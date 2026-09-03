@@ -125,16 +125,48 @@ export async function fetchBoundedText(
     }, timeoutMs);
   });
 
+  // When the deadline wins the race below, the read is still in flight and
+  // still holds the stream's lock. An abort only ends it if the peer honours
+  // the signal, so the reader is recorded here and cancelled explicitly in the
+  // `finally` — otherwise a stream that ignores `AbortSignal` leaves a pending
+  // read against a permanently locked body (Codex round 2 on 98d4a946).
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const response = await Promise.race([
       fetchImpl(url, { ...init, signal: controller.signal }),
       deadline,
     ]);
-    const text = await Promise.race([readBoundedText(response, limitBytes, controller), deadline]);
+    const read = readBoundedText(response, limitBytes, controller, (reader) => {
+      activeReader = reader;
+    });
+    // The race may abandon this promise. Attaching a handler now means an
+    // abandoned rejection is never an unhandled one.
+    read.catch(() => undefined);
+    const text = await Promise.race([read, deadline]);
     return { response, text };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     removeUpstreamAbortListener?.();
+    if (activeReader) await releaseBodyReader(activeReader);
+  }
+}
+
+/**
+ * Cancel then unlock, each independently guarded: a reader may already have
+ * been cancelled by the read loop, already released, or belong to a stream
+ * that errored. Cancelling first is what settles any pending read, which is
+ * what makes `releaseLock` legal and the body unlocked afterwards.
+ */
+async function releaseBodyReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Already cancelled, or the stream errored: nothing left to release it from.
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // Already released.
   }
 }
 
@@ -147,6 +179,7 @@ async function readBoundedText(
   response: Response,
   limitBytes: number,
   controller?: AbortController,
+  onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void,
 ): Promise<string> {
   const body = response.body;
   if (!body) {
@@ -160,6 +193,7 @@ async function readBoundedText(
   }
 
   const reader = body.getReader();
+  onReader?.(reader);
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -174,16 +208,18 @@ async function readBoundedText(
       }
       chunks.push(value);
     }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  }
 
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    // Every exit — read to completion, over the cap, or abandoned by the
+    // deadline — leaves the body unlocked rather than held by a reader nobody
+    // owns any more.
+    await releaseBodyReader(reader);
   }
-  return new TextDecoder().decode(joined);
 }

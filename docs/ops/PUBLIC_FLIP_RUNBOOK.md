@@ -3,7 +3,7 @@
 Status: canonical for the one-time flip. Delete or archive it once the flip is
 done.
 
-Owner decision (2026-09-04): Olympus goes public **as a fresh repository**. The
+Owner decision (2026-09-03): Olympus goes public **as a fresh repository**. The
 current private repository is renamed to `olympus-archived` and stays private;
 a new **public** repository takes the name `Olympus` and receives a single
 squashed commit of `main`. No history crosses over, because the private history

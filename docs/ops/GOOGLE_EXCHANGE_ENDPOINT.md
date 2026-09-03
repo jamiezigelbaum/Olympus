@@ -11,9 +11,12 @@ intercepts only `/exchange/*`). The worker-side integration is applied (see
 document is the record of how it was deployed, not outstanding work — with one
 standing exception: **a change to anything under `exchange/` requires the owner
 to redeploy** (`bunx wrangler deploy`), because this repository cannot publish
-to the owner's Cloudflare account. The bounded upstream body read added in the
-same pull request as the worker-side integration is such a change and is
-pending that redeploy.
+to the owner's Cloudflare account. **`exchange/` has changed since that
+deployment** — the bounded upstream body read and its reader cleanup — so the
+Worker currently serving is one revision behind this repository until the owner
+redeploys. Nothing about the deployed Worker's API or the worker-side
+integration changes with it; what is pending is a hardening fix, not a
+contract change.
 
 Owner-approved direction (2026-09-03): Google requires `client_secret` at the
 token endpoint for a Web-application OAuth client, even with PKCE. A secret
@@ -518,10 +521,17 @@ before the new behaviour is actually serving.
    services are deployed, routed correctly, and fail closed on bad input. The
    first real exchange proof is the first live "Connect Gmail" click, which
    the worker-side integration (above, applied) now makes possible.
-8. **The worker-side integration is applied** (see above) — no further pull
-   request is needed for it. What remains here is deployment: steps 1-7 are
-   the owner's own Cloudflare and Google Cloud console actions, none of which
-   this repository can perform on the owner's behalf.
+8. **Nothing in steps 1-7 is outstanding.** They record the **completed**
+   initial deployment — the Web application client exists, the secret and the
+   KV namespace are set, the Worker is deployed, and step 7's live checks
+   passed on 2026-09-03 (see the status at the top of this document). The
+   worker-side integration is applied too, so no further pull request is
+   needed for it either. **The one thing that remains is a redeploy of the
+   current `exchange/` revision** — step 6 (`bunx wrangler deploy`) followed by
+   step 7's checks — because this repository cannot publish to the owner's
+   Cloudflare account, and `exchange/` has changed since the deployed Worker
+   was published. Repeat those two steps after any future `exchange/` change
+   for the same reason.
 9. **Google verification thresholds**, unchanged from
    `docs/ops/OAUTH_RELAY.md` but worth restating here because this endpoint is
    what makes clearing them possible at all: `gmail.readonly` and
