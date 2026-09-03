@@ -313,7 +313,7 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
  * `test-results/` and a developer's checkout does not.
  */
 const REPO_CONTENT_DIRECTORIES = [
-  '.claude', '.github', 'bin', 'config', 'dist', 'docs', 'eval',
+  '.claude', '.github', 'bin', 'config', 'dist', 'docs', 'eval', 'exchange',
   'integrations', 'relay', 'scripts', 'skills', 'src', 'test', 'tools',
 ];
 

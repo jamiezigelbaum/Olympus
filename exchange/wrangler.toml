@@ -1,0 +1,46 @@
+# Olympus's Google token-exchange endpoint.
+#
+# Contract, threat model, and the owner runbook for every step below:
+# docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md.
+#
+# This file carries NO secrets. `GOOGLE_CLIENT_SECRET` is set with
+# `wrangler secret put GOOGLE_CLIENT_SECRET` after `wrangler deploy`, and never
+# committed to this repository in any form.
+
+name = "olympus-google-exchange"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# One Worker Route on the zone the relay already lives on
+# (docs/ops/OAUTH_RELAY.md). Cloudflare resolves a Worker Route ahead of a
+# Pages custom domain on the same zone for any path the route matches, so this
+# coexists with the relay's Pages project without a new subdomain, DNS record,
+# or certificate. See the runbook's "Hostname and routing" section for why
+# this was chosen over a dedicated `api.olympusplugin.ai`.
+routes = [
+  { pattern = "auth.olympusplugin.ai/exchange/*", zone_name = "olympusplugin.ai" },
+]
+
+[vars]
+# Public identifier, not a secret — every browser that reaches Google's
+# consent screen already sees it. Fill in after creating the Web application
+# client (see the runbook).
+GOOGLE_CLIENT_ID = ""
+# Comma-separated exact `redirect_uri` matches, in addition to the loopback
+# forms `isAllowedRedirectUri` always accepts (src/redirect-allowlist.ts).
+# The default covers the one production relay; override only for a staging
+# relay under test.
+ALLOWED_REDIRECT_URIS = "https://auth.olympusplugin.ai/oauth/callback/"
+# Per-IP request budget (src/rate-limit.ts). 20/60s comfortably covers one
+# connect flow's exchange call plus its own retries; raise it if legitimate
+# traffic from a shared NAT (e.g. an office network) gets throttled.
+RATE_LIMIT_MAX = "20"
+RATE_LIMIT_WINDOW_SECONDS = "60"
+
+# Required for rate limiting to do anything at all — see src/rate-limit.ts for
+# why its absence fails open rather than failing the endpoint closed.
+# `wrangler kv namespace create RATE_LIMIT_KV`, then paste the returned id
+# below (the runbook has the exact command).
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
