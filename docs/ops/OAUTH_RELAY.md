@@ -33,14 +33,34 @@ Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
   install that has registered no client id of its own for that source (pasted
   into the dashboard, or already bound to a connected handle). Bring-your-own
   stays reachable from every publisher card as "Use my own app instead".
+
+  "Registered" is decided by **provenance, not presence**. Completing a
+  publisher-mode connection persists the publisher app's own client id under
+  the identical secret-store key a bring-your-own registration uses
+  (`<source>.personal.oauth.client_id`), so "a client id is on file" cannot by
+  itself tell the two apart. A companion key,
+  `<source>.personal.oauth.client_id_source` (`'publisher'` or `'byo'`), is
+  written whenever a client id reaches the store — at connect completion and
+  at registration — and discovery keys off THAT field. Data written before
+  this field existed falls back to matching the stored id against the
+  CURRENT `DEFAULT_*_PUBLISHER_APP_KEY`; the field is what keeps working
+  across a future default rotation, which the value-match fallback cannot.
+  Getting this wrong stuck a completed publisher connection in bring-your-own
+  the moment it needed reauthentication, sending the dashboard-origin
+  callback where Dropbox had only ever registered the relay (Codex round 3 on
+  e75598f7).
 - **Google on loopback keeps the loopback redirect.** A Desktop app client
   cannot register an https redirect URI, so the pilot client cannot use the
   relay — and does not need to: a loopback callback reaches the worker directly.
   Same publisher app, no relay, no signed state.
 
-Both publisher identifiers ship **empty**. Until the owner creates the apps,
-every non-loopback case answers "not configured" and the dashboard shows exactly
-the bring-your-own path it shows today.
+Dropbox ships **filled in**: the owner created the "Olympus-Plugin" app
+2026-09-03, registered both redirect URIs it needs (the relay and the loopback
+fallback), and the app key — a public OAuth client identifier, not a secret —
+is `DEFAULT_DROPBOX_PUBLISHER_APP_KEY` in `core/publisher-oauth-client.ts`.
+Google's publisher web client stays **empty** until the owner creates that app
+too; until then every non-loopback Google case answers "not configured" and
+the dashboard shows the bring-your-own path it shows today.
 
 The publisher-side token-exchange endpoint is still unbuilt. When it lands, only
 the exchange leg moves: the relay contract, the state format, and the registered

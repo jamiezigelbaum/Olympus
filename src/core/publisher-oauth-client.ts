@@ -2,25 +2,34 @@
  * The publisher-owned OAuth client identifiers Olympus ships.
  *
  * These are **public identifiers**, not secrets. A Dropbox app key and a Google
- * client id are handed to every browser that reaches a consent screen; the
- * confidential half (a Dropbox app secret, a Google web client secret) is never
- * shipped and never lives here. Dropbox with PKCE needs no secret at the token
- * endpoint at all, and Google's web-client secret is solved separately by a
- * publisher-side exchange endpoint (see `docs/ops/OAUTH_RELAY.md`).
+ * client id are handed to every browser that reaches a consent screen, sent
+ * again as the `client_id` parameter in the token-exchange request body (the
+ * normal shape for a PKCE public client), and persisted locally in the
+ * worker's own secret store next to the resulting refresh token — none of
+ * which requires confidentiality, because none of it authenticates anything
+ * on its own. The confidential half (a Dropbox app secret, a Google web
+ * client secret) is never shipped and never lives here: Dropbox with PKCE
+ * needs no client secret at that same token endpoint at all, and Google's
+ * web-client secret is solved separately by a publisher-side exchange
+ * endpoint (see `docs/ops/OAUTH_RELAY.md`).
  *
- * The Dropbox default below is filled in; the Google one stays EMPTY until the
- * owner creates that app too. An empty default fails closed to bring-your-own:
- * the connect card shows the owner's own walkthrough exactly as it does today,
- * and no publisher flow is offered. Fill the literal in (or set the
- * environment variable) and nothing else changes.
+ * Dropbox ships filled in: the owner created the "Olympus-Plugin" app
+ * 2026-09-03 (docs/ops/OAUTH_RELAY.md has the full story). Google stays EMPTY
+ * until the owner creates that app too. An empty default fails closed to
+ * bring-your-own: the connect card shows the owner's own walkthrough exactly
+ * as it does today, and no publisher flow is offered. Fill the literal in (or
+ * set the environment variable) and nothing else changes.
  */
 
 /**
  * The Dropbox app key for the publisher-owned Dropbox app ("Olympus-Plugin",
  * created by the owner 2026-09-03). A Dropbox app key is a public OAuth client
- * identifier, not a secret — Dropbox with PKCE never sends one to the token
- * endpoint at all — so shipping it in source is the intended shape, the same
- * way the packaged Google pilot client id ships in `google-pilot-client.ts`.
+ * identifier, not a secret: it goes out at authorization, again as `client_id`
+ * in the token-exchange body, and into the local secret store — Dropbox's
+ * PKCE flow just never asks for the app's CLIENT SECRET at that endpoint, and
+ * that secret is what stays out of this repository. Shipping the app key in
+ * source is therefore the intended shape, the same way the packaged Google
+ * pilot client id ships in `google-pilot-client.ts`.
  *
  * Both redirect URIs are registered on the app: the relay
  * (`https://auth.olympusplugin.ai/oauth/callback/`) and the loopback fallback

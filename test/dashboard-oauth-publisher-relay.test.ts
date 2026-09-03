@@ -33,6 +33,10 @@ import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.
 import type { DashboardSourceAction } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import {
+  readConnectedHandleRegistry,
+  writeConnectedHandleRegistry,
+} from '../src/workers/credential-broker/connected-handles.ts';
 
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
@@ -55,6 +59,7 @@ interface Fixture {
   fetch: (request: Request) => Promise<Response>;
   secretStore: SecretStore;
   exchanges: Array<URLSearchParams>;
+  registryPath: string;
 }
 
 function fixture(
@@ -75,11 +80,12 @@ function fixture(
       scope: 'files.metadata.read files.content.read sharing.read',
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
+  const registryPath = join(dir, 'handles.json');
   const worker = createEmailSourceWorker({
     sourceIndexStatus: { async status() { return fixtureStatus(); } },
     sourceDashboard: {
       sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
-      registryPath: join(dir, 'handles.json'),
+      registryPath,
       secretStore,
       oauthFetch,
       // Only used by the 'expired state' scenario below: the real starter,
@@ -100,6 +106,7 @@ function fixture(
     fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
     secretStore,
     exchanges,
+    registryPath,
   };
 }
 
@@ -473,7 +480,7 @@ describe('publisher-client relay flow', () => {
         },
       });
       const fetchWithAuth = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
-      await startConnect({ fetch: fetchWithAuth, secretStore, exchanges: [] });
+      await startConnect({ fetch: fetchWithAuth, secretStore, exchanges: [], registryPath: join(dir, 'handles.json') });
       return { fetch: fetchWithAuth, state: captured.state! };
     }
 
@@ -545,6 +552,201 @@ async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
 function dropboxAction(view: { sources: Array<Record<string, any>> }): Record<string, any> {
   return view.sources.find((source) => source.source_id === 'dropbox.files')!.connection.action;
 }
+
+/** Marks the dropbox handle reauth_required, the way a stale token would be found. */
+function markDropboxHandleReauthRequired(registryPath: string): void {
+  const registry = readConnectedHandleRegistry(registryPath);
+  const handle = registry.handles.find((candidate) => candidate.provider === 'dropbox');
+  if (!handle) throw new Error('expected a dropbox handle in the fixture registry');
+  writeConnectedHandleRegistry({
+    ...registry,
+    handles: registry.handles.map((candidate) => (
+      candidate === handle
+        ? { ...candidate, backendState: { kind: 'oauth2_refresh' as const, status: 'reauth_required' as const } }
+        : candidate
+    )),
+  }, registryPath);
+}
+
+// MAJOR, Codex round 3 on e75598f7: completing a publisher connection
+// persisted the publisher's own client id under the SAME store key
+// (`dropbox.personal.oauth.client_id`) discovery already read as "the owner's
+// registration". The next render then thought this install had brought its
+// own app, which sends a Reauthenticate through the dashboard-origin callback
+// instead of the relay — Dropbox refuses that redirect_uri, and the account is
+// stuck. This is the client_id_source field.
+describe('publisher provenance survives reauthentication', () => {
+  test('a completed publisher connection records provenance, and the field — not "any client_id" — is what discovery reads', async () => {
+    const instance = fixture();
+    const authorizeUrl = await authorizationUrl(await startConnect(instance));
+    const state = authorizeUrl.searchParams.get('state')!;
+    const redirect = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=publisher-code&state=${encodeURIComponent(state)}`,
+    ));
+    expect(redirect.status).toBe(303);
+
+    // completeOAuthSourceConnection persisted the SAME key discovery reads for
+    // "the owner's own registration" — this is the exact collision the review
+    // named. The provenance companion is what disambiguates it.
+    expect(await instance.secretStore.get('dropbox.personal.oauth.client_id'))
+      .toBe(PUBLISHER_APP_KEY);
+    expect(await instance.secretStore.get('dropbox.personal.oauth.client_id_source')).toBe('publisher');
+
+    // A fully connected source offers no action at all (existing behavior) —
+    // the interesting proof that discovery reads the field, not "any
+    // client_id present", is the next test: mark it reauth_required and watch
+    // the card stay in publisher mode rather than falling back to a
+    // bring-your-own sheet prefilled with the publisher's own key.
+  });
+
+  test('after reauth_required, the next Connect still selects publisher mode, the relay redirect_uri, and a freshly signed state', async () => {
+    const instance = fixture();
+    const firstState = (await authorizationUrl(await startConnect(instance))).searchParams.get('state')!;
+    const firstRedirect = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=publisher-code-1&state=${encodeURIComponent(firstState)}`,
+    ));
+    expect(firstRedirect.status).toBe(303);
+
+    // The token goes stale — exactly the review's scenario — and the card now
+    // offers Reauthenticate.
+    markDropboxHandleReauthRequired(instance.registryPath);
+    const reauthAction = dropboxAction(await dashboardJson(instance));
+    expect(reauthAction.kind).toBe('oauth');
+    expect(reauthAction.publisher_client).toBe(true);
+    expect(reauthAction.label).toBe('Reauthenticate');
+
+    // The second Connect (what the Reauthenticate button submits) must go out
+    // through the SAME publisher path as the first: Olympus's own app, the
+    // relay's redirect_uri, and a freshly signed multi-segment state — never
+    // the dashboard-origin callback a bring-your-own client id would produce,
+    // which Dropbox refuses as a redirect_uri mismatch for this app.
+    const secondUrl = await authorizationUrl(await startConnect(instance));
+    expect(secondUrl.searchParams.get('client_id')).toBe(PUBLISHER_APP_KEY);
+    expect(secondUrl.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+    const secondState = secondUrl.searchParams.get('state')!;
+    expect(secondState).not.toBe(firstState);
+    expect(secondState.split('.')).toHaveLength(2);
+    expect(statePayload(secondState).origin).toBe(DASHBOARD_ORIGIN);
+  });
+
+  test('an owner-pasted client id is marked byo explicitly, not inferred', async () => {
+    const instance = fixture();
+    const url = await authorizationUrl(await startConnect(instance, { client_id: 'owner-dropbox-app-key' }));
+    expect(url.searchParams.get('client_id')).toBe('owner-dropbox-app-key');
+    expect(await instance.secretStore.get('dropbox.personal.oauth.client_id_source')).toBe('byo');
+
+    // A subsequent Connect with nothing resubmitted keeps using the owner's
+    // own registration, not the publisher app.
+    const again = await authorizationUrl(await startConnect(instance));
+    expect(again.searchParams.get('client_id')).toBe('owner-dropbox-app-key');
+    expect(again.searchParams.get('redirect_uri')).toBe(`${DASHBOARD_ORIGIN}/oauth/callback/dropbox`);
+  });
+
+  test('migration case: a pre-fix stored id with no provenance field is still recognized by value', async () => {
+    // Data written before this field existed: the publisher key is on file
+    // under the plain config key, with no `_source` companion at all. Uses
+    // this fixture's active publisher key (the env override every test in
+    // this file runs under), not the shipped literal default, so the
+    // value-match fallback is exercised against whatever key is CURRENT.
+    const instance = fixture({ 'dropbox.personal.oauth.client_id': PUBLISHER_APP_KEY });
+    expect(await instance.secretStore.get('dropbox.personal.oauth.client_id_source')).toBeUndefined();
+    const action = dropboxAction(await dashboardJson(instance));
+    expect(action.kind).toBe('oauth');
+    expect(action.publisher_client).toBe(true);
+
+    const url = await authorizationUrl(await startConnect(instance));
+    expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+  });
+
+  test('a pre-fix stored id that does not match any current publisher key is treated as byo (fails closed)', async () => {
+    // No provenance field, and the value matches NEITHER the current
+    // publisher key nor anything else Olympus mints — the safe read when the
+    // field is missing and the value can't be attributed is "owner's own",
+    // because that was every install's shape before publisher mode existed.
+    const instance = fixture({ 'dropbox.personal.oauth.client_id': 'some-other-app-key' });
+    const action = dropboxAction(await dashboardJson(instance));
+    expect(action.kind).toBe('oauth');
+    expect(action.publisher_client).toBeUndefined();
+    expect(action.known_client_id).toBe('some-other-app-key');
+  });
+});
+
+// MINOR, Codex round 3 on e75598f7: docs/ops/OAUTH_RELAY.md step 8 calls for
+// rate-limiting unsolicited callbacks; there was none. A byte-identical
+// refusal is easy to fake by construction (an invalid state is ALSO a 410
+// with the same body), so these tests prove the limiter does real work: it
+// blocks a would-be-SUCCESSFUL completion once a key's budget is spent, not
+// just piggyback on inputs that were already going to be refused.
+describe('callback rate limiting', () => {
+  const RATE_LIMIT_MAX_PER_WINDOW = 30;
+
+  function floodRequest(source: string, forwardedFor: string): Request {
+    return new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/${source}?code=flood&state=aaaa.bbbb`,
+      { headers: { 'X-Forwarded-For': forwardedFor } },
+    );
+  }
+
+  test('a key that spends its budget on garbage is then refused even a valid completion', async () => {
+    const instance = fixture();
+    const authorizeUrl = await authorizationUrl(await startConnect(instance));
+    const state = authorizeUrl.searchParams.get('state')!;
+
+    for (let i = 0; i < RATE_LIMIT_MAX_PER_WINDOW; i += 1) {
+      const flood = await instance.fetch(floodRequest('dropbox', '203.0.113.9'));
+      expect(flood.status).toBe(410);
+    }
+
+    // The budget is spent. This state is genuinely live, correctly signed,
+    // and carries a real code — without the limiter this would be a 303. With
+    // the limiter tripped it is refused instead, in the SAME shape every
+    // other refusal on this route uses, and the exchange never runs.
+    const shouldHaveWorked = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=too-late&state=${encodeURIComponent(state)}`,
+      { headers: { 'X-Forwarded-For': '203.0.113.9' } },
+    ));
+    expect(shouldHaveWorked.status).toBe(410);
+    const baseline = await fixture().fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=aaaa.bbbb`,
+    ));
+    expect(await shouldHaveWorked.text()).toBe(await baseline.text());
+    expect(instance.exchanges).toHaveLength(0);
+  });
+
+  test('a different caller address for the same source keeps its own budget', async () => {
+    const instance = fixture();
+    for (let i = 0; i < RATE_LIMIT_MAX_PER_WINDOW; i += 1) {
+      expect((await instance.fetch(floodRequest('dropbox', '203.0.113.1'))).status).toBe(410);
+    }
+    // A second attempt, from a caller address the flood never touched.
+    const authorizeUrl = await authorizationUrl(await startConnect(instance));
+    const state = authorizeUrl.searchParams.get('state')!;
+    const completed = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
+      { headers: { 'X-Forwarded-For': '203.0.113.2' } },
+    ));
+    expect(completed.status).toBe(303);
+  });
+
+  test('a different source keeps its own budget even from the same caller address', async () => {
+    const instance = fixture();
+    for (let i = 0; i < RATE_LIMIT_MAX_PER_WINDOW; i += 1) {
+      expect((await instance.fetch(floodRequest('dropbox', '203.0.113.5'))).status).toBe(410);
+    }
+    const gmailFlood = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=c&state=aaaa.bbbb`,
+      { headers: { 'X-Forwarded-For': '203.0.113.5' } },
+    ));
+    // Still the standard "no attempt" refusal — gmail's own budget is
+    // untouched, so this is the ordinary invalid-state answer, not a second
+    // trip of dropbox's exhausted one.
+    expect(gmailFlood.status).toBe(410);
+    const gmailBaseline = await fixture().fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=c&state=aaaa.bbbb`,
+    ));
+    expect(await gmailFlood.text()).toBe(await gmailBaseline.text());
+  });
+});
 
 describe('publisher-mode card', () => {
   test('a publisher-owned source offers Connect with no client id and no walkthrough field', async () => {

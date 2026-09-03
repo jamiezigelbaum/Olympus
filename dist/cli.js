@@ -33638,6 +33638,11 @@ async function completeOAuthSourceConnection(prepared, code) {
     await prepared.secretStore.set(clientIdKey, prepared.clientId);
     await prepared.secretStore.set(refreshKey, refreshToken);
     secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
+    if (prepared.options.clientIdSource !== undefined) {
+      const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
+      await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+      secretRefs.push(`store:${clientIdSourceKey}`);
+    }
     let clientSecretRef;
     if (clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
       const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
@@ -69249,6 +69254,7 @@ function createEmailSourceWorker(options = {}) {
     dashboardRelayStateKeysCache = minted;
     return minted;
   };
+  const dashboardOAuthCallbackRateLimiter = createDashboardOAuthCallbackRateLimiter();
   const dashboardDisconnectedSources = new Set;
   const dashboardUnpairedSources = new Set;
   let dashboardSchedulerRegistryStamp;
@@ -69536,6 +69542,14 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
           }
           const source = parseDashboardOAuthSource(decodeURIComponent(url.pathname.slice("/oauth/callback/".length)));
+          if (!dashboardOAuthCallbackRateLimiter(dashboardOAuthCallbackRateLimitKey(source, request.headers), Date.now())) {
+            return dashboardOAuthFailureHtml({
+              source,
+              reason: "This connection attempt is no longer active. Start connect again from the Olympus dashboard.",
+              returnTo: dashboardReturnTo(),
+              status: 410
+            });
+          }
           const attempt = dashboardOAuthAttempts.get(source);
           const state = asOptionalString(url.searchParams.get("state"));
           const callbackError = asOptionalString(url.searchParams.get("error"));
@@ -69634,6 +69648,7 @@ function createEmailSourceWorker(options = {}) {
             }
             if (submittedClientId) {
               await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
+              await secretStore.set(dashboardOAuthClientIdSourceKey(source), "byo");
             }
             const submittedClientSecret = asOptionalString(record3.client_secret);
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
@@ -69657,7 +69672,8 @@ function createEmailSourceWorker(options = {}) {
               redirectUri,
               ...relayState ? { state: relayState } : {},
               openBrowser: false,
-              ...sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {}
+              ...sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {},
+              clientIdSource: publisher ? "publisher" : "byo"
             });
             const expectedOrigin = oauthAuthorizeOrigin(source);
             let authorizationUrl;
@@ -71628,6 +71644,28 @@ function dashboardUnpairedSourceStates(unpaired, registryPath) {
     state: record3.state === "unpaired" ? "unpaired" : "unpair_incomplete"
   }));
 }
+function createDashboardOAuthCallbackRateLimiter() {
+  const buckets = new Map;
+  return (key, now) => {
+    for (const [bucketKey, bucket] of buckets) {
+      if (now - bucket.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS)
+        buckets.delete(bucketKey);
+    }
+    const existing = buckets.get(key);
+    if (!existing || now - existing.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) {
+      buckets.set(key, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (existing.count >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW)
+      return false;
+    existing.count += 1;
+    return true;
+  };
+}
+function dashboardOAuthCallbackRateLimitKey(source, headers) {
+  const forwardedFor = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return `${source}:${forwardedFor || "unknown"}`;
+}
 function isDashboardUnpairSourceId(value) {
   return value === "telegram.messages" || value === "whatsapp.personal.messages";
 }
@@ -71917,16 +71955,20 @@ async function dashboardOAuthClientIdSets(registry2, secretStore) {
     const clientId = await secretStore.get(parsed.key);
     if (!clientId)
       continue;
-    if (handle.provider === "gmail")
+    const family = handle.provider === "gmail" ? "gmail" : handle.provider === "google_drive" ? "google-drive" : handle.provider === "dropbox" ? "dropbox" : handle.provider === "x" ? "x" : undefined;
+    if (family && await dashboardStoredClientIdIsPublisherOwned(family, clientId, parsed.key, secretStore))
+      continue;
+    if (family === "gmail")
       own.gmail = clientId;
-    if (handle.provider === "google_drive")
+    if (family === "google-drive")
       own["google-drive"] = clientId;
-    if (handle.provider === "dropbox")
+    if (family === "dropbox")
       own.dropbox = clientId;
-    if (handle.provider === "x")
+    if (family === "x")
       own.x = clientId;
-    if (ref.startsWith("store:google."))
+    if (ref.startsWith("store:google.") && !await dashboardStoredClientIdIsPublisherOwned("google", clientId, parsed.key, secretStore)) {
       own.google = clientId;
+    }
   }
   const all = { ...own };
   const pilotClientId = dashboardGooglePilotClientId();
@@ -71938,9 +71980,32 @@ async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
   const sources = ["google", "gmail", "google-drive", "dropbox", "x"];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
-    if (clientId)
-      output[source] = clientId;
+    if (!clientId)
+      continue;
+    if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore))
+      continue;
+    output[source] = clientId;
   }
+}
+async function dashboardStoredClientIdIsPublisherOwned(source, clientId, clientIdKey, secretStore) {
+  const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
+  if (provenance === "publisher")
+    return true;
+  if (provenance === "byo")
+    return false;
+  return dashboardCurrentPublisherClientIds(source).includes(clientId);
+}
+function dashboardCurrentPublisherClientIds(source) {
+  if (source === "x")
+    return [];
+  if (dashboardGoogleOAuthSource(source)) {
+    return [dashboardGooglePilotClientId(), googlePublisherWebClientId()].filter((id) => Boolean(id));
+  }
+  const appKey = dropboxPublisherAppKey();
+  return appKey ? [appKey] : [];
+}
+function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey) {
+  return clientIdKey.replace(/\.oauth\.client_id$/, ".oauth.client_id_source");
 }
 function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
   if (source === "x")
@@ -72017,6 +72082,9 @@ function dashboardGooglePilotClientConfigured() {
 }
 function dashboardOAuthClientIdConfigKey(source) {
   return `${source}.personal.oauth.client_id`;
+}
+function dashboardOAuthClientIdSourceKey(source) {
+  return `${source}.personal.oauth.client_id_source`;
 }
 function dashboardOAuthClientSecretConfigKey(source) {
   return `${source}.personal.oauth.client_secret`;
@@ -72343,7 +72411,7 @@ function html(value, status = 200, extraHeaders) {
     }
   });
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
   init_email_policy();
   init_oauth_relay();

@@ -558,6 +558,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     dashboardRelayStateKeysCache = minted;
     return minted;
   };
+  // A bounded, in-memory abuse control for the callback route's flood case
+  // (docs/ops/OAUTH_RELAY.md, "Hygiene": "Rate-limit unsolicited callbacks").
+  // Per worker instance, like `dashboardOAuthAttempts` above it, so unrelated
+  // fixtures in the same test process never share a bucket.
+  const dashboardOAuthCallbackRateLimiter = createDashboardOAuthCallbackRateLimiter();
   const dashboardDisconnectedSources = new Set<V04PublicSourceId>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
@@ -1011,6 +1016,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
           }
           const source = parseDashboardOAuthSource(decodeURIComponent(url.pathname.slice('/oauth/callback/'.length)));
+          // MINOR, Codex round 3 on e75598f7: docs/ops/OAUTH_RELAY.md step 8
+          // calls for rate-limiting unsolicited callbacks. Checked before any
+          // attempt lookup or relay verification, so a flood spends none of
+          // that work, and tripping it returns the IDENTICAL refusal every
+          // other invalid callback gets — never a distinguishable 429 — so an
+          // unauthenticated caller learns nothing new by tripping it.
+          if (!dashboardOAuthCallbackRateLimiter(dashboardOAuthCallbackRateLimitKey(source, request.headers), Date.now())) {
+            return dashboardOAuthFailureHtml({
+              source,
+              reason: 'This connection attempt is no longer active. Start connect again from the Olympus dashboard.',
+              returnTo: dashboardReturnTo(),
+              status: 410,
+            });
+          }
           const attempt = dashboardOAuthAttempts.get(source);
           // THIS ROUTE IS UNAUTHENTICATED. A provider redirect is just a GET
           // anyone can make, so the `state` this flow generated is the ONLY
@@ -1208,6 +1227,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // oauth_client_id_missing and the owner re-pasting the same id.
           if (submittedClientId) {
             await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
+            // Explicit, not inferred: an owner-pasted id is bring-your-own by
+            // definition, and marking it here means a later render never has
+            // to fall back to the value-match migration heuristic for it.
+            await secretStore.set(dashboardOAuthClientIdSourceKey(source), 'byo');
           }
           // The secret is a registration for the same reason — and for X it is
           // the credential the token exchange itself authenticates with, so a
@@ -1246,6 +1269,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             ...(relayState ? { state: relayState } : {}),
             openBrowser: false,
             ...(sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {}),
+            // Recorded alongside the persisted client id at completion (MAJOR,
+            // Codex round 3 on e75598f7): "a client id is present" cannot tell a
+            // publisher-owned id from an owner-pasted one once both are stored
+            // under the identical key, and mistaking one for the other broke
+            // reauthentication after the first successful publisher connect.
+            clientIdSource: publisher ? 'publisher' : 'byo',
           });
           // The starter is an injectable seam whose URL the owner's browser
           // will follow and whose clock the dashboard displays: the URL is
@@ -4334,6 +4363,67 @@ function dashboardUnpairedSourceStates(
  */
 const DASHBOARD_OAUTH_RELAY_STATE_KEY = 'dashboard.oauth.relay_state_key';
 
+/** The callback rate limiter's fixed window and per-key ceiling within it. */
+const DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60_000;
+const DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
+
+interface DashboardOAuthCallbackRateLimitBucket {
+  windowStart: number;
+  count: number;
+}
+
+/**
+ * A bounded, in-memory fixed-window limiter for the OAuth callback route.
+ *
+ * Abuse-control speed bump, not the security boundary — the boundary is the
+ * signature, nonce, origin, and single-use checks the route already runs
+ * (docs/ops/OAUTH_RELAY.md, "What the worker must verify"). This worker is one
+ * long-running process, unlike the stateless Cloudflare exchange endpoint
+ * (`exchange/src/rate-limit.ts`, which needs a KV binding for cross-instance
+ * counting), so a plain in-memory `Map` is the right primitive here: no
+ * external store, no cross-process coordination, and — because nothing ever
+ * calls this from a stateless edge runtime with thousands of isolates — no
+ * fail-open story to design for either. It fails CLOSED like everything else
+ * on this route: a limiter that cannot allocate a `Map` entry is a process
+ * already out of memory, at which point refusing one more callback is the
+ * least of the process's problems.
+ *
+ * Pruned opportunistically on every call — bucketed by whichever key last
+ * appeared expired — so a worker that runs for weeks never accumulates one
+ * entry per distinct key (address, source pair) it has ever seen.
+ */
+function createDashboardOAuthCallbackRateLimiter(): (key: string, now: number) => boolean {
+  const buckets = new Map<string, DashboardOAuthCallbackRateLimitBucket>();
+  return (key: string, now: number): boolean => {
+    for (const [bucketKey, bucket] of buckets) {
+      if (now - bucket.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) buckets.delete(bucketKey);
+    }
+    const existing = buckets.get(key);
+    if (!existing || now - existing.windowStart >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) {
+      buckets.set(key, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (existing.count >= DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW) return false;
+    existing.count += 1;
+    return true;
+  };
+}
+
+/**
+ * `<source>:<caller address>` — the finest granularity this route can trust.
+ * `X-Forwarded-For`'s first hop is the ordinary shape a reverse proxy sets
+ * (the same convention `dashboardForwardedProto` already reads for the
+ * origin scheme), used opportunistically rather than as a security boundary:
+ * a caller that can spoof it can already reach this unauthenticated route
+ * directly, and the limiter's job is to bound an accidental or scripted flood,
+ * not to authenticate anyone. Absent the header, every caller for a source
+ * shares one bucket — coarser, never wrong.
+ */
+function dashboardOAuthCallbackRateLimitKey(source: DashboardOAuthSource, headers: Headers): string {
+  const forwardedFor = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  return `${source}:${forwardedFor || 'unknown'}`;
+}
+
 const DASHBOARD_UNPAIR_SOURCE_IDS: DashboardUnpairSource[] = [
   'telegram.messages',
   'whatsapp.personal.messages',
@@ -4857,11 +4947,23 @@ async function dashboardOAuthClientIdSets(
     if (parsed?.kind !== 'store') continue;
     const clientId = await secretStore.get(parsed.key);
     if (!clientId) continue;
-    if (handle.provider === 'gmail') own.gmail = clientId;
-    if (handle.provider === 'google_drive') own['google-drive'] = clientId;
-    if (handle.provider === 'dropbox') own.dropbox = clientId;
-    if (handle.provider === 'x') own.x = clientId;
-    if (ref.startsWith('store:google.')) own.google = clientId;
+    const family = handle.provider === 'gmail' ? 'gmail'
+      : handle.provider === 'google_drive' ? 'google-drive'
+      : handle.provider === 'dropbox' ? 'dropbox'
+      : handle.provider === 'x' ? 'x'
+      : undefined;
+    // The provenance companion key rides on the SAME ref the handle already
+    // carries, not on a hardcoded account role: `clientIdSecretRef` already
+    // encodes whichever role this handle's flow actually used.
+    if (family && await dashboardStoredClientIdIsPublisherOwned(family, clientId, parsed.key, secretStore)) continue;
+    if (family === 'gmail') own.gmail = clientId;
+    if (family === 'google-drive') own['google-drive'] = clientId;
+    if (family === 'dropbox') own.dropbox = clientId;
+    if (family === 'x') own.x = clientId;
+    if (ref.startsWith('store:google.')
+      && !(await dashboardStoredClientIdIsPublisherOwned('google', clientId, parsed.key, secretStore))) {
+      own.google = clientId;
+    }
   }
   const all = { ...own };
   const pilotClientId = dashboardGooglePilotClientId();
@@ -4876,8 +4978,59 @@ async function readConfiguredDashboardOAuthClientIds(
   const sources: Array<DashboardOAuthSource | 'google'> = ['google', 'gmail', 'google-drive', 'dropbox', 'x'];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
-    if (clientId) output[source] = clientId;
+    if (!clientId) continue;
+    if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore)) continue;
+    output[source] = clientId;
   }
+}
+
+/**
+ * Whether a client id this install has on file belongs to Olympus's own
+ * publisher app rather than something the owner registered.
+ *
+ * Checked in two ways, either sufficient on its own (MAJOR, Codex round 3 on
+ * e75598f7):
+ *
+ * 1. **The provenance field.** `<client-id-key>_source` records `'publisher'`
+ *    or `'byo'` at the moment a connection completes or a registration is
+ *    submitted — the authoritative answer, because it is a fact about how
+ *    THIS id reached the store, not a guess from its current value. It
+ *    survives a publisher default rotation: an install marked `'publisher'`
+ *    stays publisher-owned even once its stored id no longer matches
+ *    whatever `DEFAULT_*_PUBLISHER_APP_KEY` says today.
+ * 2. **The value-match fallback**, only when the field is absent (data
+ *    written before this fix existed): a stored id identical to a CURRENT
+ *    publisher identity is treated as publisher-owned even without the
+ *    field, so an already-broken install self-heals without a migration
+ *    step. This fallback stops working across a rotation, which is exactly
+ *    why the field — not the value — is the real fix.
+ */
+async function dashboardStoredClientIdIsPublisherOwned(
+  source: DashboardOAuthSource | 'google',
+  clientId: string,
+  clientIdKey: string,
+  secretStore: SecretStore,
+): Promise<boolean> {
+  const provenance = await secretStore.get(dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey));
+  if (provenance === 'publisher') return true;
+  if (provenance === 'byo') return false;
+  return dashboardCurrentPublisherClientIds(source).includes(clientId);
+}
+
+/** Every client id Olympus's own publisher apps currently use for a source. */
+function dashboardCurrentPublisherClientIds(source: DashboardOAuthSource | 'google'): string[] {
+  if (source === 'x') return [];
+  if (dashboardGoogleOAuthSource(source)) {
+    return [dashboardGooglePilotClientId(), googlePublisherWebClientId()]
+      .filter((id): id is string => Boolean(id));
+  }
+  const appKey = dropboxPublisherAppKey();
+  return appKey ? [appKey] : [];
+}
+
+/** `<source>.<role>.oauth.client_id` → its provenance companion key. */
+function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): string {
+  return clientIdKey.replace(/\.oauth\.client_id$/, '.oauth.client_id_source');
 }
 
 /**
@@ -4892,7 +5045,15 @@ async function readConfiguredDashboardOAuthClientIds(
  *   secret cannot ship, and the relay is not involved (OAUTH_RELAY.md).
  * - **A registration the owner made wins.** Publisher mode is the default for an
  *   install that has registered nothing; it never overrides a client id the
- *   owner pasted or a connected handle already carries.
+ *   owner pasted or a connected handle already carries. "Registered" is read
+ *   off `ownClientId`, which `dashboardOAuthClientIdSets` builds from
+ *   PROVENANCE, not presence: a publisher-mode connect persists its client id
+ *   under the identical store key a bring-your-own registration uses, so
+ *   `own` excludes an id its `client_id_source` companion marks
+ *   `'publisher'` (or, for data written before that field existed, an id
+ *   that matches a CURRENT publisher key). Reading "is a client_id present"
+ *   instead stuck a completed publisher connection in bring-your-own the
+ *   moment it needed reauthentication (Codex round 3 on e75598f7).
  * - **Google on a loopback dashboard keeps the loopback redirect.** The pilot
  *   client is a Desktop app client and a Desktop client cannot register an https
  *   redirect URI, so the relay is not usable by it — and it does not need to be:
@@ -4901,10 +5062,11 @@ async function readConfiguredDashboardOAuthClientIds(
  * - **Everything else goes through the relay** with `redirect_uri` = the one
  *   registered relay URL and a signed state naming this dashboard's origin.
  *
- * Both publisher identifiers ship empty (`core/publisher-oauth-client.ts`), so
- * until the owner creates the apps this function answers `undefined` for every
- * non-loopback case and the dashboard shows the bring-your-own path it shows
- * today.
+ * The Dropbox default ships filled in (the owner's "Olympus-Plugin" app,
+ * created 2026-09-03); the Google web client default stays empty until the
+ * owner creates that app too (`core/publisher-oauth-client.ts`). Until then,
+ * every non-loopback Google case answers `undefined` and the dashboard shows
+ * the bring-your-own path it shows today.
  */
 interface DashboardPublisherOAuthFlow {
   clientId: string;
@@ -5041,6 +5203,11 @@ function dashboardGooglePilotClientConfigured(): boolean {
 
 function dashboardOAuthClientIdConfigKey(source: DashboardOAuthSource | 'google'): string {
   return `${source}.personal.oauth.client_id`;
+}
+
+/** The provenance companion to `dashboardOAuthClientIdConfigKey`: `'publisher' | 'byo'`. */
+function dashboardOAuthClientIdSourceKey(source: DashboardOAuthSource | 'google'): string {
+  return `${source}.personal.oauth.client_id_source`;
 }
 
 function dashboardOAuthClientSecretConfigKey(source: DashboardOAuthSource | 'google'): string {

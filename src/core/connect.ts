@@ -70,6 +70,16 @@ export interface ConnectOAuthOptions {
   tokenExchangeTimeoutMs?: number;
   /** Internal fence captured when a detached connection request is accepted. */
   grantEpoch?: string;
+  /**
+   * Whose OAuth app this flow's `clientId` belongs to, when the caller knows.
+   * Persisted alongside the stored client id (`<source>.<role>.oauth.client_id_source`)
+   * so a later render can tell "the owner registered this" from "this is
+   * Olympus's own publisher app the owner never had to touch" — a distinction
+   * "is a client_id present" cannot make once a publisher-owned id and an
+   * owner-pasted id are stored under the identical key. Absent for the plain
+   * CLI connect path, which has no publisher concept and writes nothing new.
+   */
+  clientIdSource?: 'publisher' | 'byo';
 }
 
 export interface ConnectResult {
@@ -593,6 +603,19 @@ async function completeOAuthSourceConnection(
       // custody fence, so Disconnect can occur wholly before or after Connect.
       await prepared.secretStore.set(refreshKey, refreshToken);
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
+      // Written only when the caller states it, which today means only the
+      // dashboard's publisher-relay start route: the plain CLI connect path has
+      // no publisher concept and leaves this key untouched, exactly as before
+      // this field existed. Without it, `clientIdKey` alone cannot tell a
+      // client id the OWNER pasted from Olympus's own publisher app key once
+      // both are persisted under the identical key — the gap that let a
+      // completed publisher connection get misclassified as bring-your-own on
+      // its next reauthentication (Codex round 3 on e75598f7).
+      if (prepared.options.clientIdSource !== undefined) {
+        const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
+        await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+        secretRefs.push(`store:${clientIdSourceKey}`);
+      }
 
       let clientSecretRef: string | undefined;
       if (clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
