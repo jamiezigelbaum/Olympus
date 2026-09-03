@@ -2,7 +2,7 @@
 
 Status: canonical for the publisher-owned Google token exchange
 
-**Deployment status: DEPLOYED.** Verified live on 2026-09-04 —
+**Deployment status: DEPLOYED.** Verified live on 2026-09-03 —
 `POST https://auth.olympusplugin.ai/exchange/google` with a bad body answers
 `400` JSON, `GET` on the same path answers `405`, and the relay page at
 `/oauth/callback/` is still served through the same host (the Worker Route

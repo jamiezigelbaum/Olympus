@@ -65,11 +65,12 @@ in the same file.
 
 The publisher-side token-exchange endpoint the Google web client needs
 (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is built, DEPLOYED — verified live
-2026-09-04 — and wired into the worker: a non-loopback Google flow's token exchange and refresh go through it
-instead of straight to Google, with `oauth2Refresh.exchangeVia:
-'publisher_endpoint'` recorded on the resulting credential so refresh knows
-which path to use. Only the exchange leg moves — the relay contract, the state
-format, and the registered `redirect_uri` are unchanged by it.
+2026-09-03 — and wired into the worker: a non-loopback Google flow's token
+exchange and refresh go through it instead of straight to Google, with
+`oauth2Refresh.exchangeVia: 'publisher_endpoint'` recorded on the resulting
+credential so refresh knows which path to use. Only the exchange leg moves —
+the relay contract, the state format, and the registered `redirect_uri` are
+unchanged by it.
 
 ### The worker's state signing key
 
@@ -584,7 +585,7 @@ token.
    specified and implemented in
    [`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`](GOOGLE_EXCHANGE_ENDPOINT.md) and
    [`exchange/`](../../exchange). It is **deployed and verified live**
-   (2026-09-04); that document's owner runbook is the record of how, and the
+   (2026-09-03); that document's owner runbook is the record of how, and the
    procedure to repeat after any change to `exchange/`, which only the owner
    can redeploy. The relay contract is unaffected either way — the exchange
    happens in a publisher endpoint, never in the relay.
