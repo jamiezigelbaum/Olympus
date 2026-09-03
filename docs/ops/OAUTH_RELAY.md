@@ -48,12 +48,27 @@ the exchange leg moves: the relay contract, the state format, and the registered
 
 ### The worker's state signing key
 
-`dashboard.oauth.relay_state_key` in the worker's own secret store: 32 random
-bytes, base64url, minted on first use and cached in the worker process. It signs
-and verifies `state` and nothing else. It is never sent to a provider, never put
-in a page, and never reachable from an unauthenticated route — the callback
-route only reads it once a pending attempt an authenticated start route created
-already exists.
+`dashboard.oauth.relay_state_key` in the worker's own secret store, as JSON:
+`{ current, previous?, rotatedAt? }`. `current` is 32 random bytes, base64url,
+minted on first use and cached in the worker process; new states are always
+signed with it. It signs and verifies `state` and nothing else — it is never
+sent to a provider, never put in a page, and never reachable from an
+unauthenticated route: the callback route only reads it once a pending attempt
+an authenticated start route created already exists.
+
+**Rotation.** Rotating replaces `current` with a fresh key and demotes the old
+one to `previous`, recording `rotatedAt`. `previous` keeps verifying for
+**one flow TTL** (`OAUTH_RELAY_STATE_TTL_MS`, ten minutes) past `rotatedAt` —
+long enough that a state minted just before rotation and still fresh at
+verification time keeps working — and stops verifying once that window passes,
+so a compromised key that prompted the rotation cannot forge a state forever
+after. Only one demoted key is ever kept: rotating twice in quick succession
+does not chain two grace windows. `src/core/oauth-relay.ts` implements the
+type, the rotation, and the persisted JSON shape
+(`rotateOAuthRelayStateKeys`, `serializeOAuthRelayStateKeys`,
+`parseOAuthRelayStateKeys`); nothing in this repository currently calls
+rotation on a schedule or exposes it as an operator command — until it does,
+rotation is a manual edit of the stored JSON.
 
 ## Why a relay at all
 

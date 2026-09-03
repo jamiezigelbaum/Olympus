@@ -62235,6 +62235,50 @@ function createOAuthRelayNonce() {
 function createOAuthRelayStateKey() {
   return randomBytes4(32).toString("base64url");
 }
+function createOAuthRelayStateKeys() {
+  return { current: createOAuthRelayStateKey() };
+}
+function serializeOAuthRelayStateKeys(keys) {
+  const json = {
+    current: keys.current,
+    ...keys.previous ? { previous: keys.previous } : {},
+    ...keys.rotatedAt ? { rotatedAt: keys.rotatedAt.toISOString() } : {}
+  };
+  return JSON.stringify(json);
+}
+function parseOAuthRelayStateKeys(raw) {
+  if (!raw)
+    return;
+  let decoded;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
+    return;
+  const record3 = decoded;
+  if (typeof record3.current !== "string" || !record3.current)
+    return;
+  if (record3.previous !== undefined && (typeof record3.previous !== "string" || !record3.previous))
+    return;
+  if (record3.rotatedAt !== undefined) {
+    if (typeof record3.rotatedAt !== "string")
+      return;
+    const parsed = Date.parse(record3.rotatedAt);
+    if (!Number.isFinite(parsed))
+      return;
+    return {
+      current: record3.current,
+      ...record3.previous ? { previous: record3.previous } : {},
+      rotatedAt: new Date(parsed)
+    };
+  }
+  return {
+    current: record3.current,
+    ...record3.previous ? { previous: record3.previous } : {}
+  };
+}
 function signOAuthRelayState(payload, key) {
   const body = {
     v: payload.v ?? OAUTH_RELAY_STATE_VERSION,
@@ -62257,8 +62301,15 @@ function verifyOAuthRelayState(state, expectation) {
   const [segment, signature] = segments;
   if (!BASE64URL_SEGMENT.test(segment) || !BASE64URL_SEGMENT.test(signature))
     return refuse("malformed_state");
-  if (!constantTimeEquals(signature, relaySignature(segment, expectation.key)))
-    return refuse("bad_signature");
+  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
+  const signedWithCurrent = constantTimeEquals(signature, relaySignature(segment, expectation.keys.current));
+  if (!signedWithCurrent) {
+    const { previous, rotatedAt } = expectation.keys;
+    const previousStillHonored = previous !== undefined && rotatedAt !== undefined && expectation.now.getTime() - rotatedAt.getTime() <= ttlMs;
+    if (!previousStillHonored || !constantTimeEquals(signature, relaySignature(segment, previous))) {
+      return refuse("bad_signature");
+    }
+  }
   let decoded;
   try {
     decoded = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
@@ -62282,7 +62333,6 @@ function verifyOAuthRelayState(state, expectation) {
     return refuse("foreign_origin");
   if (record3.source !== expectation.expectedSource)
     return refuse("source_mismatch");
-  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
   const ageMs = expectation.now.getTime() - record3.iat * 1000;
   if (ageMs > ttlMs || ageMs < -60000)
     return refuse("stale_iat");
@@ -69185,18 +69235,18 @@ function createEmailSourceWorker(options = {}) {
   const credentialDegradations = options.credentialDegradations;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map;
-  let dashboardRelayStateKeyCache;
-  const dashboardRelayStateKey = async (secretStore) => {
-    if (dashboardRelayStateKeyCache)
-      return dashboardRelayStateKeyCache;
-    const stored = (await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY))?.trim();
-    if (stored) {
-      dashboardRelayStateKeyCache = stored;
-      return stored;
+  let dashboardRelayStateKeysCache;
+  const dashboardRelayStateKeys = async (secretStore) => {
+    if (dashboardRelayStateKeysCache)
+      return dashboardRelayStateKeysCache;
+    const parsed = parseOAuthRelayStateKeys(await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY));
+    if (parsed) {
+      dashboardRelayStateKeysCache = parsed;
+      return parsed;
     }
-    const minted = createOAuthRelayStateKey();
-    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, minted);
-    dashboardRelayStateKeyCache = minted;
+    const minted = createOAuthRelayStateKeys();
+    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, serializeOAuthRelayStateKeys(minted));
+    dashboardRelayStateKeysCache = minted;
     return minted;
   };
   const dashboardDisconnectedSources = new Set;
@@ -69476,6 +69526,11 @@ function createEmailSourceWorker(options = {}) {
           const page = renderDashboardHtmlRoute({ url, view, options: options2 });
           return html(page.html, page.status);
         }
+        const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
+        if (request.method === "GET" && oauthCallbackDone) {
+          const source = parseDashboardOAuthSource(decodeURIComponent(oauthCallbackDone[1]));
+          return dashboardOAuthCompleteHtml({ source, returnTo: dashboardReturnTo() });
+        }
         if (request.method === "GET" && url.pathname.startsWith("/oauth/callback/")) {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
@@ -69483,15 +69538,19 @@ function createEmailSourceWorker(options = {}) {
           const source = parseDashboardOAuthSource(decodeURIComponent(url.pathname.slice("/oauth/callback/".length)));
           const attempt = dashboardOAuthAttempts.get(source);
           const state = asOptionalString(url.searchParams.get("state"));
+          const callbackError = asOptionalString(url.searchParams.get("error"));
+          const code = asOptionalString(url.searchParams.get("code"));
           const relayAccepted = attempt?.relay === undefined || state === undefined ? true : verifyOAuthRelayState(state, {
-            key: await dashboardRelayStateKey(dashboardSecretStore(sourceDashboard)),
+            keys: await dashboardRelayStateKeys(dashboardSecretStore(sourceDashboard)),
             expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
             expectedSource: source,
             expectedNonce: attempt.relay.nonce,
             now: new Date,
             ttlMs: OAUTH_RELAY_STATE_TTL_MS
           }).ok;
-          if (!attempt || dashboardOAuthAttemptExpired(attempt, new Date) || !state || !dashboardOAuthStateMatches(attempt, state) || !relayAccepted) {
+          const hasResult = callbackError !== undefined || code !== undefined;
+          const attemptUsable = attempt !== undefined && attempt.consumed !== true && !dashboardOAuthAttemptExpired(attempt, new Date) && state !== undefined && dashboardOAuthStateMatches(attempt, state) && relayAccepted && hasResult;
+          if (!attemptUsable) {
             if (attempt && dashboardOAuthAttemptExpired(attempt, new Date)) {
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             }
@@ -69502,10 +69561,10 @@ function createEmailSourceWorker(options = {}) {
               status: 410
             });
           }
-          const callbackError = asOptionalString(url.searchParams.get("error"));
-          if (callbackError) {
+          if (callbackError !== undefined) {
             const errorCode = safeOAuthErrorCode(callbackError);
             attempt.error = { code: errorCode ?? "unrecognized_error", at: new Date().toISOString() };
+            attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
               reason: `OAuth provider returned ${errorCode ?? "an unrecognized error"}.`,
@@ -69513,14 +69572,12 @@ function createEmailSourceWorker(options = {}) {
               status: 400
             });
           }
-          const code = asOptionalString(url.searchParams.get("code"));
-          if (!code) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+          if (code === undefined) {
             return dashboardOAuthFailureHtml({
               source,
-              reason: "OAuth callback is missing code or state.",
-              returnTo: attempt.returnTo,
-              status: 400
+              reason: "This connection attempt is no longer active. Start connect again from the Olympus dashboard.",
+              returnTo: dashboardReturnTo(),
+              status: 410
             });
           }
           try {
@@ -69545,7 +69602,13 @@ function createEmailSourceWorker(options = {}) {
               status: 400
             });
           }
-          return dashboardOAuthCompleteHtml({ source, returnTo: attempt.returnTo });
+          return new Response(null, {
+            status: 303,
+            headers: {
+              Location: `/oauth/callback/${encodeURIComponent(source)}/done`,
+              "Referrer-Policy": "no-referrer"
+            }
+          });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/connect/oauth/start") {
           return await withDashboardGrantMutation(async () => {
@@ -69583,7 +69646,7 @@ function createEmailSourceWorker(options = {}) {
               source,
               nonce: relayNonce,
               iat: Math.floor(Date.now() / 1000)
-            }, await dashboardRelayStateKey(secretStore));
+            }, (await dashboardRelayStateKeys(secretStore)).current);
             const startOAuth = sourceDashboard.startExternalOAuthConnection ?? startExternalOAuthSourceConnection;
             const pending = await startOAuth({
               source,
@@ -72056,7 +72119,9 @@ ${paragraphs}
       <p><a href="${escapeHtml3(options.returnTo)}">Return to dashboard</a></p>
     </main>
   </body>
-</html>`, options.status);
+</html>`, options.status, {
+    "Referrer-Policy": "no-referrer"
+  });
 }
 function escapeHtml3(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -72268,12 +72333,13 @@ function embeddingLedgerBasePath(url) {
     return;
   return `/dashboard?token=${encodeURIComponent(token)}`;
 }
-function html(value, status = 200) {
+function html(value, status = 200, extraHeaders) {
   return new Response(value, {
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      ...extraHeaders
     }
   });
 }

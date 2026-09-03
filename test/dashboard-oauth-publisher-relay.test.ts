@@ -9,6 +9,7 @@
 // `redirect_uri` is readable and can be compared with what /start sent: the two
 // must be the identical string or the providers refuse the exchange.
 
+import { createHmac } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,10 +18,16 @@ import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import type { OAuthFetch } from '../src/core/connect.ts';
+import type { OAuthFetch, ExternalPendingOAuthConnection } from '../src/core/connect.ts';
+import { startExternalOAuthSourceConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
-import { DEFAULT_OAUTH_RELAY_URL } from '../src/core/oauth-relay.ts';
+import {
+  createOAuthRelayStateKey,
+  signOAuthRelayState,
+  DEFAULT_OAUTH_RELAY_URL,
+  OAUTH_RELAY_STATE_TTL_MS,
+} from '../src/core/oauth-relay.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import type { DashboardSourceAction } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -49,7 +56,10 @@ interface Fixture {
   exchanges: Array<URLSearchParams>;
 }
 
-function fixture(initialSecrets: Record<string, string> = {}): Fixture {
+function fixture(
+  initialSecrets: Record<string, string> = {},
+  options: { attemptExpiresInMs?: number } = {},
+): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
   dirs.push(dir);
   const secretStore = memorySecretStore(initialSecrets);
@@ -71,6 +81,18 @@ function fixture(initialSecrets: Record<string, string> = {}): Fixture {
       registryPath: join(dir, 'handles.json'),
       secretStore,
       oauthFetch,
+      // Only used by the 'expired state' scenario below: the real starter,
+      // with its honest ~10-minute expiry replaced by a near-immediate one, so
+      // the test can wait a few milliseconds instead of ten real minutes to
+      // reach a genuinely expired attempt.
+      ...(options.attemptExpiresInMs === undefined ? {} : {
+        startExternalOAuthConnection: async (
+          connectOptions: Parameters<typeof startExternalOAuthSourceConnection>[0],
+        ): Promise<ExternalPendingOAuthConnection> => {
+          const pending = await startExternalOAuthSourceConnection(connectOptions);
+          return { ...pending, expiresAt: new Date(Date.now() + options.attemptExpiresInMs!).toISOString() };
+        },
+      }),
     },
   });
   return {
@@ -78,6 +100,25 @@ function fixture(initialSecrets: Record<string, string> = {}): Fixture {
     secretStore,
     exchanges,
   };
+}
+
+/** The `current` signing key this worker has actually minted, for forging test states. */
+async function currentRelayKey(instance: Fixture): Promise<string> {
+  const raw = await instance.secretStore.get('dashboard.oauth.relay_state_key');
+  return (JSON.parse(raw!) as { current: string }).current;
+}
+
+/**
+ * A signed state built directly from the wire format, bypassing
+ * `signOAuthRelayState`'s type — which will not construct a payload missing a
+ * required field or carrying the wrong type. An attacker (or a state a buggy
+ * older worker minted) is not bound by that type either, so this is how a
+ * "validly signed but malformed payload" is actually produced on the wire.
+ */
+function rawRelayState(payload: unknown, key: string): string {
+  const segment = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature = createHmac('sha256', Buffer.from(key, 'base64url')).update(segment, 'ascii').digest('base64url');
+  return `${segment}.${signature}`;
 }
 
 async function startConnect(
@@ -128,7 +169,7 @@ describe('publisher-client relay flow', () => {
     expect(body).not.toContain('relay_state_key');
   });
 
-  test('a relay-bounced callback completes, and the exchange uses the identical redirect_uri', async () => {
+  test('a relay-bounced callback redirects to a query-free done page, and the exchange uses the identical redirect_uri', async () => {
     const instance = fixture();
     const started = await authorizationUrl(await startConnect(instance));
     const state = started.searchParams.get('state')!;
@@ -138,7 +179,25 @@ describe('publisher-client relay flow', () => {
     const callback = await instance.fetch(new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=relay-code-1&state=${encodeURIComponent(state)}`,
     ));
-    expect(callback.status).toBe(200);
+    // MINOR 2, Codex round 2: the success page used to render directly at this
+    // URL, which still carried the (already-spent) code and state — and
+    // therefore landed in this tab's browser history despite `no-store`, which
+    // only keeps a response out of the disk cache. A 303 to a clean same-origin
+    // URL is what actually keeps them out of history.
+    expect(callback.status).toBe(303);
+    const location = callback.headers.get('Location')!;
+    expect(location).toBe('/oauth/callback/dropbox/done');
+    expect(location).not.toContain('code');
+    expect(location).not.toContain('state');
+    expect(callback.headers.get('Referrer-Policy')).toBe('no-referrer');
+
+    const done = await instance.fetch(new Request(`${DASHBOARD_ORIGIN}${location}`));
+    expect(done.status).toBe(200);
+    expect(done.headers.get('Referrer-Policy')).toBe('no-referrer');
+    const donePage = await done.text();
+    expect(donePage).toContain('Connected dropbox');
+    expect(donePage).not.toContain('relay-code-1');
+    expect(donePage).not.toContain(state);
 
     expect(instance.exchanges).toHaveLength(1);
     expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
@@ -150,111 +209,297 @@ describe('publisher-client relay flow', () => {
       .toBe('dropbox-refresh-token-fixture');
   });
 
-  test('the signing key is worker-local and is minted once', async () => {
+  test('the signing key is worker-local, minted once, and stored as current/previous/rotatedAt material', async () => {
     const instance = fixture();
     await startConnect(instance);
-    const key = await instance.secretStore.get('dashboard.oauth.relay_state_key');
-    expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const raw = await instance.secretStore.get('dashboard.oauth.relay_state_key');
+    // JSON, not a bare key string: the shape rotation needs (MINOR 3).
+    const material = JSON.parse(raw!);
+    expect(material.current).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(material.previous).toBeUndefined();
+    expect(material.rotatedAt).toBeUndefined();
     await startConnect(instance);
-    expect(await instance.secretStore.get('dashboard.oauth.relay_state_key')).toBe(key!);
+    expect(await instance.secretStore.get('dashboard.oauth.relay_state_key')).toBe(raw!);
   });
 
-  test('every relay refusal is indistinguishable from every other', async () => {
-    const refusals: Array<{ name: string; path: string; run: () => Promise<Response> }> = [];
+  // MAJOR 2, Codex round 2 on 7863a735: the previous refusal suite grouped
+  // refusals by internal reason and never compared raw bytes, which is exactly
+  // how MAJOR 1 (the missing-result oracle) got through. Every scenario the
+  // review named is exercised here against a LIVE attempt where the review says
+  // "against a live attempt", and every one is asserted BYTE-IDENTICAL — status
+  // and full body — to the same "no attempt" baseline.
+  test('every named refusal is byte-identical to the "no attempt" baseline', async () => {
+    const baselineResponse = await fixture().fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=aaaa.bbbb`,
+    ));
+    expect(baselineResponse.status).toBe(410);
+    const baseline = { status: baselineResponse.status, body: await baselineResponse.text() };
+    expect(baseline.body).not.toContain('signature');
+    expect(baseline.body).not.toContain('nonce');
+    expect(baseline.body).not.toContain('relay');
 
-    // A tampered signature over an otherwise perfect state.
-    refusals.push({
-      name: 'bad signature',
-      path: 'dropbox',
-      run: async () => {
-        const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance));
-        const [segment, signature] = started.searchParams.get('state')!.split('.') as [string, string];
-        const forged = `${segment}.${signature.slice(0, -1)}${signature.endsWith('A') ? 'B' : 'A'}`;
-        return instance.fetch(new Request(
-          `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(forged)}`,
-        ));
-      },
-    });
-
-    // The same code and state delivered twice: the attempt is consumed, so the
-    // nonce cannot be replayed.
-    refusals.push({
-      name: 'replayed nonce',
-      path: 'dropbox',
-      run: async () => {
-        const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance));
-        const state = started.searchParams.get('state')!;
-        const first = await instance.fetch(new Request(
-          `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c1&state=${encodeURIComponent(state)}`,
-        ));
-        expect(first.status).toBe(200);
-        return instance.fetch(new Request(
-          `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c2&state=${encodeURIComponent(state)}`,
-        ));
-      },
-    });
-
-    // A state minted for this dashboard, delivered to a worker that derives a
-    // different origin for itself. The signature is genuine; the origin is not.
-    refusals.push({
-      name: 'foreign origin',
-      path: 'dropbox',
-      run: async () => {
-        const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance));
-        const state = started.searchParams.get('state')!;
-        return instance.fetch(new Request(
-          `https://other.example.org/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
-        ));
-      },
-    });
-
-    // A dropbox state offered on the gmail callback path.
-    refusals.push({
-      name: 'crossed source',
-      path: 'gmail',
-      run: async () => {
-        const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance));
-        const state = started.searchParams.get('state')!;
-        return instance.fetch(new Request(
-          `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=c&state=${encodeURIComponent(state)}`,
-        ));
-      },
-    });
-
-    // No state at all, and a state for a flow nobody started.
-    refusals.push({
-      name: 'unsolicited callback',
-      path: 'dropbox',
-      run: async () => fixture().fetch(new Request(
-        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=aaaa.bbbb`,
-      )),
-    });
-
-    const answers = new Map<string, Set<string>>();
-    for (const refusal of refusals) {
-      const response = await refusal.run();
-      expect(response.status, refusal.name).toBe(410);
-      const page = await response.text();
-      // Nothing about which check fired, and no state or code echoed back.
-      expect(page, refusal.name).not.toContain('signature');
-      expect(page, refusal.name).not.toContain('nonce');
-      expect(page, refusal.name).not.toContain('relay');
-      const seen = answers.get(refusal.path) ?? new Set<string>();
-      seen.add(`${response.status}:${page}`);
-      answers.set(refusal.path, seen);
+    async function scenario(name: string, run: () => Promise<Response>): Promise<void> {
+      const response = await run();
+      expect(response.status, name).toBe(baseline.status);
+      expect(await response.text(), name).toBe(baseline.body);
     }
-    // One answer for every refusal on a path. The page names the source it was
-    // called on, which the caller chose by picking the path — so the gmail
-    // refusal is compared with gmail's, and telling the two apart proves
-    // nothing about whether either flow exists.
-    for (const [path, seen] of answers) expect(seen.size, path).toBe(1);
-    const dropbox = [...answers.get('dropbox')!][0]!;
-    const gmail = [...answers.get('gmail')!][0]!;
-    expect(gmail).toBe(dropbox.replaceAll('dropbox', 'gmail'));
+
+    // A live attempt plus its decoded payload and the actual signing key this
+    // worker minted, so a scenario can forge a payload field and re-sign it
+    // exactly the way a worker running an older or buggy build might.
+    async function liveDropboxAttempt(): Promise<{ instance: Fixture; key: string; payload: Record<string, unknown> }> {
+      const instance = fixture();
+      const started = await authorizationUrl(await startConnect(instance));
+      return {
+        instance,
+        key: await currentRelayKey(instance),
+        payload: statePayload(started.searchParams.get('state')!),
+      };
+    }
+
+    await scenario('missing state', async () => {
+      const { instance } = await liveDropboxAttempt();
+      return instance.fetch(new Request(`${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c`));
+    });
+
+    await scenario('wrong state', async () => {
+      const { instance } = await liveDropboxAttempt();
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent('unrelated.state')}`,
+      ));
+    });
+
+    await scenario('bad signature', async () => {
+      const { instance, payload } = await liveDropboxAttempt();
+      const forged = rawRelayState(payload, createOAuthRelayStateKey());
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(forged)}`,
+      ));
+    });
+
+    await scenario('unsupported version', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      const resigned = signOAuthRelayState({ ...(payload as any), v: 2 }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('validly-signed malformed payload', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      // A correctly signed segment whose payload fails shape validation — the
+      // one case `signOAuthRelayState`'s own type cannot construct, because an
+      // attacker (or an older buggy worker) is not bound by it.
+      const { nonce: _nonce, ...withoutNonce } = payload;
+      const forged = rawRelayState(withoutNonce, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(forged)}`,
+      ));
+    });
+
+    await scenario('nonce mismatch against a live attempt', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      const resigned = signOAuthRelayState({ ...(payload as any), nonce: `${payload.nonce}x` }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('source mismatch against a live attempt', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      // Same nonce as the live dropbox attempt — so this reaches the source
+      // check rather than failing on the nonce first — but a different
+      // `source` field, delivered back to the SAME (dropbox) path.
+      const resigned = signOAuthRelayState({ ...(payload as any), source: 'gmail' }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('stale iat', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      const stale = (payload.iat as number) - Math.ceil(OAUTH_RELAY_STATE_TTL_MS / 1000) - 60;
+      const resigned = signOAuthRelayState({ ...(payload as any), iat: stale }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('future iat', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      const future = (payload.iat as number) + Math.ceil(OAUTH_RELAY_STATE_TTL_MS / 1000) + 60;
+      const resigned = signOAuthRelayState({ ...(payload as any), iat: future }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('foreign origin', async () => {
+      const { instance, key, payload } = await liveDropboxAttempt();
+      const resigned = signOAuthRelayState({ ...(payload as any), origin: 'https://attacker.example' }, key);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(resigned)}`,
+      ));
+    });
+
+    await scenario('replayed nonce', async () => {
+      const instance = fixture();
+      const started = await authorizationUrl(await startConnect(instance));
+      const state = started.searchParams.get('state')!;
+      const first = await instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c1&state=${encodeURIComponent(state)}`,
+      ));
+      expect(first.status).toBe(303);
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c2&state=${encodeURIComponent(state)}`,
+      ));
+    });
+
+    await scenario('expired state', async () => {
+      const instance = fixture({}, { attemptExpiresInMs: 5 });
+      const started = await authorizationUrl(await startConnect(instance));
+      const state = started.searchParams.get('state')!;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
+      ));
+    });
+
+    // MAJOR 1, Codex round 2: the case that got through review 1. A perfectly
+    // valid, unexpired, unconsumed, correctly signed state carrying NEITHER
+    // `code` nor `error` used to reach its own 400 that also deleted the
+    // attempt — reachable by anyone who knew a live state string with the
+    // result parameters stripped off, letting them tell "this attempt exists"
+    // from "it doesn't" and cancel a live attempt by omission alone.
+    await scenario('valid state with neither code nor error', async () => {
+      const { instance, payload } = await liveDropboxAttempt();
+      const state = signOAuthRelayState(payload as any, await currentRelayKey(instance));
+      return instance.fetch(new Request(
+        `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?state=${encodeURIComponent(state)}`,
+      ));
+    });
+  });
+
+  // MINOR 1, Codex round 2: a provider-error callback didn't consume the
+  // nonce, so the identical signed state stayed replayable — with a REAL code
+  // this time — until the attempt's own ten-minute expiry.
+  test('a state is consumed by a provider error, not just by success', async () => {
+    const instance = fixture();
+    const started = await authorizationUrl(await startConnect(instance));
+    const state = started.searchParams.get('state')!;
+
+    const errorCallback = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?error=access_denied&state=${encodeURIComponent(state)}`,
+    ));
+    expect(errorCallback.status).toBe(400);
+    expect(await errorCallback.text()).toContain('access_denied');
+
+    // The identical state, now with a real code attached, must be refused —
+    // not exchanged — even though the attempt record itself is still on file
+    // (kept so the dashboard can show what was refused).
+    const replay = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=late-code&state=${encodeURIComponent(state)}`,
+    ));
+    expect(replay.status).toBe(410);
+    expect(instance.exchanges).toHaveLength(0);
+
+    // The dashboard still reads the provider's refusal off the kept attempt.
+    const view = await (await instance.fetch(new Request(`${DASHBOARD_ORIGIN}/dashboard.json`, {
+      headers: { Authorization: 'Bearer dashboard-secret' },
+    }))).json();
+    const dropbox = view.sources.find((source: any) => source.source_id === 'dropbox.files');
+    expect(dropbox.connection.provider_refusal?.code).toBe('access_denied');
+  });
+
+  // MINOR 3, Codex round 2: rotation wasn't implemented — the worker cached one
+  // key and verification checked only that one. Seeding the secret store
+  // directly simulates an out-of-band key roll (there is no HTTP rotation
+  // route in this change) and proves the WIRED loader — not just the pure
+  // function in oauth-relay.ts — honors the one-flow-TTL grace window.
+  test('a key rotated out-of-band verifies within its TTL and is refused past it', async () => {
+    const oldKey = createOAuthRelayStateKey();
+    const newKey = createOAuthRelayStateKey();
+
+    // Attempts are in-memory and process-local, so within a single running
+    // worker every attempt IT creates is always signed with whatever `current`
+    // key that process has cached — there is no natural way for a live
+    // in-process attempt to have been minted under a key that process now
+    // calls `previous`. The realistic trigger the contract's grace window
+    // protects is a flow that started under the OLD key just before an
+    // operator rotated it (typically adopted on the worker's next restart):
+    // this attempt's OWN recorded state was genuinely signed with the old key,
+    // even though the process that eventually sees the callback has since
+    // moved on. `startExternalOAuthConnection` is the seam that lets a test
+    // construct that shape directly, by resigning the exact payload the real
+    // start route produced (redirect_uri, nonce, origin, source, iat all come
+    // from the untouched call beneath it) with the old key instead.
+    async function attemptSignedWith(key: string, keyMaterial: { current: string; previous: string; rotatedAt: string }) {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
+      dirs.push(dir);
+      const secretStore = memorySecretStore({ 'dashboard.oauth.relay_state_key': JSON.stringify(keyMaterial) });
+      const captured: { state?: string } = {};
+      const oauthFetch: OAuthFetch = async () => new Response(JSON.stringify({
+        access_token: 'dropbox-access-token-fixture',
+        refresh_token: 'dropbox-refresh-token-fixture',
+        expires_in: 14_400,
+        token_type: 'bearer',
+        scope: 'files.metadata.read files.content.read sharing.read',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      const worker = createEmailSourceWorker({
+        sourceIndexStatus: { async status() { return fixtureStatus(); } },
+        sourceDashboard: {
+          sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+          registryPath: join(dir, 'handles.json'),
+          secretStore,
+          oauthFetch,
+          // Resigning BEFORE the real starter runs — not overriding its
+          // returned `pending.state` afterward — matters: `connect.ts`'s own
+          // `completeCallback` closes over whatever `state` it was called
+          // with and checks the callback's `state` against THAT, independent
+          // of `dashboardOAuthStateMatches` and the relay verification. All
+          // three must see the same old-key-signed string, and the only way
+          // to get there is to hand the resigned state to the real starter,
+          // exactly as an old-key-signing worker would have.
+          startExternalOAuthConnection: async (
+            connectOptions: Parameters<typeof startExternalOAuthSourceConnection>[0],
+          ): Promise<ExternalPendingOAuthConnection> => {
+            const [segment] = connectOptions.state!.split('.') as [string];
+            const payload = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
+            const resigned = signOAuthRelayState(payload, key);
+            captured.state = resigned;
+            return startExternalOAuthSourceConnection({ ...connectOptions, state: resigned });
+          },
+        },
+      });
+      const fetchWithAuth = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+      await startConnect({ fetch: fetchWithAuth, secretStore, exchanges: [] });
+      return { fetch: fetchWithAuth, state: captured.state! };
+    }
+
+    const withinTtl = await attemptSignedWith(oldKey, {
+      current: newKey,
+      previous: oldKey,
+      rotatedAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const accepted = await withinTtl.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(withinTtl.state)}`,
+    ));
+    expect(accepted.status).toBe(303);
+
+    const pastTtl = await attemptSignedWith(oldKey, {
+      current: newKey,
+      previous: oldKey,
+      rotatedAt: new Date(Date.now() - OAUTH_RELAY_STATE_TTL_MS - 1_000).toISOString(),
+    });
+    const refused = await pastTtl.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(pastTtl.state)}`,
+    ));
+    expect(refused.status).toBe(410);
+
+    const baseline = await fixture().fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=aaaa.bbbb`,
+    ));
+    expect(await refused.text()).toBe(await baseline.text());
   });
 
   test('an owner-supplied client id keeps the bring-your-own flow, unsigned state and all', async () => {

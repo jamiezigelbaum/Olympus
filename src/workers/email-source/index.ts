@@ -8,11 +8,14 @@ import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
   createOAuthRelayNonce,
-  createOAuthRelayStateKey,
+  createOAuthRelayStateKeys,
   oauthRelayUrl,
+  parseOAuthRelayStateKeys,
+  serializeOAuthRelayStateKeys,
   signOAuthRelayState,
   verifyOAuthRelayState,
   OAUTH_RELAY_STATE_TTL_MS,
+  type OAuthRelayStateKeys,
 } from '../../core/oauth-relay.ts';
 import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
@@ -534,23 +537,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const credentialDegradations = options.credentialDegradations;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map<DashboardOAuthSource, DashboardOAuthAttempt>();
-  // The HMAC key the publisher-relay `state` is signed with. Worker-local, kept
-  // in the same secret store the worker's other local material lives in, minted
-  // once on first use, and never handed to a browser or a provider. Cached in
-  // the closure so an unauthenticated callback can never make this process read
-  // the secret store: the key is only ever reached through a pending attempt
-  // that an authenticated start route created.
-  let dashboardRelayStateKeyCache: string | undefined;
-  const dashboardRelayStateKey = async (secretStore: SecretStore): Promise<string> => {
-    if (dashboardRelayStateKeyCache) return dashboardRelayStateKeyCache;
-    const stored = (await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY))?.trim();
-    if (stored) {
-      dashboardRelayStateKeyCache = stored;
-      return stored;
+  // The HMAC key material the publisher-relay `state` is signed with:
+  // `current`, and a `previous` key that still verifies for one flow TTL past
+  // its own rotation (docs/ops/OAUTH_RELAY.md). Worker-local, kept in the same
+  // secret store the worker's other local material lives in, minted once on
+  // first use, and never handed to a browser or a provider. Cached in the
+  // closure so an unauthenticated callback can never make this process read
+  // the secret store on its own account: the key is only ever reached through
+  // a pending attempt that an authenticated start route created.
+  let dashboardRelayStateKeysCache: OAuthRelayStateKeys | undefined;
+  const dashboardRelayStateKeys = async (secretStore: SecretStore): Promise<OAuthRelayStateKeys> => {
+    if (dashboardRelayStateKeysCache) return dashboardRelayStateKeysCache;
+    const parsed = parseOAuthRelayStateKeys(await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY));
+    if (parsed) {
+      dashboardRelayStateKeysCache = parsed;
+      return parsed;
     }
-    const minted = createOAuthRelayStateKey();
-    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, minted);
-    dashboardRelayStateKeyCache = minted;
+    const minted = createOAuthRelayStateKeys();
+    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, serializeOAuthRelayStateKeys(minted));
+    dashboardRelayStateKeysCache = minted;
     return minted;
   };
   const dashboardDisconnectedSources = new Set<V04PublicSourceId>();
@@ -983,6 +988,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return html(page.html, page.status);
         }
 
+        // The query-free landing the successful callback redirects to (MINOR 2,
+        // Codex round 2 on 7863a735): rendering the "Connected" page directly at
+        // the URL the provider redirected to left `code` and `state` sitting in
+        // this tab's browser history despite `Cache-Control: no-store`, which
+        // only keeps a response out of the disk cache, not out of history. This
+        // route takes no query parameters and reads no attempt — it exists only
+        // to be a clean URL to redirect a browser to after the code is already
+        // spent — so it matches on source alone.
+        const oauthCallbackDone = /^\/oauth\/callback\/([^/]+)\/done$/.exec(url.pathname);
+        if (request.method === 'GET' && oauthCallbackDone) {
+          const source = parseDashboardOAuthSource(decodeURIComponent(oauthCallbackDone[1]!));
+          return dashboardOAuthCompleteHtml({ source, returnTo: dashboardReturnTo() });
+        }
+
         if (request.method === 'GET' && url.pathname.startsWith('/oauth/callback/')) {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -1001,6 +1020,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // `GET /oauth/callback/dropbox?error=access_denied` rewrote the
           // owner's live attempt and dropped their card out of "connecting".
           const state = asOptionalString(url.searchParams.get('state'));
+          const callbackError = asOptionalString(url.searchParams.get('error'));
+          const code = asOptionalString(url.searchParams.get('code'));
           // A relay-bounced callback carries the SIGNED state this worker
           // minted, so every field the contract names is re-verified here:
           // signature, version, nonce, origin as this worker derives it,
@@ -1012,26 +1033,45 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const relayAccepted = attempt?.relay === undefined || state === undefined
             ? true
             : verifyOAuthRelayState(state, {
-              key: await dashboardRelayStateKey(dashboardSecretStore(sourceDashboard)),
+              keys: await dashboardRelayStateKeys(dashboardSecretStore(sourceDashboard)),
               expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
               expectedSource: source,
               expectedNonce: attempt.relay.nonce,
               now: new Date(),
               ttlMs: OAUTH_RELAY_STATE_TTL_MS,
             }).ok;
-          if (!attempt
-            || dashboardOAuthAttemptExpired(attempt, new Date())
-            || !state
-            || !dashboardOAuthStateMatches(attempt, state)
-            || !relayAccepted) {
+          // Fixed-response(MAJOR 1, Codex round 2 on 7863a735): a validly
+          // signed, unexpired, unconsumed state carrying NEITHER `code` nor
+          // `error` used to fall through to its own 400 that also deleted the
+          // attempt — a different status, a different body, and a mutation, all
+          // reachable by an unauthenticated caller who merely knew (or guessed)
+          // a live state string with the result parameters stripped off. That
+          // let such a caller distinguish "this attempt still exists" from
+          // "it's gone" and cancel a live attempt by doing nothing more than
+          // omitting the result. `hasResult` folds that case into the exact
+          // same refusal every other invalid-callback shape gets, and
+          // `attempt.consumed` (set once a terminal outcome has been recorded,
+          // MINOR 1 below) does the same for a callback replayed after the
+          // provider's result has already been read once.
+          const hasResult = callbackError !== undefined || code !== undefined;
+          const attemptUsable = attempt !== undefined
+            && attempt.consumed !== true
+            && !dashboardOAuthAttemptExpired(attempt, new Date())
+            && state !== undefined
+            && dashboardOAuthStateMatches(attempt, state)
+            && relayAccepted
+            && hasResult;
+          if (!attemptUsable) {
             // Deliberately ONE answer for every fact — no attempt, an expired
-            // one, no state, the wrong state, and every relay-state refusal
-            // (bad signature, wrong version, replayed nonce, stale iat, foreign
-            // origin, crossed source). An unauthenticated
-            // caller learns nothing about whether a connect is in flight, and
-            // in every one of these cases the stored attempt is left exactly
-            // as it was. Only a genuinely absent or expired record is dropped,
-            // which the prune pass would have done anyway.
+            // one, a consumed one, no state, the wrong state, no result, and
+            // every relay-state refusal (bad signature, wrong version, replayed
+            // nonce, stale iat, foreign origin, crossed source). An
+            // unauthenticated caller learns nothing about whether a connect is
+            // in flight, and in every one of these cases the stored attempt is
+            // left exactly as it was. Only a genuinely expired record is
+            // dropped here, which the prune pass would have done anyway; a
+            // merely consumed or mismatched one stays untouched so a stray
+            // request can never end a live attempt it failed to prove it owns.
             if (attempt && dashboardOAuthAttemptExpired(attempt, new Date())) {
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             }
@@ -1042,8 +1082,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               status: 410,
             });
           }
-          const callbackError = asOptionalString(url.searchParams.get('error'));
-          if (callbackError) {
+          if (callbackError !== undefined) {
             // The error param arrives on a provider-crafted redirect: only a
             // known OAuth code is repeated, never the raw value.
             const errorCode = safeOAuthErrorCode(callbackError);
@@ -1053,6 +1092,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // (owner, 2026-09-03). It still expires on the same clock, and the
             // next Connect replaces it outright.
             attempt.error = { code: errorCode ?? 'unrecognized_error', at: new Date().toISOString() };
+            // MINOR 1 (Codex round 2): a provider error is a terminal outcome
+            // for THIS state even though the attempt record survives for
+            // display, so the state itself must stop verifying — otherwise the
+            // identical signed state stays replayable, with a different `code`,
+            // until its own ten-minute expiry. `consumed` is a fact about the
+            // state's usability, kept separate from `error`, which is a fact
+            // about what the dashboard should say.
+            attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
               reason: `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
@@ -1060,14 +1107,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               status: 400,
             });
           }
-          const code = asOptionalString(url.searchParams.get('code'));
-          if (!code) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+          // `hasResult` guarantees one of `callbackError`/`code` is defined;
+          // `callbackError` was just handled and returned above, so `code` is
+          // the one left. The check stays explicit rather than a non-null
+          // assertion: if that invariant is ever wrong, this must fail the same
+          // way every other invalid shape does, not throw past the refusal.
+          if (code === undefined) {
             return dashboardOAuthFailureHtml({
               source,
-              reason: 'OAuth callback is missing code or state.',
-              returnTo: attempt.returnTo,
-              status: 400,
+              reason: 'This connection attempt is no longer active. Start connect again from the Olympus dashboard.',
+              returnTo: dashboardReturnTo(),
+              status: 410,
             });
           }
           try {
@@ -1092,12 +1142,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               status: 400,
             });
           }
-          // The authorization runs in its OWN tab now, so redirecting this one
-          // to the dashboard produced a second dashboard tab beside the one the
-          // owner is already watching. This tab says the work is done and that
-          // it can be closed; the dashboard tab's poll picks the connection up
-          // on its own.
-          return dashboardOAuthCompleteHtml({ source, returnTo: attempt.returnTo });
+          // MINOR 2 (Codex round 2): redirect to the query-free `/done` route
+          // above rather than rendering the "Connected" page at this URL, which
+          // still carries the now-spent `code` and `state` in its own address —
+          // and therefore in this tab's history — even though the code has
+          // already been exchanged and cannot be replayed. The authorization
+          // also runs in its OWN tab now, so redirecting it to the dashboard
+          // produced a second dashboard tab beside the one the owner is already
+          // watching; this tab says the work is done and that it can be closed,
+          // and the dashboard tab's poll picks the connection up on its own.
+          return new Response(null, {
+            status: 303,
+            headers: {
+              Location: `/oauth/callback/${encodeURIComponent(source)}/done`,
+              'Referrer-Policy': 'no-referrer',
+            },
+          });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/oauth/start') {
@@ -1174,7 +1234,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               source,
               nonce: relayNonce,
               iat: Math.floor(Date.now() / 1000),
-            }, await dashboardRelayStateKey(secretStore));
+            }, (await dashboardRelayStateKeys(secretStore)).current);
           const startOAuth = sourceDashboard.startExternalOAuthConnection ?? startExternalOAuthSourceConnection;
           const pending = await startOAuth({
             source,
@@ -4521,6 +4581,17 @@ interface DashboardOAuthAttempt {
    * still expires on exactly the same clock.
    */
   error?: { code: string; at: string };
+  /**
+   * Set once this attempt's `state` has produced a terminal result — a
+   * provider error, or (moot, since the attempt is deleted) a completed
+   * exchange. A consumed state refuses exactly like a missing or expired one
+   * (MINOR 1, Codex round 2 on 7863a735): the attempt record can outlive its
+   * state's usability, because the dashboard still needs it for display, but
+   * the state itself must stop verifying the moment its one legitimate result
+   * has been read — otherwise the identical signed state stays replayable,
+   * with a different `code` each time, until the attempt's own expiry.
+   */
+  consumed?: boolean;
 }
 
 function dashboardPendingConnects(attempts: Map<DashboardOAuthSource, DashboardOAuthAttempt>): DashboardPendingConnect[] {
@@ -5172,7 +5243,15 @@ ${paragraphs}
       <p><a href="${escapeHtml(options.returnTo)}">Return to dashboard</a></p>
     </main>
   </body>
-</html>`, options.status);
+</html>`, options.status, {
+    // This page is reached at a URL that carried (or still carries) `code` and
+    // `state` in its own query string. `no-store` keeps it out of the disk
+    // cache, but a browser still sends `Referer` when the reader clicks the
+    // "Return to dashboard" link or any future link this page grows — unless
+    // the response says not to. Same header the relay's own `_headers` sets
+    // for the identical reason.
+    'Referrer-Policy': 'no-referrer',
+  });
 }
 
 function escapeHtml(value: string): string {
@@ -5457,12 +5536,13 @@ function embeddingLedgerBasePath(url: URL): string | undefined {
   return `/dashboard?token=${encodeURIComponent(token)}`;
 }
 
-function html(value: string, status = 200): Response {
+function html(value: string, status = 200, extraHeaders?: Record<string, string>): Response {
   return new Response(value, {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
+      ...extraHeaders,
     },
   });
 }

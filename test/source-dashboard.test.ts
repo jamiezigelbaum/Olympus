@@ -1307,13 +1307,19 @@ describe('multi-source source dashboard', () => {
     expect(start.status).toBe(200);
     expect(state).toBeTruthy();
 
-    const callback = await fetch(new Request(`http://worker.test/oauth/callback/gmail?code=gmail-code-fixture&state=${state}`));
+    const redirect = await fetch(new Request(`http://worker.test/oauth/callback/gmail?code=gmail-code-fixture&state=${state}`));
+    // A successful callback now redirects (303) to a query-free `/done` page
+    // rather than rendering "Connected" directly at the code/state-bearing
+    // URL (MINOR 2, Codex round 2 on 7863a735) — the redirect target carries
+    // no query either, so it cannot carry the dash_ token any more than the
+    // page it lands on can.
+    expect(redirect.status).toBe(303);
+    expect(redirect.headers.get('Location')).toBe('/oauth/callback/gmail/done');
+    const callback = await fetch(new Request(`http://worker.test${redirect.headers.get('Location')}`));
     // The authorization runs in its own tab, so the callback lands there and
     // says so instead of redirecting a second dashboard into that tab.
     expect(callback.status).toBe(200);
     expect(await callback.clone().text()).toContain('You can close this tab');
-    // No Location: the tab stays where it is and offers the way back instead.
-    expect(callback.headers.get('Location')).toBeNull();
     // The link back carries NO query. `return_to` was this page's own
     // window.location.href, which on a read-only view holds the dash_ token —
     // and this page is unauthenticated HTML a provider redirect lands on.
@@ -1755,14 +1761,20 @@ describe('multi-source source dashboard', () => {
     expect(authorizationUrl.searchParams.get('redirect_uri')).toBe('http://worker.test/oauth/callback/dropbox');
     expect(state).toBeTruthy();
 
-    const callback = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?code=dropbox-code-fixture&state=${state}`));
+    const redirect = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?code=dropbox-code-fixture&state=${state}`));
     const registry = readConnectedHandleRegistry(registryPath);
+
+    // A successful callback now redirects (303) to a query-free `/done` page
+    // (MINOR 2, Codex round 2 on 7863a735) rather than rendering "Connected"
+    // directly at the code/state-bearing URL.
+    expect(redirect.status).toBe(303);
+    expect(redirect.headers.get('Location')).toBe('/oauth/callback/dropbox/done');
+    const callback = await fetch(new Request(`http://worker.test${redirect.headers.get('Location')}`));
 
     // The authorization runs in its own tab, so the callback lands there and
     // says so instead of redirecting a second dashboard into that tab.
     expect(callback.status).toBe(200);
     expect(await callback.clone().text()).toContain('You can close this tab');
-    expect(callback.headers.get('Location')).toBeNull();
     const dropboxLandingHtml = await callback.clone().text();
     expect(dropboxLandingHtml).toContain('href="/dashboard"');
     expect(dropboxLandingHtml).not.toContain('dashboard-return-token');

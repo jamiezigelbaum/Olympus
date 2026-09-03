@@ -11,32 +11,42 @@ import { describe, expect, test } from 'bun:test';
 import {
   createOAuthRelayNonce,
   createOAuthRelayStateKey,
+  createOAuthRelayStateKeys,
   oauthRelayUrl,
+  parseOAuthRelayStateKeys,
+  rotateOAuthRelayStateKeys,
+  serializeOAuthRelayStateKeys,
   signOAuthRelayState,
   verifyOAuthRelayState,
   DEFAULT_OAUTH_RELAY_URL,
   OAUTH_RELAY_MAX_STATE_LENGTH,
+  OAUTH_RELAY_STATE_TTL_MS,
   OAUTH_RELAY_STATE_VERSION,
+  type OAuthRelayStateKeys,
 } from '../src/core/oauth-relay.ts';
 
 const KEY = createOAuthRelayStateKey();
+const KEYS: OAuthRelayStateKeys = { current: KEY };
 const NOW = new Date('2026-09-03T12:00:00.000Z');
 const ORIGIN = 'https://olympus.example.org';
 const NONCE = createOAuthRelayNonce();
 
-function state(overrides: Partial<{ origin: string; source: string; nonce: string; iat: number; v: number }> = {}): string {
+function state(
+  overrides: Partial<{ origin: string; source: string; nonce: string; iat: number; v: number }> = {},
+  key: string = KEY,
+): string {
   return signOAuthRelayState({
     origin: overrides.origin ?? ORIGIN,
     source: overrides.source ?? 'dropbox',
     nonce: overrides.nonce ?? NONCE,
     iat: overrides.iat ?? Math.floor(NOW.getTime() / 1000),
     ...(overrides.v === undefined ? {} : { v: overrides.v }),
-  }, KEY);
+  }, key);
 }
 
 function verify(value: string, expectation: Partial<Parameters<typeof verifyOAuthRelayState>[1]> = {}) {
   return verifyOAuthRelayState(value, {
-    key: KEY,
+    keys: KEYS,
     expectedOrigin: ORIGIN,
     expectedSource: 'dropbox',
     expectedNonce: NONCE,
@@ -128,6 +138,92 @@ describe('relay state', () => {
     // where gmail's nonce is expected fails on the nonce before the source.
     expect(verify(state(), { expectedSource: 'gmail', expectedNonce: createOAuthRelayNonce() }))
       .toEqual({ ok: false, reason: 'nonce_mismatch' });
+  });
+});
+
+// MINOR 3, Codex round 2 on 7863a735: rotation wasn't implemented at all — the
+// worker cached one key, and verification checked only that one. The contract
+// requires the OLD key to keep verifying for one flow TTL past its own
+// rotation (so a state minted just before rotation and still fresh at
+// verification time keeps working), and to STOP verifying once that window has
+// passed (so a compromised key that prompted the rotation cannot forge a
+// brand-new, fully fresh state forever after).
+describe('key rotation', () => {
+  test('rotating replaces current and demotes it to previous, with a rotation timestamp', () => {
+    const original: OAuthRelayStateKeys = { current: KEY };
+    const rotated = rotateOAuthRelayStateKeys(original, NOW);
+    expect(rotated.current).not.toBe(KEY);
+    expect(rotated.previous).toBe(KEY);
+    expect(rotated.rotatedAt).toEqual(NOW);
+  });
+
+  test('rotating twice keeps only the most recently demoted key, never a chain', () => {
+    const first = rotateOAuthRelayStateKeys({ current: KEY }, NOW);
+    const second = rotateOAuthRelayStateKeys(first, new Date(NOW.getTime() + 60_000));
+    expect(second.previous).toBe(first.current);
+    // The key `first` demoted (the original KEY) is gone entirely — one
+    // rotation's grace window, never two chained together.
+    expect(second.previous).not.toBe(KEY);
+  });
+
+  test('a state signed with the previous key verifies within one flow TTL of rotation', () => {
+    const rotated = rotateOAuthRelayStateKeys({ current: KEY }, NOW);
+    const oldSigned = state({ iat: Math.floor(NOW.getTime() / 1000) }, KEY);
+    // Right at rotation, and again just under the TTL boundary.
+    for (const elapsedMs of [0, OAUTH_RELAY_STATE_TTL_MS - 1]) {
+      expect(verify(oldSigned, { keys: rotated, now: new Date(NOW.getTime() + elapsedMs) }).ok).toBe(true);
+    }
+    // The new key verifies immediately too — rotation costs the new key nothing.
+    const newSigned = state({ iat: Math.floor(NOW.getTime() / 1000) }, rotated.current);
+    expect(verify(newSigned, { keys: rotated }).ok).toBe(true);
+  });
+
+  test('a state signed with the previous key is refused once its TTL window has passed', () => {
+    const rotated = rotateOAuthRelayStateKeys({ current: KEY }, NOW);
+    // The state's own `iat` is minted AFTER the TTL boundary has passed for the
+    // rotation, so its own freshness is fine — only the key it was signed with
+    // has aged out. This isolates the rotation boundary from the state's own
+    // freshness check: without a working previous-key expiry, this would still
+    // verify forever on a compromised key that prompted the rotation.
+    const afterBoundary = new Date(NOW.getTime() + OAUTH_RELAY_STATE_TTL_MS + 1);
+    const oldSignedButFresh = state({ iat: Math.floor(afterBoundary.getTime() / 1000) }, KEY);
+    expect(verify(oldSignedButFresh, { keys: rotated, now: afterBoundary }))
+      .toEqual({ ok: false, reason: 'bad_signature' });
+    // The current key is unaffected by how long ago the rotation happened.
+    const newSigned = state({ iat: Math.floor(afterBoundary.getTime() / 1000) }, rotated.current);
+    expect(verify(newSigned, { keys: rotated, now: afterBoundary }).ok).toBe(true);
+  });
+
+  test('no previous key and no rotation timestamp means only current verifies', () => {
+    const unrotated: OAuthRelayStateKeys = { current: KEY };
+    const foreignSigned = state({}, createOAuthRelayStateKey());
+    expect(verify(foreignSigned, { keys: unrotated })).toEqual({ ok: false, reason: 'bad_signature' });
+  });
+
+  test('key material round-trips through the persisted JSON shape', () => {
+    const rotated = rotateOAuthRelayStateKeys({ current: KEY }, NOW);
+    const persisted = serializeOAuthRelayStateKeys(rotated);
+    // What actually reaches the secret store: no signature, no state, just the
+    // three fields the worker's own verification needs back.
+    expect(JSON.parse(persisted)).toEqual({
+      current: rotated.current,
+      previous: KEY,
+      rotatedAt: NOW.toISOString(),
+    });
+    expect(parseOAuthRelayStateKeys(persisted)).toEqual(rotated);
+  });
+
+  test('fresh key material has no previous key to parse back', () => {
+    const fresh = createOAuthRelayStateKeys();
+    expect(fresh.previous).toBeUndefined();
+    expect(fresh.rotatedAt).toBeUndefined();
+    expect(parseOAuthRelayStateKeys(serializeOAuthRelayStateKeys(fresh))).toEqual(fresh);
+  });
+
+  test('a corrupt or foreign stored value parses to undefined rather than a partial key', () => {
+    for (const raw of [undefined, '', 'not json', '{}', '{"current":123}', JSON.stringify({ current: KEY, rotatedAt: 'not a date' })]) {
+      expect(parseOAuthRelayStateKeys(raw)).toBeUndefined();
+    }
   });
 });
 

@@ -44,9 +44,26 @@ export interface OAuthRelayStatePayload {
   iat: number;
 }
 
+/**
+ * The worker-local HMAC key material, with room for one rotation in flight.
+ *
+ * `previous` verifies only for one flow TTL after `rotatedAt` — the contract's
+ * "keep the previous key accepted for one flow TTL" — so a leaked key stops
+ * being honored a bounded time after it is rotated out, independent of any
+ * single state's own freshness window.
+ */
+export interface OAuthRelayStateKeys {
+  /** The key new states are signed with. */
+  current: string;
+  /** The key `current` replaced, if a rotation has happened. */
+  previous?: string;
+  /** When `current` became current. Required to verify with `previous`. */
+  rotatedAt?: Date;
+}
+
 export interface OAuthRelayStateExpectation {
-  /** The worker-local HMAC key, base64url as it is stored. */
-  key: string;
+  /** The worker-local HMAC key material: current, and a previous key in its TTL window. */
+  keys: OAuthRelayStateKeys;
   /** The dashboard origin this worker derives for itself — never one the request claims. */
   expectedOrigin: string;
   /** The source recorded with the nonce. */
@@ -111,6 +128,73 @@ export function createOAuthRelayStateKey(): string {
   return randomBytes(32).toString('base64url');
 }
 
+/** Fresh key material with no rotation history: a lone `current` key. */
+export function createOAuthRelayStateKeys(): OAuthRelayStateKeys {
+  return { current: createOAuthRelayStateKey() };
+}
+
+/**
+ * Rotates the signing key: the old `current` becomes `previous` and verifies
+ * for one more flow TTL, and a freshly minted key becomes `current`.
+ *
+ * Rotating twice in immediate succession is deliberately destructive to the
+ * PRIOR `previous`: only one demoted key is ever kept, because the contract
+ * bounds the honored window to one TTL past the most recent rotation, not a
+ * chain of them.
+ */
+export function rotateOAuthRelayStateKeys(keys: OAuthRelayStateKeys, now: Date): OAuthRelayStateKeys {
+  return { current: createOAuthRelayStateKey(), previous: keys.current, rotatedAt: now };
+}
+
+interface OAuthRelayStateKeysJson {
+  current: string;
+  previous?: string;
+  rotatedAt?: string;
+}
+
+/** The JSON shape persisted to the worker's secret store. */
+export function serializeOAuthRelayStateKeys(keys: OAuthRelayStateKeys): string {
+  const json: OAuthRelayStateKeysJson = {
+    current: keys.current,
+    ...(keys.previous ? { previous: keys.previous } : {}),
+    ...(keys.rotatedAt ? { rotatedAt: keys.rotatedAt.toISOString() } : {}),
+  };
+  return JSON.stringify(json);
+}
+
+/**
+ * The inverse of `serializeOAuthRelayStateKeys`. `undefined` on anything that
+ * is not the shape this module wrote — a corrupt or foreign value mints fresh
+ * material rather than trusting partial bytes as a signing key.
+ */
+export function parseOAuthRelayStateKeys(raw: string | undefined): OAuthRelayStateKeys | undefined {
+  if (!raw) return undefined;
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) return undefined;
+  const record = decoded as Record<string, unknown>;
+  if (typeof record.current !== 'string' || !record.current) return undefined;
+  if (record.previous !== undefined && (typeof record.previous !== 'string' || !record.previous)) return undefined;
+  if (record.rotatedAt !== undefined) {
+    if (typeof record.rotatedAt !== 'string') return undefined;
+    const parsed = Date.parse(record.rotatedAt);
+    if (!Number.isFinite(parsed)) return undefined;
+    return {
+      current: record.current,
+      ...(record.previous ? { previous: record.previous } : {}),
+      rotatedAt: new Date(parsed),
+    };
+  }
+  return {
+    current: record.current,
+    ...(record.previous ? { previous: record.previous } : {}),
+  };
+}
+
 /**
  * `BASE64URL(payload) "." BASE64URL(HMAC-SHA256(key, BASE64URL(payload)))`.
  *
@@ -153,8 +237,25 @@ export function verifyOAuthRelayState(
   if (!BASE64URL_SEGMENT.test(segment) || !BASE64URL_SEGMENT.test(signature)) return refuse('malformed_state');
 
   // Signature first, and in constant time. Everything below this line is
-  // reading bytes the worker's own key has already vouched for.
-  if (!constantTimeEquals(signature, relaySignature(segment, expectation.key))) return refuse('bad_signature');
+  // reading bytes a key this worker currently trusts has already vouched for.
+  //
+  // `current` first, then `previous` if it is still inside its one-flow-TTL
+  // grace window from the moment it was rotated out — the contract's "keep the
+  // previous key accepted for one flow TTL". A state minted before rotation and
+  // still fresh at verification time must keep working; a `previous` key that
+  // rotation has aged past its window must not, independent of any state's own
+  // freshness, or a leaked old key would verify forever.
+  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
+  const signedWithCurrent = constantTimeEquals(signature, relaySignature(segment, expectation.keys.current));
+  if (!signedWithCurrent) {
+    const { previous, rotatedAt } = expectation.keys;
+    const previousStillHonored = previous !== undefined
+      && rotatedAt !== undefined
+      && expectation.now.getTime() - rotatedAt.getTime() <= ttlMs;
+    if (!previousStillHonored || !constantTimeEquals(signature, relaySignature(segment, previous))) {
+      return refuse('bad_signature');
+    }
+  }
 
   let decoded: unknown;
   try {
@@ -173,7 +274,6 @@ export function verifyOAuthRelayState(
   if (record.origin !== expectation.expectedOrigin) return refuse('foreign_origin');
   if (record.source !== expectation.expectedSource) return refuse('source_mismatch');
 
-  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
   const ageMs = expectation.now.getTime() - record.iat * 1000;
   // A future `iat` is as wrong as a stale one: it is either a clock that moved
   // or a state this worker did not mint on the clock it is reading now. One

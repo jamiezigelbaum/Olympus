@@ -540,10 +540,14 @@ describe('X usage guard invocation provenance', () => {
       expect(started.status).toBe(200);
 
       // The callback itself carries no bearer — exactly the exempt surface.
+      // A successful callback now redirects (303) to a query-free done page
+      // rather than answering 200 directly (MINOR 2, Codex round 2 on
+      // 7863a735); the redirect is the completion signal this test cares
+      // about — the post-connect sync it dispatches already ran by then.
       const callback = await fetch(new Request(
         'http://worker.test/oauth/callback/x?code=x-code-fixture&state=state-fixture',
       ));
-      expect(callback.status).toBe(200);
+      expect(callback.status).toBe(303);
       expect(requests.length).toBeGreaterThan(0);
       for (const entry of requests) expect(entry.provenance).not.toBe('operator');
     } finally {
