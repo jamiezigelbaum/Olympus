@@ -12,8 +12,83 @@ which bounces the browser back to whatever dashboard origin the flow's own
 
 This document is the contract. The relay page is
 [`relay/oauth/callback/index.html`](../../relay/oauth/callback/index.html); the
-worker side is implemented separately and must satisfy
+worker side lives in [`src/core/oauth-relay.ts`](../../src/core/oauth-relay.ts)
+(state minting and verification), the publisher client identifiers in
+[`src/core/publisher-oauth-client.ts`](../../src/core/publisher-oauth-client.ts),
+and the routes in `src/workers/email-source/index.ts`. It satisfies
 ["What the worker must verify"](#what-the-worker-must-verify).
+
+### Which flow a source takes
+
+| Source | Dashboard origin | Client | `redirect_uri` | `state` |
+|---|---|---|---|---|
+| `gmail`, `google-drive` | loopback | packaged Google **Desktop** pilot client | `http://127.0.0.1:<port>/oauth/callback/<source>` | random |
+| `gmail`, `google-drive` | anything else | publisher Google **Web** client | the relay URL | signed |
+| `dropbox` | any | publisher Dropbox app key | the relay URL | signed |
+| `x` | any | bring-your-own | the dashboard's own callback | random |
+
+Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
+
+- **A registration the owner made wins.** Publisher mode is offered only to an
+  install that has registered no client id of its own for that source (pasted
+  into the dashboard, or already bound to a connected handle). Bring-your-own
+  stays reachable from every publisher card as "Use my own app instead".
+
+  "Registered" is decided by **provenance, not presence**. Completing a
+  publisher-mode connection persists the publisher app's own client id under
+  the identical secret-store key a bring-your-own registration uses
+  (`<source>.personal.oauth.client_id`), so "a client id is on file" cannot by
+  itself tell the two apart. A companion key,
+  `<source>.personal.oauth.client_id_source` (`'publisher'` or `'byo'`), is
+  written whenever a client id reaches the store — at connect completion and
+  at registration — and discovery keys off THAT field. Data written before
+  this field existed falls back to matching the stored id against the
+  CURRENT `DEFAULT_*_PUBLISHER_APP_KEY`; the field is what keeps working
+  across a future default rotation, which the value-match fallback cannot.
+  Getting this wrong stuck a completed publisher connection in bring-your-own
+  the moment it needed reauthentication, sending the dashboard-origin
+  callback where Dropbox had only ever registered the relay (Codex round 3 on
+  e75598f7).
+- **Google on loopback keeps the loopback redirect.** A Desktop app client
+  cannot register an https redirect URI, so the pilot client cannot use the
+  relay — and does not need to: a loopback callback reaches the worker directly.
+  Same publisher app, no relay, no signed state.
+
+Dropbox ships **filled in**: the owner created the "Olympus-Plugin" app
+2026-09-03, registered both redirect URIs it needs (the relay and the loopback
+fallback), and the app key — a public OAuth client identifier, not a secret —
+is `DEFAULT_DROPBOX_PUBLISHER_APP_KEY` in `core/publisher-oauth-client.ts`.
+Google's publisher web client stays **empty** until the owner creates that app
+too; until then every non-loopback Google case answers "not configured" and
+the dashboard shows the bring-your-own path it shows today.
+
+The publisher-side token-exchange endpoint is still unbuilt. When it lands, only
+the exchange leg moves: the relay contract, the state format, and the registered
+`redirect_uri` are unchanged by it.
+
+### The worker's state signing key
+
+`dashboard.oauth.relay_state_key` in the worker's own secret store, as JSON:
+`{ current, previous?, rotatedAt? }`. `current` is 32 random bytes, base64url,
+minted on first use and cached in the worker process; new states are always
+signed with it. It signs and verifies `state` and nothing else — it is never
+sent to a provider, never put in a page, and never reachable from an
+unauthenticated route: the callback route only reads it once a pending attempt
+an authenticated start route created already exists.
+
+**Rotation.** Rotating replaces `current` with a fresh key and demotes the old
+one to `previous`, recording `rotatedAt`. `previous` keeps verifying for
+**one flow TTL** (`OAUTH_RELAY_STATE_TTL_MS`, ten minutes) past `rotatedAt` —
+long enough that a state minted just before rotation and still fresh at
+verification time keeps working — and stops verifying once that window passes,
+so a compromised key that prompted the rotation cannot forge a state forever
+after. Only one demoted key is ever kept: rotating twice in quick succession
+does not chain two grace windows. `src/core/oauth-relay.ts` implements the
+type, the rotation, and the persisted JSON shape
+(`rotateOAuthRelayStateKeys`, `serializeOAuthRelayStateKeys`,
+`parseOAuthRelayStateKeys`); nothing in this repository currently calls
+rotation on a schedule or exposes it as an operator command — until it does,
+rotation is a manual edit of the stored JSON.
 
 ## Why a relay at all
 

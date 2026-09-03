@@ -82,14 +82,18 @@ describe('dashboard OAuth attempt overlap', () => {
     await firstExchangeEntered.promise;
     const secondStart = startConnect();
     releaseFirstExchange.resolve();
-    expect((await firstCallback).status).toBe(200);
+    // A successful callback now redirects (303) to a query-free done page
+    // rather than rendering "Connected" directly at the code/state-bearing URL
+    // (MINOR 2, Codex round 2 on 7863a735); the exchange itself is what this
+    // test cares about, so the redirect status is the completion signal.
+    expect((await firstCallback).status).toBe(303);
     const secondState = await secondStart;
 
     const secondCallback = await fetch(new Request(
       `http://worker.test/oauth/callback/dropbox?code=dropbox-code-2&state=${secondState}`,
     ));
 
-    expect(secondCallback.status).toBe(200);
+    expect(secondCallback.status).toBe(303);
     expect(await secretStore.get('dropbox.personal.oauth.refresh_token'))
       .toBe('dropbox-refresh-token-dropbox-code-2');
   });

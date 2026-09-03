@@ -70,6 +70,16 @@ export interface ConnectOAuthOptions {
   tokenExchangeTimeoutMs?: number;
   /** Internal fence captured when a detached connection request is accepted. */
   grantEpoch?: string;
+  /**
+   * Whose OAuth app this flow's `clientId` belongs to, when the caller knows.
+   * Persisted alongside the stored client id (`<source>.<role>.oauth.client_id_source`)
+   * so a later render can tell "the owner registered this" from "this is
+   * Olympus's own publisher app the owner never had to touch" — a distinction
+   * "is a client_id present" cannot make once a publisher-owned id and an
+   * owner-pasted id are stored under the identical key. Absent for the plain
+   * CLI connect path, which has no publisher concept and writes nothing new.
+   */
+  clientIdSource?: 'publisher' | 'byo';
 }
 
 export interface ConnectResult {
@@ -398,9 +408,19 @@ export async function startOAuthSourceConnection(options: ConnectOAuthOptions): 
 }
 
 export async function startExternalOAuthSourceConnection(
-  options: ConnectOAuthOptions & { redirectUri: string },
+  options: ConnectOAuthOptions & { redirectUri: string; state?: string },
 ): Promise<ExternalPendingOAuthConnection> {
-  const prepared = prepareOAuthSourceConnection(options, options.redirectUri);
+  // The caller may own the `state` — the publisher-client relay flow signs one
+  // that carries the dashboard origin the relay bounces back to (see
+  // `core/oauth-relay.ts`). The PKCE verifier is still minted here and still
+  // never leaves this process; only the opaque state is substituted, and it is
+  // bounded to what a provider will echo and the relay will parse.
+  const pkce = createOAuthPkceState();
+  const prepared = prepareOAuthSourceConnection(
+    options,
+    options.redirectUri,
+    options.state === undefined ? pkce : { ...pkce, state: assertExternalOAuthState(options.state) },
+  );
   await options.onAuthorizationUrl?.(prepared.authorizationUrl);
   return {
     ok: true,
@@ -416,6 +436,19 @@ export async function startExternalOAuthSourceConnection(
     },
     cancel() {},
   };
+}
+
+/**
+ * A caller-supplied `state` must survive a provider echo and the relay's own
+ * parse: two base64url segments joined by one `.`, no longer than the relay's
+ * 2048-character ceiling. Anything else is refused at start rather than turned
+ * into a consent round that cannot come back.
+ */
+function assertExternalOAuthState(state: string): string {
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state) || state.length > 2048) {
+    throw new Error('OAuth state must be two base64url segments of at most 2048 characters.');
+  }
+  return state;
 }
 
 async function finishOAuthSourceConnection(options: {
@@ -570,6 +603,19 @@ async function completeOAuthSourceConnection(
       // custody fence, so Disconnect can occur wholly before or after Connect.
       await prepared.secretStore.set(refreshKey, refreshToken);
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
+      // Written only when the caller states it, which today means only the
+      // dashboard's publisher-relay start route: the plain CLI connect path has
+      // no publisher concept and leaves this key untouched, exactly as before
+      // this field existed. Without it, `clientIdKey` alone cannot tell a
+      // client id the OWNER pasted from Olympus's own publisher app key once
+      // both are persisted under the identical key — the gap that let a
+      // completed publisher connection get misclassified as bring-your-own on
+      // its next reauthentication (Codex round 3 on e75598f7).
+      if (prepared.options.clientIdSource !== undefined) {
+        const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
+        await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+        secretRefs.push(`store:${clientIdSourceKey}`);
+      }
 
       let clientSecretRef: string | undefined;
       if (clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {

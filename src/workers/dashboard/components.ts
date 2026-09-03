@@ -969,6 +969,18 @@ export interface DashboardConnectSheetInput {
   cancellable?: boolean;
   /** The submit button's word; defaults to Connect. */
   submitLabel?: string;
+  /**
+   * Publisher mode: this source connects through Olympus's OWN registered app,
+   * so the sheet leads with a single Connect button and no fields at all. The
+   * bring-your-own path is not removed — every field, walkthrough and prompt
+   * above moves inside the named disclosure, one click away.
+   */
+  publisher?: {
+    /** The sentence above the one-click control. */
+    intro: string;
+    /** The disclosure's summary, e.g. "Use my own app instead". */
+    byoSummary: string;
+  };
 }
 
 /**
@@ -1020,20 +1032,50 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
     + `</details>`;
+  const submitLabel = escapeHtml(input.submitLabel ?? 'Connect');
+  const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
+  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+    + sourceField
+    + `${inputs}`
+    + `<button class="btn primary" type="submit">${submitLabel}</button>`
+    + `<span class="actmsg" data-action-message role="status"></span>`
+    // Where the authorization link lands when the browser blocks the new tab.
+    + `<span class="authfallback" data-authorization-fallback></span>`
+    + `</form>`;
+  if (input.publisher) {
+    // The whole point of publisher mode is that there is nothing to do first.
+    // The one-click form carries the source and NOTHING else: no client id
+    // field to fill, no redirect URI to register, no console to visit. The
+    // start route reads the absence of a client id as "use the publisher app".
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+      + sourceField
+      + `<button class="btn primary" type="submit">${submitLabel}</button>`
+      + `<span class="actmsg" data-action-message role="status"></span>`
+      + `<span class="authfallback" data-authorization-fallback></span>`
+      + `</form>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">`
+      + `<h4>${escapeHtml(input.heading)}</h4>`
+      + `${notice}`
+      + `<p>${escapeHtml(input.publisher.intro)}</p>`
+      + `${publisherForm}`
+      + `${cancel}`
+      + `<details class="agentprompt">`
+      + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>`
+      + `<p>${escapeHtml(input.intro)}</p>`
+      + `${registration}`
+      + `${redirect}`
+      + `${byoForm}`
+      + `${prompt}`
+      + `</details>`
+      + `</div>`;
+  }
   return `<div class="sheet" id="${id}" aria-hidden="true">`
     + `<h4>${escapeHtml(input.heading)}</h4>`
     + `${notice}`
     + `<p>${escapeHtml(input.intro)}</p>`
     + `${registration}`
     + `${redirect}`
-    + `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
-    + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`
-    + `${inputs}`
-    + `<button class="btn primary" type="submit">${escapeHtml(input.submitLabel ?? 'Connect')}</button>`
-    + `<span class="actmsg" data-action-message role="status"></span>`
-    // Where the authorization link lands when the browser blocks the new tab.
-    + `<span class="authfallback" data-authorization-fallback></span>`
-    + `</form>`
+    + `${byoForm}`
     + `${cancel}`
     + `${prompt}`
     + `</div>`;
@@ -1134,6 +1176,18 @@ export function dashboardOAuthConnectSheet(
     source: action.source,
     fields,
     submitLabel: action.label,
+    // Publisher mode: Olympus's own registered app does the asking, so the
+    // sheet leads with the button and keeps the bring-your-own walkthrough
+    // one click away rather than deleting it.
+    ...(action.publisher_client
+      ? {
+        publisher: {
+          intro: `Olympus connects ${source.label} through its own registered app. `
+            + 'Press Connect, approve it with your account, and come back to this page.',
+          byoSummary: 'Use my own app instead',
+        },
+      }
+      : {}),
     ...(Object.keys(secretPlaceholders).length > 0 ? { placeholders: secretPlaceholders } : {}),
     ...(action.known_client_id ? { values: { client_id: action.known_client_id } } : {}),
     ...(action.pending_attempt ? { cancellable: true } : {}),

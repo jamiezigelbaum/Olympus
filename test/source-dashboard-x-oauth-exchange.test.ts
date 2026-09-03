@@ -105,7 +105,10 @@ describe('dashboard X OAuth exchange', () => {
     const callback = await fixture.fetch(new Request(
       `http://worker.test/oauth/callback/x?code=x-code-1&state=${state}`,
     ));
-    expect(callback.status).toBe(200);
+    // A successful callback now redirects (303) to a query-free done page
+    // (MINOR 2, Codex round 2 on 7863a735) rather than a 200 rendered directly
+    // at the code/state-bearing URL.
+    expect(callback.status).toBe(303);
 
     expect(fixture.exchanges).toHaveLength(1);
     expect(fixture.exchanges[0]!.authorization).toBe(expectedBasic);
@@ -126,7 +129,7 @@ describe('dashboard X OAuth exchange', () => {
     const state = new URL((await started.json()).authorization_url).searchParams.get('state')!;
     expect((await fixture.fetch(new Request(
       `http://worker.test/oauth/callback/x?code=x-code-2&state=${state}`,
-    ))).status).toBe(200);
+    ))).status).toBe(303);
     expect(fixture.exchanges).toHaveLength(1);
     expect(fixture.exchanges[0]!.authorization).toBe(expectedBasic);
   });

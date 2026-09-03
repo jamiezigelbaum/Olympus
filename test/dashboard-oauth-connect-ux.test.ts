@@ -513,9 +513,13 @@ describe('an unauthenticated callback cannot touch an attempt without its state'
     expect(refusedHtml).not.toContain('token=');
 
     const okState = await startAttempt(worker, 'dropbox', 'http://worker.test/dashboard?token=dash_live-view-token');
-    const completed = await worker.fetch(new Request(
+    const redirected = await worker.fetch(new Request(
       `http://worker.test/oauth/callback/dropbox?code=dropbox-code&state=${encodeURIComponent(okState)}`,
     ));
+    // The redirect itself carries no query, so it cannot carry the token
+    // either — the interesting assertion is about the page it lands on.
+    expect(redirected.headers.get('Location')).toBe('/oauth/callback/dropbox/done');
+    const completed = await followOAuthDone(worker, redirected);
     const completedHtml = await completed.text();
     expect(completed.status).toBe(200);
     expect(completedHtml).toContain('href="/dashboard"');
@@ -561,9 +565,9 @@ describe('an unauthenticated callback cannot touch an attempt without its state'
       `http://worker.test/oauth/callback/dropbox?error=access_denied&state=${encodeURIComponent(refusedState)}`,
     ))).text();
     const okState = await startAttempt(worker, 'dropbox');
-    const completed = await (await worker.fetch(new Request(
+    const completed = await (await followOAuthDone(worker, await worker.fetch(new Request(
       `http://worker.test/oauth/callback/dropbox?code=dropbox-code&state=${encodeURIComponent(okState)}`,
-    ))).text();
+    )))).text();
 
     // The template used to hardcode this sentence on top of whatever the caller
     // said, so the success page printed it twice in a row in two wordings.
@@ -803,6 +807,20 @@ function fixturePending(
     }),
     cancel() {},
   };
+}
+
+/**
+ * A successful callback now redirects (303) to a query-free `/done` page
+ * (MINOR 2, Codex round 2 on 7863a735) rather than rendering the "Connected"
+ * page directly at the URL that still carried the spent `code` and `state`.
+ * This follows that redirect the way a browser would, for assertions that care
+ * about the landing page's own content rather than the redirect itself.
+ */
+async function followOAuthDone(worker: { fetch: (request: Request) => Promise<Response> }, response: Response): Promise<Response> {
+  expect(response.status).toBe(303);
+  const location = response.headers.get('Location')!;
+  expect(location).toMatch(/^\/oauth\/callback\/[a-z-]+\/done$/);
+  return worker.fetch(new Request(`http://worker.test${location}`));
 }
 
 function jsonRequest(path: string, body: Record<string, unknown>): Request {
