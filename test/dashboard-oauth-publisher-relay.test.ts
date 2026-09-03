@@ -28,6 +28,7 @@ import {
   DEFAULT_OAUTH_RELAY_URL,
   OAUTH_RELAY_STATE_TTL_MS,
 } from '../src/core/oauth-relay.ts';
+import { DEFAULT_DROPBOX_PUBLISHER_APP_KEY } from '../src/core/publisher-oauth-client.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import type { DashboardSourceAction } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -533,19 +534,19 @@ describe('publisher-client relay flow', () => {
   });
 });
 
+async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
+  const response = await instance.fetch(new Request(`${origin}/dashboard.json`, {
+    headers: { Authorization: 'Bearer dashboard-secret' },
+  }));
+  expect(response.status).toBe(200);
+  return await response.json();
+}
+
+function dropboxAction(view: { sources: Array<Record<string, any>> }): Record<string, any> {
+  return view.sources.find((source) => source.source_id === 'dropbox.files')!.connection.action;
+}
+
 describe('publisher-mode card', () => {
-  async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
-    const response = await instance.fetch(new Request(`${origin}/dashboard.json`, {
-      headers: { Authorization: 'Bearer dashboard-secret' },
-    }));
-    expect(response.status).toBe(200);
-    return await response.json();
-  }
-
-  function dropboxAction(view: { sources: Array<Record<string, any>> }): Record<string, any> {
-    return view.sources.find((source) => source.source_id === 'dropbox.files')!.connection.action;
-  }
-
   test('a publisher-owned source offers Connect with no client id and no walkthrough field', async () => {
     const action = dropboxAction(await dashboardJson(fixture()));
     expect(action.kind).toBe('oauth');
@@ -567,13 +568,44 @@ describe('publisher-mode card', () => {
     expect(action.callback_registration.required).toBe(true);
   });
 
-  test('with no publisher app configured the card is unchanged', async () => {
+  test('the shipped Dropbox default enables the publisher card with no override configured', async () => {
+    // The owner created the Dropbox app "Olympus-Plugin" 2026-09-03 and its key
+    // is now the literal default in publisher-oauth-client.ts. This is the
+    // out-of-the-box shape: no OLYMPUS_DROPBOX_PUBLISHER_APP_KEY override, no
+    // dashboard-registered client id, nothing but what the repository ships.
     delete process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
+    expect(DEFAULT_DROPBOX_PUBLISHER_APP_KEY).toBeTruthy();
     const action = dropboxAction(await dashboardJson(fixture()));
-    // The shipped default: nothing registered anywhere, so the owner is asked
-    // to set up their own app exactly as before.
-    expect(action.kind).toBe('needs_setup');
+    expect(action.kind).toBe('oauth');
+    expect(action.publisher_client).toBe(true);
+    expect(action.label).toBe('Connect');
+    // No PREFILLED client id — the whole point of publisher mode — even
+    // though `instructions.fields` still names the bring-your-own field for
+    // the disclosure. And the app key itself is a public identifier the card
+    // has no use for, so it stays off the read-only surface exactly like the
+    // env-var case.
+    expect(action.known_client_id).toBeUndefined();
+    expect(JSON.stringify(action)).not.toContain(DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
+
+    // And it is not just a label: pressing Connect with nothing else
+    // configured actually goes out to Dropbox with this exact key.
+    const instance = fixture();
+    const url = await authorizationUrl(await startConnect(instance));
+    expect(url.origin).toBe('https://www.dropbox.com');
+    expect(url.searchParams.get('client_id')).toBe(DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
+    expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+  });
+
+  test('a dashboard-registered client id still overrides the shipped default', async () => {
+    // The default shipping a real key must not foreclose bring-your-own: an
+    // owner who registered their own app before this key existed, or who
+    // wants their own for any reason, keeps getting it.
+    delete process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
+    const instance = fixture({ 'dropbox.personal.oauth.client_id': 'stored-dropbox-app-key' });
+    const action = dropboxAction(await dashboardJson(instance));
+    expect(action.kind).toBe('oauth');
     expect(action.publisher_client).toBeUndefined();
+    expect(action.known_client_id).toBe('stored-dropbox-app-key');
   });
 
   test('the read-only dashboard surface leaks no key, app key, or state', async () => {
@@ -664,6 +696,34 @@ describe('publisher-mode sheet', () => {
     )!.sheet;
     expect(sheet).not.toContain('<img src=x');
     expect(sheet).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  test('the real shipped-default Dropbox action renders with no client-id field', async () => {
+    // Not a synthetic action — the actual `DashboardSourceAction` this install
+    // produces with nothing configured but the repository's own shipped
+    // Dropbox default, run through the exact same sheet builder the dashboard
+    // page uses.
+    delete process.env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY;
+    const view = await dashboardJson(fixture());
+    const action = dropboxAction(view);
+    expect(action.kind).toBe('oauth');
+    expect(action.publisher_client).toBe(true);
+
+    const sheet = dashboardOAuthConnectSheet(
+      { source_id: 'dropbox.files', label: 'Dropbox' },
+      action as Extract<DashboardSourceAction, { kind: 'oauth' }>,
+    )!.sheet;
+    const [lead, disclosure] = sheet.split('<details') as [string, string];
+    // No Client ID field, no App key to paste, nothing to fill in before the
+    // one button — and the key itself never appears anywhere on the page,
+    // public identifier or not.
+    expect(lead).not.toContain('keyfield');
+    expect(lead).toContain('<button class="btn primary" type="submit">Connect</button>');
+    expect(sheet).not.toContain(DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
+    // Bring-your-own is still one click away, with the real walkthrough this
+    // shipped app's OWN redirect URI produces.
+    expect(disclosure).toContain('Use my own app instead');
+    expect(disclosure).toContain('keyfield');
   });
 });
 

@@ -8,20 +8,25 @@
  * endpoint at all, and Google's web-client secret is solved separately by a
  * publisher-side exchange endpoint (see `docs/ops/OAUTH_RELAY.md`).
  *
- * Both defaults are EMPTY until the owner creates the apps. An empty default
- * fails closed to bring-your-own: the connect card shows the owner's own
- * walkthrough exactly as it does today, and no publisher flow is offered. Fill
- * the literal in (or set the environment variable) and nothing else changes.
+ * The Dropbox default below is filled in; the Google one stays EMPTY until the
+ * owner creates that app too. An empty default fails closed to bring-your-own:
+ * the connect card shows the owner's own walkthrough exactly as it does today,
+ * and no publisher flow is offered. Fill the literal in (or set the
+ * environment variable) and nothing else changes.
  */
 
 /**
- * The Dropbox app key for the publisher-owned Dropbox app.
+ * The Dropbox app key for the publisher-owned Dropbox app ("Olympus-Plugin",
+ * created by the owner 2026-09-03). A Dropbox app key is a public OAuth client
+ * identifier, not a secret — Dropbox with PKCE never sends one to the token
+ * endpoint at all — so shipping it in source is the intended shape, the same
+ * way the packaged Google pilot client id ships in `google-pilot-client.ts`.
  *
- * Owner step: create the app per the runbook in `docs/ops/OAUTH_RELAY.md`,
- * register `https://auth.olympusplugin.ai/oauth/callback/` as a redirect URI,
- * and paste the App key here.
+ * Both redirect URIs are registered on the app: the relay
+ * (`https://auth.olympusplugin.ai/oauth/callback/`) and the loopback fallback
+ * (`http://127.0.0.1/oauth/callback/dropbox`).
  */
-export const DEFAULT_DROPBOX_PUBLISHER_APP_KEY = '';
+export const DEFAULT_DROPBOX_PUBLISHER_APP_KEY = '1y1l05nqd24xaaw';
 
 /**
  * The Google **Web application** client id for the relay flow.

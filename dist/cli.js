@@ -62210,7 +62210,7 @@ function firstConfigured(...candidates) {
   }
   return;
 }
-var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "";
+var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "";
 
 // src/core/oauth-relay.ts
 import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
