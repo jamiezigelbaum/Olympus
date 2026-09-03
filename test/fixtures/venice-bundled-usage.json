@@ -1,0 +1,70 @@
+{
+  "balance": {
+    "canConsume": true,
+    "consumptionCurrency": "BUNDLED_CREDITS",
+    "balances": {
+      "usd": 0,
+      "diem": null
+    },
+    "diemEpochAllocation": null
+  },
+  "usage": [
+    {
+      "timestamp": "2026-07-01T00:00:00.000Z",
+      "sku": "subscription-allocation",
+      "amount": 7500,
+      "currency": "BUNDLED_CREDITS",
+      "notes": "Subscription credit allocation"
+    },
+    {
+      "timestamp": "2026-07-10T11:30:00.000Z",
+      "sku": "grok-4-vision-input-mtoken",
+      "pricePerUnitUsd": 3,
+      "units": 10,
+      "amount": -30,
+      "currency": "BUNDLED_CREDITS",
+      "notes": "API Inference",
+      "inferenceDetails": {
+        "requestId": "vision-request-1",
+        "inferenceExecutionTime": 1200,
+        "promptTokens": 10000,
+        "completionTokens": 0
+      }
+    },
+    {
+      "timestamp": "2026-07-10T10:30:00.000Z",
+      "sku": "grok-4-vision-output-mtoken",
+      "amount": "-2.5",
+      "currency": "BUNDLED_CREDITS",
+      "notes": "API Inference"
+    },
+    {
+      "timestamp": "2026-07-10T09:30:00.000Z",
+      "sku": "e2ee-glm-5-input-mtoken",
+      "amount": -4.25,
+      "currency": "BUNDLED_CREDITS",
+      "notes": "API Inference"
+    },
+    {
+      "timestamp": "2026-07-10T08:30:00.000Z",
+      "sku": "miscellaneous-api-unit",
+      "amount": -1,
+      "currency": "BUNDLED_CREDITS",
+      "notes": "API Inference"
+    },
+    {
+      "timestamp": "2026-07-08T08:30:00.000Z",
+      "sku": "grok-4-vision-input-mtoken",
+      "amount": -100,
+      "currency": "BUNDLED_CREDITS",
+      "notes": "API Inference"
+    },
+    {
+      "timestamp": "2026-07-09T08:30:00.000Z",
+      "sku": "grok-4-vision-input-mtoken",
+      "amount": -999,
+      "currency": "USD",
+      "notes": "Side pool inference"
+    }
+  ]
+}

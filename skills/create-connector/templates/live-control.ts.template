@@ -1,0 +1,79 @@
+// TEMPLATE — copy to src/workers/<source>/live-control.ts and replace every
+// <Source> / <SOURCE> / <source> token.
+//
+// Cadence and bound policy for the <Source> connector-store lane. Only the two
+// store tasks read this config; any legacy lane keeps its own cadence.
+//
+// Shape lifted from src/workers/readwise/live-control.ts.
+
+export const <SOURCE>_STORE_PULL_INTERVAL_MS = 15 * 60_000;
+export const <SOURCE>_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60_000;
+export const <SOURCE>_STORE_PULL_MAX_ITEMS = 200;
+export const <SOURCE>_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60_000;
+export const <SOURCE>_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
+
+// Must match /^[a-z0-9][a-z0-9._:-]{0,127}$/ — the scheduler rejects anything
+// else, and an unknown token would be collapsed out of status.
+export const <SOURCE>_DAILY_REQUEST_GUARD_REASON = '<provider>_daily_api_request_guard';
+
+export interface <Source>LiveSyncConfig {
+  storePullIntervalMs: number;
+  storePullFreshnessThresholdMs: number;
+  /** Hard per-run item bound; a bounded slice can never reconcile absence. */
+  storePullMaxItems: number;
+  storeReconcileIntervalMs: number;
+  storeReconcileFreshnessThresholdMs: number;
+}
+
+export function default<Source>LiveSyncConfig(
+  env: Record<string, string | undefined> = process.env,
+): <Source>LiveSyncConfig {
+  return {
+    storePullIntervalMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_<SOURCE>_STORE_PULL_INTERVAL_SECONDS,
+      <SOURCE>_STORE_PULL_INTERVAL_MS / 1_000,
+    ) * 1_000,
+    storePullFreshnessThresholdMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_<SOURCE>_STORE_PULL_STALE_SECONDS,
+      <SOURCE>_STORE_PULL_FRESHNESS_THRESHOLD_MS / 1_000,
+    ) * 1_000,
+    storePullMaxItems: boundedPositiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_<SOURCE>_STORE_PULL_MAX_ITEMS,
+      <SOURCE>_STORE_PULL_MAX_ITEMS,
+      1,
+      10_000,
+    ),
+    storeReconcileIntervalMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_<SOURCE>_STORE_RECONCILE_INTERVAL_SECONDS,
+      <SOURCE>_STORE_RECONCILE_INTERVAL_MS / 1_000,
+    ) * 1_000,
+    storeReconcileFreshnessThresholdMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_<SOURCE>_STORE_RECONCILE_STALE_SECONDS,
+      <SOURCE>_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS / 1_000,
+    ) * 1_000,
+  };
+}
+
+// Configuration is validated and REFUSED, never silently clamped: a
+// misconfigured host should fail loudly at construction.
+function positiveIntegerEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError('<Source> live sync configuration must be a positive integer.');
+  }
+  return parsed;
+}
+
+function boundedPositiveIntegerEnv(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = positiveIntegerEnv(value, fallback);
+  if (parsed < minimum || parsed > maximum) {
+    throw new TypeError(`<Source> live sync configuration must be between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
+}

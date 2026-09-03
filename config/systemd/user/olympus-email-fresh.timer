@@ -1,0 +1,12 @@
+[Unit]
+Description=Olympus freshness timer: email both accounts
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+RandomizedDelaySec=60
+Unit=olympus-email-fresh.service
+
+[Install]
+WantedBy=timers.target

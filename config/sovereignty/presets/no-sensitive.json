@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "modelProfiles": {
+    "cloud-openclaw-infer": {
+      "provider": "openclaw-infer",
+      "trust": "standard_cloud",
+      "model": "openai/gpt-5.5",
+      "purpose": "analyst"
+    },
+    "gemini-source-embedding": {
+      "provider": "google-gemini",
+      "trust": "standard_cloud",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-embedding-2",
+      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+      "purpose": "embedding"
+    }
+  },
+  "routes": {
+    "secure_local": {
+      "mode": "disabled",
+      "pool": { "members": [] },
+      "disabledReason": "no-sensitive keeps secure-classified items metadata-only and reports an honest gap until a local or encrypted-cloud secure lane is configured."
+    },
+    "internal": { "analyst": ["cloud-openclaw-infer"] },
+    "public_safe": { "analyst": ["cloud-openclaw-infer"] }
+  },
+  "retrieval": {
+    "trustDomains": {
+      "secure_local": {
+        "minimumExecutionTrust": "local",
+        "allowedEmbeddingTrust": ["local"],
+        "embeddingProfile": null,
+        "allowCloudQuery": false,
+        "activationMode": "metadata_only",
+        "secureHandling": "metadata_only_gap"
+      },
+      "internal": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": ["local", "standard_cloud"],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      },
+      "public_safe": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": ["local", "standard_cloud"],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Olympus freshness timer: Drive and Readwise plus conditional legacy X
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+RandomizedDelaySec=60
+Unit=olympus-cloud-fresh.service
+
+[Install]
+WantedBy=timers.target

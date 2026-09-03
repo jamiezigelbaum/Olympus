@@ -1,0 +1,106 @@
+{
+  "name": "olympus-source-checkout",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Sovereignty-aware OpenClaw source answers across seven personal data providers.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "olympus": "./bin/olympus"
+  },
+  "files": [
+    "LICENSE",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "clawhubSpec": "clawhub:olympus",
+      "defaultChoice": "clawhub",
+      "minHostVersion": ">=2026.7.1"
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1"
+    }
+  },
+  "scripts": {
+    "prepack": "bun scripts/standard-pack-guard.ts",
+    "build": "bun build ./src/native-plugin.ts --target=node --format=esm --outfile=dist/index.js && bun build ./src/cli.ts --target=node --format=esm --outfile=dist/cli.js && bun scripts/strip-generated-trailing-whitespace.ts dist/index.js dist/cli.js",
+    "dist:check": "bun run build && git diff --exit-code -- dist/index.js dist/cli.js",
+    "release:artifact": "bun scripts/release-artifact.ts",
+    "release:managed-proof": "bun scripts/managed-package-proof.ts",
+    "release:qualification": "bun scripts/release-qualification-harness.ts",
+    "release:qualification:simulate": "bun scripts/qualification/simulated-clean-home.ts",
+    "release:qualification:inputs": "bun scripts/qualification/release-input-evidence.ts",
+    "artifact:receipt": "bun scripts/ci-artifact-receipt.ts --output release-artifacts/ci-provenance.json",
+    "openshell-posture:proof": "bun scripts/openshell-posture-proof.ts",
+    "resource-wiki:compile-proof": "bun scripts/resource-wiki-compile-proof.ts",
+    "resource-wiki:compile-real": "bun scripts/resource-wiki-compile-real.ts",
+    "source-readiness:proof": "bun scripts/source-readiness-proof.ts",
+    "source-ingestion:dashboard": "bun scripts/source-ingestion-dashboard.ts",
+    "source-ingestion:live-dashboard": "bun scripts/source-ingestion-live-dashboard.ts",
+    "source-ingestion:digest": "bun scripts/source-ingestion-digest.ts",
+    "whatsapp-transcribe:drain": "bun scripts/whatsapp-transcribe-drain.ts",
+    "source-embedding:drain": "bun scripts/source-embedding-drain.ts",
+    "embedding-identity:repair": "bun scripts/embedding-identity-repair.ts",
+    "source-exclusions:purge": "bun scripts/source-exclusion-purge.ts",
+    "source-exclusions:resolve-folder": "bun scripts/source-exclusion-resolve-folder.ts",
+    "source-processing:supervise": "bun scripts/source-processing-supervisor.ts",
+    "source-processing:janitor": "bun scripts/source-processing-supervisor.ts --janitor",
+    "venice:credit-status": "bun scripts/venice-credit-status.ts",
+    "dropbox-venice:extraction-proof": "bun scripts/dropbox-venice-extraction-proof.ts",
+    "dropbox-venice:extraction-proof:qwen3vl235b": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_qwen3vl235b_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-qwen3vl235b-proof bun scripts/dropbox-venice-extraction-proof.ts",
+    "dropbox-venice:extraction-proof:grok43": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_grok43_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-grok43-proof bun scripts/dropbox-venice-extraction-proof.ts",
+    "x-oauth2:seed-state": "bun scripts/x-oauth2-seed-state.ts",
+    "domain-library:sync": "bun scripts/domain-library-sync.ts",
+    "whatsapp:live-sync": "bun scripts/whatsapp-live-sync.ts",
+    "whatsapp:identity-backfill": "bun scripts/whatsapp-identity-backfill.ts",
+    "connector-store:embed": "bun scripts/connector-store-embed.ts",
+    "connector-store:locator-index": "bun scripts/connector-store-locator-index.ts",
+    "telegram:trust-reconcile": "bun scripts/telegram-trust-reconcile.ts",
+    "worktree:audit": "bun scripts/worktree-integration-audit.ts",
+    "local-vlm:promotion-gate": "bun scripts/local-vlm-promotion-gate.ts",
+    "email-source:serve": "bun src/workers/email-source/server.ts",
+    "file-delivery:serve": "bun src/workers/file-delivery/server.ts",
+    "castor-workspace:serve": "bun src/workers/castor-workspace/server.ts",
+    "domain-expert:serve": "bun src/workers/domain-expert/server.ts",
+    "test": "bun run build && bun test",
+    "test:focus": "bun test",
+    "test:fast": "bun run build && bun scripts/test-lane.ts fast",
+    "test:deploy": "bun run build && bun scripts/test-lane.ts deploy",
+    "test:go": "bun scripts/test-lane.ts go",
+    "contracts:check": "bun scripts/contract-version.ts",
+    "credentials:check": "bun scripts/credential-pattern-check.ts",
+    "risk:check": "bun scripts/change-risk.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "bun run typecheck && bun run test:fast && bun run dist:check",
+    "verify:full": "bun run typecheck && bun run test && bun run dist:check",
+    "eval": "bun eval/run.ts",
+    "eval:real": "bun eval/run-real.ts",
+    "eval:inspect-pack": "bun scripts/source-eval-pack-inspect.ts",
+    "tools-json": "bun src/cli.ts --tools-json"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "@types/bun": "^1.3.0",
+    "terser": "^5.51.2",
+    "typescript": "^5.9.3"
+  }
+}

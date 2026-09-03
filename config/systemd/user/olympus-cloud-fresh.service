@@ -1,0 +1,7 @@
+[Unit]
+Description=Olympus freshness: Drive and Readwise plus conditional legacy X
+
+[Service]
+Type=oneshot
+ExecStart=%h/olympus-fresh/cloud-fresh.sh
+EnvironmentFile=-%h/.config/olympus/worker.env

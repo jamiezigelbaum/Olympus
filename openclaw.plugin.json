@@ -1,0 +1,723 @@
+{
+  "id": "olympus",
+  "name": "Olympus",
+  "version": "0.4.0",
+  "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sovereignty": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "configPath": {
+            "type": "string",
+            "description": "Path to sovereignty.json. Defaults to ~/.olympus/sovereignty.json; OLYMPUS_SOVEREIGNTY_CONFIG can override it for workers."
+          },
+          "policy": {
+            "type": "object",
+            "description": "Inline sovereignty policy object with schemaVersion, modelProfiles, routes, and retrieval.trustDomains."
+          }
+        }
+      },
+      "worker": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "authToken": {
+            "type": "string",
+            "description": "Bearer token sent to Olympus worker HTTP endpoints. New installs should generate this and set OLYMPUS_WORKER_AUTH_TOKEN on the workers."
+          },
+          "scheduler": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Enable the in-process Olympus worker scheduler."
+              },
+              "sourceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"]
+                },
+                "uniqueItems": true,
+                "description": "Explicit source allowlist. A non-empty list is required when the scheduler is enabled."
+              },
+              "tickSeconds": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Scheduler tick cadence in seconds."
+              },
+              "syncIntervalSeconds": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Source sync interval in seconds."
+              },
+              "freshnessThresholdHours": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Freshness threshold before source data is considered stale."
+              },
+              "errorBackoffSeconds": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Backoff interval after transient scheduler errors."
+              },
+              "maxTransientRetries": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Maximum transient retry count before surfacing scheduler failure."
+              }
+            }
+          }
+        }
+      },
+      "identity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ownerName": {
+            "type": "string",
+            "description": "Human owner name used in assistant-facing prompts."
+          },
+          "assistantName": {
+            "type": "string",
+            "description": "Calling assistant name used in assistant-facing prompts."
+          }
+        }
+      },
+      "argus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "defaultLane": {
+            "type": "string",
+            "enum": ["fast", "deep"],
+            "description": "Default Argus lane."
+          },
+          "defaultProfile": {
+            "type": "string",
+            "enum": ["default_chat", "source_answer", "classification_fast", "embedding_secure_local", "vlm_document", "vlm_fast", "vlm_qwen36_27b", "vlm_qwen36_35b"],
+            "description": "Default Argus model profile."
+          },
+          "transport": {
+            "type": "string",
+            "enum": ["direct"],
+            "description": "Argus transport. v0.1 supports direct HTTP to a runtime-managed endpoint."
+          },
+          "requestTimeoutSeconds": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Request timeout for Argus model calls."
+          },
+          "lanes": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "fast": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "baseUrl": {
+                    "type": "string",
+                    "description": "OpenAI-compatible FAST lane base URL."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "FAST lane model id."
+                  },
+                  "secretRef": {
+                    "type": "string",
+                    "description": "SecretRef for the FAST lane model provider credential."
+                  }
+                }
+              },
+              "deep": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "baseUrl": {
+                    "type": "string",
+                    "description": "OpenAI-compatible DEEP lane base URL."
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "DEEP lane model id."
+                  },
+                  "secretRef": {
+                    "type": "string",
+                    "description": "SecretRef for the DEEP lane model provider credential."
+                  }
+                }
+              }
+            }
+          },
+          "modelProfiles": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "default_chat": { "$ref": "#/$defs/argusModelProfile" },
+              "source_answer": { "$ref": "#/$defs/argusModelProfile" },
+              "classification_fast": { "$ref": "#/$defs/argusModelProfile" },
+              "embedding_secure_local": { "$ref": "#/$defs/argusModelProfile" },
+              "vlm_document": { "$ref": "#/$defs/argusModelProfile" },
+              "vlm_fast": { "$ref": "#/$defs/argusModelProfile" },
+              "vlm_qwen36_27b": { "$ref": "#/$defs/argusModelProfile" },
+              "vlm_qwen36_35b": { "$ref": "#/$defs/argusModelProfile" }
+            }
+          }
+        }
+      },
+      "email": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable the Gateway-local private email source worker."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Base URL for the private email source worker reachable from the OpenClaw Gateway host."
+          },
+          "requestTimeoutSeconds": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Request timeout for private email lane calls."
+          }
+        }
+      },
+      "sourceIndex": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable the public source answer, status, and search tools."
+          },
+          "corpusRegistry": {
+            "$ref": "#/$defs/sourceCorpusRegistry"
+          },
+          "corpora": {
+            "type": "array",
+            "description": "Shorthand for sourceIndex.corpusRegistry.corpora with schemaVersion 1.",
+            "items": {
+              "$ref": "#/$defs/sourceCorpus"
+            }
+          },
+          "ingestionExclusions": {
+            "$ref": "#/$defs/sourceIngestionExclusions"
+          },
+          "ingestionExclusionsPath": {
+            "type": "string",
+            "description": "Path to a JSON file holding the ingestion exclusions. Defaults to ~/.olympus/sources/ingestion-exclusions.json."
+          },
+          "ingestionPolicies": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "dropboxPersonal": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Dropbox personal ingestion policy wrapper or inline schemaVersion 1 policy.",
+                "properties": {
+                  "policyPath": {
+                    "type": "string",
+                    "description": "Path to a local Dropbox ingestion policy JSON file."
+                  },
+                  "policy": {
+                    "$ref": "#/$defs/sourceIngestionPolicy"
+                  },
+                  "schemaVersion": {
+                    "type": "number",
+                    "enum": [1]
+                  },
+                  "source": {
+                    "type": "string"
+                  },
+                  "corpusId": {
+                    "type": "string"
+                  },
+                  "roots": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/sourceIngestionRoot"
+                    }
+                  },
+                  "rules": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/sourceIngestionRule"
+                    }
+                  },
+                  "sync": {
+                    "$ref": "#/$defs/sourceIngestionSync"
+                  },
+                  "content": {
+                    "$ref": "#/$defs/sourceIngestionContent"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "$defs": {
+      "argusModelProfile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string",
+            "description": "OpenAI-compatible model-profile base URL."
+          },
+          "model": {
+            "type": "string",
+            "description": "Served model id for this model profile."
+          },
+          "secretRef": {
+            "type": "string",
+            "description": "SecretRef for this model profile provider credential."
+          },
+          "purpose": {
+            "type": "string",
+            "enum": ["chat", "text_reasoning", "classification", "embedding", "vision"],
+            "description": "Intended profile capability."
+          }
+        }
+      },
+      "sourceCorpusRegistry": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "enum": [1]
+          },
+          "corpora": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceCorpus"
+            }
+          }
+        }
+      },
+      "sourceCorpus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "corpusId": {
+            "type": "string",
+            "enum": ["secure_local.email.private", "internal.email", "internal.drive.docs", "secure_local.drive.docs", "internal.telegram.messages", "internal.readwise.library", "internal.x.bookmarks", "secure_local.dropbox.files", "secure_local.telegram.protected.messages", "secure_local.whatsapp.messages"]
+          },
+          "sourceId": {
+            "type": "string",
+            "enum": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"]
+          },
+          "provider": {
+            "type": "string",
+            "enum": ["gmail", "google_drive", "dropbox", "x", "telegram", "whatsapp", "readwise"]
+          },
+          "family": {
+            "type": "string",
+            "enum": ["email", "file", "chat", "readwise", "x"]
+          },
+          "trustDomain": {
+            "type": "string",
+            "enum": ["public_safe", "internal", "secure_local"]
+          },
+          "activationMode": {
+            "type": "string",
+            "enum": ["lexical_only", "hybrid_shadow", "hybrid_primary"]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["answer", "status", "sync", "search", "promotion_candidates"]
+            }
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": ["corpusId", "sourceId", "provider", "family", "trustDomain", "capabilities"],
+        "oneOf": [
+          {
+            "properties": {
+              "corpusId": { "const": "secure_local.email.private" },
+              "sourceId": { "const": "gmail.email" },
+              "provider": { "const": "gmail" },
+              "family": { "const": "email" },
+              "trustDomain": { "const": "secure_local" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "internal.email" },
+              "sourceId": { "const": "gmail.email" },
+              "provider": { "const": "gmail" },
+              "family": { "const": "email" },
+              "trustDomain": { "const": "internal" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "internal.drive.docs" },
+              "sourceId": { "const": "google_drive.docs" },
+              "provider": { "const": "google_drive" },
+              "family": { "const": "file" },
+              "trustDomain": { "const": "internal" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "secure_local.drive.docs" },
+              "sourceId": { "const": "google_drive.docs" },
+              "provider": { "const": "google_drive" },
+              "family": { "const": "file" },
+              "trustDomain": { "const": "secure_local" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "internal.telegram.messages" },
+              "sourceId": { "const": "telegram.messages" },
+              "provider": { "const": "telegram" },
+              "family": { "const": "chat" },
+              "trustDomain": { "const": "internal" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "internal.readwise.library" },
+              "sourceId": { "const": "readwise.library" },
+              "provider": { "const": "readwise" },
+              "family": { "const": "readwise" },
+              "trustDomain": { "const": "internal" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "internal.x.bookmarks" },
+              "sourceId": { "const": "x.bookmarks" },
+              "provider": { "const": "x" },
+              "family": { "const": "x" },
+              "trustDomain": { "const": "internal" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "secure_local.dropbox.files" },
+              "sourceId": { "const": "dropbox.files" },
+              "provider": { "const": "dropbox" },
+              "family": { "const": "file" },
+              "trustDomain": { "const": "secure_local" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search", "promotion_candidates"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "secure_local.telegram.protected.messages" },
+              "sourceId": { "const": "telegram.messages" },
+              "provider": { "const": "telegram" },
+              "family": { "const": "chat" },
+              "trustDomain": { "const": "secure_local" },
+              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": { "const": "secure_local.whatsapp.messages" },
+              "sourceId": { "const": "whatsapp.personal.messages" },
+              "provider": { "const": "whatsapp" },
+              "family": { "const": "chat" },
+              "trustDomain": { "const": "secure_local" },
+              "capabilities": { "items": { "enum": ["status", "sync", "search", "answer"] } }
+            }
+          }
+        ]
+      },
+      "sourceIngestionExclusions": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Ingestion dispositions. Source-neutral: one shape for every file-storage connector, whether it names folders by path or by identity. An exclusion always wins over an approved scope, and over a metadata-only rule covering the same item, whatever order they are written in. An item that cannot be evaluated against this list is excluded rather than ingested.",
+        "required": ["schemaVersion", "rules"],
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "enum": [1]
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceIngestionExclusionRule"
+            }
+          }
+        }
+      },
+      "sourceIngestionExclusionRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One ingestion disposition. Names items by folder path prefix, by folder identity, or by a media criterion, for the sources listed. At least one of path_prefixes, folder_ids, or media is required. mode decides what happens to a matching item: exclude (never ingested) or metadata_only (indexed by title, path and date, content never read). Example: {\"id\": \"spirituality\", \"mode\": \"metadata_only\", \"sources\": [\"dropbox.personal\"], \"path_prefixes\": [\"/3 Resources/Spirituality\"], \"reason\": \"index_titles_only\"}",
+        "required": ["id"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable label for this rule. Previews and receipts are keyed by it, so counts stay comparable when the folders under it change. Letters, digits, dot, dash, and underscore only."
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["exclude", "metadata_only"],
+            "description": "What happens to a matching item. exclude is the default and is what every rule written without this field means: never ingested, and removed by the purge if already stored. metadata_only admits the item with its title, path and timestamps and never reads its content: no extraction, no chunks, no embeddings, and an honest coverage gap naming this rule. Content already stored for such an item is removed by the metadata-only strip, which keeps the item row. An unrecognized value is refused when configuration is read, never defaulted."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source ids this rule applies to, for example dropbox.personal or google_drive.personal. Omit or leave empty to exclude these folders from every source. REQUIRED when folder_ids is used: a folder id is minted by one provider and means nothing to another. A rule that names a source which cannot enforce any criterion the rule carries is refused when the gate is built, rather than silently matching nothing."
+          },
+          "path_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Folder paths to exclude, together with everything beneath them. Matched on whole path segments and case-insensitively: /3 Resources/Books excludes that folder and its contents, but not a sibling named Bookshelf. For providers whose paths are real paths, such as Dropbox. Google Drive publishes no folder paths, so use folder_ids there."
+          },
+          "folder_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceIngestionExclusionFolder"
+            },
+            "description": "Folders to exclude by provider identity, together with everything beneath them at any depth. For providers that build paths from opaque folder ids rather than names, such as Google Drive. Identity survives a rename or a move, which a path prefix does not. A file reachable through an excluded folder is excluded even when it also sits under an ordinary one. Get an id with: bun run source-exclusions:resolve-folder -- <drive folder URL>"
+          },
+          "media": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Match items by what they ARE rather than where they live: the concrete case is video over a size threshold, which no folder list can express. Provider-neutral, because a byte count and a file type are facts every file source publishes. At least one of extensions or mime_prefixes is required: a size-only rule cannot be answered for an item whose provider omits a size, so it would exclude every such item. The type and size halves are ANDed; entries within a half are ORed. A rule carrying media may not also carry path_prefixes or folder_ids, because that conjunction has two plausible readings and the unchecked one under-matches; write two rules instead. Example: {\"extensions\": [\".mp4\", \".mov\", \".avi\", \".mkv\", \".m4v\", \".mts\"], \"min_bytes\": 104857600}",
+            "properties": {
+              "extensions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "File extensions, with or without the leading dot, compared case-insensitively against the last dot of the file name. archive.tar.gz is a .gz; holiday.mp4.txt is a .txt, not a video."
+              },
+              "mime_prefixes": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Media-type prefixes such as video/ , for providers that publish a mime type and no useful extension."
+              },
+              "min_bytes": {
+                "type": "number",
+                "description": "Inclusive lower bound in bytes. 104857600 is 100 MiB."
+              },
+              "max_bytes": {
+                "type": "number",
+                "description": "Inclusive upper bound in bytes."
+              }
+            }
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why this rule exists. Appears in previews and receipts, so keep it free of private detail."
+          }
+        }
+      },
+      "sourceIngestionExclusionFolder": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "description": "One folder named by provider identity. The name is never matched on. It is there so the file stays reviewable a year later, because a list of bare opaque ids is not.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The provider's folder id, exactly as the provider spells it. Compared case-sensitively, unlike a path."
+          },
+          "name": {
+            "type": "string",
+            "description": "The folder's human name, for review. Documentation only: never used for matching, and it does not have to stay accurate."
+          }
+        }
+      },
+      "sourceIngestionPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "enum": [1]
+          },
+          "source": {
+            "type": "string"
+          },
+          "corpusId": {
+            "type": "string"
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceIngestionRoot"
+            }
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceIngestionRule"
+            }
+          },
+          "sync": {
+            "$ref": "#/$defs/sourceIngestionSync"
+          },
+          "content": {
+            "$ref": "#/$defs/sourceIngestionContent"
+          }
+        }
+      },
+      "sourceIngestionRoot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "approved_scope_key": {
+            "type": "string"
+          },
+          "default_action": {
+            "type": "string",
+            "enum": ["full_extract", "metadata_only", "on_demand"]
+          }
+        }
+      },
+      "sourceIngestionRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "match": {
+            "$ref": "#/$defs/sourceIngestionMatch"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["full_extract", "metadata_only", "on_demand"]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "sourceIngestionMatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mime_type_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path_contains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "sourceIngestionSync": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cadence": {
+            "type": "string",
+            "enum": ["manual", "continuous"]
+          },
+          "max_entries_per_pass": {
+            "type": "number",
+            "minimum": 1
+          },
+          "max_pages_per_pass": {
+            "type": "number",
+            "minimum": 1
+          }
+        }
+      },
+      "sourceIngestionContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "default_extractor_kind": {
+            "type": "string"
+          },
+          "default_extractor_version": {
+            "type": "string"
+          },
+          "plan_limit": {
+            "type": "number",
+            "minimum": 1
+          },
+          "batch_size": {
+            "type": "number",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "argus": {
+      "label": "Argus",
+      "help": "Local/private OpenAI-compatible model endpoints reachable from the OpenClaw Gateway host."
+    },
+    "sovereignty": {
+      "label": "Sovereignty Policy",
+      "help": "Versioned model-routing and retrieval policy. Config files use secret references, never inline keys."
+    },
+    "email": {
+      "label": "Private Email Lane",
+      "help": "Gateway-local private email source worker. OAuth and raw email access must stay outside ordinary cloud-model context."
+    },
+    "sourceIndex": {
+      "label": "Source Index",
+      "help": "Public source answer, status, and search tools with counts-only operational output."
+    },
+    "worker.authToken": {
+      "label": "Worker Auth Token",
+      "sensitive": true,
+      "help": "Bearer token for Olympus worker HTTP endpoints. Marked sensitive so Control UI and config reads redact it instead of rendering it in the clear."
+    }
+  },
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["tool"]
+  },
+  "contracts": {
+    "tools": ["argus_ping", "argus_list_models", "argus_complete", "source_answer", "source_index_status", "source_index_search", "source_watch_create", "source_watches", "source_watch_cancel", "olympus_doctor"]
+  },
+  "skills": ["skills/ask-argus", "skills/ask-sources"]
+}

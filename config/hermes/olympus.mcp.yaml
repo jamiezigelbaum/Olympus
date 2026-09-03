@@ -1,0 +1,8 @@
+mcp_servers:
+  olympus:
+    command: <absolute-managed-plugin-root>/bin/olympus
+    args: [serve]
+    tools:
+      include: [source_answer, source_index_status]
+      prompts: false
+      resources: false

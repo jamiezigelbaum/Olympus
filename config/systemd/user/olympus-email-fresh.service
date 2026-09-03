@@ -1,0 +1,7 @@
+[Unit]
+Description=Olympus freshness: email both accounts
+
+[Service]
+Type=oneshot
+ExecStart=%h/olympus-fresh/email-fresh.sh
+EnvironmentFile=-%h/.config/olympus/worker.env

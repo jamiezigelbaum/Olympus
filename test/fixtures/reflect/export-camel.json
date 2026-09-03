@@ -1,0 +1,48 @@
+[
+  {
+    "id": "note-camel",
+    "title": "Camel note",
+    "body": "Camel markdown body.",
+    "createdAt": "2026-03-01T10:00:00Z",
+    "updatedAt": "2026-03-02T10:00:00Z",
+    "tags": [{ "name": "exports" }, "reflect"]
+  },
+  {
+    "id": "note-editor",
+    "title": "Editor note",
+    "createdAt": "2026-03-03T10:00:00Z",
+    "updatedAt": "2026-03-04T10:00:00Z",
+    "body": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            { "type": "text", "text": "Hello " },
+            { "type": "text", "marks": [{ "type": "bold" }], "text": "world" },
+            { "type": "text", "text": "." }
+          ]
+        },
+        {
+          "type": "bulletList",
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "First item" }] }
+              ]
+            },
+            {
+              "type": "listItem",
+              "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "Second item" }] }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  { "id": 42, "title": "Numeric id note", "body": "Numeric id body." },
+  { "title": "No id note", "body": "Dropped: a note without an id cannot be addressed." }
+]

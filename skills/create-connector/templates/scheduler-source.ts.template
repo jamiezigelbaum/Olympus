@@ -1,0 +1,111 @@
+// TEMPLATE — this is a SNIPPET to add to src/workers/source-scheduler.ts, not a
+// standalone file. Replace every <Source> / <SOURCE> / <source> token.
+//
+// Shape lifted from createReadwiseSchedulerSource in
+// src/workers/source-scheduler.ts; createXBookmarksSchedulerSource in the same
+// file is the second reference.
+
+export function create<Source>SchedulerSource(input: {
+  config: OlympusConfig;
+  liveSync?: <Source>ConnectorStoreSyncHandler;
+  account?: string;
+  liveConfig?: <Source>LiveSyncConfig;
+}): SourceSchedulerSource | undefined {
+  // FAIL CLOSED PER LANE: no store handler means no store tasks. One lane may
+  // never stand in for another, and enabling the scheduler must never fall back
+  // to a provider-heavier path.
+  if (!input.liveSync) return undefined;
+  const liveConfig = input.liveConfig ?? default<Source>LiveSyncConfig();
+  return {
+    sourceId: '<source>.<collection>',
+    corpusId: <SOURCE>_CORPUS_ID,
+    cadence: 'continuous',
+    intervalMs: liveConfig.storePullIntervalMs,
+    freshnessThresholdHours: liveConfig.storeReconcileFreshnessThresholdMs / (60 * 60_000),
+    // Both tasks deliberately share the source-default concurrency key: one
+    // provider token, one daily request budget, serialized access is correct.
+    // Give them distinct keys ONLY if the lanes may genuinely run together.
+    tasks: [
+      {
+        id: '<source>.<collection>_store_pull',
+        kind: 'sync',
+        writer: true,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext) => {
+          try {
+            return <source>StoreProgress(await input.liveSync!.pull({
+              attempted_at: context?.attemptedAt ?? new Date().toISOString(),
+              ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
+              max_items: liveConfig.storePullMaxItems,
+            }));
+          } catch (error) {
+            throw <source>SchedulerFailure(error);
+          }
+        },
+      },
+      {
+        id: '<source>.<collection>_store_reconcile',
+        kind: 'sync',
+        writer: true,
+        intervalMs: liveConfig.storeReconcileIntervalMs,
+        freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
+        run: async (context?: SourceSchedulerTaskRunContext) => {
+          try {
+            return <source>StoreProgress(await input.liveSync!.reconcile({
+              attempted_at: context?.attemptedAt ?? new Date().toISOString(),
+            }));
+          } catch (error) {
+            throw <source>SchedulerFailure(error);
+          }
+        },
+      },
+    ],
+    lastSyncCompletedAt: () => input.liveSync!.lastStoreRunCompletedAt(),
+  };
+}
+
+function <source>StoreProgress(
+  outcome: <Source>ConnectorStoreTaskOutcome,
+): SourceSchedulerTaskRunResult {
+  return {
+    status: outcome.receipt.status,
+    counts: outcome.receipt.counts,
+    ...(outcome.receipt.warnings ? { warnings: outcome.receipt.warnings } : {}),
+    // ALWAYS supplied: null clears the durable checkpoint after a completed
+    // traversal, a string carries the resume point for the next bounded slice.
+    checkpoint: outcome.checkpoint,
+  };
+}
+
+/**
+ * The daily request guard is a planned park, not a failure to retry: bridge it
+ * to a structured deferral so the scheduler waits for the UTC rollover instead
+ * of fail-looping the lane at the error backoff all day. A plain Error here is
+ * classified task_failed — that is the bug this exists to prevent.
+ */
+function <source>SchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+  if (!(error instanceof <Source>RequestBudgetError)) return error;
+  return new SourceSchedulerTaskFailure(error.message, {
+    errorKind: <SOURCE>_DAILY_REQUEST_GUARD_REASON,
+    retryAt: {
+      // error.retryAt is the next UTC day. Maximum future deferral is 48h.
+      at: error.retryAt,
+      // Must match /^[a-z0-9][a-z0-9._:-]{0,127}$/ or the scheduler drops it.
+      degradedReason: <SOURCE>_DAILY_REQUEST_GUARD_REASON,
+    },
+  });
+}
+
+// --- Wiring checklist (not code) ---------------------------------------------
+//
+// 1. Register the source where the worker builds its scheduler sources
+//    (src/workers/email-source/server.ts), passing the handler from
+//    create<Source>ConnectorStoreRuntime.
+// 2. Registering is NOT scheduling. The host selects live lanes through
+//    WORKER_SCHEDULER_SOURCE_IDS in config/private-host.env, which is
+//    manifest-pinned. Expect to land unscheduled and flag the operator re-bind
+//    as a follow-up leg (this is exactly why the Drive store tasks landed
+//    unscheduled).
+// 3. Assert in tests that the source registers BOTH task ids in order, and that
+//    it returns undefined without the store handler.

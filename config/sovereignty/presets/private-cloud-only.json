@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "modelProfiles": {
+    "venice-private": {
+      "provider": "venice",
+      "trust": "encrypted_cloud",
+      "baseUrl": "https://api.venice.ai/api/v1",
+      "model": "kimi-k3",
+      "secretRef": "store:venice.api_key",
+      "purpose": "analyst"
+    },
+    "cloud-openclaw-infer": {
+      "provider": "openclaw-infer",
+      "trust": "standard_cloud",
+      "model": "openai/gpt-5.5",
+      "purpose": "analyst"
+    },
+    "gemini-source-embedding": {
+      "provider": "google-gemini",
+      "trust": "standard_cloud",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-embedding-2",
+      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+      "purpose": "embedding"
+    }
+  },
+  "routes": {
+    "secure_local": { "pool": { "members": ["venice-private"] } },
+    "internal": {
+      "analyst": [
+        "cloud-openclaw-infer"
+      ]
+    },
+    "public_safe": {
+      "analyst": [
+        "cloud-openclaw-infer"
+      ]
+    }
+  },
+  "retrieval": {
+    "trustDomains": {
+      "secure_local": {
+        "minimumExecutionTrust": "encrypted_cloud",
+        "allowedEmbeddingTrust": [
+          "local"
+        ],
+        "embeddingProfile": null,
+        "allowCloudQuery": false,
+        "activationMode": "lexical_only",
+        "secureHandling": "answerable"
+      },
+      "internal": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": [
+          "local",
+          "standard_cloud"
+        ],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      },
+      "public_safe": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": [
+          "local",
+          "standard_cloud"
+        ],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      }
+    }
+  }
+}

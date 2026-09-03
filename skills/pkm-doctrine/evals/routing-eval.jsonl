@@ -1,0 +1,6 @@
+{"id":"route-project-page","intent":"Write a page for my new kitchen renovation project","expect":{"route":"pkm-doctrine","slice":"writing-project-page.md"}}
+{"id":"route-task-wording","intent":"That task you wrote is confusing; fix the wording","expect":{"route":"pkm-doctrine","slice":"wording-tasks.md"}}
+{"id":"route-filing","intent":"Where should my accountant's proposal document live?","expect":{"route":"pkm-doctrine","slice":"filing.md"}}
+{"id":"route-onboarding","intent":"This is a fresh install and the PKM pages are empty","expect":{"route":"pkm-doctrine","slice":"onboarding.md"}}
+{"id":"route-source-question","intent":"What did my doctor's email say about fish?","expect":{"route":"ask-sources"}}
+{"id":"route-wiki-boundary","intent":"Make a wiki page about peptides","expect":{"route":"out-of-scope","boundary":"wiki-authoring"}}

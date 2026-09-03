@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-preview",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["scripts/dashboard-preview.ts"],
+      "port": 8930
+    }
+  ]
+}

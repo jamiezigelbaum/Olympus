@@ -1,0 +1,301 @@
+// TEMPLATE — copy to src/workers/<source>/live-sync.ts and replace every
+// <Source> / <SOURCE> / <source> / <provider> token and every TODO.
+//
+// Source-specific control plane around the real <Source> SourceConnector.
+// Provider I/O stays inside Contract 1; shared ingest and embedding stay in the
+// generic connector-store runner. Everything that leaves this module is
+// COUNTS-ONLY: the resume cursor is handed to the scheduler as an opaque
+// checkpoint and never appears in a receipt, warning, or log line.
+//
+// Shape lifted from src/workers/readwise/live-sync.ts.
+
+import { createHash } from 'node:crypto';
+import {
+  syncAndEmbedFromConnector,
+  type ConnectorStoreSyncAndEmbedSummary,
+  type LocalConnectorStore,
+} from '../connector-store/index.ts';
+import type { CredentialBroker } from '../credential-broker/index.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import { <Source>ApiError, type <Source>ApiClientOptions } from './api.ts';
+import {
+  <SOURCE>_PROVIDER,
+  <Source>DailyRequestBudget,
+  create<Source>SourceConnector,
+  is<Source>ConnectorCursor,
+  type <Source>RequestBudgetStatus,
+} from './connector.ts';
+import { default<Source>LiveSyncConfig, type <Source>LiveSyncConfig } from './live-control.ts';
+
+export const <SOURCE>_STORE_PULL_RECEIPT_KIND = '<source>_connector_store_pull_receipt';
+export const <SOURCE>_STORE_RECONCILE_RECEIPT_KIND = '<source>_connector_store_reconcile_receipt';
+// A fixed token, never an interpolated provider string.
+export const <SOURCE>_RESUME_REJECTED_WARNING = '<source>_store_resume_cursor_rejected';
+
+export interface <Source>ConnectorStoreReceipt {
+  kind: typeof <SOURCE>_STORE_PULL_RECEIPT_KIND | typeof <SOURCE>_STORE_RECONCILE_RECEIPT_KIND;
+  status: 'progress' | 'idle';
+  counts: {
+    api_requests: number;
+    daily_api_request_budget: number;
+    items_seen: number;
+    items_indexed: number;
+    items_tombstoned: number;
+    items_rejected: number;
+    chunks_indexed: number;
+    chunks_embedded: number;
+    /** 1 when the run continued a durable checkpoint instead of starting over. */
+    resumed_from_checkpoint: number;
+    /**
+     * 1 when a resume point was present but unusable and the run traversed
+     * fresh. Carried as a COUNT because the shared scheduler collapses unknown
+     * warning tokens, and this signal must stay legible in scheduler status.
+     */
+    resume_cursor_rejected: number;
+    /** 1 when the provider traversal reached its final page in this run. */
+    traversal_complete: number;
+    /** TODO: 0 until this source's deletion semantics are proven. */
+    absence_authoritative: number;
+  };
+  api_usage: { utc_day: string };
+  warnings?: string[];
+  policy: {
+    counts_only: true;
+    raw_source_exposed: false;
+    source_text_returned: false;
+    provider_cursor_exposed: false;
+    absence_authority: 'partial_window';
+    tombstones_applied: false;
+  };
+  receipt_sha256: string;
+}
+
+export interface <Source>ConnectorStoreTaskOutcome {
+  receipt: <Source>ConnectorStoreReceipt;
+  /**
+   * Scheduler-private durable resume point. `null` clears the checkpoint after
+   * a completed traversal. It crosses only the scheduler state store, never a
+   * counts-only surface.
+   */
+  checkpoint: string | null;
+}
+
+export interface <Source>StorePullRequest {
+  attempted_at?: string;
+  /** Durable scheduler checkpoint; never returned from this surface. */
+  checkpoint?: string;
+  max_items?: number;
+}
+
+export interface <Source>StoreReconcileRequest {
+  attempted_at?: string;
+}
+
+export interface <Source>ConnectorStoreSyncHandler {
+  pull(request?: <Source>StorePullRequest): Promise<<Source>ConnectorStoreTaskOutcome>;
+  reconcile(request?: <Source>StoreReconcileRequest): Promise<<Source>ConnectorStoreTaskOutcome>;
+  lastStoreRunCompletedAt(): string | undefined;
+  requestBudgetStatus(): <Source>RequestBudgetStatus;
+}
+
+export interface <Source>ConnectorStoreSyncHandlerOptions {
+  store: LocalConnectorStore;
+  embeddingProvider: SourceEmbeddingProvider;
+  /** Required: the one runtime day counter shared with every connector it builds. */
+  requestBudget: <Source>DailyRequestBudget;
+  account?: string;
+  credentialBroker?: CredentialBroker;
+  credentialHandle?: string;
+  fetch?: <Source>ApiClientOptions['fetch'];
+  baseUrl?: string;
+  timeoutMs?: number;
+  pageSize?: number;
+  config?: <Source>LiveSyncConfig;
+  env?: Record<string, string | undefined>;
+  now?: () => Date;
+}
+
+export function create<Source>ConnectorStoreSyncHandler(
+  options: <Source>ConnectorStoreSyncHandlerOptions,
+): <Source>ConnectorStoreSyncHandler {
+  const env = options.env ?? process.env;
+  const config = options.config ?? default<Source>LiveSyncConfig(env);
+  const account = options.account?.trim() || 'personal';
+  const requestBudget = options.requestBudget;
+  const buildConnector = () => create<Source>SourceConnector({
+    ...(options.account ? { account: options.account } : {}),
+    ...(options.credentialBroker ? { credentialBroker: options.credentialBroker } : {}),
+    ...(options.credentialHandle ? { credentialHandle: options.credentialHandle } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.pageSize ? { pageSize: options.pageSize } : {}),
+    requestBudget,
+    env,
+    ...(options.now ? { now: options.now } : {}),
+  });
+
+  return {
+    async pull(request: <Source>StorePullRequest = {}): Promise<<Source>ConnectorStoreTaskOutcome> {
+      const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
+      const warnings: string[] = [];
+      // The store's own last run is the freshest durable traversal position: it
+      // is written after every run, including a run the budget guard cut short.
+      // The scheduler checkpoint covers the case where the last run was an
+      // uncursored reconcile (which stores no cursor).
+      const candidate = options.store.status().lastSyncRun?.cursor
+        ?? request.checkpoint?.trim()
+        ?? undefined;
+      let resume = is<Source>ConnectorCursor(candidate) ? candidate : undefined;
+      if (candidate !== undefined && resume === undefined) {
+        warnings.push(<SOURCE>_RESUME_REJECTED_WARNING);
+      }
+
+      let connector = buildConnector();
+      let run: ConnectorStoreSyncAndEmbedSummary;
+      try {
+        run = await syncAndEmbedFromConnector({
+          store: options.store,
+          connector,
+          embeddingProvider: options.embeddingProvider,
+          sync: { fetchContent: true, maxItems, ...(resume ? { cursor: resume } : {}) },
+        });
+      } catch (error) {
+        // Cursor validity across days is unverified provider behavior. A
+        // provider that rejects the resume point must not park the lane: drop
+        // the checkpoint and traverse fresh, with a counts-only warning.
+        if (resume === undefined || !isRejectedCursorError(error)) throw error;
+        warnings.push(<SOURCE>_RESUME_REJECTED_WARNING);
+        resume = undefined;
+        connector = buildConnector();
+        run = await syncAndEmbedFromConnector({
+          store: options.store,
+          connector,
+          embeddingProvider: options.embeddingProvider,
+          sync: { fetchContent: true, maxItems },
+        });
+      }
+
+      return taskOutcome({
+        kind: <SOURCE>_STORE_PULL_RECEIPT_KIND,
+        run,
+        usage: connector.requestBudgetStatus(),
+        resumed: resume !== undefined,
+        warnings,
+      });
+    },
+
+    async reconcile(
+      _request: <Source>StoreReconcileRequest = {},
+    ): Promise<<Source>ConnectorStoreTaskOutcome> {
+      const connector = buildConnector();
+      // Deliberately un-cursored and un-bounded: the shared spine only treats a
+      // traversal as a full snapshot when neither a cursor nor a maxItems bound
+      // was supplied and it reached a done page.
+      const run = await syncAndEmbedFromConnector({
+        store: options.store,
+        connector,
+        embeddingProvider: options.embeddingProvider,
+        sync: {
+          fetchContent: true,
+          reconcileFullSnapshot: true,
+          reconcileFullSnapshotScope: { provider: <SOURCE>_PROVIDER, accountScope: account },
+          // TODO: weakest honest authority until this provider's deletion
+          // semantics are PROVEN. `partial_window` means absence is never
+          // evidence of removal and nothing is tombstoned. Upgrading to
+          // 'complete_snapshot' is a separate tranche with its own proof.
+          reconcileAbsenceAuthority: 'partial_window',
+        },
+      });
+      return taskOutcome({
+        kind: <SOURCE>_STORE_RECONCILE_RECEIPT_KIND,
+        run,
+        usage: connector.requestBudgetStatus(),
+        resumed: false,
+        warnings: [],
+      });
+    },
+
+    lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt,
+    requestBudgetStatus: () => requestBudget.status(),
+  };
+}
+
+function taskOutcome(input: {
+  kind: <Source>ConnectorStoreReceipt['kind'];
+  run: ConnectorStoreSyncAndEmbedSummary;
+  usage: <Source>RequestBudgetStatus;
+  resumed: boolean;
+  warnings: string[];
+}): <Source>ConnectorStoreTaskOutcome {
+  const checkpoint = input.run.sync.cursor ?? null;
+  const changed = input.run.sync.itemsIndexed > 0
+    || input.run.sync.itemsTombstoned > 0
+    || input.run.embed.chunksEmbedded > 0;
+  const warnings = [...new Set(input.warnings)];
+  const receipt: Omit<<Source>ConnectorStoreReceipt, 'receipt_sha256'> = {
+    kind: input.kind,
+    status: changed ? 'progress' : 'idle',
+    counts: {
+      api_requests: input.usage.requests,
+      daily_api_request_budget: input.usage.dailyRequestBudget,
+      items_seen: input.run.sync.itemsSeen,
+      items_indexed: input.run.sync.itemsIndexed,
+      items_tombstoned: input.run.sync.itemsTombstoned,
+      items_rejected: input.run.sync.itemsRejected,
+      chunks_indexed: input.run.sync.chunksIndexed,
+      chunks_embedded: input.run.embed.chunksEmbedded,
+      resumed_from_checkpoint: Number(input.resumed),
+      resume_cursor_rejected: Number(warnings.includes(<SOURCE>_RESUME_REJECTED_WARNING)),
+      // No checkpoint left over means the connector yielded its done page.
+      traversal_complete: Number(checkpoint === null),
+      absence_authoritative: 0,
+    },
+    api_usage: { utc_day: input.usage.utcDay },
+    ...(warnings.length > 0 ? { warnings } : {}),
+    policy: {
+      counts_only: true,
+      raw_source_exposed: false,
+      source_text_returned: false,
+      provider_cursor_exposed: false,
+      absence_authority: 'partial_window',
+      tombstones_applied: false,
+    },
+  };
+  return { receipt: { ...receipt, receipt_sha256: <source>ReceiptDigest(receipt) }, checkpoint };
+}
+
+/**
+ * Self-digest over every field the receipt carries except the digest itself. A
+ * verifier recomputes it from the receipt alone; nothing private is needed.
+ */
+export function <source>ReceiptDigest(
+  receipt: Omit<<Source>ConnectorStoreReceipt, 'receipt_sha256'>,
+): string {
+  return createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
+}
+
+/**
+ * A stale page token is a client-side problem to retraverse; auth, permission,
+ * and rate-limit failures are NOT — those must surface, not be swallowed into a
+ * silent full re-traversal that spends the day's budget.
+ */
+function isRejectedCursorError(error: unknown): boolean {
+  if (error instanceof TypeError) return /cursor is invalid/i.test(error.message);
+  if (!(error instanceof <Source>ApiError)) return false;
+  return error.status !== undefined
+    && error.status >= 400
+    && error.status < 500
+    && error.status !== 401
+    && error.status !== 403
+    && error.status !== 429;
+}
+
+/** A caller may ask for less than policy, never more. */
+function boundedMaxItems(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError('<Source> store pull max_items must be a positive integer.');
+  }
+  return Math.min(value, fallback);
+}

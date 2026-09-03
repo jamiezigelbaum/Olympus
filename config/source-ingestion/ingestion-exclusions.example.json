@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "external-agent-corpora",
+      "sources": ["dropbox.personal"],
+      "path_prefixes": [
+        "/2 Areas/Example Curated Corpus"
+      ],
+      "reason": "curated source material for a separate system"
+    },
+    {
+      "id": "book-libraries",
+      "sources": ["dropbox.personal"],
+      "path_prefixes": [
+        "/3 Resources/Books"
+      ],
+      "reason": "deliberate collection, not general personal search"
+    }
+  ]
+}

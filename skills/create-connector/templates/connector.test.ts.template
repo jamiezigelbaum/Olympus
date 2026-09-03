@@ -1,0 +1,237 @@
+// TEMPLATE — copy to test/<source>-connector.test.ts and replace every
+// <Source> / <SOURCE> / <source> token and every TODO.
+//
+// Mirrors test/readwise-connector.test.ts. The scheduler cases (resume round
+// trip, budget parking, restart durability, reconcile bounds, receipt digest)
+// belong in a second file modelled on test/readwise-store-scheduler.test.ts.
+//
+// The .template suffix keeps this file out of `bun test` until it is copied.
+
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, test } from 'bun:test';
+import { createConnectorStoreCorpusAdapter } from '../src/workers/connector-store/index.ts';
+import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
+import {
+  <SOURCE>_CORPUS_ID,
+  <Source>DailyRequestBudget,
+  <Source>RequestBudgetError,
+  create<Source>ConnectorStore,
+  create<Source>ConnectorStoreSyncHandler,
+  create<Source>SourceConnector,
+  <source>DailyRequestBudgetFromEnv,
+  type <Source>Fetch,
+} from '../src/workers/<source>/index.ts';
+import { create<Source>ConnectorStoreRuntime } from '../src/workers/email-source/server.ts';
+import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+
+const ACCOUNT = 'person@example.com';
+const NOW = new Date('2026-01-01T10:00:00.000Z');
+// Every fixture body carries this string. The membrane assertions are
+// `not.toContain(MARKER)` over the JSON of anything the lane returns.
+const MARKER = 'PRIVATE_<SOURCE>_MARKER';
+
+describe('<Source> thin connector and dark store', () => {
+  test('paginates with stable identity, classification, and budget accounting', async () => {
+    const calls: string[] = [];
+    const authorizations: string[] = [];
+    const connector = create<Source>SourceConnector({
+      account: ACCOUNT,
+      credentialBroker: broker(),
+      pageSize: 2,
+      now: () => NOW,
+      fetch: paginatedFetch(calls, authorizations),
+      requestBudget: new <Source>DailyRequestBudget({ dailyRequestBudget: 10, now: () => NOW }),
+    });
+
+    const pages = [];
+    for await (const page of connector.listItems()) pages.push(page);
+    const items = pages.flatMap((page) => [...page.items]);
+
+    // Pin the exact provider URL sequence: pagination bugs are invisible in
+    // aggregate counts and expensive in provider budget.
+    expect(calls).toEqual([
+      'TODO: first page url',
+      'TODO: second page url',
+    ]);
+    expect(authorizations.every((value) => value === 'Bearer broker-token')).toBe(true);
+    // Only the final page is done — a bounded slice must never claim it.
+    expect(pages.at(-1)?.done).toBe(true);
+    expect(pages.slice(0, -1).every((page) => page.done === false)).toBe(true);
+
+    expect(items[0]).toMatchObject({
+      identity: {
+        family: '<family>',
+        provider: '<provider>',
+        accountScope: ACCOUNT,
+        providerItemId: 'TODO',
+        providerConversationId: 'TODO',
+        localItemId: `${ACCOUNT}:TODO`,
+      },
+      content: { kind: 'text' },
+    });
+    expect(connector.classify(items[0]!)).toMatchObject({
+      trustTier: 'S1',
+      trustDomain: 'internal',
+      localOnly: false,
+    });
+    // fetchItem is the in-run cache, not a second provider round trip.
+    const before = calls.length;
+    expect(await connector.fetchItem(items[0]!.identity.localItemId)).toBe(items[0]!);
+    expect(calls).toHaveLength(before);
+    expect(connector.requestBudgetStatus()).toEqual({
+      utcDay: '2026-01-01',
+      requests: calls.length,
+      dailyRequestBudget: 10,
+    });
+  });
+
+  test('refuses provider I/O before exceeding the validated daily request budget', async () => {
+    const calls: string[] = [];
+    const connector = create<Source>SourceConnector({
+      credentialBroker: broker(),
+      pageSize: 1,
+      now: () => NOW,
+      requestBudget: new <Source>DailyRequestBudget({ dailyRequestBudget: 1, now: () => NOW }),
+      fetch: async (url) => {
+        calls.push(url);
+        return jsonResponse({ nextPageToken: 'page-2', results: [/* TODO */] });
+      },
+    });
+
+    await expect(async () => {
+      for await (const _page of connector.listItems()) {
+        // Exhaust traversal so the second provider request reaches the guard.
+      }
+    }).toThrow(<Source>RequestBudgetError);
+    // The guard refuses BEFORE the request, so the call never happened.
+    expect(calls).toHaveLength(1);
+    expect(connector.requestBudgetStatus().requests).toBe(1);
+
+    expect(() => <source>DailyRequestBudgetFromEnv({
+      OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET: '1.5',
+    })).toThrow('OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET must be a positive integer.');
+  });
+
+  test('syncs into the shared store idempotently and leaks no source text', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-<source>-connector-'));
+    const store = create<Source>ConnectorStore(join(root, '<source>-connector.sqlite'));
+    const sync = create<Source>ConnectorStoreSyncHandler({
+      store,
+      embeddingProvider: new DeterministicSourceEmbeddingProvider({ modelId: '<source>-dark-test' }),
+      account: ACCOUNT,
+      credentialBroker: broker(),
+      fetch: singlePageFetch(),
+      requestBudget: new <Source>DailyRequestBudget({ dailyRequestBudget: 20, now: () => NOW }),
+      now: () => NOW,
+    });
+
+    try {
+      const first = await sync.pull();
+      const second = await sync.pull();
+
+      expect(first.receipt).toMatchObject({
+        kind: '<source>_connector_store_pull_receipt',
+        status: 'progress',
+        policy: {
+          counts_only: true,
+          raw_source_exposed: false,
+          source_text_returned: false,
+          provider_cursor_exposed: false,
+          absence_authority: 'partial_window',
+          tombstones_applied: false,
+        },
+      });
+      // Re-seeing the same items must not re-embed them.
+      expect(second.receipt.counts.chunks_embedded).toBe(0);
+      expect(store.status().counts).toMatchObject({ syncRuns: 2 });
+
+      // The membrane: nothing the lane returns may carry source text, and the
+      // cursor must never appear on a counts-only surface.
+      const emitted = JSON.stringify([first.receipt, second.receipt]);
+      expect(emitted).not.toContain(MARKER);
+      expect(emitted).not.toContain('<src>1:');
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('constructs and mounts the store only when its explicit enable is true', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-<source>-runtime-'));
+    const dbPath = join(root, '<source>-dark.sqlite');
+    const embeddingProvider = new DeterministicSourceEmbeddingProvider();
+    try {
+      expect(create<Source>ConnectorStoreRuntime({
+        enabled: false,
+        embeddingProvider,
+        dbPath,
+        env: { OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET: 'invalid-but-inert' },
+      })).toBeUndefined();
+      expect(existsSync(dbPath)).toBe(false);
+
+      // The budget is constructed BEFORE the store, so an invalid env must not
+      // leave a sqlite file behind.
+      expect(() => create<Source>ConnectorStoreRuntime({
+        enabled: true,
+        embeddingProvider,
+        dbPath,
+        env: { OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET: 'invalid' },
+      })).toThrow('OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET must be a positive integer.');
+      expect(existsSync(dbPath)).toBe(false);
+
+      const runtime = create<Source>ConnectorStoreRuntime({
+        enabled: true,
+        embeddingProvider,
+        dbPath,
+        env: { OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET: '50' },
+      });
+      expect(runtime?.store).toMatchObject({
+        corpusId: <SOURCE>_CORPUS_ID,
+        family: '<family>',
+        trustDomain: 'internal',
+      });
+      expect(existsSync(dbPath)).toBe(true);
+      // The routed adapter is membrane-safe by construction; assert it builds.
+      expect(createConnectorStoreCorpusAdapter({ store: runtime!.store })).toBeDefined();
+      runtime?.store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+function broker(): StaticCredentialBroker {
+  return new StaticCredentialBroker([{
+    handle: '<provider>.personal',
+    provider: '<provider>',
+    allowedCapabilities: ['<provider>.sync'],
+    token: 'broker-token',
+    scopes: ['TODO'],
+    trustDomain: 'internal',
+  }]);
+}
+
+function paginatedFetch(calls: string[], authorizations: string[]): <Source>Fetch {
+  return async (url, init) => {
+    calls.push(url);
+    authorizations.push(new Headers(init?.headers).get('Authorization') ?? '');
+    // TODO: branch on the parsed URL and return two pages, the second with no
+    // next page token.
+    return jsonResponse({ results: [] });
+  };
+}
+
+function singlePageFetch(): <Source>Fetch {
+  return async () => jsonResponse({
+    results: [{ id: 'item-1', title: 'Private item', text: `${MARKER} body` }],
+  });
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}

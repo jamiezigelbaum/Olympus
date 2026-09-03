@@ -1,0 +1,15 @@
+# Response headers for the Olympus OAuth callback relay (Cloudflare Pages).
+#
+# The Content-Security-Policy MUST stay identical to the meta tag in
+# oauth/callback/index.html, plus frame-ancestors, which a meta tag cannot
+# express. test/oauth-relay-page.test.ts fails if the two drift, hashes included.
+#
+# No preload on HSTS: preloading is a commitment made at the apex domain, and
+# that is the owner's call rather than this file's.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'sha256-lbKQjrGX3Hhpy1FIHV5iREDSYuzAW3127/WdHR6nvQw='; style-src 'sha256-EVDkhkGWm+bTfmH/ENGYVBvniKn30UYRl04IX3y3WXg='; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Cross-Origin-Opener-Policy: same-origin

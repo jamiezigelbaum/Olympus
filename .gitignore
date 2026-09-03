@@ -1,0 +1,26 @@
+.DS_Store
+node_modules/
+package-lock.json
+node_modules/.package-lock.json
+dist/*
+!dist/index.js
+!dist/cli.js
+coverage/
+release-artifacts/
+.release/
+.env
+.env.*
+!.env.example
+*.log
+config/*.local.json
+
+# Instantiated held-out eval datasets carry private corpus values; never commit.
+eval/private/
+
+# Mirrored source trees written by tests that need a fresh module graph.
+.private-extension-mirror-*/
+.public-runtime-stripped-*/
+
+# Python bytecode cache from helper scripts
+__pycache__/
+*.pyc

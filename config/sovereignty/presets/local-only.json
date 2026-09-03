@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "modelProfiles": {
+    "local-source-answer": {
+      "provider": "local-openai-compatible",
+      "trust": "local",
+      "baseUrl": "http://127.0.0.1:28090/v1",
+      "model": "delphi/source-answer",
+      "purpose": "analyst"
+    },
+    "cloud-openclaw-infer": {
+      "provider": "openclaw-infer",
+      "trust": "standard_cloud",
+      "model": "openai/gpt-5.5",
+      "purpose": "analyst"
+    },
+    "local-source-embedding": {
+      "provider": "local-openai-compatible",
+      "trust": "local",
+      "baseUrl": "http://127.0.0.1:28090/v1",
+      "model": "secure-local-qwen3-embed",
+      "purpose": "embedding"
+    },
+    "gemini-source-embedding": {
+      "provider": "google-gemini",
+      "trust": "standard_cloud",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "gemini-embedding-2",
+      "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+      "purpose": "embedding"
+    }
+  },
+  "routes": {
+    "secure_local": { "pool": { "members": ["local-source-answer"] } },
+    "internal": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] },
+    "public_safe": { "analyst": ["cloud-openclaw-infer", "local-source-answer"] }
+  },
+  "retrieval": {
+    "trustDomains": {
+      "secure_local": {
+        "minimumExecutionTrust": "local",
+        "allowedEmbeddingTrust": ["local"],
+        "embeddingProfile": "local-source-embedding",
+        "allowCloudQuery": false,
+        "activationMode": "hybrid_shadow",
+        "secureHandling": "answerable"
+      },
+      "internal": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": ["local", "standard_cloud"],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      },
+      "public_safe": {
+        "minimumExecutionTrust": "standard_cloud",
+        "allowedEmbeddingTrust": ["local", "standard_cloud"],
+        "embeddingProfile": "gemini-source-embedding",
+        "allowCloudQuery": true,
+        "activationMode": "hybrid_shadow"
+      }
+    }
+  }
+}

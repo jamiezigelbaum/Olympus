@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "artifact_input": "release-artifacts/olympus-0.4.0.tgz",
+  "candidate_artifact": {
+    "artifact_sha256": "847702f2f4eb4961fb03c9ccdabeddb8f4254981cd8de9874fbde893b8fde0d5",
+    "artifact_bytes": 606093
+  },
+  "rollback_baseline": {
+    "source_commit": "9d9fc02fa30e9dc6d1ceee6c3742da7b9b0c1ead",
+    "artifact_sha256": "e70351832431110d7786ac77486bd1d4c3e06af1fae3b22770b18ef370b3aa81",
+    "artifact_bytes": 603128
+  },
+  "normal_install_rule": "A user or their AI completes setup through documented Olympus onboarding, settings, and recovery actions without code, database, config-file, service-manager, or undocumented repair work.",
+  "assistance": {
+    "eligible": ["documented_flow", "documented_recovery"],
+    "ineligible": ["engineering_intervention"]
+  },
+  "assertion_contracts": {
+    "install": ["package_identity", "managed_path", "service_unit_rendered", "owner_only_environment"],
+    "lifecycle": ["start", "truthful_status", "restart", "stop_resume"],
+    "dashboard_states": ["disconnected", "needs_setup", "awaiting_consent", "syncing", "answer_ready", "reauth_required", "dependency_repair"],
+    "dependencies": ["source_condition_declared", "missing_dependency_names_supported_action"],
+    "inventory": ["exact_positive_files", "zero_private_scan", "built_entrypoints", "public_metadata"],
+    "upgrade": ["previous_install", "candidate_digest", "readiness_probe", "transaction_commit"],
+    "rollback": ["previous_digest_restored", "service_state_restored", "config_retained", "credentials_retained", "indexed_data_retained"],
+    "uninstall": ["service_removed", "config_retained", "credentials_retained", "indexed_data_retained"],
+    "real_provider_end_to_end": ["install", "dashboard_onboarding", "scope", "automatic_sync", "extraction_accounting", "retrieval", "citations", "honest_gaps", "fail_closed_security", "restart_resume"],
+    "pilot_task": ["public_instructions", "normal_onboarding", "answer_ready", "normal_question_answer_checked", "citations_checked", "feedback_recorded", "reuse_intent_recorded"],
+    "hermes_end_to_end": ["runbook_install", "mcp_test", "two_tool_discovery", "source_setup", "sync", "cited_answer", "truthful_status", "fail_closed_security"],
+    "google_scale_readiness": ["shared_client_mode_named", "unverified_warning_visible", "advanced_byo_available", "production_consent_guidance"],
+    "x_no_maintainer_spend": ["user_owned_app", "provider_plan_named", "no_maintainer_spend"]
+  },
+  "simulated_matrix": [
+    {
+      "host_os": "darwin_arm64",
+      "host_surface": "openclaw",
+      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"],
+      "checks": ["install", "lifecycle", "dashboard_states", "dependencies", "inventory", "upgrade", "rollback", "uninstall"]
+    },
+    {
+      "host_os": "linux_x64_ubuntu_lts",
+      "host_surface": "openclaw",
+      "source_ids": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"],
+      "checks": ["install", "lifecycle", "dashboard_states", "dependencies", "inventory", "upgrade", "rollback", "uninstall"]
+    }
+  ],
+  "real_provider_matrix": [
+    { "source_id": "gmail.email", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "google_drive.docs", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "dropbox.files", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "x.bookmarks", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "telegram.messages", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "whatsapp.personal.messages", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "readwise.library", "host_os": "darwin_arm64", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "gmail.email", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "google_drive.docs", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "dropbox.files", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "x.bookmarks", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "telegram.messages", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "whatsapp.personal.messages", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" },
+    { "source_id": "readwise.library", "host_os": "linux_x64_ubuntu_lts", "host_surface": "openclaw", "script": "scripts/qualification/real-provider.ts" }
+  ],
+  "hermes_cell": {
+    "source_id": "gmail.email",
+    "host_os": "linux_x64_ubuntu_lts",
+    "host_surface": "hermes",
+    "check": "hermes_end_to_end",
+    "posture": "private-cloud-only"
+  },
+  "pilot_task": "Install through the public instructions, connect one source the participant actually uses, wait for truthful answer-ready state, ask one normal question, check the answer and citations, and report what worked, what was confusing or broken, any documented recovery or answer/security surprise, and reuse intent without recording source content, the question, the answer, or credentials.",
+  "pilot_thresholds": {
+    "setup_success_without_engineering": 0.8,
+    "participants_want_reuse": 0.6
+  },
+  "receipt_policy": {
+    "content_free": true,
+    "canonical_utc_timestamps_only": true,
+    "counts_only_failure_reasons": true,
+    "provider_content_forbidden": true,
+    "credential_contents_forbidden": true,
+    "simulated_passes_never_count_as_real_provider": true,
+    "engineering_intervention_never_counts_as_success": true,
+    "real_provider_runner_custody_required": true,
+    "real_provider_receipts_require_independent_review": true,
+    "release_inputs_are_prepared_not_qualified": true
+  },
+  "documentary_cells": [
+    { "source_id": "gmail.email", "check": "google_scale_readiness", "assertions": ["shared_client_mode_named", "unverified_warning_visible", "advanced_byo_available", "production_consent_guidance"] },
+    { "source_id": "google_drive.docs", "check": "google_scale_readiness", "assertions": ["shared_client_mode_named", "unverified_warning_visible", "advanced_byo_available", "production_consent_guidance"] },
+    { "source_id": "x.bookmarks", "check": "x_no_maintainer_spend", "assertions": ["user_owned_app", "provider_plan_named", "no_maintainer_spend"] }
+  ]
+}

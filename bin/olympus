@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if ! command -v bun >/dev/null 2>&1; then
+  printf '%s\n' 'olympus requires Bun 1.2+ to run.' >&2
+  printf '%s\n' 'Install Bun from https://bun.sh/docs/installation, then rerun the command.' >&2
+  exit 127
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec bun "$SCRIPT_DIR/../dist/cli.js" "$@"

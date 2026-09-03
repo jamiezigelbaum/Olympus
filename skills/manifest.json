@@ -1,0 +1,14 @@
+{
+  "skills": [
+    {
+      "name": "ask-argus",
+      "path": "skills/ask-argus/SKILL.md",
+      "description": "Use Olympus for private reasoning. Secure source answers use the deployment-approved pool: equal members are selected by recent health/latency unless the preset configures order; local-first explicitly orders local then Venice, local-only stays local, and private-cloud-only contains Venice. Explicit provider requests constrain the configured pool; E2EE secure-answer ids are gated pending local key handling."
+    },
+    {
+      "name": "ask-sources",
+      "path": "skills/ask-sources/SKILL.md",
+      "description": "Search Olympus source-index corpora through calling-assistant-safe source tools; email/Gmail, Dropbox, Telegram, X/Twitter bookmarks, Drive, Readwise, and unified private asks use source_answer. Chat poster/sender rankings use the content-free source_index_status aggregation before sender-scoped source_answer follow-up. Set include_secure_local for private material and omit corpus_id unless intentionally force-narrowing. Locator questions use source_index_search. Never use bash, raw databases, local files, shell fallback, or skill-file inspection for ordinary source questions. Leave analyst_provider unset for secure-pool health/latency selection unless the owner explicitly constrains the configured pool; E2EE secure-answer ids are gated pending local key handling."
+    }
+  ]
+}

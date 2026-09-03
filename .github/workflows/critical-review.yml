@@ -1,0 +1,243 @@
+name: critical review
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Optional pull request number; empty backfills every open PR
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: critical-review-${{ (github.event_name == 'pull_request_target' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number) || inputs.pr_number || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, '<!-- olympus-critical-review:v1 -->') || contains(github.event.changes.body.from, '<!-- olympus-critical-review:v1 -->')) && github.event.issue.number) || (github.event_name == 'push' && 'backfill') || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: critical review
+    if: >-
+      (github.event_name != 'issue_comment' ||
+        (github.event.issue.pull_request &&
+          (contains(github.event.comment.body, '<!-- olympus-critical-review:v1 -->') ||
+            contains(github.event.changes.body.from, '<!-- olympus-critical-review:v1 -->')))) &&
+      (github.event_name != 'pull_request_target' || github.event.action != 'edited' ||
+        github.event.changes.base != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      REQUESTED_PR: ${{ inputs.pr_number }}
+    steps:
+      - name: Publish exact-head review state from live repository data
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const defaultBranch = context.payload.repository.default_branch;
+            const errorContext = 'critical-review';
+
+            function validatePolicy(policy) {
+              if (policy.schemaVersion !== 1 || policy.statusContext !== errorContext) {
+                throw new Error('Unsupported critical-review policy.');
+              }
+              if (!/^[a-z0-9:-]+$/.test(policy.receiptMarker)) {
+                throw new Error('Invalid critical-review receipt marker.');
+              }
+              if (!Array.isArray(policy.reviewerLogins) || policy.reviewerLogins.length === 0
+                || policy.reviewerLogins.some((login) => !/^[A-Za-z0-9-]+$/.test(login))) {
+                throw new Error('Invalid critical-review reviewer allowlist.');
+              }
+            }
+
+            function isCriticalPath(path, config) {
+              if (config.criticalExact.includes(path)) return true;
+              if (config.criticalPrefixes.some((prefix) => path.startsWith(prefix))) return true;
+              if (!/^(src|scripts|config)\//.test(path)) return false;
+              const lower = path.toLowerCase();
+              return config.criticalCodeTerms.some((term) => lower.includes(term.toLowerCase()));
+            }
+
+            function receiptSha(body, marker) {
+              const lines = String(body ?? '').replaceAll('\r\n', '\n').trim().split('\n');
+              if (lines.length !== 2 || lines[0] !== `<!-- ${marker} -->`) return undefined;
+              return /^critical-review-sha: ([0-9a-f]{40})$/.exec(lines[1])?.[1];
+            }
+
+            async function jsonAt(path, ref) {
+              const response = await github.rest.repos.getContent({ owner, repo, path, ref });
+              if (Array.isArray(response.data) || response.data.type !== 'file' || !response.data.content) {
+                throw new Error(`Expected ${path} to be a repository file.`);
+              }
+              return JSON.parse(Buffer.from(response.data.content, 'base64').toString('utf8'));
+            }
+
+            async function defaultBranchSha() {
+              return (await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch })).data.commit.sha;
+            }
+
+            async function liveDecision(number, expectedEventSha) {
+              const first = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+              if (first.state !== 'open') return { skip: `PR #${number} is not open.` };
+              if (first.base.ref !== defaultBranch) return { skip: `PR #${number} does not target ${defaultBranch}.` };
+              if (expectedEventSha && first.head.sha !== expectedEventSha) {
+                return { skip: `PR #${number} event head ${expectedEventSha} is stale; live head is ${first.head.sha}.` };
+              }
+
+              const policySha = await defaultBranchSha();
+
+              const [riskConfig, reviewPolicy, fileRows] = await Promise.all([
+                jsonAt('config/change-risk.json', policySha),
+                jsonAt('config/critical-review.json', policySha),
+                github.paginate(github.rest.pulls.listFiles, {
+                  owner, repo, pull_number: number, per_page: 100,
+                }),
+              ]);
+              if (riskConfig.schemaVersion !== 2) throw new Error('Unsupported change-risk configuration.');
+              validatePolicy(reviewPolicy);
+
+              const paths = new Set();
+              for (const row of fileRows) {
+                if (row.filename) paths.add(row.filename);
+                if (row.previous_filename) paths.add(row.previous_filename);
+              }
+              const incompleteFileList = Number(first.changed_files) > fileRows.length;
+              const criticalFiles = [...paths].filter((path) => isCriticalPath(path, riskConfig)).sort();
+              const critical = incompleteFileList || criticalFiles.length > 0;
+
+              let receipt;
+              if (critical) {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: number, per_page: 100,
+                });
+                const allowed = new Set(reviewPolicy.reviewerLogins.map((login) => login.toLowerCase()));
+                receipt = comments.find((comment) => allowed.has(comment.user?.login?.toLowerCase())
+                  && receiptSha(comment.body, reviewPolicy.receiptMarker) === first.head.sha);
+              }
+
+              const [confirm, confirmPolicySha] = await Promise.all([
+                github.rest.pulls.get({ owner, repo, pull_number: number }).then((response) => response.data),
+                defaultBranchSha(),
+              ]);
+              if (confirm.state !== 'open' || confirm.base.ref !== defaultBranch
+                || confirmPolicySha !== policySha || confirm.head.sha !== first.head.sha) {
+                return { retry: true };
+              }
+              if (expectedEventSha && confirm.head.sha !== expectedEventSha) {
+                return { skip: `PR #${number} changed after its event; refusing a stale publication.` };
+              }
+
+              return {
+                number,
+                sha: confirm.head.sha,
+                context: reviewPolicy.statusContext,
+                state: critical && !receipt ? 'pending' : 'success',
+                description: incompleteFileList
+                  ? 'Critical change: file list incomplete; exact-head review required'
+                  : critical && receipt
+                    ? 'Critical change: exact-head review recorded'
+                    : critical
+                      ? 'Critical change: exact-head review required'
+                      : 'Standard change: critical review not required',
+                targetUrl: receipt?.html_url ?? confirm.html_url,
+              };
+            }
+
+            async function publish(number, expectedEventSha) {
+              let decision;
+              for (let attempt = 0; attempt < 3; attempt += 1) {
+                decision = await liveDecision(number, expectedEventSha);
+                if (!decision.retry) break;
+              }
+              if (!decision || decision.retry) throw new Error(`PR #${number} did not reach a stable live head.`);
+              if (decision.skip) {
+                core.info(decision.skip);
+                return;
+              }
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: decision.sha,
+                state: decision.state,
+                context: decision.context,
+                description: decision.description,
+                target_url: decision.targetUrl,
+              });
+
+              // Re-evaluate once after publication. This makes a concurrent
+              // comment edit/delete or head change converge instead of trusting
+              // event order; concurrency cancellation is only noise reduction.
+              const after = await liveDecision(number, expectedEventSha);
+              if (!after.skip && !after.retry && after.sha === decision.sha
+                && (after.state !== decision.state || after.targetUrl !== decision.targetUrl)) {
+                await github.rest.repos.createCommitStatus({
+                  owner,
+                  repo,
+                  sha: after.sha,
+                  state: after.state,
+                  context: after.context,
+                  description: after.description,
+                  target_url: after.targetUrl,
+                });
+              }
+            }
+
+            let targets;
+            let expectedEventSha;
+            if (context.eventName === 'pull_request_target') {
+              targets = [context.payload.pull_request.number];
+              expectedEventSha = context.payload.pull_request.head.sha;
+            } else if (context.eventName === 'issue_comment') {
+              targets = [context.payload.issue.number];
+            } else {
+              const requested = String(process.env.REQUESTED_PR ?? '').trim();
+              if (requested) {
+                if (!/^[1-9][0-9]*$/.test(requested)) throw new Error('pr_number must be a positive integer.');
+                targets = [Number(requested)];
+              } else {
+                targets = (await github.paginate(github.rest.pulls.list, {
+                  owner, repo, state: 'open', base: defaultBranch, per_page: 100,
+                })).map((pull) => pull.number);
+              }
+            }
+
+            const failures = [];
+            for (const number of [...new Set(targets)]) {
+              let errorSha;
+              try {
+                const errorSnapshot = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+                if (errorSnapshot.state === 'open' && errorSnapshot.base.ref === defaultBranch) {
+                  errorSha = errorSnapshot.head.sha;
+                }
+                await publish(number, expectedEventSha);
+              } catch (error) {
+                failures.push(`PR #${number}: ${error instanceof Error ? error.message : String(error)}`);
+                try {
+                  const live = (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+                  if (errorSha && live.state === 'open' && live.base.ref === defaultBranch
+                    && live.head.sha === errorSha && (!expectedEventSha || errorSha === expectedEventSha)) {
+                    await github.rest.repos.createCommitStatus({
+                      owner, repo, sha: live.head.sha, state: 'error', context: errorContext,
+                      description: 'Critical-review publisher could not establish live state',
+                      target_url: live.html_url,
+                    });
+                  }
+                } catch (statusError) {
+                  core.warning(`Could not publish fail-closed error status for PR #${number}: ${statusError}`);
+                }
+              }
+            }
+            if (failures.length > 0) core.setFailed(failures.join('\n'));

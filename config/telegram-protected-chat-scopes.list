@@ -1,0 +1,3 @@
+# Repo-owned Telegram protected-scope policy.
+# Saved Messages contains no third-party identity and is owner-ruled protected.
+telegram.personal:chat:me

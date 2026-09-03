@@ -1,0 +1,148 @@
+{
+  "doctrine_pack": "pkm-doctrine",
+  "version": "0.1.0",
+  "rules": [
+    {
+      "id": "calm-language",
+      "kind": "style",
+      "must": "Use plain human words without jargon, compressed noun stacks, or system-speak."
+    },
+    {
+      "id": "no-invention",
+      "kind": "content",
+      "must": "Do not invent goals, standards, deadlines, facts, freshness, or commitments; prefer a sparse page and one bounded question."
+    },
+    {
+      "id": "no-bare-asks",
+      "kind": "interaction",
+      "must": "Every surfaced question or task includes its affordance; execute authorized routine actions through the available surface instead of handing over commands."
+    },
+    {
+      "id": "task-origin-owner-commitment",
+      "kind": "safety",
+      "must": "A new executable task requires an observed commitment in owner-sourced input; third-party or clipped action items remain evidence until adopted by the owner."
+    },
+    {
+      "id": "task-placement",
+      "kind": "structure",
+      "must": "The install's configured task surface is authoritative; page-native tasks appear only when that surface is configured, and no second task system is created."
+    },
+    {
+      "id": "checkbox-state-keeping",
+      "kind": "structure",
+      "must": "When page-native tasks are configured, checkboxes track owner-world actions and observed state; assistant work is Status, and owner edits or task states are never overwritten."
+    },
+    {
+      "id": "task-verb-first",
+      "kind": "style",
+      "must": "Task text starts with an imperative verb, contains one concrete action, and names real people or things.",
+      "forbidden_task_titles": [
+        "follow up",
+        "follow-up",
+        "check in",
+        "check-in",
+        "todo",
+        "to do",
+        "task",
+        "sync",
+        "circle back"
+      ]
+    },
+    {
+      "id": "todo-indent",
+      "kind": "structure",
+      "must": "When the configured task surface is page-native markdown, checkbox lines are indented two spaces under their field label."
+    },
+    {
+      "id": "surface-constraints",
+      "kind": "structure",
+      "must": "Respect the configured PKM surface's editable subset and adapter capabilities.",
+      "surface_constraints": {
+        "reflect": {
+          "restricted_marker": "private: true",
+          "notes": [
+            "markdown tables render notes read-only; use bullets and bold labels"
+          ]
+        },
+        "obsidian": {
+          "restricted_marker": null,
+          "notes": [
+            "omit a restricted marker unless the install configures a supported mechanism"
+          ]
+        },
+        "generic-markdown": {
+          "restricted_marker": null,
+          "notes": [
+            "omit unsupported markers; absence of a marker never authorizes secure content"
+          ]
+        }
+      }
+    },
+    {
+      "id": "restricted-by-classification",
+      "kind": "trust",
+      "must": "Per-item content classification determines whether protection is required; source family never does. The active surface maps the abstract restricted state to its supported mechanism."
+    },
+    {
+      "id": "owner-marker",
+      "kind": "safety",
+      "must": "Mutate only pages identified as assistant-managed by the configured surface; never clobber owner edits or task state."
+    },
+    {
+      "id": "waiting-says-role",
+      "kind": "content",
+      "must": "Every Waiting item states whether the owner needs to do anything."
+    },
+    {
+      "id": "page-shape-project",
+      "kind": "structure",
+      "top": [
+        "one-sentence summary",
+        "current status sentences",
+        "optional single bold Next"
+      ],
+      "field_labels": [
+        "Status",
+        "To Do",
+        "Waiting",
+        "Later"
+      ],
+      "field_style": "italic",
+      "subsection_style": "bold only when it has its own fields",
+      "sections": "H2 per real project part, named in owner language",
+      "bottom": "horizontal rule then Context heading with bullets"
+    },
+    {
+      "id": "page-shape-area",
+      "kind": "structure",
+      "must": "An area expresses stewardship and evidenced standards without a finish line or pseudo-project scaffolding."
+    },
+    {
+      "id": "task-horizon",
+      "kind": "content",
+      "must": "Keep fine-grained execution near-term; describe later work as verifiable phases or outcomes, not speculative tasks or dates."
+    },
+    {
+      "id": "lazy-materialization",
+      "kind": "structure",
+      "must": "Do not create empty pages, sections, or placeholder scaffolding; materialize only when there is something useful to say."
+    }
+  ],
+  "allowed_field_labels": [
+    "Status",
+    "To Do",
+    "Waiting",
+    "Later"
+  ],
+  "forbidden_markers": [
+    "| --- |",
+    "email thread",
+    "tracked thread",
+    "sync marker"
+  ],
+  "owner_marker_key": "owner",
+  "consumers": [
+    "SKILL.md and situation slices",
+    "deterministic doctrine evals"
+  ]
+}

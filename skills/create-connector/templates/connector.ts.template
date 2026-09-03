@@ -1,0 +1,521 @@
+// TEMPLATE — copy to src/workers/<source>/connector.ts and replace every
+// <Source> / <SOURCE> / <source> / <provider> token and every TODO.
+// Not compiled or tested in place; the .template suffix keeps it out of
+// tsconfig's include list and out of `bun test`.
+//
+// Contract 1 (SourceConnector) adapter for <Source>. THIN by design: provider
+// auth, cursored listing, normalization to RawItem, and trust classification.
+// Nothing else. Extraction, chunking, indexing, retrieval, and reasoning are
+// the shared spine's job (src/workers/connector-store/, src/core/).
+//
+// Shape lifted from src/workers/readwise/connector.ts; read that file and
+// src/workers/google-connectors/drive.ts before filling this in.
+
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import type {
+  RawItem,
+  SourceConnector,
+  SourceConnectorListOptions,
+  SourceConnectorListPage,
+} from '../../core/contracts.ts';
+import { buildSourceSensitivity, type SourceSensitivity } from '../../core/source-index/types.ts';
+import {
+  createEnvCredentialBroker,
+  requireBearerTokenCredentialSession,
+  type CredentialBroker,
+} from '../credential-broker/index.ts';
+import { LocalConnectorStore } from '../connector-store/index.ts';
+// TODO: your provider API client (see src/workers/readwise/api.ts for the shape:
+// bounded timeouts, typed <Source>ApiError carrying `status`, no retries that
+// bypass the budget).
+import { <Source>ApiClient, type <Source>ApiClientOptions } from './api.ts';
+import { <SOURCE>_CORPUS_ID } from './corpus-adapter.ts';
+
+export const <SOURCE>_CONNECTOR_ID = '<source>_live';
+export const <SOURCE>_PROVIDER = '<provider>';
+export const <SOURCE>_DAILY_REQUEST_BUDGET_ENV =
+  'OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET';
+export const <SOURCE>_DAILY_REQUEST_BUDGET_STATE_PATH_ENV =
+  'OLYMPUS_SOURCE_INDEX_<SOURCE>_DAILY_API_REQUEST_BUDGET_STATE_PATH';
+// TODO: set from the provider's published quota, not from a guess. Document
+// the source of the number here.
+export const DEFAULT_<SOURCE>_DAILY_REQUEST_BUDGET = 1_000;
+export const DEFAULT_<SOURCE>_CONNECTOR_PAGE_SIZE = 100;
+
+const CURSOR_PREFIX = '<src>1:'; // TODO: short, versioned, source-unique.
+const MAX_CURSOR_LENGTH = 4_096;
+const MAX_ACCOUNT_LENGTH = 256;
+const <SOURCE>_REQUEST_BUDGET_STATE_VERSION = 1;
+
+// --- Daily request budget ----------------------------------------------------
+// A first 429 must not become an errorBackoffMs fail-loop that spends the whole
+// day retrying. If a shared budget module exists by the time you read this,
+// import it instead of copying: see the open question in the skill.
+
+export interface <Source>RequestBudgetStatus {
+  utcDay: string;
+  requests: number;
+  dailyRequestBudget: number;
+}
+
+export interface <Source>DailyRequestBudgetOptions {
+  dailyRequestBudget: number;
+  /**
+   * Source-owned durable counter file. Omitting it keeps the day counter
+   * process-local; the runtime always supplies one so a restart cannot hand the
+   * provider a fresh budget mid-day. Deliberately NOT the connector-store
+   * sqlite: that file participates in qualification fingerprints.
+   */
+  statePath?: string;
+  now?: () => Date;
+}
+
+export class <Source>RequestBudgetError extends Error {
+  readonly retryAt: string;
+
+  constructor(retryAt: string) {
+    super('<Source> request deferred by daily_api_request_guard.');
+    this.name = '<Source>RequestBudgetError';
+    this.retryAt = retryAt;
+  }
+}
+
+export class <Source>DailyRequestBudget {
+  private utcDay = '';
+  private requests = 0;
+  private readonly dailyRequestBudget: number;
+  private readonly statePath: string | undefined;
+  private readonly now: () => Date;
+
+  constructor(options: <Source>DailyRequestBudgetOptions) {
+    this.dailyRequestBudget = positiveInteger(
+      options.dailyRequestBudget,
+      '<Source> daily API request budget',
+    );
+    this.now = options.now ?? (() => new Date());
+    const statePath = options.statePath?.trim();
+    if (statePath) {
+      this.statePath = statePath;
+      const restored = readRequestBudgetState(statePath);
+      if (restored) {
+        this.utcDay = restored.utcDay;
+        this.requests = restored.requests;
+      }
+    }
+  }
+
+  reserve(): void {
+    const now = validDate(this.now());
+    const utcDay = now.toISOString().slice(0, 10);
+    if (utcDay !== this.utcDay) {
+      this.utcDay = utcDay;
+      this.requests = 0;
+    }
+    if (this.requests >= this.dailyRequestBudget) {
+      throw new <Source>RequestBudgetError(nextUtcDay(now));
+    }
+    // Count first, then persist. A failed write is a loud host problem, and the
+    // in-memory counter it leaves behind is the conservative one.
+    this.requests += 1;
+    if (this.statePath) {
+      writeRequestBudgetState(this.statePath, { utcDay: this.utcDay, requests: this.requests });
+    }
+  }
+
+  status(): <Source>RequestBudgetStatus {
+    const now = validDate(this.now());
+    const utcDay = now.toISOString().slice(0, 10);
+    return {
+      utcDay,
+      requests: utcDay === this.utcDay ? this.requests : 0,
+      dailyRequestBudget: this.dailyRequestBudget,
+    };
+  }
+}
+
+/**
+ * The single runtime construction seam. Both the connector and the sync handler
+ * REQUIRE an injected budget so one process can never quietly run two
+ * independent day counters.
+ */
+export function create<Source>DailyRequestBudget(options: {
+  env?: Record<string, string | undefined>;
+  statePath?: string;
+  now?: () => Date;
+} = {}): <Source>DailyRequestBudget {
+  const env = options.env ?? process.env;
+  return new <Source>DailyRequestBudget({
+    dailyRequestBudget: <source>DailyRequestBudgetFromEnv(env),
+    statePath: options.statePath?.trim() || default<Source>RequestBudgetStatePath(env),
+    ...(options.now ? { now: options.now } : {}),
+  });
+}
+
+export function <source>DailyRequestBudgetFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const value = env[<SOURCE>_DAILY_REQUEST_BUDGET_ENV];
+  const parsed = value?.trim() ? Number(value) : DEFAULT_<SOURCE>_DAILY_REQUEST_BUDGET;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${<SOURCE>_DAILY_REQUEST_BUDGET_ENV} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+export function default<Source>RequestBudgetStatePath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const configured = env[<SOURCE>_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
+  if (configured) return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', '<source>-daily-request-budget.json');
+}
+
+function readRequestBudgetState(statePath: string): { utcDay: string; requests: number } | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(statePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const parsed = JSON.parse(raw) as { version?: unknown; utcDay?: unknown; requests?: unknown };
+  // Writes are atomic (temp file + rename), so a malformed file is external
+  // damage, not a torn write. Refuse it instead of silently reissuing a day of
+  // provider budget that may already be spent.
+  if (
+    parsed.version !== <SOURCE>_REQUEST_BUDGET_STATE_VERSION
+    || typeof parsed.utcDay !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.utcDay)
+    || !Number.isSafeInteger(parsed.requests)
+    || (parsed.requests as number) < 0
+  ) {
+    throw new TypeError(`<Source> daily API request budget state is invalid: ${statePath}`);
+  }
+  return { utcDay: parsed.utcDay, requests: parsed.requests as number };
+}
+
+function writeRequestBudgetState(statePath: string, state: { utcDay: string; requests: number }): void {
+  mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+  const tempPath = `${statePath}.tmp-${process.pid}`;
+  try {
+    writeFileSync(
+      tempPath,
+      `${JSON.stringify({ version: <SOURCE>_REQUEST_BUDGET_STATE_VERSION, ...state })}\n`,
+      { mode: 0o600 },
+    );
+    renameSync(tempPath, statePath);
+  } catch (error) {
+    rmSync(tempPath, { force: true });
+    throw error;
+  }
+  chmodSync(statePath, 0o600);
+}
+
+// --- Contract 1 --------------------------------------------------------------
+
+export interface <Source>SourceConnector extends SourceConnector {
+  requestBudgetStatus(): <Source>RequestBudgetStatus;
+}
+
+export interface <Source>SourceConnectorOptions {
+  account?: string;
+  credentialBroker?: CredentialBroker;
+  credentialHandle?: string;
+  fetch?: <Source>ApiClientOptions['fetch'];
+  baseUrl?: string;
+  timeoutMs?: number;
+  pageSize?: number;
+  /** Required: the one runtime day counter, never a per-connector fallback. */
+  requestBudget: <Source>DailyRequestBudget;
+  env?: Record<string, string | undefined>;
+  now?: () => Date;
+}
+
+/**
+ * Opaque resume state. Keep it small and provider-shaped; it is scheduler-
+ * private and must never appear in a receipt, warning, or log line.
+ */
+interface <Source>Cursor {
+  // TODO: e.g. { pageToken?: string } or { watermark?: string; highWater?: string; pageToken?: string }.
+  pageToken?: string;
+}
+
+export function create<Source>SourceConnector(
+  options: <Source>SourceConnectorOptions,
+): <Source>SourceConnector {
+  const env = options.env ?? process.env;
+  const account = requireAccount(options.account?.trim() || 'personal');
+  const credentialHandle = options.credentialHandle?.trim()
+    || env.OLYMPUS_SOURCE_INDEX_<SOURCE>_CREDENTIAL_HANDLE?.trim()
+    || '<provider>.personal';
+  const broker = options.credentialBroker ?? createEnvCredentialBroker({ env });
+  const pageSize = boundedPageSize(options.pageSize);
+  const now = options.now ?? (() => new Date());
+  const requestBudget = options.requestBudget;
+  // In-run listing cache. fetchItem resolves from here; it is NEVER a second
+  // provider round trip, and it must not re-decide a cap listItems already
+  // applied (that is what made the Drive content cap decorative).
+  const byLocalId = new Map<string, RawItem>();
+  let client: <Source>ApiClient | undefined;
+
+  const connector: <Source>SourceConnector = {
+    id: <SOURCE>_CONNECTOR_ID,
+    family: '<family>', // TODO: a member of SOURCE_FAMILIES, or an `x-` extension id.
+
+    async authenticate(): Promise<void> {
+      if (client) return;
+      const session = requireBearerTokenCredentialSession(await broker.issueSession({
+        handle: credentialHandle,
+        provider: <SOURCE>_PROVIDER,
+        capability: '<provider>.sync',
+        trustDomain: 'internal', // TODO: match the store's trust domain.
+        purpose: 'TODO: one sentence, owner-legible, no secrets.',
+      }), credentialHandle);
+      // EVERY provider request passes the guard first.
+      const guardedFetch: NonNullable<<Source>ApiClientOptions['fetch']> = async (url, init) => {
+        requestBudget.reserve();
+        return (options.fetch ?? fetch)(url, init);
+      };
+      client = new <Source>ApiClient({
+        token: session.token,
+        fetch: guardedFetch,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      });
+    },
+
+    async *listItems(
+      listOptions: SourceConnectorListOptions = {},
+    ): AsyncIterable<SourceConnectorListPage> {
+      await connector.authenticate();
+      const limit = normalizeOptionalLimit(listOptions.limit);
+      let remaining = limit ?? Number.POSITIVE_INFINITY;
+      let state = decodeCursor(listOptions.cursor);
+      const requestedProviderPages = new Set<string>();
+
+      while (remaining > 0) {
+        assertNewProviderPage(requestedProviderPages, state);
+        const page = await client!.list({
+          ...(state.pageToken ? { pageToken: state.pageToken } : {}),
+          limit: Math.min(pageSize, remaining),
+        });
+        const fetchedAt = validDate(now()).toISOString();
+        const all = dedupeItems(page.results.flatMap((raw) => {
+          const item = rawItemFrom<Source>(raw, account, fetchedAt);
+          return item ? [item] : [];
+        }));
+        const items = all.slice(0, remaining);
+        for (const item of items) byLocalId.set(item.identity.localItemId, item);
+        remaining -= items.length;
+
+        // TRAVERSAL IS COMPLETE only when the provider has no further page AND
+        // the bound did not truncate this one. Calling a bounded slice `done`
+        // tells the spine a partial window was a full snapshot.
+        const pageTruncated = items.length < all.length;
+        const done = !page.nextPageToken && !pageTruncated;
+        state = { ...(page.nextPageToken ? { pageToken: page.nextPageToken } : {}) };
+        yield {
+          items,
+          ...(done ? {} : { nextCursor: encodeCursor(state) }),
+          done,
+        };
+        if (done || !page.nextPageToken || remaining <= 0) return;
+      }
+    },
+
+    async fetchItem(localItemId: string): Promise<RawItem> {
+      const item = byLocalId.get(localItemId);
+      if (!item) throw new Error('<Source> connector cannot fetch an unknown item.');
+      return item;
+    },
+
+    classify(_item: RawItem): SourceSensitivity {
+      // The ONE place trust policy may be source-aware. Nothing downstream may
+      // classify below what this returns. TODO: if this is per-item rather than
+      // per-source, branch on normalized metadata only — never on raw content.
+      return buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' });
+    },
+
+    requestBudgetStatus: () => requestBudget.status(),
+  };
+  return connector;
+}
+
+// --- Store construction ------------------------------------------------------
+
+export function create<Source>ConnectorStore(
+  dbPath = default<Source>ConnectorStoreDbPath(),
+): LocalConnectorStore {
+  return new LocalConnectorStore({
+    dbPath,
+    corpusId: <SOURCE>_CORPUS_ID,
+    family: '<family>',
+    trustDomain: 'internal', // TODO: must match classify()'s domain.
+  });
+}
+
+export function default<Source>ConnectorStoreDbPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const configured = env.OLYMPUS_SOURCE_INDEX_<SOURCE>_CONNECTOR_STORE_DB_PATH?.trim();
+  if (configured) return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', '<source>-connector-store.sqlite');
+}
+
+// --- Normalization -----------------------------------------------------------
+
+function rawItemFrom<Source>(
+  raw: unknown, // TODO: your provider's item type.
+  account: string,
+  fetchedAt: string,
+): RawItem | undefined {
+  // TODO: pull provider id, title, author/sender, tags, locator, timestamps,
+  // and text. Return undefined for an item with no stable provider id rather
+  // than inventing one.
+  const providerItemId = 'TODO';
+  const title = 'TODO';
+  const text = '';
+  const conversationScope = `TODO:${providerItemId}`; // e.g. `document:<id>`; omit if flat.
+
+  return {
+    identity: {
+      family: '<family>',
+      provider: <SOURCE>_PROVIDER,
+      accountScope: account,
+      providerItemId,
+      // The store's uniqueness key is
+      // (provider, account_scope, normalized_conversation, provider_item_id).
+      providerThreadId: conversationScope,
+      providerConversationId: conversationScope,
+      localItemId: `${account}:${providerItemId}`,
+      // TODO: the provider's updated-at, when it has one. This is the change signal.
+      // sourceVersion: updatedAt,
+    },
+    mimeType: 'text/plain; charset=utf-8',
+    // metadata_only when there is no text — never a fabricated empty string.
+    content: text ? { kind: 'text', text } : { kind: 'metadata_only' },
+    metadata: Object.freeze({
+      // Keys the shared store actually reads. Everything else is carried but
+      // unindexed; do not invent competing spellings.
+      title,
+      // locatorUri / pathDisplay / url  -> the citation locator
+      // authoredAt / sentAt / clientModifiedAt -> authored time
+      // updatedAt / serverModifiedAt -> updated time
+      // senderId, senderLabel, senderIsOwner -> sender identity
+      // aliases, identityAliases, searchText -> retrieval surface
+      // deleted: true -> tombstone signal
+      // reactions -> validated aggregate; omit to preserve, [] to clear
+      contentHash: createHash('sha256').update(JSON.stringify({ text, title })).digest('hex'),
+    }),
+    fetchedAt,
+  };
+}
+
+// --- Cursor ------------------------------------------------------------------
+
+/**
+ * Cheap local validation of a resume cursor. A checkpoint carried across days
+ * or store generations must be provable before it is spent on provider I/O; an
+ * unparseable one falls back to a fresh traversal instead of failing a run.
+ */
+export function is<Source>ConnectorCursor(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    decodeCursor(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function encodeCursor(cursor: <Source>Cursor): string {
+  return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString('base64url')}`;
+}
+
+function decodeCursor(value: string | undefined): <Source>Cursor {
+  if (!value) return {};
+  if (value.length > MAX_CURSOR_LENGTH || !value.startsWith(CURSOR_PREFIX)) {
+    throw new TypeError('<Source> connector cursor is invalid.');
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(value.slice(CURSOR_PREFIX.length), 'base64url').toString('utf8'),
+    ) as { pageToken?: unknown };
+    if (
+      parsed.pageToken !== undefined
+      && (
+        typeof parsed.pageToken !== 'string'
+        || !parsed.pageToken.trim()
+        || parsed.pageToken.length > MAX_CURSOR_LENGTH
+      )
+    ) {
+      throw new Error('invalid');
+    }
+    return { ...(typeof parsed.pageToken === 'string' ? { pageToken: parsed.pageToken.trim() } : {}) };
+  } catch {
+    throw new TypeError('<Source> connector cursor is invalid.');
+  }
+}
+
+/** A provider that repeats a page token must not become an infinite loop. */
+function assertNewProviderPage(seen: Set<string>, cursor: <Source>Cursor): void {
+  const key = cursor.pageToken ?? '';
+  if (seen.has(key)) throw new Error('<Source> connector pagination cursor repeated.');
+  seen.add(key);
+}
+
+// --- Bounded helpers ---------------------------------------------------------
+
+function dedupeItems(items: RawItem[]): RawItem[] {
+  return [...new Map(items.map((item) => [
+    `${item.identity.providerConversationId ?? ''}\0${item.identity.providerItemId}`,
+    item,
+  ])).values()];
+}
+
+function boundedPageSize(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_<SOURCE>_CONNECTOR_PAGE_SIZE;
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw new TypeError('<Source> connector page size must be an integer from 1 to 100.');
+  }
+  return value;
+}
+
+function normalizeOptionalLimit(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  return positiveInteger(value, '<Source> connector list limit');
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive integer.`);
+  }
+  return value;
+}
+
+function requireAccount(value: string): string {
+  if (!value || value.length > MAX_ACCOUNT_LENGTH) {
+    throw new TypeError('<Source> account must be bounded and non-empty.');
+  }
+  return value;
+}
+
+function validDate(value: Date): Date {
+  if (!Number.isFinite(value.getTime())) {
+    throw new TypeError('<Source> connector timestamp must be valid.');
+  }
+  return value;
+}
+
+function nextUtcDay(date: Date): string {
+  return new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate() + 1,
+  )).toISOString();
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "contracts": "SourceConnector+EvidencePack+Analyst",
+  "fingerprintScope": "reachable_types_v2",
+  "history": [
+    {
+      "version": "1.0.0",
+      "fingerprint": "sha256:5445e704de2508c6aed6fec230da9e4d0f529d69260bf9d369d66fc6ff10d175",
+      "recordedAt": "2026-08-29",
+      "compatibility": "Initial versioned baseline; preserves the previously frozen interface shapes.",
+      "migrationReceipt": "Not required: the versioning bootstrap has no runtime or data-shape change.",
+      "evalReceipt": "docs/V0_4_RELEASE.md records the exact-head Slice 2 7/7 protected held-out receipt for the unchanged shapes.",
+      "reviewReceipt": "Owner-ratified engineering-process reset, 2026-08-29."
+    }
+  ]
+}

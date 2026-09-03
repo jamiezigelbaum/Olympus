@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "source": "dropbox.personal",
+  "corpusId": "secure_local.dropbox.files",
+  "roots": [
+    {
+      "path": "/",
+      "approved_scope_key": "dropbox.personal:/",
+      "default_action": "full_extract"
+    }
+  ],
+  "rules": [
+    {
+      "match": {
+        "mime_type_prefixes": [
+          "image/",
+          "video/"
+        ],
+        "extensions": [
+          "3gp",
+          "avi",
+          "bmp",
+          "gif",
+          "heic",
+          "heif",
+          "jpeg",
+          "jpg",
+          "m4v",
+          "mov",
+          "mp4",
+          "mpeg",
+          "mpg",
+          "png",
+          "tif",
+          "tiff",
+          "webm",
+          "webp"
+        ]
+      },
+      "action": "metadata_only",
+      "reason": "media_default_metadata_only"
+    },
+    {
+      "match": {
+        "extensions": [
+          "azw",
+          "azw3",
+          "azw4",
+          "cba",
+          "cb7",
+          "cbr",
+          "cbt",
+          "cbz",
+          "djv",
+          "djvu",
+          "epub",
+          "fb2",
+          "ibooks",
+          "lit",
+          "mobi",
+          "opf"
+        ],
+        "path_contains": [
+          "audiobooks",
+          "book library",
+          "books",
+          "calibre library",
+          "e-books",
+          "ebooks",
+          "kindle"
+        ]
+      },
+      "action": "metadata_only",
+      "reason": "book_library_metadata_only"
+    },
+    {
+      "match": {
+        "path_prefixes": [
+          "/Archive"
+        ]
+      },
+      "action": "metadata_only",
+      "reason": "archive_metadata_only"
+    }
+  ],
+  "sync": {
+    "cadence": "continuous",
+    "max_entries_per_pass": 25000,
+    "max_pages_per_pass": 1000
+  },
+  "content": {
+    "default_extractor_kind": "local_text",
+    "default_extractor_version": "2026-05-22",
+    "plan_limit": 25,
+    "batch_size": 2
+  }
+}

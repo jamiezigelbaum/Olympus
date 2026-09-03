@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lbKQjrGX3Hhpy1FIHV5iREDSYuzAW3127/WdHR6nvQw='; style-src 'sha256-EVDkhkGWm+bTfmH/ENGYVBvniKn30UYRl04IX3y3WXg='; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Olympus &mdash; returning you to your dashboard</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fbfbfa;
+  color: #1c1b19;
+  font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+main { max-width: 34rem; padding: 2rem 1.5rem; }
+h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
+p { margin: 0 0 0.75rem; }
+.destination {
+  font: 600 1.0625rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+  padding: 0.75rem 0.875rem;
+  border: 1px solid #d9d5cc;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+.detail { color: #5c5952; font-size: 0.9375rem; }
+.actions { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-top: 1.25rem; }
+a { color: #1a5fb4; }
+a.button {
+  display: inline-block;
+  padding: 0.5rem 1.125rem;
+  border-radius: 0.5rem;
+  background: #1a5fb4;
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+button {
+  font: inherit;
+  color: #5c5952;
+  background: none;
+  border: 0;
+  padding: 0.5rem 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+[hidden] { display: none !important; }
+@media (prefers-color-scheme: dark) {
+  body { background: #161513; color: #eceae5; }
+  .detail, button { color: #a8a49b; }
+  .destination { background: #1f1e1b; border-color: #3a3833; }
+  a { color: #86b6f0; }
+  a.button { background: #2a6bc4; color: #fff; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1 id="status">Returning you to your Olympus dashboard&hellip;</h1>
+<p class="destination" id="destination" hidden></p>
+<p class="detail" id="detail">This page hands the sign-in result back to the Olympus dashboard running on your own machine. It never sees your account, and it stores nothing.</p>
+<p class="actions"><a id="continue" href="#" hidden>Continue to your dashboard</a><button id="cancel" type="button" hidden>This isn&rsquo;t my Olympus</button></p>
+<noscript><p class="detail">JavaScript is required to return you to your dashboard. Close this tab and start the connection again from a browser with JavaScript enabled.</p></noscript>
+</main>
+<script>
+/*
+ * Olympus OAuth callback relay.
+ *
+ * One fixed redirect_uri can be registered with Google and Dropbox, while every
+ * user's dashboard lives at a different origin (localhost, a VPS, a home
+ * server). The provider redirects here; this page reads the origin out of the
+ * PUBLIC half of the `state` the user's own worker minted, and bounces the
+ * browser there.
+ *
+ * This page holds no key. It cannot verify the state's signature and does not
+ * pretend to: the worker holds the HMAC key and is the only authority that
+ * accepts a flow it started.
+ *
+ * KNOW WHAT THIS COSTS. Turning one registered redirect_uri into "any origin
+ * the state names" means an attacker can run the publisher's own OAuth app
+ * against a victim: craft an authorize URL with the publisher client_id, the
+ * ATTACKER's PKCE challenge, and a forged state naming the attacker's origin;
+ * the victim sees a genuine Olympus consent screen; the code lands with the
+ * attacker, who exchanges it with the verifier they kept. No Olympus worker is
+ * involved and PKCE does not help. The residual risk, its owner acceptance, and
+ * the compensating controls are recorded in docs/ops/OAUTH_RELAY.md.
+ *
+ * The defence on this page is the interstitial: a destination that is not
+ * loopback is NEVER auto-followed. The person is shown the exact origin and has
+ * to choose it. Loopback destinations auto-continue because the code can only
+ * reach software already running on that person's own machine.
+ */
+(function (globalScope) {
+  'use strict';
+
+  var STATE_VERSION = 1;
+  var MAX_STATE_LENGTH = 2048;
+  var MAX_ORIGIN_LENGTH = 255;
+  var MAX_PARAMETER_LENGTH = 4096;
+  var ALLOWED_SOURCES = ['gmail', 'google-drive', 'dropbox', 'x'];
+  var PASSTHROUGH_KEYS = ['code', 'state', 'error', 'error_description'];
+
+  var BASE64URL = /^[A-Za-z0-9_-]+$/;
+  var NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+  var ORIGIN = /^(https|http):\/\/(\[[0-9a-f:]{2,45}\]|[a-z0-9.-]{1,200})(?::([1-9][0-9]{0,4}))?$/;
+  var PUBLIC_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/;
+  var LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '[::1]'];
+
+  var REFUSALS = {
+    missing_state: 'The sign-in response did not carry the state value Olympus issued.',
+    state_too_large: 'The sign-in response carried an oversized state value.',
+    invalid_state: 'The state value in this sign-in response is not a state Olympus issues.',
+    invalid_origin: 'The state names a dashboard address this relay will not redirect to.',
+    invalid_source: 'The state names a source Olympus does not connect through this relay.',
+    missing_result: 'The sign-in response carried neither an authorization code nor an error.',
+    parameter_too_large: 'The sign-in response carried an oversized parameter.',
+    framed: 'This page was opened inside another site\u2019s frame, which Olympus never does.'
+  };
+
+  function base64UrlDecode(value) {
+    var normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    while (normalized.length % 4 !== 0) normalized += '=';
+    var binary = atob(normalized);
+    var bytes = new Uint8Array(binary.length);
+    for (var index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  /*
+   * The public half only. `state` is `base64url(payload) "." base64url(hmac)`,
+   * and the signature is the worker's business: this page reads segment one and
+   * never pretends the absence of a key is a verification.
+   */
+  function decodeStatePayload(state) {
+    if (typeof state !== 'string' || state.length === 0 || state.length > MAX_STATE_LENGTH) return null;
+    var parts = state.split('.');
+    if (parts.length !== 2) return null;
+    if (!BASE64URL.test(parts[0]) || !BASE64URL.test(parts[1])) return null;
+    var payload;
+    try {
+      payload = JSON.parse(base64UrlDecode(parts[0]));
+    } catch (error) {
+      return null;
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    if (payload.v !== STATE_VERSION) return null;
+    if (typeof payload.origin !== 'string' || typeof payload.source !== 'string') return null;
+    if (typeof payload.nonce !== 'string' || !NONCE.test(payload.nonce)) return null;
+    if (typeof payload.iat !== 'number' || !isFinite(payload.iat)) return null;
+    return payload;
+  }
+
+  /*
+   * A serialized origin and nothing else: no userinfo, no path, no query, no
+   * fragment, no default port. `http` is loopback-only; everything else must be
+   * `https` on a dotted DNS name or a loopback address. The regex decides the
+   * shape and the URL parser confirms the browser reads it the same way.
+   */
+  function parseOrigin(value) {
+    if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ORIGIN_LENGTH) return null;
+    var match = ORIGIN.exec(value);
+    if (!match) return null;
+    var scheme = match[1];
+    var host = match[2];
+    var port = match[3];
+    if (port !== undefined && Number(port) > 65535) return null;
+    var loopback = LOOPBACK_HOSTS.indexOf(host) !== -1;
+    if (scheme === 'http' && !loopback) return null;
+    if (!loopback && !PUBLIC_HOST.test(host)) return null;
+    var url;
+    try {
+      url = new URL(value);
+    } catch (error) {
+      return null;
+    }
+    if (url.origin !== value) return null;
+    if (url.username !== '' || url.password !== '') return null;
+    if (url.pathname !== '/' || url.search !== '' || url.hash !== '') return null;
+    return { origin: url.origin, host: host, port: port === undefined ? '' : port, loopback: loopback };
+  }
+
+  function isAllowedSource(source) {
+    return ALLOWED_SOURCES.indexOf(source) !== -1;
+  }
+
+  function refuse(reason) {
+    return { ok: false, reason: reason, message: REFUSALS[reason] };
+  }
+
+  function planRelay(query) {
+    var params = new URLSearchParams(typeof query === 'string' ? query : '');
+    var state = params.get('state');
+    if (state === null || state === '') return refuse('missing_state');
+    if (state.length > MAX_STATE_LENGTH) return refuse('state_too_large');
+    var payload = decodeStatePayload(state);
+    if (payload === null) return refuse('invalid_state');
+    var origin = parseOrigin(payload.origin);
+    if (origin === null) return refuse('invalid_origin');
+    if (!isAllowedSource(payload.source)) return refuse('invalid_source');
+    if (!params.get('code') && !params.get('error')) return refuse('missing_result');
+
+    var forwarded = new URLSearchParams();
+    for (var index = 0; index < PASSTHROUGH_KEYS.length; index += 1) {
+      var key = PASSTHROUGH_KEYS[index];
+      var value = params.get(key);
+      if (value === null || value === '') continue;
+      if (value.length > MAX_PARAMETER_LENGTH) return refuse('parameter_too_large');
+      forwarded.set(key, value);
+    }
+
+    return {
+      ok: true,
+      origin: origin.origin,
+      host: origin.host,
+      source: payload.source,
+      loopback: origin.loopback,
+      url: origin.origin + '/oauth/callback/' + payload.source + '?' + forwarded.toString()
+    };
+  }
+
+  function boot(doc, loc, win) {
+    var status = doc.getElementById('status');
+    var detail = doc.getElementById('detail');
+    var destination = doc.getElementById('destination');
+    var link = doc.getElementById('continue');
+    var cancel = doc.getElementById('cancel');
+
+    function render(headline, explanation) {
+      status.textContent = headline;
+      detail.textContent = explanation;
+    }
+
+    function reject(plan) {
+      render(
+        'This sign-in could not be returned.',
+        plan.message + ' Nothing was sent anywhere. Close this tab and start the connection again from your Olympus dashboard.'
+      );
+      return plan;
+    }
+
+    /*
+     * Never run inside anyone else's frame. `relay/_headers` sends
+     * frame-ancestors and X-Frame-Options, but headers are the host's promise,
+     * not the page's: a mirror, a local copy, or a host that ignores `_headers`
+     * would leave a hostile parent free to embed this page, hide the
+     * interstitial behind its own chrome, and click Continue for the user.
+     */
+    var frame = win || globalScope;
+    if (frame.top !== frame.self) return reject(refuse('framed'));
+
+    var plan = planRelay(loc.search);
+    if (!plan.ok) return reject(plan);
+
+    link.href = plan.url;
+    link.hidden = false;
+
+    /*
+     * Loopback can only reach software on the person's own machine, so there is
+     * nobody else to send the code to and no decision worth interrupting for.
+     */
+    if (plan.loopback) {
+      loc.replace(plan.url);
+      return plan;
+    }
+
+    /*
+     * Everything else stops here. An attacker who forges a state can choose the
+     * destination, so the destination is shown and the person chooses it.
+     */
+    destination.textContent = plan.origin;
+    destination.hidden = false;
+    link.textContent = 'Continue';
+    link.className = 'button';
+    cancel.hidden = false;
+    render(
+      'Olympus is returning you to ' + plan.host,
+      'Continue only if that is your own Olympus dashboard. If you do not recognise it, cancel: your sign-in has not been sent anywhere yet, and it will expire on its own.'
+    );
+    cancel.addEventListener('click', function () {
+      link.hidden = true;
+      cancel.hidden = true;
+      destination.hidden = true;
+      render(
+        'Nothing was sent.',
+        'Your sign-in was not handed to ' + plan.origin + '. Close this tab. If you did not start this from your own Olympus dashboard, someone else may have.'
+      );
+    });
+    return plan;
+  }
+
+  globalScope.OlympusOAuthRelay = {
+    STATE_VERSION: STATE_VERSION,
+    ALLOWED_SOURCES: ALLOWED_SOURCES,
+    PASSTHROUGH_KEYS: PASSTHROUGH_KEYS,
+    MAX_STATE_LENGTH: MAX_STATE_LENGTH,
+    decodeStatePayload: decodeStatePayload,
+    parseOrigin: parseOrigin,
+    isAllowedSource: isAllowedSource,
+    planRelay: planRelay,
+    boot: boot
+  };
+
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') boot(document, window.location, window);
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+</body>
+</html>

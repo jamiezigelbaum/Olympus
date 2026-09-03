@@ -1,0 +1,58 @@
+{
+  "argus": {
+    "defaultLane": "fast",
+    "defaultProfile": "default_chat",
+    "transport": "direct",
+    "requestTimeoutSeconds": 180,
+    "lanes": {
+      "fast": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "model": "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ"
+      },
+      "deep": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "model": "mlx-community/Qwen3.6-27B-4bit"
+      }
+    },
+    "modelProfiles": {
+      "default_chat": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "model": "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+        "purpose": "chat"
+      },
+      "source_answer": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "model": "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+        "purpose": "text_reasoning"
+      },
+      "vlm_document": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "model": "deepseek-ocr:latest",
+        "purpose": "vision"
+      },
+      "vlm_qwen36_27b": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "model": "deepseek-ocr:latest",
+        "purpose": "vision"
+      },
+      "vlm_fast": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "model": "deepseek-ocr:latest",
+        "purpose": "vision"
+      },
+      "vlm_qwen36_35b": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "model": "deepseek-ocr:latest",
+        "purpose": "vision"
+      }
+    }
+  },
+  "email": {
+    "enabled": false,
+    "baseUrl": "http://127.0.0.1:8010/v1",
+    "requestTimeoutSeconds": 180
+  },
+  "sourceIndex": {
+    "enabled": true
+  }
+}

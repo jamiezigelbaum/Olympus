@@ -1,0 +1,58 @@
+{
+  "kind": "olympus_private_release_live_attestation",
+  "schema_version": 1,
+  "execution_id": "804cb1b598a9da800db3cdbc364b056722937b1751fe02cbbe7e25d1d0688aaa",
+  "private_ops_commit": "13ae3694953b252b6805ef2c00f08585af78d433",
+  "private_ops_ci": "https://github.com/jamiezigelbaum/olympus-ops/actions/runs/33334480340",
+  "proof_receipt_sha256": "a2ad099f7b3db34a047559a6d32bb5055e5daadd40a50660bf2d4a7bf66fe404",
+  "authorization": "owner_explicit_one_isolated_plugin_proof",
+  "execution_count": 1,
+  "retry_count": 0,
+  "platform": "linux",
+  "host": "[redacted:private-host]",
+  "host_redacted": true,
+  "host_class": "supported_linux_private_topology",
+  "isolation": {
+    "temporary_home": true,
+    "temporary_openclaw_state": true,
+    "temporary_openclaw_config": true,
+    "temporary_xdg_roots": true,
+    "temporary_state_removed": true
+  },
+  "production_before": {
+    "plugin_version": "0.3.0-alpha.1",
+    "plugin_status": "loaded",
+    "activated": true,
+    "artifact_kind": null
+  },
+  "production_after": {
+    "plugin_version": "0.3.0-alpha.1",
+    "plugin_status": "loaded",
+    "activated": true,
+    "artifact_kind": null
+  },
+  "production_unchanged": true,
+  "production_actions": {
+    "gateway_config_writes": 0,
+    "gateway_starts": 0,
+    "gateway_stops": 0,
+    "gateway_restarts": 0,
+    "service_manager_actions": 0,
+    "managed_plugin_installs": 0,
+    "managed_plugin_updates": 0,
+    "managed_plugin_uninstalls": 0,
+    "worker_installs": 0,
+    "worker_starts": 0,
+    "worker_stops": 0,
+    "worker_uninstalls": 0,
+    "worker_upgrades": 0,
+    "credential_reads": 0,
+    "credential_writes": 0,
+    "credential_deletes": 0,
+    "provider_requests": 0,
+    "source_data_reads": 0,
+    "source_data_writes": 0,
+    "source_data_deletes": 0
+  },
+  "content_free": true
+}

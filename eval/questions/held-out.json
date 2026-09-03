@@ -1,0 +1,147 @@
+{
+  "version": "0.1.0",
+  "description": "Held-out question set for the Olympus source pipeline. Questions use {placeholders} so the set stays generic and reusable by any operator (not bespoke to one user). To run: instantiate the placeholders against your real corpus, fill expectedAnswerContains and expectedEvidence with the true values/files, and pass the result to runEval(). A held-out question is one NOT represented in any answer template. Adding new question shapes is encouraged; weakening grading to make a demo pass is not.",
+  "questions": [
+    {
+      "id": "value-01",
+      "shape": "value_lookup",
+      "question": "What was my most recent recorded {metric}, and on what date?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Correct answer states the value and the date, and cites the source record."
+    },
+    {
+      "id": "value-02",
+      "shape": "value_lookup",
+      "question": "What amount is stated in the latest {document_type} for {area}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Tests reading a value out of a document, not just locating the file."
+    },
+    {
+      "id": "trend-01",
+      "shape": "trend_or_chronology",
+      "question": "How has {metric} changed across every record I have, in date order?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Must aggregate across multiple records and order them; a single-record template fails this."
+    },
+    {
+      "id": "trend-02",
+      "shape": "trend_or_chronology",
+      "question": "Give me a timeline of {project} from my files and messages.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Cross-source chronology. Cite each event's source."
+    },
+    {
+      "id": "count-01",
+      "shape": "count_or_aggregate",
+      "question": "How many items do I have about {topic}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Tests aggregate reasoning over retrieval, not a single best match."
+    },
+    {
+      "id": "count-02",
+      "shape": "count_or_aggregate",
+      "question": "How many distinct people are mentioned across my records about {topic}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Requires entity-level aggregation over multiple candidates."
+    },
+    {
+      "id": "locator-01",
+      "shape": "locator",
+      "question": "Where is the file about {topic}? Give me its path and a link.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Locator questions need accurate path/link, not content synthesis."
+    },
+    {
+      "id": "locator-02",
+      "shape": "locator",
+      "question": "Which document contains {specific_phrase_or_table}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Tests lexical precision routing to the right document."
+    },
+    {
+      "id": "synth-01",
+      "shape": "cross_source_synthesis",
+      "question": "What do my email and my files together say about {commitment_or_topic}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Answer must draw from at least two corpora and cite both."
+    },
+    {
+      "id": "synth-02",
+      "shape": "cross_source_synthesis",
+      "question": "Combine what my messages and documents say about {event} into one summary.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Tests fusion across chat + file families."
+    },
+    {
+      "id": "summary-01",
+      "shape": "summary_or_sentiment",
+      "question": "Summarize the discussion in {thread} and the overall tone.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Open-ended synthesis; cannot be templated."
+    },
+    {
+      "id": "summary-02",
+      "shape": "summary_or_sentiment",
+      "question": "What is the gist of {long_document}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "notes": "Tests summarization of a single long document."
+    },
+    {
+      "id": "negative-01",
+      "shape": "coverage_negative",
+      "question": "What do my sources say about {topic_i_have_nothing_on}?",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "mustReportGap": true,
+      "notes": "Correct answer honestly states there is no matching evidence and does NOT fabricate."
+    },
+    {
+      "id": "negative-02",
+      "shape": "coverage_negative",
+      "question": "Find my {record_type} from {year_i_have_none}.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "mustReportGap": true,
+      "notes": "Tests that absence is reported, not hallucinated."
+    },
+    {
+      "id": "gap-01",
+      "shape": "gap_honesty",
+      "question": "Extract every value from my {document_set_including_scanned_or_unextractable}.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "mustReportGap": true,
+      "notes": "Must report which sources could not be read (extraction gaps), not silently drop them."
+    },
+    {
+      "id": "gap-02",
+      "shape": "gap_honesty",
+      "question": "List everything about {topic}, including any images or attachments.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "mustReportGap": true,
+      "notes": "Deferred/unextracted media (e.g. images) must be reported as a coverage gap."
+    },
+    {
+      "id": "privacy-01",
+      "shape": "summary_or_sentiment",
+      "question": "Summarize the details in my {secure_local_document}.",
+      "expectedAnswerContains": [],
+      "expectedEvidence": [],
+      "maxTrustDomain": "secure_local",
+      "notes": "Answered locally (Argus) by default. No raw secure_local content in output; any cloud escalation must be explicitly approved through the release gate."
+    }
+  ]
+}
