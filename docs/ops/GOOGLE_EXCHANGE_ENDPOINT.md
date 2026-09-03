@@ -76,11 +76,17 @@ about closing a gap that PKCE leaves open:
 | Timeouts | 10s timeout on every call to Google, via `AbortController` | `exchange/src/google.ts` |
 | Structured error passthrough | Google's error responses are forwarded with their exact status and body (Google's OAuth error bodies are a small fixed vocabulary and never echo the secret); this endpoint's own errors are a fixed `{error, error_description}` shape that never includes exception text, a stack trace, or anything read from `env` | `exchange/src/index.ts` (`respondFromGoogle`, `errorResponse`) |
 
-Rate limiting fails **open**, not closed, when the KV binding is absent
-(`exchange/src/rate-limit.ts`): a defense-in-depth control must never take
-down the one endpoint the publisher flow depends on. The runbook below makes
-creating and binding the KV namespace a required setup step precisely because
-of this — an undeployed rate limiter is a silent gap, not a loud one.
+Rate limiting fails **open**, not closed, both when the KV binding is absent
+AND when a present binding's `get` or `put` throws — a transient KV error, a
+misconfigured permission, a regional outage
+(`exchange/src/rate-limit.ts`, every KV call wrapped in its own `try`/`catch`).
+A defense-in-depth control must never take down the one endpoint the
+publisher flow depends on; letting a KV exception propagate would turn an
+abuse control into an outage generator for every caller the moment KV has a
+bad moment, which is exactly backwards. The runbook below makes creating and
+binding the KV namespace a required setup step regardless — an undeployed
+rate limiter is a silent gap, not a loud one, even though a deployed one that
+starts failing is not an outage either.
 
 ### Why the `redirect_uri` allowlist accepts loopback forms it should never see
 
@@ -214,11 +220,15 @@ Why this over a dedicated `api.olympusplugin.ai`:
   Route adds a path match on an existing hostname; a new subdomain would need
   its own DNS record (automatic on Cloudflare, but still a step) and its own
   certificate issuance.
-- **Cloudflare resolves this cleanly.** A Worker Route takes precedence over a
-  Pages custom domain for any path it matches, on the same zone — the Pages
-  project continues serving `/oauth/callback/` untouched, and the Worker Route
-  intercepts only `/exchange/*`. This is a standard, supported Cloudflare
-  layering, not a workaround.
+- **This is the intended layering, confirmed live rather than assumed.** A
+  Worker Route is expected to take precedence over a Pages custom domain for
+  any path it matches on the same zone — the Pages project continues serving
+  `/oauth/callback/` untouched, and the Worker Route intercepts only
+  `/exchange/*`. Cloudflare's own documentation does not spell out this exact
+  precedence in so many words, so this is the design's intent, not a cited
+  guarantee; step 7 of the runbook below (`curl` against both paths after
+  deploy) is what actually confirms it holds on this zone, and step 7 must
+  pass before anything depends on it.
 - **The exchange endpoint is never a browser-facing `redirect_uri`.** Only the
   relay page's URL is registered with Google as a redirect URI; this endpoint
   is called worker-to-worker. That means, unlike the relay URL, changing its
@@ -415,19 +425,35 @@ in `exchange/wrangler.toml`.
    `olympusplugin.ai` zone. No separate "route binding" console step is needed
    beyond having the zone on this Cloudflare account, which it already is (the
    relay's Pages project is on the same zone).
-7. **Confirm it is live and refuses cleanly:**
+7. **Confirm it is live, refuses cleanly, AND that the relay still works.**
+   The Worker Route/Pages coexistence this design relies on
+   ("Hostname and routing" above) is this design's intent, not a documented
+   Cloudflare guarantee — these two checks are what actually confirm it on
+   this zone, and both must pass:
    ```sh
    curl -s -X POST https://auth.olympusplugin.ai/exchange/google \
      -H 'Content-Type: application/json' -d '{}'
    # expect: {"error":"invalid_request","error_description":"..."} with HTTP 400
    curl -s -X POST https://auth.olympusplugin.ai/exchange/google
    # expect: {"error":"invalid_request", ...} (POST with no body) — never a 500
+
+   curl -sI https://auth.olympusplugin.ai/oauth/callback/
+   # expect: 200, and the relay's own headers (content-security-policy,
+   # strict-transport-security, x-content-type-options, referrer-policy —
+   # docs/ops/OAUTH_RELAY.md, "Confirm the headers arrive") — proving the
+   # Worker Route intercepted only /exchange/* and the Pages project still
+   # serves everything else on the same hostname.
    ```
-   A real end-to-end proof needs a live authorization code and verifier, which
-   only exists mid-flow; the curl checks above only confirm the endpoint is
-   deployed, routed, and fails closed on bad input. The first real proof is
-   the first live "Connect Gmail" click once the worker-side integration
-   (above) has also been applied.
+   If the second check ever stops returning the relay's headers (a 404, or a
+   plain response missing them), the Worker Route has started shadowing the
+   relay and this needs fixing before anything else proceeds — the relay is
+   the one thing registered with Google and cannot go dark.
+
+   A real end-to-end exchange proof needs a live authorization code and
+   verifier, which only exists mid-flow; the checks above only confirm both
+   services are deployed, routed correctly, and fail closed on bad input. The
+   first real exchange proof is the first live "Connect Gmail" click once the
+   worker-side integration (above) has also been applied.
 8. **Apply the worker-side integration** described above, once PR #2 has
    merged — this is a separate, small pull request, not part of deploying the
    endpoint itself.

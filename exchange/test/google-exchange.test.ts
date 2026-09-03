@@ -54,6 +54,22 @@ class FakeKv implements RateLimitBinding {
   }
 }
 
+/**
+ * A KV binding that is PRESENT but broken: every call throws, simulating a
+ * transient KV error, a misconfigured permission, or a regional outage. The
+ * absent-binding case (`undefined`) already fails open; this stub proves the
+ * present-but-throwing case does too, rather than propagating to the
+ * endpoint's top-level catch and returning 500 for every caller.
+ */
+class ThrowingKv implements RateLimitBinding {
+  get(): Promise<string | null> {
+    return Promise.reject(new Error('KV get failed'));
+  }
+  put(): Promise<void> {
+    return Promise.reject(new Error('KV put failed'));
+  }
+}
+
 describe('schema: parseExchangeRequest', () => {
   test('accepts a well-formed request', () => {
     const result = parseExchangeRequest({ code: 'abc123', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
@@ -180,6 +196,21 @@ describe('rate limiting', () => {
     const config = { maxRequests: 1, windowSeconds: 60 };
     expect((await checkRateLimit(kv, 'a', config, 0)).allowed).toBe(true);
     expect((await checkRateLimit(kv, 'b', config, 0)).allowed).toBe(true);
+  });
+
+  test('fails open when a PRESENT binding throws on get', async () => {
+    const result = await checkRateLimit(new ThrowingKv(), 'k', { maxRequests: 1, windowSeconds: 60 });
+    expect(result.allowed).toBe(true);
+  });
+
+  test('fails open when a PRESENT binding throws on put', async () => {
+    // `get` must succeed (so the code reaches `put`) while `put` throws.
+    const partiallyBroken: RateLimitBinding = {
+      get: () => Promise.resolve(null),
+      put: () => Promise.reject(new Error('KV put failed')),
+    };
+    const result = await checkRateLimit(partiallyBroken, 'k', { maxRequests: 1, windowSeconds: 60 });
+    expect(result.allowed).toBe(true);
   });
 });
 
@@ -368,6 +399,24 @@ describe('worker: POST /exchange/google', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  test('a throwing RATE_LIMIT_KV binding fails open — the exchange still succeeds rather than 500ing', async () => {
+    // Regression: a PRESENT-but-broken KV binding (transient error,
+    // misconfigured permission, outage) must never take the endpoint down.
+    // Before this was fixed, `checkRateLimit` let the thrown error propagate
+    // to the top-level catch in `handleRequest`, turning every Google connect
+    // into a 500 for as long as KV had a bad moment.
+    const fetchImpl = mock(() => Promise.resolve(googleSuccess({ access_token: 'tok', expires_in: 3600 })));
+    const env = baseEnv({ RATE_LIMIT_KV: new ThrowingKv(), RATE_LIMIT_MAX: '2', RATE_LIMIT_WINDOW_SECONDS: '60' });
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL }, { 'CF-Connecting-IP': '203.0.113.50' });
+
+    const response = await handleRequest(request, env, deps(fetchImpl, 0));
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toEqual({ access_token: 'tok', expires_in: 3600 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test('different IPs get independent rate-limit budgets', async () => {
     const kv = new FakeKv(0);
     const fetchImpl = mock(() => Promise.resolve(googleSuccess({ access_token: 'tok', expires_in: 3600 })));
@@ -424,6 +473,16 @@ describe('worker: POST /exchange/google/refresh', () => {
     const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
     expect(response.status).toBe(403);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('a throwing RATE_LIMIT_KV binding also fails open on the refresh route', async () => {
+    const fetchImpl = mock(() => Promise.resolve(googleSuccess({ access_token: 'tok2', expires_in: 3600 })));
+    const env = baseEnv({ RATE_LIMIT_KV: new ThrowingKv() });
+    const request = jsonRequest('/exchange/google/refresh', { refresh_token: 'x' }, { 'CF-Connecting-IP': '203.0.113.51' });
+
+    const response = await handleRequest(request, env, deps(fetchImpl, 0));
+
+    expect(response.status).toBe(200);
   });
 
   test('is independently rate limited from /exchange/google', async () => {
