@@ -790,6 +790,14 @@ export type DashboardSourceAction =
     kind: 'oauth';
     source: DashboardOAuthSource;
     label: 'Connect' | 'Reauthenticate';
+    /**
+     * True when this source connects through Olympus's own registered OAuth
+     * app: the card offers one Connect button and no fields, and the
+     * bring-your-own walkthrough below moves into a disclosure. The publisher
+     * client id itself is NOT carried here — the card never needs it, and the
+     * fewer public identifiers on the read-only surface the better.
+     */
+    publisher_client?: true;
     known_client_id?: string;
     /**
      * The exact callback URI this dashboard sends the provider, for the owner
@@ -938,6 +946,13 @@ export interface SourceDashboardBuildOptions {
   oauthClientSecretAvailability?: Partial<Record<DashboardOAuthSource | 'google', boolean>>;
   googleCloudProjectId?: string;
   googlePilotClientConfigured?: boolean;
+  /**
+   * The OAuth sources this install connects through Olympus's OWN registered
+   * app, so their card needs no client id and no provider walkthrough. Names
+   * sources only: no client id, no relay URL, no state — this rides on the
+   * read-only surface with everything else here.
+   */
+  publisherOAuthSources?: readonly DashboardOAuthSource[];
   oauthRedirectBaseUrl?: string;
   apiKeyAvailability?: Partial<Record<DashboardApiKeySource, boolean>>;
   pendingConnects?: DashboardPendingConnect[];
@@ -1721,6 +1736,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.oauthClientSecretAvailability ?? {},
       options.googleCloudProjectId,
       options.googlePilotClientConfigured === true,
+      options.publisherOAuthSources ?? [],
       options.oauthRedirectBaseUrl,
       options.apiKeyAvailability ?? {},
       options.pendingConnects ?? [],
@@ -1843,7 +1859,7 @@ function answerLaneFromDefinition(
       || result.status === 'missing'
       || result.status === 'degraded');
   const connected = !probeUnavailable && (apiKeyAvailability.venice === true || activeHandles.length > 0);
-  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, undefined);
+  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], undefined);
   return {
     lane_id: 'venice-secure-answers',
     source_id: definition.source_id,
@@ -1869,6 +1885,7 @@ function sourceCardFromDefinition(
   oauthClientSecretAvailability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
+  publisherOAuthSources: readonly DashboardOAuthSource[],
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -1933,6 +1950,7 @@ function sourceCardFromDefinition(
     oauthClientSecretAvailability,
     googleCloudProjectId,
     googlePilotClientConfigured,
+    publisherOAuthSources,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pendingConnects,
@@ -2581,6 +2599,7 @@ function connectionFromDefinition(
   oauthClientSecretAvailability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
+  publisherOAuthSources: readonly DashboardOAuthSource[],
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pendingConnects: DashboardPendingConnect[],
@@ -2602,6 +2621,7 @@ function connectionFromDefinition(
     oauthClientSecretAvailability,
     googleCloudProjectId,
     googlePilotClientConfigured,
+    publisherOAuthSources,
     oauthRedirectBaseUrl,
     apiKeyAvailability,
     pending,
@@ -2644,6 +2664,7 @@ function connectionStateFromDefinition(
   oauthClientSecretAvailability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
+  publisherOAuthSources: readonly DashboardOAuthSource[],
   oauthRedirectBaseUrl: string | undefined,
   apiKeyAvailability: Partial<Record<DashboardApiKeySource, boolean>>,
   pending: DashboardPendingConnect | undefined,
@@ -2702,11 +2723,11 @@ function connectionStateFromDefinition(
     return {
       state: 'not_connected',
       label,
-      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, 'none', pending),
+      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, 'none', pending),
       handles: handleIds,
     };
   }
-  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, sessionEvidence, pending);
+  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending);
   // A refused attempt is no longer a handshake in flight. Leaving it in
   // awaiting_consent kept the row reading "connecting" for the rest of the
   // ten-minute record over a flow the provider had already rejected (owner,
@@ -2819,6 +2840,7 @@ function sourceAction(
   oauthClientSecretAvailability: Partial<Record<DashboardOAuthSource | 'google', boolean>>,
   googleCloudProjectId: string | undefined,
   googlePilotClientConfigured: boolean,
+  publisherOAuthSources: readonly DashboardOAuthSource[],
   oauthRedirectBaseUrl: string | undefined,
   sessionEvidence?: DashboardSessionEvidence,
   pending?: DashboardPendingConnect,
@@ -2848,6 +2870,22 @@ function sourceAction(
       ...(redirectUriGuidance ? { redirect_uri_guidance: redirectUriGuidance } : {}),
       ...(callbackRegistration ? { callback_registration: callbackRegistration } : {}),
     };
+    // Publisher mode outranks both branches below. There is no app key to
+    // register, so "needs setup" is untrue, and no client id to correct, so a
+    // prefilled field would be an invitation to break a working flow. The
+    // bring-your-own path is not removed — it moves into the sheet's own
+    // disclosure, carrying the identical walkthrough these fields feed.
+    if (publisherOAuthSources.includes(definition.connect_action.source)) {
+      return {
+        kind: 'oauth',
+        source: definition.connect_action.source,
+        label,
+        publisher_client: true as const,
+        ...redirectFields,
+        instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        ...(pending ? { pending_attempt: true as const } : {}),
+      };
+    }
     if (!knownClientId || !hasClientSecret) {
       return {
         kind: 'needs_setup',

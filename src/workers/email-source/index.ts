@@ -5,6 +5,15 @@ import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
 import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
+import { dropboxPublisherAppKey, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
+import {
+  createOAuthRelayNonce,
+  createOAuthRelayStateKey,
+  oauthRelayUrl,
+  signOAuthRelayState,
+  verifyOAuthRelayState,
+  OAUTH_RELAY_STATE_TTL_MS,
+} from '../../core/oauth-relay.ts';
 import { connectPublicApiKeySource, oauthAuthorizeOrigin, safeOAuthErrorCode, startExternalOAuthSourceConnection, startOAuthSourceConnection, type OAuthFetch } from '../../core/connect.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
@@ -525,6 +534,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const credentialDegradations = options.credentialDegradations;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map<DashboardOAuthSource, DashboardOAuthAttempt>();
+  // The HMAC key the publisher-relay `state` is signed with. Worker-local, kept
+  // in the same secret store the worker's other local material lives in, minted
+  // once on first use, and never handed to a browser or a provider. Cached in
+  // the closure so an unauthenticated callback can never make this process read
+  // the secret store: the key is only ever reached through a pending attempt
+  // that an authenticated start route created.
+  let dashboardRelayStateKeyCache: string | undefined;
+  const dashboardRelayStateKey = async (secretStore: SecretStore): Promise<string> => {
+    if (dashboardRelayStateKeyCache) return dashboardRelayStateKeyCache;
+    const stored = (await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY))?.trim();
+    if (stored) {
+      dashboardRelayStateKeyCache = stored;
+      return stored;
+    }
+    const minted = createOAuthRelayStateKey();
+    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, minted);
+    dashboardRelayStateKeyCache = minted;
+    return minted;
+  };
   const dashboardDisconnectedSources = new Set<V04PublicSourceId>();
   // Paired-session sources this worker has unpaired. Separate from the
   // Disconnect latch because it answers a different question: Disconnect's
@@ -855,6 +883,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const registryRead = readDashboardRegistryOutcome(sourceDashboard.registryPath);
           const registry = registryRead.registry;
           const secretStore = dashboardSecretStore(sourceDashboard);
+          const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           const googleCloudProjectId = dashboardGoogleCloudProjectId();
           const sourceIndexDashboardStatus = withCredentialDegradations(
             // include_readiness_ledger: without it the status answers with no
@@ -913,11 +943,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
             ),
             ...(credentialHealth ? { credentialHealth } : {}),
-            oauthClientIds: await dashboardOAuthClientIds(registry, secretStore),
+            oauthClientIds: dashboardClientIdSets.all,
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
             ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            oauthRedirectBaseUrl: dashboardOAuthRedirectOrigin(url, request.headers),
+            oauthRedirectBaseUrl: dashboardOAuthOrigin,
+            // Which sources connect through Olympus's own app, so their card can
+            // offer one Connect button instead of a walkthrough for an app the
+            // owner does not have to register. Names sources only — no client
+            // id, no relay URL, no state: this rides on the read-only surface.
+            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardOAuthOrigin, dashboardClientIdSets.own),
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -966,12 +1001,33 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // `GET /oauth/callback/dropbox?error=access_denied` rewrote the
           // owner's live attempt and dropped their card out of "connecting".
           const state = asOptionalString(url.searchParams.get('state'));
+          // A relay-bounced callback carries the SIGNED state this worker
+          // minted, so every field the contract names is re-verified here:
+          // signature, version, nonce, origin as this worker derives it,
+          // source, and freshness (docs/ops/OAUTH_RELAY.md, "What the worker
+          // must verify"). The relay holds no key and checks none of this; it
+          // decides only where to bounce. Single use is the attempt record
+          // itself — a consumed or replaced attempt is gone, and a replay
+          // therefore lands in the same refusal as a forgery.
+          const relayAccepted = attempt?.relay === undefined || state === undefined
+            ? true
+            : verifyOAuthRelayState(state, {
+              key: await dashboardRelayStateKey(dashboardSecretStore(sourceDashboard)),
+              expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
+              expectedSource: source,
+              expectedNonce: attempt.relay.nonce,
+              now: new Date(),
+              ttlMs: OAUTH_RELAY_STATE_TTL_MS,
+            }).ok;
           if (!attempt
             || dashboardOAuthAttemptExpired(attempt, new Date())
             || !state
-            || !dashboardOAuthStateMatches(attempt, state)) {
-            // Deliberately ONE answer for four different facts — no attempt,
-            // an expired one, no state, the wrong state. An unauthenticated
+            || !dashboardOAuthStateMatches(attempt, state)
+            || !relayAccepted) {
+            // Deliberately ONE answer for every fact — no attempt, an expired
+            // one, no state, the wrong state, and every relay-state refusal
+            // (bad signature, wrong version, replayed nonce, stale iat, foreign
+            // origin, crossed source). An unauthenticated
             // caller learns nothing about whether a connect is in flight, and
             // in every one of these cases the stored attempt is left exactly
             // as it was. Only a genuinely absent or expired record is dropped,
@@ -1058,8 +1114,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
-          const clientIds = await dashboardOAuthClientIds(registry, secretStore);
-          const clientId = asOptionalString(record.client_id) ?? dashboardOAuthClientIdForSource(source, clientIds);
+          const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
+          const submittedClientId = asOptionalString(record.client_id);
+          const dashboardOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          // Publisher mode: Olympus's own registered app, so the owner presses
+          // Connect and nothing else. It is chosen only when this install has
+          // no registration of its own for the source — a submitted client id
+          // is a bring-your-own registration and always wins, and so does one
+          // already on file. X is never publisher-owned.
+          const publisher = submittedClientId
+            ? undefined
+            : dashboardPublisherOAuthFlow(
+              source,
+              dashboardOrigin,
+              dashboardOAuthClientIdForSource(source, clientIdSets.own),
+            );
+          const clientId = submittedClientId
+            ?? publisher?.clientId
+            ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
           if (!clientId) {
             throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
@@ -1074,7 +1146,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // flow that died at the provider — as the live X flow did on
           // 2026-08-19 — left the next start call failing with
           // oauth_client_id_missing and the owner re-pasting the same id.
-          const submittedClientId = asOptionalString(record.client_id);
           if (submittedClientId) {
             await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
           }
@@ -1085,7 +1156,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
             await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
           }
-          const redirectUri = `${dashboardOAuthRedirectOrigin(url, request.headers)}/oauth/callback/${encodeURIComponent(source)}`;
+          // ONE redirect URI per flow, and the same string reaches the token
+          // exchange: `startExternalOAuthSourceConnection` keeps it on the
+          // prepared flow and sends it back at exchange time, which is what the
+          // providers' exact-string matching requires.
+          const redirectUri = publisher?.redirectUri
+            ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+          // The relay bounces the browser to whatever origin the state names,
+          // so a relay flow's state is signed and carries that origin. Minted
+          // here, inside an authenticated control-session route, and never from
+          // an inbound callback (OAUTH_RELAY.md, worker check 0).
+          const relayNonce = publisher?.relay === true ? createOAuthRelayNonce() : undefined;
+          const relayState = relayNonce === undefined
+            ? undefined
+            : signOAuthRelayState({
+              origin: dashboardOrigin,
+              source,
+              nonce: relayNonce,
+              iat: Math.floor(Date.now() / 1000),
+            }, await dashboardRelayStateKey(secretStore));
           const startOAuth = sourceDashboard.startExternalOAuthConnection ?? startExternalOAuthSourceConnection;
           const pending = await startOAuth({
             source,
@@ -1094,6 +1183,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
             secretStore,
             redirectUri,
+            ...(relayState ? { state: relayState } : {}),
             openBrowser: false,
             ...(sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {}),
           });
@@ -1119,6 +1209,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             returnTo: dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
+            ...(relayNonce ? { relay: { nonce: relayNonce } } : {}),
           });
           return json({
             ok: true,
@@ -4175,6 +4266,14 @@ function dashboardUnpairedSourceStates(
     }));
 }
 
+/**
+ * Where the publisher-relay state signing key lives: the worker's own secret
+ * store, beside the rest of this install's local material. It is never a
+ * credential for anything outside this process — it only proves that a state
+ * arriving on the callback route is one this worker minted.
+ */
+const DASHBOARD_OAUTH_RELAY_STATE_KEY = 'dashboard.oauth.relay_state_key';
+
 const DASHBOARD_UNPAIR_SOURCE_IDS: DashboardUnpairSource[] = [
   'telegram.messages',
   'whatsapp.personal.messages',
@@ -4406,6 +4505,13 @@ interface DashboardOAuthAttempt {
   returnTo: string;
   startedAt: string;
   expiresAt: string;
+  /**
+   * The relay flow this attempt belongs to, when it went out through the
+   * publisher relay rather than a callback on this dashboard's own origin.
+   * The nonce is the single-use record the bounced state must match; consuming
+   * or replacing the attempt is what makes a replay fail.
+   */
+  relay?: { nonce: string };
   /**
    * The provider's refusal, if its callback carried `error=`.
    *
@@ -4648,8 +4754,31 @@ async function dashboardOAuthClientIds(
   registry: ConnectedHandleRegistry,
   secretStore: SecretStore,
 ): Promise<Partial<Record<DashboardOAuthSource | 'google', string>>> {
-  const output: Partial<Record<DashboardOAuthSource | 'google', string>> = {};
-  await readConfiguredDashboardOAuthClientIds(output, secretStore);
+  return (await dashboardOAuthClientIdSets(registry, secretStore)).all;
+}
+
+/**
+ * The two client-id maps this worker reasons over, from ONE pass across the
+ * store and the registry.
+ *
+ * `own` is what this install registered for itself: pasted into the dashboard,
+ * or already bound to a connected handle. `all` is `own` plus the packaged
+ * Google pilot client, which is a publisher identity rather than the owner's.
+ *
+ * Keeping them apart is what lets publisher mode exist: "does this source have
+ * a client id at all" and "did the OWNER register one" are different questions,
+ * and answering the second with the first would hide every publisher-owned
+ * source behind a bring-your-own walkthrough it does not need.
+ */
+async function dashboardOAuthClientIdSets(
+  registry: ConnectedHandleRegistry,
+  secretStore: SecretStore,
+): Promise<{
+  own: Partial<Record<DashboardOAuthSource | 'google', string>>;
+  all: Partial<Record<DashboardOAuthSource | 'google', string>>;
+}> {
+  const own: Partial<Record<DashboardOAuthSource | 'google', string>> = {};
+  await readConfiguredDashboardOAuthClientIds(own, secretStore);
   for (const handle of registry.handles) {
     const ref = handle.oauth2Refresh?.clientIdSecretRef;
     if (!ref) continue;
@@ -4657,13 +4786,16 @@ async function dashboardOAuthClientIds(
     if (parsed?.kind !== 'store') continue;
     const clientId = await secretStore.get(parsed.key);
     if (!clientId) continue;
-    if (handle.provider === 'gmail') output.gmail = clientId;
-    if (handle.provider === 'google_drive') output['google-drive'] = clientId;
-    if (handle.provider === 'dropbox') output.dropbox = clientId;
-    if (handle.provider === 'x') output.x = clientId;
-    if (ref.startsWith('store:google.')) output.google = clientId;
+    if (handle.provider === 'gmail') own.gmail = clientId;
+    if (handle.provider === 'google_drive') own['google-drive'] = clientId;
+    if (handle.provider === 'dropbox') own.dropbox = clientId;
+    if (handle.provider === 'x') own.x = clientId;
+    if (ref.startsWith('store:google.')) own.google = clientId;
   }
-  return output;
+  const all = { ...own };
+  const pilotClientId = dashboardGooglePilotClientId();
+  if (!all.google && pilotClientId) all.google = pilotClientId;
+  return { own, all };
 }
 
 async function readConfiguredDashboardOAuthClientIds(
@@ -4675,10 +4807,85 @@ async function readConfiguredDashboardOAuthClientIds(
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
     if (clientId) output[source] = clientId;
   }
-  const pilotClientId = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID?.trim();
-  const packagedClientId = packagedGooglePilotClientId();
-  if (!output.google && pilotClientId) output.google = pilotClientId;
-  if (!output.google && packagedClientId) output.google = packagedClientId;
+}
+
+/**
+ * The publisher-owned app this source connects through, or `undefined` when the
+ * owner has to bring their own.
+ *
+ * Owner direction (2026-09-03): one-click connect for Google and Dropbox through
+ * publisher-owned OAuth apps and the static relay, for ANY dashboard origin,
+ * with bring-your-own as the fallback and X unchanged. The rules, in order:
+ *
+ * - **X is never publisher-owned.** Its app is a confidential client whose
+ *   secret cannot ship, and the relay is not involved (OAUTH_RELAY.md).
+ * - **A registration the owner made wins.** Publisher mode is the default for an
+ *   install that has registered nothing; it never overrides a client id the
+ *   owner pasted or a connected handle already carries.
+ * - **Google on a loopback dashboard keeps the loopback redirect.** The pilot
+ *   client is a Desktop app client and a Desktop client cannot register an https
+ *   redirect URI, so the relay is not usable by it — and it does not need to be:
+ *   a loopback callback reaches the worker directly. Same publisher app, no
+ *   relay, no signed state, exactly today's working local flow.
+ * - **Everything else goes through the relay** with `redirect_uri` = the one
+ *   registered relay URL and a signed state naming this dashboard's origin.
+ *
+ * Both publisher identifiers ship empty (`core/publisher-oauth-client.ts`), so
+ * until the owner creates the apps this function answers `undefined` for every
+ * non-loopback case and the dashboard shows the bring-your-own path it shows
+ * today.
+ */
+interface DashboardPublisherOAuthFlow {
+  clientId: string;
+  redirectUri: string;
+  /** True when the redirect is the publisher relay and the state must be signed. */
+  relay: boolean;
+}
+
+function dashboardPublisherOAuthFlow(
+  source: DashboardOAuthSource,
+  dashboardOrigin: string,
+  ownClientId: string | undefined,
+): DashboardPublisherOAuthFlow | undefined {
+  if (source === 'x') return undefined;
+  if (ownClientId) return undefined;
+  if (dashboardGoogleOAuthSource(source)) {
+    const pilotClientId = dashboardGooglePilotClientId();
+    if (pilotClientId && dashboardLoopbackOrigin(dashboardOrigin)) {
+      return {
+        clientId: pilotClientId,
+        redirectUri: `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`,
+        relay: false,
+      };
+    }
+    const webClientId = googlePublisherWebClientId();
+    return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
+  }
+  const appKey = dropboxPublisherAppKey();
+  return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
+}
+
+/** The sources whose card offers one-click Connect through a publisher app. */
+function dashboardPublisherOAuthSources(
+  dashboardOrigin: string,
+  ownClientIds: Partial<Record<DashboardOAuthSource | 'google', string>>,
+): DashboardOAuthSource[] {
+  const sources: DashboardOAuthSource[] = ['gmail', 'google-drive', 'dropbox', 'x'];
+  return sources.filter((source) => dashboardPublisherOAuthFlow(
+    source,
+    dashboardOrigin,
+    dashboardOAuthClientIdForSource(source, ownClientIds),
+  ) !== undefined);
+}
+
+/** Whether an origin this worker derived for itself is a loopback one. */
+function dashboardLoopbackOrigin(origin: string): boolean {
+  try {
+    const hostname = new URL(origin).hostname;
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
 }
 
 async function dashboardOAuthClientSecretAvailability(

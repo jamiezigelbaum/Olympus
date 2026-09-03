@@ -398,9 +398,19 @@ export async function startOAuthSourceConnection(options: ConnectOAuthOptions): 
 }
 
 export async function startExternalOAuthSourceConnection(
-  options: ConnectOAuthOptions & { redirectUri: string },
+  options: ConnectOAuthOptions & { redirectUri: string; state?: string },
 ): Promise<ExternalPendingOAuthConnection> {
-  const prepared = prepareOAuthSourceConnection(options, options.redirectUri);
+  // The caller may own the `state` — the publisher-client relay flow signs one
+  // that carries the dashboard origin the relay bounces back to (see
+  // `core/oauth-relay.ts`). The PKCE verifier is still minted here and still
+  // never leaves this process; only the opaque state is substituted, and it is
+  // bounded to what a provider will echo and the relay will parse.
+  const pkce = createOAuthPkceState();
+  const prepared = prepareOAuthSourceConnection(
+    options,
+    options.redirectUri,
+    options.state === undefined ? pkce : { ...pkce, state: assertExternalOAuthState(options.state) },
+  );
   await options.onAuthorizationUrl?.(prepared.authorizationUrl);
   return {
     ok: true,
@@ -416,6 +426,19 @@ export async function startExternalOAuthSourceConnection(
     },
     cancel() {},
   };
+}
+
+/**
+ * A caller-supplied `state` must survive a provider echo and the relay's own
+ * parse: two base64url segments joined by one `.`, no longer than the relay's
+ * 2048-character ceiling. Anything else is refused at start rather than turned
+ * into a consent round that cannot come back.
+ */
+function assertExternalOAuthState(state: string): string {
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state) || state.length > 2048) {
+    throw new Error('OAuth state must be two base64url segments of at most 2048 characters.');
+  }
+  return state;
 }
 
 async function finishOAuthSourceConnection(options: {

@@ -33517,7 +33517,8 @@ async function startOAuthSourceConnection(options) {
   };
 }
 async function startExternalOAuthSourceConnection(options) {
-  const prepared = prepareOAuthSourceConnection(options, options.redirectUri);
+  const pkce = createOAuthPkceState();
+  const prepared = prepareOAuthSourceConnection(options, options.redirectUri, options.state === undefined ? pkce : { ...pkce, state: assertExternalOAuthState(options.state) });
   await options.onAuthorizationUrl?.(prepared.authorizationUrl);
   return {
     ok: true,
@@ -33534,6 +33535,12 @@ async function startExternalOAuthSourceConnection(options) {
     },
     cancel() {}
   };
+}
+function assertExternalOAuthState(state) {
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state) || state.length > 2048) {
+    throw new Error("OAuth state must be two base64url segments of at most 2048 characters.");
+  }
+  return state;
 }
 async function finishOAuthSourceConnection(options) {
   try {
@@ -35741,7 +35748,7 @@ function buildSourceDashboardViewModel(options) {
     const corpora = options.sourceIndexStatus.corpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    return sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id));
+    return sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id));
   });
   const unassignedCorpora = unassignedCorporaFrom(options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
   const samples = cards.map((card) => ({
@@ -35816,7 +35823,7 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== "reauth_required");
   const probeUnavailable = credentialHealthForDefinition(definition, credentialHealth).some((result) => result.status === "reauth_required" || result.status === "missing" || result.status === "degraded");
   const connected = !probeUnavailable && (apiKeyAvailability.venice === true || activeHandles.length > 0);
-  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, undefined);
+  const action = sourceAction(definition, connected, false, false, {}, {}, undefined, false, [], undefined);
   return {
     lane_id: "venice-secure-answers",
     source_id: definition.source_id,
@@ -35830,7 +35837,7 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
     }
   };
 }
-function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired) {
+function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
   const schedulers = [
     ...corpora.map((corpus) => schedulerByCorpus.get(corpus.corpus_id)).filter((value) => !!value),
@@ -35849,7 +35856,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const schedule = scheduleFromSchedulers(schedulers);
   const operatorPaused = schedule?.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
   const providerRefusing = !operatorPaused && (schedule?.degraded_reason === "api_request_guard" || schedule !== undefined && schedule.consecutive_failures > 0 && schedule.last_error_kind === "api_request_guard");
-  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired);
+  const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired);
   const pairedSession = definition.connect_action.kind === "guided_session";
   const unpairable = pairedSession && unpaired === undefined && (baseConnection.handles.length > 0 || baseConnection.state !== "not_connected");
   const connection = {
@@ -36253,9 +36260,9 @@ function aggregateTierComposition(cards, definition, coverage) {
     content_ready_items: counts.content_ready_items
   }));
 }
-function connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired) {
+function connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired) {
   const pending = pendingForDefinition(definition, pendingConnects, now);
-  const connection = connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired);
+  const connection = connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired);
   if (!pending?.error)
     return connection;
   const registration = definition.connect_action.kind === "oauth" ? oauthCallbackRegistration(definition.connect_action.source, oauthRedirectBaseUrl, googleCloudProjectId, googlePilotClientConfigured) : undefined;
@@ -36267,7 +36274,7 @@ function connectionFromDefinition(definition, registry, credentialHealth, covera
     }
   };
 }
-function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
+function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
   const handles = handlesForDefinition(definition, registry);
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
   const probeNeedsRepair = probeResults.some((result) => result.status === "reauth_required" || result.status === "missing");
@@ -36281,11 +36288,11 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
     return {
       state: "not_connected",
       label,
-      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, "none", pending),
+      action: sourceAction(definition, false, false, false, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, "none", pending),
       handles: handleIds
     };
   }
-  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, sessionEvidence, pending);
+  const action = sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending);
   if (pending && !pending.error && !connected) {
     return {
       state: "awaiting_consent",
@@ -36340,7 +36347,7 @@ function sessionConnectionEvidence(coverage, freshness) {
     return "unconfirmed";
   return "none";
 }
-function sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, oauthRedirectBaseUrl, sessionEvidence, pending) {
+function sourceAction(definition, connected, reauthRequired, providerRefusing, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, sessionEvidence, pending) {
   const label = reauthRequired || providerRefusing ? "Reauthenticate" : "Connect";
   if (definition.connect_action.kind === "oauth") {
     if (connected && !reauthRequired && !providerRefusing)
@@ -36356,6 +36363,17 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       ...redirectUriGuidance ? { redirect_uri_guidance: redirectUriGuidance } : {},
       ...callbackRegistration ? { callback_registration: callbackRegistration } : {}
     };
+    if (publisherOAuthSources.includes(definition.connect_action.source)) {
+      return {
+        kind: "oauth",
+        source: definition.connect_action.source,
+        label,
+        publisher_client: true,
+        ...redirectFields,
+        instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        ...pending ? { pending_attempt: true } : {}
+      };
+    }
     if (!knownClientId || !hasClientSecret) {
       return {
         kind: "needs_setup",
@@ -62177,6 +62195,128 @@ function packagedGooglePilotClientId() {
 }
 var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
 
+// src/core/publisher-oauth-client.ts
+function dropboxPublisherAppKey(env = process.env) {
+  return firstConfigured(env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY, DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
+}
+function googlePublisherWebClientId(env = process.env) {
+  return firstConfigured(env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID, DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+}
+function firstConfigured(...candidates) {
+  for (const candidate of candidates) {
+    const trimmed2 = candidate?.trim();
+    if (trimmed2)
+      return trimmed2;
+  }
+  return;
+}
+var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "";
+
+// src/core/oauth-relay.ts
+import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
+function oauthRelayUrl(env = process.env) {
+  const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
+  if (!override)
+    return DEFAULT_OAUTH_RELAY_URL;
+  let parsed;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_OAUTH_RELAY_URL;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
+    return override;
+  return DEFAULT_OAUTH_RELAY_URL;
+}
+function createOAuthRelayNonce() {
+  return randomBytes4(32).toString("base64url");
+}
+function createOAuthRelayStateKey() {
+  return randomBytes4(32).toString("base64url");
+}
+function signOAuthRelayState(payload, key) {
+  const body = {
+    v: payload.v ?? OAUTH_RELAY_STATE_VERSION,
+    origin: payload.origin,
+    source: payload.source,
+    nonce: payload.nonce,
+    iat: payload.iat
+  };
+  const segment = Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
+  return `${segment}.${relaySignature(segment, key)}`;
+}
+function verifyOAuthRelayState(state, expectation) {
+  if (typeof state !== "string" || state.length === 0)
+    return refuse("malformed_state");
+  if (state.length > OAUTH_RELAY_MAX_STATE_LENGTH)
+    return refuse("malformed_state");
+  const segments = state.split(".");
+  if (segments.length !== 2)
+    return refuse("malformed_state");
+  const [segment, signature] = segments;
+  if (!BASE64URL_SEGMENT.test(segment) || !BASE64URL_SEGMENT.test(signature))
+    return refuse("malformed_state");
+  if (!constantTimeEquals(signature, relaySignature(segment, expectation.key)))
+    return refuse("bad_signature");
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+  } catch {
+    return refuse("invalid_payload");
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
+    return refuse("invalid_payload");
+  const record3 = decoded;
+  if (record3.v !== OAUTH_RELAY_STATE_VERSION)
+    return refuse("unsupported_version");
+  if (typeof record3.origin !== "string" || typeof record3.source !== "string")
+    return refuse("invalid_payload");
+  if (typeof record3.nonce !== "string" || !OAUTH_RELAY_NONCE_PATTERN.test(record3.nonce))
+    return refuse("invalid_payload");
+  if (typeof record3.iat !== "number" || !Number.isFinite(record3.iat))
+    return refuse("invalid_payload");
+  if (!constantTimeEquals(record3.nonce, expectation.expectedNonce))
+    return refuse("nonce_mismatch");
+  if (record3.origin !== expectation.expectedOrigin)
+    return refuse("foreign_origin");
+  if (record3.source !== expectation.expectedSource)
+    return refuse("source_mismatch");
+  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
+  const ageMs = expectation.now.getTime() - record3.iat * 1000;
+  if (ageMs > ttlMs || ageMs < -60000)
+    return refuse("stale_iat");
+  return {
+    ok: true,
+    payload: {
+      v: record3.v,
+      origin: record3.origin,
+      source: record3.source,
+      nonce: record3.nonce,
+      iat: record3.iat
+    }
+  };
+}
+function relaySignature(segment, key) {
+  return createHmac2("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
+}
+function constantTimeEquals(left, right) {
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  if (a.length !== b.length)
+    return false;
+  return timingSafeEqual(a, b);
+}
+function refuse(reason) {
+  return { ok: false, reason };
+}
+var OAUTH_RELAY_STATE_VERSION = 1, DEFAULT_OAUTH_RELAY_URL = "https://auth.olympusplugin.ai/oauth/callback/", OAUTH_RELAY_MAX_STATE_LENGTH = 2048, OAUTH_RELAY_STATE_TTL_MS, OAUTH_RELAY_NONCE_PATTERN, BASE64URL_SEGMENT;
+var init_oauth_relay = __esm(() => {
+  OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
+  OAUTH_RELAY_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+  BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
+});
+
 // src/workers/source-index/answer-latency-log.ts
 import {
   chmod,
@@ -63312,7 +63452,14 @@ function connectSetupSheet(input) {
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml(input.intro)}</p>` + `${registration}` + `${redirect}` + `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `${inputs}` + `<button class="btn primary" type="submit">${escapeHtml(input.submitLabel ?? "Connect")}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>` + `${cancel}` + `${prompt}` + `</div>`;
+  const submitLabel = escapeHtml(input.submitLabel ?? "Connect");
+  const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
+  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  if (input.publisher) {
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${prompt}` + `</details>` + `</div>`;
+  }
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${cancel}` + `${prompt}` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -63353,6 +63500,12 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     source: action.source,
     fields,
     submitLabel: action.label,
+    ...action.publisher_client ? {
+      publisher: {
+        intro: `Olympus connects ${source.label} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.",
+        byoSummary: "Use my own app instead"
+      }
+    } : {},
     ...Object.keys(secretPlaceholders).length > 0 ? { placeholders: secretPlaceholders } : {},
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
@@ -66426,7 +66579,7 @@ var init_dashboard = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -66552,7 +66705,7 @@ function isDashboardControlRoute(request) {
   ]).has(new URL(request.url).pathname);
 }
 function hmacTag(authToken, context, ...parts) {
-  const mac2 = createHmac2("sha256", authToken).update(context);
+  const mac2 = createHmac3("sha256", authToken).update(context);
   for (const part of parts)
     mac2.update("\x00").update(part);
   return mac2.digest("base64url");
@@ -66589,7 +66742,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes4(24).toString("base64url"),
+    nonce: randomBytes5(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -66762,7 +66915,7 @@ function constantTimeStringEqual(actual, expected) {
   const expectedPadded = new Uint8Array(maxLength);
   actualPadded.set(actualBytes.slice(0, maxLength));
   expectedPadded.set(expectedBytes.slice(0, maxLength));
-  return timingSafeEqual(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
+  return timingSafeEqual2(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
 }
 function workerAuthRequiredResponse() {
   return new Response(JSON.stringify({
@@ -68988,7 +69141,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash33, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync28, statSync as statSync9 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
 import { join as join45, resolve as resolve7 } from "node:path";
@@ -69032,6 +69185,20 @@ function createEmailSourceWorker(options = {}) {
   const credentialDegradations = options.credentialDegradations;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map;
+  let dashboardRelayStateKeyCache;
+  const dashboardRelayStateKey = async (secretStore) => {
+    if (dashboardRelayStateKeyCache)
+      return dashboardRelayStateKeyCache;
+    const stored = (await secretStore.get(DASHBOARD_OAUTH_RELAY_STATE_KEY))?.trim();
+    if (stored) {
+      dashboardRelayStateKeyCache = stored;
+      return stored;
+    }
+    const minted = createOAuthRelayStateKey();
+    await secretStore.set(DASHBOARD_OAUTH_RELAY_STATE_KEY, minted);
+    dashboardRelayStateKeyCache = minted;
+    return minted;
+  };
   const dashboardDisconnectedSources = new Set;
   const dashboardUnpairedSources = new Set;
   let dashboardSchedulerRegistryStamp;
@@ -69255,6 +69422,8 @@ function createEmailSourceWorker(options = {}) {
           const registryRead = readDashboardRegistryOutcome(sourceDashboard.registryPath);
           const registry2 = registryRead.registry;
           const secretStore = dashboardSecretStore(sourceDashboard);
+          const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
           const googleCloudProjectId = dashboardGoogleCloudProjectId();
           const sourceIndexDashboardStatus = withCredentialDegradations(await sourceIndexStatus.status({
             include_items: false,
@@ -69281,11 +69450,12 @@ function createEmailSourceWorker(options = {}) {
             ...registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {},
             unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
             ...credentialHealth ? { credentialHealth } : {},
-            oauthClientIds: await dashboardOAuthClientIds(registry2, secretStore),
+            oauthClientIds: dashboardClientIdSets.all,
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
             ...googleCloudProjectId ? { googleCloudProjectId } : {},
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            oauthRedirectBaseUrl: dashboardOAuthRedirectOrigin(url, request.headers),
+            oauthRedirectBaseUrl: dashboardOAuthOrigin,
+            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardOAuthOrigin, dashboardClientIdSets.own),
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -69313,7 +69483,15 @@ function createEmailSourceWorker(options = {}) {
           const source = parseDashboardOAuthSource(decodeURIComponent(url.pathname.slice("/oauth/callback/".length)));
           const attempt = dashboardOAuthAttempts.get(source);
           const state = asOptionalString(url.searchParams.get("state"));
-          if (!attempt || dashboardOAuthAttemptExpired(attempt, new Date) || !state || !dashboardOAuthStateMatches(attempt, state)) {
+          const relayAccepted = attempt?.relay === undefined || state === undefined ? true : verifyOAuthRelayState(state, {
+            key: await dashboardRelayStateKey(dashboardSecretStore(sourceDashboard)),
+            expectedOrigin: dashboardOAuthRedirectOrigin(url, request.headers),
+            expectedSource: source,
+            expectedNonce: attempt.relay.nonce,
+            now: new Date,
+            ttlMs: OAUTH_RELAY_STATE_TTL_MS
+          }).ok;
+          if (!attempt || dashboardOAuthAttemptExpired(attempt, new Date) || !state || !dashboardOAuthStateMatches(attempt, state) || !relayAccepted) {
             if (attempt && dashboardOAuthAttemptExpired(attempt, new Date)) {
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             }
@@ -69379,8 +69557,11 @@ function createEmailSourceWorker(options = {}) {
             const secretStore = dashboardSecretStore(sourceDashboard);
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
             assertDashboardAccountCardinality(registry2, source);
-            const clientIds = await dashboardOAuthClientIds(registry2, secretStore);
-            const clientId = asOptionalString(record3.client_id) ?? dashboardOAuthClientIdForSource(source, clientIds);
+            const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
+            const submittedClientId = asOptionalString(record3.client_id);
+            const dashboardOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+            const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOrigin, dashboardOAuthClientIdForSource(source, clientIdSets.own));
+            const clientId = submittedClientId ?? publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
@@ -69388,7 +69569,6 @@ function createEmailSourceWorker(options = {}) {
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
               throw new EmailSourceWorkerError(409, "oauth_client_secret_missing", `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
             }
-            const submittedClientId = asOptionalString(record3.client_id);
             if (submittedClientId) {
               await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
             }
@@ -69396,7 +69576,14 @@ function createEmailSourceWorker(options = {}) {
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
             }
-            const redirectUri = `${dashboardOAuthRedirectOrigin(url, request.headers)}/oauth/callback/${encodeURIComponent(source)}`;
+            const redirectUri = publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+            const relayNonce = publisher?.relay === true ? createOAuthRelayNonce() : undefined;
+            const relayState = relayNonce === undefined ? undefined : signOAuthRelayState({
+              origin: dashboardOrigin,
+              source,
+              nonce: relayNonce,
+              iat: Math.floor(Date.now() / 1000)
+            }, await dashboardRelayStateKey(secretStore));
             const startOAuth = sourceDashboard.startExternalOAuthConnection ?? startExternalOAuthSourceConnection;
             const pending = await startOAuth({
               source,
@@ -69405,6 +69592,7 @@ function createEmailSourceWorker(options = {}) {
               registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
               secretStore,
               redirectUri,
+              ...relayState ? { state: relayState } : {},
               openBrowser: false,
               ...sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {}
             });
@@ -69425,7 +69613,8 @@ function createEmailSourceWorker(options = {}) {
               pending,
               returnTo: dashboardReturnTo(),
               startedAt: startedAtDate.toISOString(),
-              expiresAt
+              expiresAt,
+              ...relayNonce ? { relay: { nonce: relayNonce } } : {}
             });
             return json({
               ok: true,
@@ -71573,7 +71762,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual2(createHash33("sha256").update(expected).digest(), createHash33("sha256").update(state).digest());
+  return timingSafeEqual3(createHash33("sha256").update(expected).digest(), createHash33("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -71652,9 +71841,9 @@ function dashboardGoogleCloudProjectId() {
     return;
   }
 }
-async function dashboardOAuthClientIds(registry2, secretStore) {
-  const output = {};
-  await readConfiguredDashboardOAuthClientIds(output, secretStore);
+async function dashboardOAuthClientIdSets(registry2, secretStore) {
+  const own = {};
+  await readConfiguredDashboardOAuthClientIds(own, secretStore);
   for (const handle of registry2.handles) {
     const ref = handle.oauth2Refresh?.clientIdSecretRef;
     if (!ref)
@@ -71666,17 +71855,21 @@ async function dashboardOAuthClientIds(registry2, secretStore) {
     if (!clientId)
       continue;
     if (handle.provider === "gmail")
-      output.gmail = clientId;
+      own.gmail = clientId;
     if (handle.provider === "google_drive")
-      output["google-drive"] = clientId;
+      own["google-drive"] = clientId;
     if (handle.provider === "dropbox")
-      output.dropbox = clientId;
+      own.dropbox = clientId;
     if (handle.provider === "x")
-      output.x = clientId;
+      own.x = clientId;
     if (ref.startsWith("store:google."))
-      output.google = clientId;
+      own.google = clientId;
   }
-  return output;
+  const all = { ...own };
+  const pilotClientId = dashboardGooglePilotClientId();
+  if (!all.google && pilotClientId)
+    all.google = pilotClientId;
+  return { own, all };
 }
 async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
   const sources = ["google", "gmail", "google-drive", "dropbox", "x"];
@@ -71685,12 +71878,38 @@ async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
     if (clientId)
       output[source] = clientId;
   }
-  const pilotClientId = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID?.trim();
-  const packagedClientId = packagedGooglePilotClientId();
-  if (!output.google && pilotClientId)
-    output.google = pilotClientId;
-  if (!output.google && packagedClientId)
-    output.google = packagedClientId;
+}
+function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
+  if (source === "x")
+    return;
+  if (ownClientId)
+    return;
+  if (dashboardGoogleOAuthSource(source)) {
+    const pilotClientId = dashboardGooglePilotClientId();
+    if (pilotClientId && dashboardLoopbackOrigin(dashboardOrigin)) {
+      return {
+        clientId: pilotClientId,
+        redirectUri: `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`,
+        relay: false
+      };
+    }
+    const webClientId = googlePublisherWebClientId();
+    return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
+  }
+  const appKey = dropboxPublisherAppKey();
+  return appKey ? { clientId: appKey, redirectUri: oauthRelayUrl(), relay: true } : undefined;
+}
+function dashboardPublisherOAuthSources(dashboardOrigin, ownClientIds) {
+  const sources = ["gmail", "google-drive", "dropbox", "x"];
+  return sources.filter((source) => dashboardPublisherOAuthFlow(source, dashboardOrigin, dashboardOAuthClientIdForSource(source, ownClientIds)) !== undefined);
+}
+function dashboardLoopbackOrigin(origin) {
+  try {
+    const hostname = new URL(origin).hostname;
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
 }
 async function dashboardOAuthClientSecretAvailability(secretStore) {
   const output = {};
@@ -72058,9 +72277,10 @@ function html(value, status = 200) {
     }
   });
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
   init_email_policy();
+  init_oauth_relay();
   init_connect();
   init_operation_error();
   init_ingestion_throughput();
@@ -75912,7 +76132,7 @@ var init_server4 = __esm(async () => {
 
 // src/cli.ts
 init_config();
-import { randomBytes as randomBytes5 } from "node:crypto";
+import { randomBytes as randomBytes6 } from "node:crypto";
 import { readFileSync as readFileSync29 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -79969,7 +80189,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes5(32).toString("base64url");
+  return randomBytes6(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

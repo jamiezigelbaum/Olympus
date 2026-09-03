@@ -11,6 +11,9 @@
 //                one provider's connect walkthrough on its own route, and
 //   /connect-dropbox-refused the same card after the provider refused the
 //                callback. Add ?setup to read them on the setup page.
+//   /connect-dropbox-publisher, /connect-google-publisher
+//                publisher-app mode: one Connect button, with the
+//                bring-your-own walkthrough behind "Use my own app instead".
 //   ?source=<id> / ?setup / ?background select the same subpages the worker
 //   serves on any of the three states.
 //   Append ?token=dash_<anything> to carry the read-only dashboard URL, and
@@ -195,7 +198,7 @@ const engine = createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({
  */
 function connectPreview(
   provider: 'google' | 'dropbox' | 'x',
-  options: { refused?: boolean; loopback?: boolean } = {},
+  options: { refused?: boolean; loopback?: boolean; publisher?: boolean } = {},
 ) {
   const source = provider === 'google' ? 'gmail' : provider;
   return buildSourceDashboardViewModel({
@@ -205,14 +208,19 @@ function connectPreview(
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
     // Each provider's key is on file, so the card is an `oauth` action: the
-    // state the owner's live reauthorization failed in.
-    oauthClientIds: {
+    // state the owner's live reauthorization failed in. A publisher-mode
+    // preview registers NO key of its own — that is exactly the state in which
+    // Olympus's own app takes over and the card collapses to one button.
+    oauthClientIds: options.publisher ? {} : {
       google: PREVIEW_GOOGLE_CLIENT_ID,
       dropbox: 'preview-dropbox-app-key',
       x: 'preview-x-client-id',
     },
-    oauthClientSecretAvailability: { google: true, x: true },
+    oauthClientSecretAvailability: options.publisher ? {} : { google: true, x: true },
     googlePilotClientConfigured: true,
+    // Publisher mode for the two relay providers: what the owner sees once the
+    // publisher's Dropbox app key (and later Google web client id) ship.
+    ...(options.publisher ? { publisherOAuthSources: ['gmail', 'google-drive', 'dropbox'] as const } : {}),
     oauthRedirectBaseUrl: options.loopback ? 'http://127.0.0.1:8010' : PREVIEW_REDIRECT_BASE_URL,
     ...(options.refused
       ? {
@@ -236,6 +244,8 @@ function view(state: string) {
   if (state === 'connect-dropbox') return connectPreview('dropbox');
   if (state === 'connect-x') return connectPreview('x');
   if (state === 'connect-dropbox-refused') return connectPreview('dropbox', { refused: true });
+  if (state === 'connect-dropbox-publisher') return connectPreview('dropbox', { publisher: true });
+  if (state === 'connect-google-publisher') return connectPreview('google', { publisher: true });
   if (state === 'fresh') {
     return buildSourceDashboardViewModel({
       sourceIndexStatus: emptyStatus(),
@@ -474,7 +484,7 @@ Bun.serve({
     const states = [
       'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
-      'connect-dropbox-refused',
+      'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
     if (!states.includes(state)) {
       return new Response(`states: ${states.map((name) => `/${name}`).join(' ')}`, { status: 404 });
@@ -522,3 +532,4 @@ Bun.serve({
 console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
 console.log('  states: /fresh /partial /full /dropbox-initial /dropbox-update');
 console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
+console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');

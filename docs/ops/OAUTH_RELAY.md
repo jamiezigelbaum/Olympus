@@ -12,8 +12,48 @@ which bounces the browser back to whatever dashboard origin the flow's own
 
 This document is the contract. The relay page is
 [`relay/oauth/callback/index.html`](../../relay/oauth/callback/index.html); the
-worker side is implemented separately and must satisfy
+worker side lives in [`src/core/oauth-relay.ts`](../../src/core/oauth-relay.ts)
+(state minting and verification), the publisher client identifiers in
+[`src/core/publisher-oauth-client.ts`](../../src/core/publisher-oauth-client.ts),
+and the routes in `src/workers/email-source/index.ts`. It satisfies
 ["What the worker must verify"](#what-the-worker-must-verify).
+
+### Which flow a source takes
+
+| Source | Dashboard origin | Client | `redirect_uri` | `state` |
+|---|---|---|---|---|
+| `gmail`, `google-drive` | loopback | packaged Google **Desktop** pilot client | `http://127.0.0.1:<port>/oauth/callback/<source>` | random |
+| `gmail`, `google-drive` | anything else | publisher Google **Web** client | the relay URL | signed |
+| `dropbox` | any | publisher Dropbox app key | the relay URL | signed |
+| `x` | any | bring-your-own | the dashboard's own callback | random |
+
+Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
+
+- **A registration the owner made wins.** Publisher mode is offered only to an
+  install that has registered no client id of its own for that source (pasted
+  into the dashboard, or already bound to a connected handle). Bring-your-own
+  stays reachable from every publisher card as "Use my own app instead".
+- **Google on loopback keeps the loopback redirect.** A Desktop app client
+  cannot register an https redirect URI, so the pilot client cannot use the
+  relay — and does not need to: a loopback callback reaches the worker directly.
+  Same publisher app, no relay, no signed state.
+
+Both publisher identifiers ship **empty**. Until the owner creates the apps,
+every non-loopback case answers "not configured" and the dashboard shows exactly
+the bring-your-own path it shows today.
+
+The publisher-side token-exchange endpoint is still unbuilt. When it lands, only
+the exchange leg moves: the relay contract, the state format, and the registered
+`redirect_uri` are unchanged by it.
+
+### The worker's state signing key
+
+`dashboard.oauth.relay_state_key` in the worker's own secret store: 32 random
+bytes, base64url, minted on first use and cached in the worker process. It signs
+and verifies `state` and nothing else. It is never sent to a provider, never put
+in a page, and never reachable from an unauthenticated route — the callback
+route only reads it once a pending attempt an authenticated start route created
+already exists.
 
 ## Why a relay at all
 
