@@ -25,7 +25,7 @@ routes = [
 # Public identifier, not a secret — every browser that reaches Google's
 # consent screen already sees it. Fill in after creating the Web application
 # client (see the runbook).
-GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com"
 # Comma-separated exact `redirect_uri` matches, in addition to the loopback
 # forms `isAllowedRedirectUri` always accepts (src/redirect-allowlist.ts).
 # The default covers the one production relay; override only for a staging
