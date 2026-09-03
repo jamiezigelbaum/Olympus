@@ -43,4 +43,4 @@ RATE_LIMIT_WINDOW_SECONDS = "60"
 # below (the runbook has the exact command).
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "d733cdb7519341a1a528463c4f4a9427"
