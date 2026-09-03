@@ -7,9 +7,14 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stdin as processStdin } from 'node:process';
 import { createDefaultSecretStore, isSafeSecretKey, normalizeSecretRef, type SecretStore } from './secret-store.ts';
-import { fetchWithTimeout, isAbortError } from './http-timeout.ts';
+import {
+  fetchBoundedText,
+  fetchWithTimeout,
+  isAbortError,
+  isBoundedResponseTooLargeError,
+} from './http-timeout.ts';
 import { googlePublisherExchangeUrl } from './oauth-relay.ts';
-import { googlePublisherWebClientId } from './publisher-oauth-client.ts';
+import { isGooglePublisherWebClientId } from './publisher-oauth-client.ts';
 import {
   assertOneConnectedAccountPerProvider,
   defaultHandleRegistryPath,
@@ -560,8 +565,17 @@ async function completeOAuthSourceConnection(
   prepared: PreparedOAuthSourceConnection,
   code: string,
 ): Promise<ConnectResult> {
-  const clientSecret = await resolveOAuthClientSecret(prepared);
+  // The route is decided FIRST, because it decides whether a client secret
+  // may be touched at all (Codex round 1 on 5cb644b9). The publisher web
+  // client's secret lives only in the publisher exchange endpoint, so this
+  // flow has no secret of its own — and `resolveOAuthClientSecret` searches
+  // the `google`/`gmail`/`google-drive` namespaces for ANY stored secret
+  // without checking it belongs to the client in use. Resolving first meant a
+  // secret left behind by an unrelated bring-your-own registration was copied
+  // under this source's key and referenced from the handle registry, giving a
+  // publisher credential a `clientSecretSecretRef` to a stranger's secret.
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
+  const clientSecret = usesGooglePublisherExchange ? undefined : await resolveOAuthClientSecret(prepared);
   const token = await exchangeAuthorizationCode({
     source: prepared.options.source,
     tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
@@ -622,7 +636,11 @@ async function completeOAuthSourceConnection(
       }
 
       let clientSecretRef: string | undefined;
-      if (clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
+      // `clientSecret` is already `undefined` on the publisher path; the
+      // condition restates it so the invariant is readable here rather than
+      // sixty lines up, and so a future edit to the resolver cannot quietly
+      // reintroduce a stored secret for a credential that has none.
+      if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
         const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
         await prepared.secretStore.set(clientSecretKey, clientSecret);
         clientSecretRef = `store:${clientSecretKey}`;
@@ -1537,64 +1555,51 @@ async function exchangeAuthorizationCode(options: {
   // Google Desktop pilot client, a bring-your-own Google client, Dropbox, X —
   // is unaffected and still exchanges directly with the provider below.
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(options.source, options.clientId);
+  const url = usesGooglePublisherExchange ? googlePublisherExchangeUrl() : options.tokenUrl;
+  const init: RequestInit = usesGooglePublisherExchange
+    ? {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      // No `client_secret` field: this endpoint holds the secret itself and
+      // never accepts one from a caller (it would have nowhere honest to
+      // put it — the Worker's own secret is the only one Google will
+      // accept).
+      body: JSON.stringify({
+        code: options.code,
+        code_verifier: options.verifier,
+        redirect_uri: options.redirectUri,
+        ...(options.state ? { state: options.state } : {}),
+      }),
+    }
+    : directTokenExchangeRequest(options);
   let response: Response;
-  if (usesGooglePublisherExchange) {
-    try {
-      response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeUrl(), {
-        method: 'POST',
-        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-        // No `client_secret` field: this endpoint holds the secret itself and
-        // never accepts one from a caller (it would have nowhere honest to
-        // put it — the Worker's own secret is the only one Google will
-        // accept).
-        body: JSON.stringify({
-          code: options.code,
-          code_verifier: options.verifier,
-          redirect_uri: options.redirectUri,
-          ...(options.state ? { state: options.state } : {}),
-        }),
-      }, options.timeoutMs);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
-      }
-      throw error;
+  let text: string;
+  try {
+    // Headers AND body under one deadline, with a byte cap: the timeout used
+    // to end the moment the status line arrived, so a peer that answered and
+    // then dribbled its body held connect open past the timeout it was given
+    // (Codex round 1 on 5cb644b9). A token response is a few hundred bytes.
+    ({ response, text } = await fetchBoundedText(options.fetchImpl, url, init, {
+      timeoutMs: options.timeoutMs,
+      limitBytes: OAUTH_TOKEN_RESPONSE_LIMIT_BYTES,
+    }));
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
     }
-  } else {
-    const body = new URLSearchParams();
-    body.set('grant_type', 'authorization_code');
-    body.set('code', options.code);
-    body.set('redirect_uri', options.redirectUri);
-    body.set('code_verifier', options.verifier);
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    };
-    if (options.source === 'x' && options.clientSecret) {
-      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
-    } else {
-      body.set('client_id', options.clientId);
-      if (isGoogleOAuthSource(options.source) && options.clientSecret) body.set('client_secret', options.clientSecret);
+    if (isBoundedResponseTooLargeError(error)) {
+      // Nothing of the body is repeated: an oversized answer is exactly the
+      // kind that might be an error page, a proxy interstitial, or an attempt
+      // to make this process buffer something.
+      throw new Error('OAuth token exchange returned an oversized response. No credentials were stored; re-run connect when the provider is reachable.');
     }
-    try {
-      response = await fetchWithTimeout(options.fetchImpl, options.tokenUrl, {
-        method: 'POST',
-        headers,
-        body,
-      }, options.timeoutMs);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
-      }
-      throw error;
-    }
+    throw error;
   }
   // The exchange endpoint forwards Google's own success and error shapes
   // unchanged (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`, "API"), and its own
   // refusals (rate limit, bad request, timeout, upstream failure) are the same
   // `{error, error_description?}`-shaped JSON with a real HTTP status, so
   // nothing below needs to know which branch produced `response`.
-  const text = await response.text();
   if (!response.ok) {
     // Provider error bodies are echo chambers: a provider may reflect request
     // material — credential values included — into error_description, and no
@@ -1622,6 +1627,36 @@ async function exchangeAuthorizationCode(options: {
   };
 }
 
+/** A token response is a small JSON object on every provider Olympus talks to. */
+const OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+/** Today's direct-to-provider exchange: form-encoded, unchanged. */
+function directTokenExchangeRequest(options: {
+  source: ConnectOAuthOptions['source'];
+  clientId: string;
+  clientSecret?: string;
+  code: string;
+  redirectUri: string;
+  verifier: string;
+}): RequestInit {
+  const body = new URLSearchParams();
+  body.set('grant_type', 'authorization_code');
+  body.set('code', options.code);
+  body.set('redirect_uri', options.redirectUri);
+  body.set('code_verifier', options.verifier);
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
+  if (options.source === 'x' && options.clientSecret) {
+    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
+  } else {
+    body.set('client_id', options.clientId);
+    if (isGoogleOAuthSource(options.source) && options.clientSecret) body.set('client_secret', options.clientSecret);
+  }
+  return { method: 'POST', headers, body };
+}
+
 function isGoogleOAuthSource(source: ConnectOAuthOptions['source']): boolean {
   return source === 'google' || source === 'gmail' || source === 'google-drive';
 }
@@ -1632,10 +1667,14 @@ function isGoogleOAuthSource(source: ConnectOAuthOptions['source']): boolean {
  * refresh go through the publisher exchange endpoint rather than straight to
  * Google. The packaged Desktop pilot client and a bring-your-own client both
  * exchange directly with Google and never match this.
+ *
+ * Matches any id in the append-only published set, not just the current
+ * default (`isGooglePublisherWebClientId`): a web client Olympus published
+ * under an earlier rotation still has its secret only in the exchange
+ * endpoint, so it must still route there.
  */
 function isGooglePublisherExchangeClient(source: ConnectOAuthOptions['source'], clientId: string): boolean {
-  const publisherClientId = googlePublisherWebClientId();
-  return isGoogleOAuthSource(source) && publisherClientId !== undefined && clientId === publisherClientId;
+  return isGoogleOAuthSource(source) && isGooglePublisherWebClientId(clientId);
 }
 
 function shouldStoreOAuthClientSecret(source: ConnectOAuthOptions['source']): boolean {

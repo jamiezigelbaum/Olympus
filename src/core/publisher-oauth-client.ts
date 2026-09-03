@@ -62,6 +62,46 @@ export const DEFAULT_DROPBOX_PUBLISHER_APP_KEY = '1y1l05nqd24xaaw';
 export const DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID =
   '1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com';
 
+/**
+ * Every Google Web-application client id Olympus has ever shipped as its
+ * publisher client, newest first.
+ *
+ * **Append-only.** A rotation adds the new id at the front and never removes
+ * an old one, because this list is what a credential connected under a
+ * PREVIOUS publisher client is recognised by. That recognition is load-bearing
+ * in exactly one place that cannot be re-derived later: a Google web client's
+ * token exchange and refresh only work through the publisher exchange endpoint
+ * (the secret Google demands lives there and nowhere else), so an install
+ * whose stored client id stopped matching `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID`
+ * would otherwise fall back to a direct, secretless Google call, be refused,
+ * and latch the handle into `reauth_required` — ingestion stops for a rotation
+ * the user never made and cannot see. `exchangeVia` on the stored credential
+ * is the durable fix; this list is what identifies the credentials written
+ * before that field existed, and what the one-time migration keys off.
+ */
+export const GOOGLE_PUBLISHER_WEB_CLIENT_IDS: readonly string[] = [
+  DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+];
+
+/**
+ * Whether a client id is one of Olympus's own publisher web clients — the
+ * CURRENT one, this install's environment override, or any historical one.
+ *
+ * Deliberately wider than `clientId === googlePublisherWebClientId()`: that
+ * comparison answers "is this the id a NEW flow would use", which is the wrong
+ * question for a credential that was connected months ago.
+ */
+export function isGooglePublisherWebClientId(
+  clientId: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const candidate = clientId?.trim();
+  if (!candidate) return false;
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
+  if (override && candidate === override) return true;
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== '' && known.trim() === candidate);
+}
+
 /** The publisher Dropbox app key, environment override first. */
 export function dropboxPublisherAppKey(
   env: Record<string, string | undefined> = process.env,

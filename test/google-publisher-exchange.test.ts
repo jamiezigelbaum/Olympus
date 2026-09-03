@@ -22,12 +22,17 @@ import {
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
 import type { OAuthFetch } from '../src/core/connect.ts';
+import { startExternalOAuthSourceConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
-import { googlePublisherExchangeUrl, googlePublisherExchangeRefreshUrl } from '../src/core/oauth-relay.ts';
+import { DEFAULT_OAUTH_RELAY_URL, googlePublisherExchangeUrl, googlePublisherExchangeRefreshUrl } from '../src/core/oauth-relay.ts';
+import { DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
-import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  readConnectedHandleRegistry,
+  writeConnectedHandleRegistry,
+} from '../src/workers/credential-broker/connected-handles.ts';
 import {
   createEnvCredentialBroker,
   CredentialBrokerError,
@@ -85,12 +90,14 @@ interface FixtureOptions {
   exchangeResponse?: () => Response;
   /** What a direct-to-Google call answers, for the loopback scenarios. */
   googleDirectResponse?: () => Response;
+  /** Secret-store contents this install already holds before the connect. */
+  secrets?: Record<string, string>;
 }
 
 function fixture(options: FixtureOptions = {}): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-google-exchange-worker-'));
   dirs.push(dir);
-  const secretStore = memorySecretStore();
+  const secretStore = memorySecretStore(options.secrets ?? {});
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const exchangeResponse = options.exchangeResponse ?? (() => new Response(JSON.stringify({
     access_token: 'google-access-token-fixture',
@@ -244,6 +251,85 @@ describe('publisher Google flow through the relay (non-loopback dashboard)', () 
   });
 });
 
+// Codex round 1 on 5cb644b9, MAJOR 1. `resolveOAuthClientSecret` searches the
+// `google`/`gmail`/`google-drive` namespaces for ANY stored Google secret and
+// falls back to the pilot client's env secret, none of which is checked
+// against the client id actually in use. While it ran BEFORE the publisher
+// route was decided, a stranger's secret was resolved, copied under this
+// source's own key, and referenced from the handle registry — giving a
+// publisher credential (which has no secret, by construction) a
+// `clientSecretSecretRef` pointing at someone else's.
+describe('the publisher path never touches a client secret it does not own', () => {
+  const STALE_SECRETS = {
+    'google.personal.oauth.client_secret': 'stale-google-namespace-secret',
+    'google-drive.personal.oauth.client_secret': 'stale-drive-namespace-secret',
+  };
+  let previousPilotSecret: string | undefined;
+
+  beforeEach(() => {
+    previousPilotSecret = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET;
+    process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET = 'stale-pilot-env-secret';
+  });
+
+  afterEach(() => {
+    restoreEnv('OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET', previousPilotSecret);
+  });
+
+  test('a stale secret under any Google namespace is neither sent, copied, nor referenced', async () => {
+    const instance = fixture({ secrets: { ...STALE_SECRETS } });
+    const started = await authorizationUrl(await startConnect(instance));
+    const state = started.searchParams.get('state')!;
+    const callback = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=relay-code-1&state=${encodeURIComponent(state)}`,
+    ));
+    expect(callback.status).toBe(303);
+
+    // Not sent: not in the JSON body, not in a header, not anywhere on the wire.
+    const wire = JSON.stringify(instance.calls);
+    for (const stale of [...Object.values(STALE_SECRETS), 'stale-pilot-env-secret']) {
+      expect(wire).not.toContain(stale);
+    }
+    expect(JSON.parse(String(instance.calls[0]!.init.body))).not.toHaveProperty('client_secret');
+
+    // Not copied: the connect must not mint a secret under the source's own
+    // key out of one that belongs to a different registration.
+    expect(await instance.secretStore.get('gmail.personal.oauth.client_secret')).toBeUndefined();
+    // ...and the ones it found are left exactly as they were.
+    expect(await instance.secretStore.get('google.personal.oauth.client_secret'))
+      .toBe(STALE_SECRETS['google.personal.oauth.client_secret']);
+
+    // Not referenced: nothing in the registry tells a later refresh to go
+    // looking for a secret this credential does not have.
+    const registry = readConnectedHandleRegistry(instance.registryPath);
+    const handle = registry.handles.find((entry) => entry.handle === 'gmail.personal');
+    expect(handle?.oauth2Refresh?.clientSecretSecretRef).toBeUndefined();
+    expect(handle?.oauth2Refresh?.exchangeVia).toBe('publisher_endpoint');
+    expect(JSON.stringify(registry)).not.toContain('client_secret');
+  });
+
+  test('a bring-your-own Google connect still keeps the secret its own registration was issued with', async () => {
+    // The same resolver, on the path it exists for: an owner-registered client
+    // id whose secret is on file must still reach the exchange.
+    const instance = fixture({
+      secrets: {
+        'gmail.personal.oauth.client_id': 'owner-registered-byo-client-id',
+        'gmail.personal.oauth.client_secret': 'owner-registered-byo-client-secret',
+      },
+    });
+    const started = await authorizationUrl(await startConnect(instance));
+    expect(started.searchParams.get('client_id')).toBe('owner-registered-byo-client-id');
+    const state = started.searchParams.get('state')!;
+    await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/gmail?code=byo-code-1&state=${encodeURIComponent(state)}`,
+    ));
+
+    expect(instance.calls).toHaveLength(1);
+    expect(instance.calls[0]!.url).toBe('https://oauth2.googleapis.com/token');
+    const params = new URLSearchParams(String(instance.calls[0]!.init.body ?? ''));
+    expect(params.get('client_secret')).toBe('owner-registered-byo-client-secret');
+  });
+});
+
 describe('publisher Google flow on a loopback dashboard keeps the Desktop pilot client', () => {
   beforeEach(() => {
     process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = PILOT_CLIENT_ID;
@@ -322,6 +408,8 @@ describe('Google publisher OAuth2 refresh routes on stored provenance', () => {
       handles: [refreshHandle({ exchangeVia: 'publisher_endpoint' })],
       secretStore,
       oauth2CacheNamespace: `google-publisher-refresh-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
       fetch: async (url, init) => {
         calls.push({ url: String(url), init: (init ?? {}) as RequestInit });
         return new Response(JSON.stringify({
@@ -355,6 +443,8 @@ describe('Google publisher OAuth2 refresh routes on stored provenance', () => {
       handles: [refreshHandle()],
       secretStore,
       oauth2CacheNamespace: `google-publisher-refresh-fallback-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
       fetch: async (url) => {
         calls.push({ url: String(url) });
         return new Response(JSON.stringify({ access_token: 'refreshed-access-token-fixture', expires_in: 3599 }), {
@@ -379,6 +469,8 @@ describe('Google publisher OAuth2 refresh routes on stored provenance', () => {
       handles: [refreshHandle({ clientSecretSecretRef: 'store:gmail.personal.oauth.client_secret' })],
       secretStore,
       oauth2CacheNamespace: `google-byo-refresh-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
       fetch: async (url, init) => {
         calls.push({ url: String(url), init: (init ?? {}) as RequestInit });
         return new Response(JSON.stringify({ access_token: 'refreshed-access-token-fixture', expires_in: 3599 }), {
@@ -407,9 +499,280 @@ describe('Google publisher OAuth2 refresh routes on stored provenance', () => {
       handles: [refreshHandle({ exchangeVia: 'publisher_endpoint' })],
       secretStore,
       oauth2CacheNamespace: `google-publisher-refresh-network-fail-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
       fetch: async () => {
         throw new Error('network is down');
       },
+    });
+
+    await expect(broker.issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' }))
+      .rejects.toBeInstanceOf(CredentialBrokerError);
+  });
+});
+
+// Codex round 1 on 5cb644b9, MAJOR 2. A credential connected before
+// `exchangeVia` existed is recognised only by its stored client id. If that
+// recognition is against the CURRENT default, the day the default rotates
+// every such credential silently falls to the direct-Google branch, which has
+// no secret to send, is refused, and latches the handle into reauth — a dead
+// source the user never touched. Two independent defences are tested here: the
+// published set is append-only, and the field is written durably on first use.
+describe('legacy publisher credentials survive a client-id rotation', () => {
+  let previousWebId: string | undefined;
+
+  beforeEach(() => {
+    previousWebId = process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID;
+  });
+
+  afterEach(() => {
+    restoreEnv('OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID', previousWebId);
+  });
+
+  function legacyRegistry(registryPath: string, clientIdKey: string): void {
+    writeConnectedHandleRegistry({
+      version: 1,
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail',
+        accountRole: 'personal',
+        trustDomain: 'secure_local',
+        allowedCapabilities: ['gmail.email.sync'],
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        oauth2Refresh: {
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          clientIdSecretRef: `store:${clientIdKey}`,
+          refreshTokenSecretRef: 'store:gmail.personal.oauth.refresh_token',
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+          // No `exchangeVia`: this is the pre-migration shape.
+        },
+        connectedAt: '2026-09-01T00:00:00.000Z',
+      }],
+    }, registryPath);
+  }
+
+  function refreshingBroker(options: {
+    registryPath: string;
+    secretStore: SecretStore;
+    calls: Array<{ url: string }>;
+    namespace: string;
+    env?: Record<string, string | undefined>;
+  }) {
+    return createEnvCredentialBroker({
+      handleRegistryPath: options.registryPath,
+      secretStore: options.secretStore,
+      oauth2CacheNamespace: options.namespace,
+      env: options.env ?? {},
+      fetch: async (url) => {
+        options.calls.push({ url: String(url) });
+        return new Response(JSON.stringify({ access_token: 'refreshed-access-token-fixture', expires_in: 3599 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+  }
+
+  test('the first refresh of a legacy handle writes exchangeVia, and a later rotation cannot unroute it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-google-exchange-legacy-'));
+    dirs.push(dir);
+    const registryPath = join(dir, 'handles.json');
+    legacyRegistry(registryPath, 'gmail.personal.oauth.client_id');
+    const secretStore = memorySecretStore({
+      'gmail.personal.oauth.client_id': PUBLISHER_WEB_CLIENT_ID,
+      'gmail.personal.oauth.refresh_token': 'stored-refresh-token-fixture',
+    });
+    process.env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID = PUBLISHER_WEB_CLIENT_ID;
+
+    const first: Array<{ url: string }> = [];
+    await refreshingBroker({
+      registryPath,
+      secretStore,
+      calls: first,
+      namespace: `legacy-migrate-${dir}`,
+      // This install's publisher id, as the broker sees it.
+      env: { OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID: PUBLISHER_WEB_CLIENT_ID },
+    }).issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' });
+    expect(first).toEqual([{ url: EXCHANGE_REFRESH_URL }]);
+
+    // Durable, not re-derived: the fact is now on disk.
+    const migrated = readConnectedHandleRegistry(registryPath).handles
+      .find((handle) => handle.handle === 'gmail.personal');
+    expect(migrated?.oauth2Refresh?.exchangeVia).toBe('publisher_endpoint');
+
+    // Now rotate the publisher client id out from under the stored one. The
+    // value-match no longer holds; the written field is what keeps this
+    // credential refreshing instead of dying at Google with no secret.
+    const afterRotation: Array<{ url: string }> = [];
+    await refreshingBroker({
+      registryPath,
+      secretStore,
+      calls: afterRotation,
+      namespace: `legacy-rotated-${dir}`,
+      // The rotation: nothing this install can see still names the stored id.
+      env: { OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID: 'rotated-publisher-web-client-id' },
+    }).issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' });
+    expect(afterRotation).toEqual([{ url: EXCHANGE_REFRESH_URL }]);
+  });
+
+  test('a published-but-superseded client id still routes to the endpoint with no migration at all', async () => {
+    // The rotation happened before this install ever refreshed, so no
+    // migration has run and the stored id is not the current one. It is still
+    // an id Olympus published, which is what `GOOGLE_PUBLISHER_WEB_CLIENT_IDS`
+    // is for.
+    const calls: Array<{ url: string }> = [];
+    const secretStore = memorySecretStore({
+      'gmail.personal.oauth.client_id': DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+      'gmail.personal.oauth.refresh_token': 'stored-refresh-token-fixture',
+    });
+    const broker = createEnvCredentialBroker({
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail',
+        allowedCapabilities: ['gmail.email.sync'],
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        tokenEnvNames: [],
+        oauth2Refresh: {
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          clientIdEnvNames: [],
+          clientIdSecretRef: 'store:gmail.personal.oauth.client_id',
+          refreshTokenSecretRef: 'store:gmail.personal.oauth.refresh_token',
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        },
+      }],
+      secretStore,
+      oauth2CacheNamespace: `legacy-published-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
+      // The current id is NOT the stored one: only the append-only published
+      // set can recognise this credential.
+      env: { OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID: 'rotated-publisher-web-client-id' },
+      fetch: async (url) => {
+        calls.push({ url: String(url) });
+        return new Response(JSON.stringify({ access_token: 'refreshed-access-token-fixture', expires_in: 3599 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    await broker.issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' });
+    expect(calls).toEqual([{ url: EXCHANGE_REFRESH_URL }]);
+  });
+});
+
+// Codex round 1 on 5cb644b9, MAJOR 3. `fetchWithTimeout` cleared its timer the
+// moment the response headers arrived, so the deadline bounded the handshake
+// and not the call: a peer that answered and then dribbled its body held
+// connect (or a refresh) open indefinitely, and an unbounded `response.text()`
+// would buffer whatever it did send.
+describe('the exchange and refresh bodies are read under the deadline and a byte cap', () => {
+  function neverEndingBody(): Response {
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"access_token":"'));
+        // ...and never closes.
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  async function publisherExchange(response: () => Response): Promise<() => Promise<unknown>> {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-google-exchange-bounded-'));
+    dirs.push(dir);
+    const pending = await startExternalOAuthSourceConnection({
+      source: 'gmail',
+      clientId: PUBLISHER_WEB_CLIENT_ID,
+      redirectUri: DEFAULT_OAUTH_RELAY_URL,
+      state: 'AAAA.BBBB',
+      secretStore: memorySecretStore(),
+      registryPath: join(dir, 'handles.json'),
+      openBrowser: false,
+      tokenExchangeTimeoutMs: 250,
+      fetch: async () => response(),
+    });
+    // A thunk, not the promise: awaiting the helper must not be what surfaces
+    // the rejection, or `expect(...).rejects` never sees it.
+    return () => pending.completeCallback({ state: 'AAAA.BBBB', code: 'bounded-code-1' });
+  }
+
+  test('a body that never ends fails the exchange on its own deadline instead of hanging', async () => {
+    const run = await publisherExchange(neverEndingBody);
+    const started = Date.now();
+    await expect(run()).rejects.toThrow(/timed out/);
+    // The deadline was 250ms; anything near the old behaviour would sit here
+    // until the process gave up.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 15_000);
+
+  test('an oversized exchange response is refused without repeating any of it', async () => {
+    const marker = 'A'.repeat(80 * 1024);
+    const run = await publisherExchange(() => new Response(`{"marker":"${marker}"}`, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(run()).rejects.toThrow(/oversized response/);
+  }, 15_000);
+
+  test('an oversized refresh response is a bounded broker refusal, not an unbounded read', async () => {
+    const secretStore = memorySecretStore({
+      'gmail.personal.oauth.client_id': PUBLISHER_WEB_CLIENT_ID,
+      'gmail.personal.oauth.refresh_token': 'stored-refresh-token-fixture',
+    });
+    const broker = createEnvCredentialBroker({
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail',
+        allowedCapabilities: ['gmail.email.sync'],
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        tokenEnvNames: [],
+        oauth2Refresh: {
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          clientIdEnvNames: [],
+          clientIdSecretRef: 'store:gmail.personal.oauth.client_id',
+          refreshTokenSecretRef: 'store:gmail.personal.oauth.refresh_token',
+          exchangeVia: 'publisher_endpoint',
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        },
+      }],
+      secretStore,
+      oauth2CacheNamespace: `bounded-refresh-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
+      env: { OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID: PUBLISHER_WEB_CLIENT_ID },
+      fetch: async () => new Response('B'.repeat(80 * 1024), { status: 200 }),
+    });
+
+    await expect(broker.issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' }))
+      .rejects.toBeInstanceOf(CredentialBrokerError);
+  });
+
+  test('the direct-to-provider refresh lane is capped too', async () => {
+    const secretStore = memorySecretStore({
+      'gmail.personal.oauth.client_id': 'owner-registered-byo-client-id',
+      'gmail.personal.oauth.refresh_token': 'stored-refresh-token-fixture',
+    });
+    const broker = createEnvCredentialBroker({
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail',
+        allowedCapabilities: ['gmail.email.sync'],
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        tokenEnvNames: [],
+        oauth2Refresh: {
+          tokenUrl: 'https://oauth2.googleapis.com/token',
+          clientIdEnvNames: [],
+          clientIdSecretRef: 'store:gmail.personal.oauth.client_id',
+          refreshTokenSecretRef: 'store:gmail.personal.oauth.refresh_token',
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        },
+      }],
+      secretStore,
+      oauth2CacheNamespace: `bounded-direct-refresh-${Math.random()}`,
+      // Owns no registry: never let a test reach the default handles.json.
+      loadDefaultHandleRegistry: false,
+      env: {},
+      // A bring-your-own client id: this lane goes straight to Google.
+      fetch: async () => new Response('C'.repeat(80 * 1024), { status: 200 }),
     });
 
     await expect(broker.issueSession({ handle: 'gmail.personal', capability: 'gmail.email.sync' }))

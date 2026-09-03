@@ -55,7 +55,7 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
       'src/workers/source-dispositions.ts',
       'src/workers/source-ingestion-ledger.ts',
     ],
-    implementation_guard_sha256: '941dc194c76957569c556d9696b0355d87454c7c0deadb7e139d1cdd74c3f3a4',
+    implementation_guard_sha256: '879306f08c947c5637ec302c60f9ce02ea1c809cf3271b4e535571781c40614d',
     pending_review: {
       requested_on: '2026-09-02',
       reason: 'The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance.',

@@ -19,41 +19,122 @@ export interface GoogleFetch {
   (input: string, init: RequestInit): Promise<Response>;
 }
 
+/**
+ * Google's token response is a small JSON object — a grant or an
+ * `{error, error_description}` refusal. The cap is what stops a hostile or
+ * broken upstream from making this Worker buffer an unbounded body inside its
+ * CPU and memory limits, and it is enforced on the bytes actually read, not
+ * on a `Content-Length` the peer chose.
+ */
+export const MAX_UPSTREAM_RESPONSE_BYTES = 64 * 1024;
+
 export interface GoogleUpstreamResult {
   ok: true;
-  response: Response;
+  status: number;
+  contentType: string | null;
+  /** Already read, under the same deadline and cap as the request itself. */
+  text: string;
 }
 
 export type GoogleUpstreamFailure =
   | { ok: false; kind: 'timeout' }
-  | { ok: false; kind: 'network_error' };
+  | { ok: false; kind: 'network_error' }
+  | { ok: false; kind: 'oversized_response' };
 
 export type GoogleUpstreamOutcome = GoogleUpstreamResult | GoogleUpstreamFailure;
 
+/**
+ * The deadline covers the BODY, not just the status line.
+ *
+ * Clearing the timer once headers arrived left the body read unbounded: an
+ * upstream that answered `200` and then dribbled held this Worker open past
+ * its stated timeout, spending request duration it had already promised to
+ * bound (Codex round 1 on 5cb644b9). The read is raced against the deadline
+ * rather than left to the abort signal alone, because a signal only interrupts
+ * a peer that honours it.
+ */
 async function postToGoogle(
   body: URLSearchParams,
   fetchImpl: GoogleFetch,
   timeoutMs: number,
 ): Promise<GoogleUpstreamOutcome> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const error = new Error('upstream deadline');
+      error.name = 'AbortError';
+      reject(error);
+    }, timeoutMs);
+  });
   try {
-    const response = await fetchImpl(GOOGLE_TOKEN_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: body.toString(),
-      signal: controller.signal,
-    });
-    return { ok: true, response };
+    const response = await Promise.race([
+      fetchImpl(GOOGLE_TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body: body.toString(),
+        signal: controller.signal,
+      }),
+      deadline,
+    ]);
+    const text = await Promise.race([
+      readBoundedText(response, MAX_UPSTREAM_RESPONSE_BYTES, controller),
+      deadline,
+    ]);
+    return { ok: true, status: response.status, contentType: response.headers.get('content-type'), text };
   } catch (error) {
+    if (error instanceof ResponseTooLargeError) return { ok: false, kind: 'oversized_response' };
     if (error instanceof Error && error.name === 'AbortError') return { ok: false, kind: 'timeout' };
     return { ok: false, kind: 'network_error' };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+class ResponseTooLargeError extends Error {}
+
+/** Refuses rather than truncating: a half-read token response is not an answer. */
+async function readBoundedText(
+  response: Response,
+  limitBytes: number,
+  controller: AbortController,
+): Promise<string> {
+  const body = response.body;
+  if (!body) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > limitBytes) throw new ResponseTooLargeError();
+    return text;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > limitBytes) {
+        controller.abort();
+        throw new ResponseTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
 }
 
 /**

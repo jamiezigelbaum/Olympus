@@ -370,6 +370,46 @@ export function markConnectedHandleReauthRequired(
   });
 }
 
+/**
+ * Records how an already-connected credential's tokens must be exchanged.
+ *
+ * The one caller is the broker's one-time migration of a Google publisher
+ * credential connected before `exchangeVia` existed: those handles are
+ * recognised only by their stored client id matching a published publisher id
+ * (`GOOGLE_PUBLISHER_WEB_CLIENT_IDS`), and that recognition would end at the
+ * next rotation of the default. Writing the field the first time such a handle
+ * is refreshed makes the routing durable, so the value-match never has to be
+ * right twice.
+ *
+ * Same lease and same preserved-unknowns write path as every other registry
+ * mutation. A handle with no `oauth2Refresh` block, or one that already
+ * carries this exact value, is left untouched and reported as unchanged.
+ */
+export function markConnectedHandleExchangeVia(
+  handleId: string,
+  exchangeVia: NonNullable<NonNullable<ConnectedCredentialHandle['oauth2Refresh']>['exchangeVia']>,
+  path: string = defaultHandleRegistryPath(),
+): boolean {
+  if (!existsSync(path)) return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId || !handle.oauth2Refresh) return handle;
+      if (handle.oauth2Refresh.exchangeVia === exchangeVia) return handle;
+      changed = true;
+      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
+    });
+    if (!changed) return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...(registry.dropped ? { dropped: registry.dropped } : {}),
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+
 export function deriveEnvCredentialHandlesFromRegistry(
   registry: ConnectedHandleRegistry,
 ): EnvCredentialHandleDefinition[] {

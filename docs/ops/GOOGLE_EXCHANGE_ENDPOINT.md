@@ -2,6 +2,19 @@
 
 Status: canonical for the publisher-owned Google token exchange
 
+**Deployment status: DEPLOYED.** Verified live on 2026-09-04 —
+`POST https://auth.olympusplugin.ai/exchange/google` with a bad body answers
+`400` JSON, `GET` on the same path answers `405`, and the relay page at
+`/oauth/callback/` is still served through the same host (the Worker Route
+intercepts only `/exchange/*`). The worker-side integration is applied (see
+"Worker-side integration" below). The owner runbook at the end of this
+document is the record of how it was deployed, not outstanding work — with one
+standing exception: **a change to anything under `exchange/` requires the owner
+to redeploy** (`bunx wrangler deploy`), because this repository cannot publish
+to the owner's Cloudflare account. The bounded upstream body read added in the
+same pull request as the worker-side integration is such a change and is
+pending that redeploy.
+
 Owner-approved direction (2026-09-03): Google requires `client_secret` at the
 token endpoint for a Web-application OAuth client, even with PKCE. A secret
 shipped inside the open-source Olympus plugin is not secret, so the token
@@ -73,7 +86,8 @@ about closing a gap that PKCE leaves open:
 | `redirect_uri` allowlist | Exact match against the configured relay URL(s), or a loopback form (defense in depth — see below) | `exchange/src/redirect-allowlist.ts` |
 | No logging of codes/tokens | The only thing ever logged is `{path, status, duration_ms}` — never a request or response body, never a header value | `exchange/src/index.ts` (`logRequest`) |
 | No CORS | No `Access-Control-Allow-*` header is ever returned, and any request carrying an `Origin` header is refused outright — this is a server-to-server endpoint, never called from a browser | `exchange/src/index.ts` (`hasBrowserOrigin`) |
-| Timeouts | 10s timeout on every call to Google, via `AbortController` | `exchange/src/google.ts` |
+| Timeouts | 10s deadline on every call to Google, covering the response BODY as well as the headers (`AbortController` plus a raced deadline, so a peer that answers and then dribbles cannot outlive it) | `exchange/src/google.ts` |
+| Upstream body cap | 64 KiB on Google's response, enforced on the bytes actually read; an oversized answer is refused rather than truncated, and none of it is echoed | `exchange/src/google.ts` (`readBoundedText`) |
 | Structured error passthrough | Google's error responses are forwarded with their exact status and body (Google's OAuth error bodies are a small fixed vocabulary and never echo the secret); this endpoint's own errors are a fixed `{error, error_description}` shape that never includes exception text, a stack trace, or anything read from `env` | `exchange/src/index.ts` (`respondFromGoogle`, `errorResponse`) |
 
 Rate limiting fails **open**, not closed, both when the KV binding is absent
@@ -191,7 +205,8 @@ On a request this endpoint itself refuses, before ever calling Google:
 | 413 | `payload_too_large` | Body exceeded 8 KiB, by header or by actual bytes read |
 | 429 | `rate_limited` | Per-IP budget exhausted (`Retry-After` header set) |
 | 502 | `upstream_unreachable` | A network-level failure reaching Google |
-| 504 | `upstream_timeout` | Google did not respond within 10s |
+| 502 | `upstream_response_too_large` | Google's response body exceeded the 64 KiB cap |
+| 504 | `upstream_timeout` | Google did not respond, headers and body complete, within 10s |
 | 500 | `internal_error` | Anything unexpected — deliberately uninformative |
 
 ### `POST /exchange/google/refresh`
@@ -283,44 +298,76 @@ Google's token response unchanged (see "API" above), so the existing
 `payload.access_token` / `payload.refresh_token` / `payload.expires_in` /
 `payload.scope` handling applies identically either way.
 
-`dashboardOAuthClientSecretRequired()` already returns `false` for Google
-sources and `dashboardGoogleOAuthClientSecret()` already returns `undefined`
-when no matching stored secret exists — the publisher web client id never
-matches a stored client id, so no client secret is ever resolved for this
-path in the first place, and the publisher branch's JSON body has no field to
-put one in even if it were.
+**No client secret is touched on this path at all, and the order is what
+enforces it.** The route is decided *before* `resolveOAuthClientSecret` is
+called, and on the publisher path that resolver never runs. It searches the
+`google`/`gmail`/`google-drive` namespaces (and the pilot client's env secret)
+for any stored Google secret without checking that it belongs to the client id
+in use, so running it first meant an unrelated bring-your-own registration's
+secret could be resolved, copied under the connecting source's own key, and
+referenced from the handle registry as this credential's
+`clientSecretSecretRef` — a publisher credential, which by construction has no
+secret, pointing at someone else's. Nothing is resolved, nothing is stored, and
+no `clientSecretSecretRef` is written for a publisher-endpoint credential.
 
 ### `src/workers/credential-broker/index.ts` — `refreshOAuth2AccessToken`
 
 The same branch, in the same shape, applies to the refresh path: when the
-stored credential's `oauth2Refresh.exchangeVia === 'publisher_endpoint'` (or,
-for a credential connected before that field existed, when its resolved
-`clientId` still equals `googlePublisherWebClientId()`), the refresh POSTs
-JSON `{refresh_token}` to `googlePublisherExchangeRefreshUrl()` instead of
+credential's route resolves to `publisher_endpoint`, the refresh POSTs JSON
+`{refresh_token}` to `googlePublisherExchangeRefreshUrl()` instead of
 form-encoding a request straight to `options.tokenUrl` — again with no
-`client_secret` involved on the worker's side. The HTTP call is wrapped in a
-bounded timeout (`fetchWithTimeout`, 20s) and a network failure or timeout is
+`client_secret` involved on the worker's side. The HTTP call is bounded by a
+20s deadline covering the response BODY as well as the headers, plus a 64 KiB
+cap on that body; a timeout, a network failure, or an oversized answer is
 raised as the same `OAuth2TokenEndpointError` shape the direct path uses
-(`502`/`upstream_unreachable` or `504`/`upstream_timeout`), so it flows through
-the broker's existing refusal handling and reaches the dashboard as an
-ordinary provider refusal.
+(`504`/`upstream_timeout`, `502`/`upstream_unreachable`,
+`502`/`upstream_response_too_large`), so it flows through the broker's
+existing refusal handling and reaches the dashboard as an ordinary provider
+refusal. The direct-to-provider lane keeps its existing timeout behaviour and
+gains the same body cap.
 
-### Provenance: `exchangeVia`
+`EnvCredentialBroker.resolveExchangeVia` is the **single** place that decides
+the route, and it reads the broker's own `env`; the refresh function obeys that
+answer rather than re-deriving one from `process.env`, because two authorities
+disagree the moment a broker is constructed with an explicit `env` — and the
+half that lost was the durable migration below, which would then never run.
+
+### Provenance: `exchangeVia`, and surviving a client-id rotation
 
 `src/core/connect.ts` writes `oauth2Refresh.exchangeVia: 'publisher_endpoint'`
 onto the connected-handle registry entry at the moment a Google
 publisher-Web-client connection completes — a fact about how *that* exchange
 actually happened, not a value re-derived from the stored client id on every
 read. This is the same "provenance, not presence" reasoning
-`client_id_source` already uses (`docs/ops/OAUTH_RELAY.md`): a future rotation
-of `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID` must not stop an
-already-connected publisher credential's refresh from finding the exchange
-endpoint. `src/workers/credential-broker/connected-handles.ts` carries the
-field through normalization (`normalizeOAuth2`, rejecting any value other than
-the one literal) and into the broker's `EnvOAuth2RefreshDefinition`
+`client_id_source` already uses (`docs/ops/OAUTH_RELAY.md`).
+`src/workers/credential-broker/connected-handles.ts` carries the field through
+normalization (`normalizeOAuth2`, rejecting any value other than the one
+literal) and into the broker's `EnvOAuth2RefreshDefinition`
 (`deriveEnvCredentialHandlesFromRegistry`). Absent for every other credential
--- the Desktop pilot client, any bring-your-own registration, Dropbox, X --
+— the Desktop pilot client, any bring-your-own registration, Dropbox, X —
 all of which keep refreshing directly with their provider exactly as before.
+
+What matters is what happens to a credential connected **before** that field
+existed, because the stakes are asymmetric: a Google web client's secret lives
+only in this endpoint, so a refresh sent anywhere else is refused, and the
+broker latches the handle into `reauth_required` — the source stops ingesting
+after a rotation the user never made and cannot see. Recognising such a
+credential by comparing its stored client id against the *current* default
+would be a check that expires on the next rotation. Two defences instead:
+
+- **`GOOGLE_PUBLISHER_WEB_CLIENT_IDS`** (`src/core/publisher-oauth-client.ts`)
+  is the **append-only** list of every publisher web client id Olympus has
+  shipped. A rotation adds an id at the front and never removes one, so a
+  credential minted under any of them is still recognised.
+  `isGooglePublisherWebClientId` is what both the routing and the migration
+  consult, and appending the retired id to this list is a required step of any
+  future rotation.
+- **A one-time durable migration.** The first refresh of a recognised
+  pre-migration credential writes `exchangeVia` into the registry
+  (`markConnectedHandleExchangeVia`, under the registry's own file lease), so
+  the value-match only has to be correct once. The write is best-effort: a
+  registry that cannot be written must not fail a refresh that the same answer
+  already routed correctly in memory.
 
 ### What did *not* change
 
@@ -373,18 +420,26 @@ fake exchange endpoint (asserting the exact JSON body shape, that
 `redirect_uri` equals the relay URL, and that no `client_secret` field is
 ever sent); a loopback dashboard still using the packaged Desktop pilot
 client and exchanging directly with Google; refresh routed to the endpoint
-for an endpoint-minted credential (by `exchangeVia` and, for a
-pre-migration credential, by client-id fallback) and to Google directly for
-a bring-your-own credential; the endpoint's 400/401/502/504 error shapes
-rendered as ordinary connect refusals; and that no secret-shaped string
-appears in any response. Run it with `bun test test/google-publisher-exchange.test.ts`.
+for an endpoint-minted credential and to Google directly for a
+bring-your-own credential; the endpoint's 400/401/502/504 error shapes
+rendered as ordinary connect refusals; that no secret-shaped string appears in
+any response; that a stale client secret stored under any Google namespace is
+never sent, copied, or referenced on the publisher path; that a pre-migration
+credential is migrated to `exchangeVia` on its first refresh and keeps routing
+to the endpoint after the publisher client id rotates; and that a response body
+which never ends, or which exceeds the size cap, is refused on the deadline
+rather than read unbounded. Run it with
+`bun test test/google-publisher-exchange.test.ts`.
 
 ## Owner runbook
 
-Everything below is the owner's step; nothing in this pull request performs
-any of it. `exchange/` ships with no secret, no live client id, and no real KV
-namespace id — every value that must be real is a placeholder marked as such
-in `exchange/wrangler.toml`.
+Everything below is the owner's own step in the Cloudflare and Google Cloud
+consoles; nothing in this repository can perform any of it. **These steps have
+been carried out — the endpoint is deployed and verified live (see the status
+at the top of this document).** They are kept as the record of what was done
+and as the procedure for doing it again: any change to `exchange/` needs step 6
+(`bunx wrangler deploy`) and step 7 (the live checks) repeated by the owner
+before the new behaviour is actually serving.
 
 1. **Create the Google Web application client**, if PR #2's runbook step
    (`docs/ops/OAUTH_RELAY.md`, "Google") has not already been done:

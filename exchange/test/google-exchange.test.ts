@@ -382,6 +382,62 @@ describe('worker: POST /exchange/google', () => {
     expect(body.error).toBe('upstream_unreachable');
   });
 
+  // The deadline used to end at the status line: `postToGoogle` cleared its
+  // timer as soon as headers arrived and the body was then read unbounded, so
+  // an upstream that answered 200 and dribbled held this Worker open past the
+  // timeout it had already promised (Codex round 1 on 5cb644b9).
+  test('a Google response whose body never ends becomes a 504 rather than outliving the deadline', async () => {
+    const fetchImpl = mock(() => Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"access_token":"'));
+        // ...and never closes.
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+    expect(response.status).toBe(504);
+    const body = await response.json() as { error: string };
+    expect(body.error).toBe('upstream_timeout');
+  }, 20_000);
+
+  test('an oversized Google response is refused, with none of it echoed', async () => {
+    const oversized = `{"marker":"${'A'.repeat(80 * 1024)}"}`;
+    const fetchImpl = mock(() => Promise.resolve(new Response(oversized, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })));
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+    expect(response.status).toBe(502);
+    const text = await response.text();
+    expect(JSON.parse(text)).toEqual({
+      error: 'upstream_response_too_large',
+      error_description: 'Google token endpoint returned an oversized response.',
+    });
+    expect(text).not.toContain('AAAA');
+    expect(text.length).toBeLessThan(500);
+  });
+
+  test('a refresh whose upstream body is oversized is refused the same way', async () => {
+    const fetchImpl = mock(() => Promise.resolve(new Response('B'.repeat(80 * 1024), { status: 200 })));
+    const request = jsonRequest('/exchange/google/refresh', { refresh_token: 'stored-refresh-token' });
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+    expect(response.status).toBe(502);
+    const body = await response.json() as { error: string };
+    expect(body.error).toBe('upstream_response_too_large');
+  });
+
+  test('a body just under the cap still passes through unchanged', async () => {
+    const padding = 'C'.repeat(60 * 1024);
+    const fetchImpl = mock(() => Promise.resolve(googleSuccess({ access_token: 'tok', expires_in: 3600, padding })));
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+    expect(response.status).toBe(200);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body.access_token).toBe('tok');
+    expect(body.padding).toBe(padding);
+  });
+
   test('rate limits per IP once the configured budget is exhausted', async () => {
     const kv = new FakeKv(0);
     const fetchImpl = mock(() => Promise.resolve(googleSuccess({ access_token: 'tok', expires_in: 3600 })));
