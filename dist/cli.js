@@ -3640,6 +3640,228 @@ function base64Url(value) {
 var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer", DEFAULT_ASSERTION_LIFETIME_SECONDS = 3600, MAX_ASSERTION_LIFETIME_SECONDS = 3600;
 var init_google_service_account = () => {};
 
+// src/core/http-timeout.ts
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+function isAbortError(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+// src/core/oauth-relay.ts
+import { createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+function oauthRelayUrl(env = process.env) {
+  const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
+  if (!override)
+    return DEFAULT_OAUTH_RELAY_URL;
+  let parsed;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_OAUTH_RELAY_URL;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
+    return override;
+  return DEFAULT_OAUTH_RELAY_URL;
+}
+function googlePublisherExchangeUrl(env = process.env) {
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
+  if (!override)
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  let parsed;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
+    return override;
+  return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+}
+function googlePublisherExchangeRefreshUrl(env = process.env) {
+  return `${googlePublisherExchangeUrl(env)}/refresh`;
+}
+function createOAuthRelayNonce() {
+  return randomBytes2(32).toString("base64url");
+}
+function createOAuthRelayStateKey() {
+  return randomBytes2(32).toString("base64url");
+}
+function createOAuthRelayStateKeys() {
+  return { current: createOAuthRelayStateKey() };
+}
+function serializeOAuthRelayStateKeys(keys) {
+  const json = {
+    current: keys.current,
+    ...keys.previous ? { previous: keys.previous } : {},
+    ...keys.rotatedAt ? { rotatedAt: keys.rotatedAt.toISOString() } : {}
+  };
+  return JSON.stringify(json);
+}
+function parseOAuthRelayStateKeys(raw) {
+  if (!raw)
+    return;
+  let decoded;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
+    return;
+  const record = decoded;
+  if (typeof record.current !== "string" || !record.current)
+    return;
+  if (record.previous !== undefined && (typeof record.previous !== "string" || !record.previous))
+    return;
+  if (record.rotatedAt !== undefined) {
+    if (typeof record.rotatedAt !== "string")
+      return;
+    const parsed = Date.parse(record.rotatedAt);
+    if (!Number.isFinite(parsed))
+      return;
+    return {
+      current: record.current,
+      ...record.previous ? { previous: record.previous } : {},
+      rotatedAt: new Date(parsed)
+    };
+  }
+  return {
+    current: record.current,
+    ...record.previous ? { previous: record.previous } : {}
+  };
+}
+function signOAuthRelayState(payload, key) {
+  const body = {
+    v: payload.v ?? OAUTH_RELAY_STATE_VERSION,
+    origin: payload.origin,
+    source: payload.source,
+    nonce: payload.nonce,
+    iat: payload.iat
+  };
+  const segment = Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
+  return `${segment}.${relaySignature(segment, key)}`;
+}
+function verifyOAuthRelayState(state, expectation) {
+  if (typeof state !== "string" || state.length === 0)
+    return refuse("malformed_state");
+  if (state.length > OAUTH_RELAY_MAX_STATE_LENGTH)
+    return refuse("malformed_state");
+  const segments = state.split(".");
+  if (segments.length !== 2)
+    return refuse("malformed_state");
+  const [segment, signature] = segments;
+  if (!BASE64URL_SEGMENT.test(segment) || !BASE64URL_SEGMENT.test(signature))
+    return refuse("malformed_state");
+  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
+  const signedWithCurrent = constantTimeEquals(signature, relaySignature(segment, expectation.keys.current));
+  if (!signedWithCurrent) {
+    const { previous, rotatedAt } = expectation.keys;
+    const previousStillHonored = previous !== undefined && rotatedAt !== undefined && expectation.now.getTime() - rotatedAt.getTime() <= ttlMs;
+    if (!previousStillHonored || !constantTimeEquals(signature, relaySignature(segment, previous))) {
+      return refuse("bad_signature");
+    }
+  }
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+  } catch {
+    return refuse("invalid_payload");
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
+    return refuse("invalid_payload");
+  const record = decoded;
+  if (record.v !== OAUTH_RELAY_STATE_VERSION)
+    return refuse("unsupported_version");
+  if (typeof record.origin !== "string" || typeof record.source !== "string")
+    return refuse("invalid_payload");
+  if (typeof record.nonce !== "string" || !OAUTH_RELAY_NONCE_PATTERN.test(record.nonce))
+    return refuse("invalid_payload");
+  if (typeof record.iat !== "number" || !Number.isFinite(record.iat))
+    return refuse("invalid_payload");
+  if (!constantTimeEquals(record.nonce, expectation.expectedNonce))
+    return refuse("nonce_mismatch");
+  if (record.origin !== expectation.expectedOrigin)
+    return refuse("foreign_origin");
+  if (record.source !== expectation.expectedSource)
+    return refuse("source_mismatch");
+  const ageMs = expectation.now.getTime() - record.iat * 1000;
+  if (ageMs > ttlMs || ageMs < -60000)
+    return refuse("stale_iat");
+  return {
+    ok: true,
+    payload: {
+      v: record.v,
+      origin: record.origin,
+      source: record.source,
+      nonce: record.nonce,
+      iat: record.iat
+    }
+  };
+}
+function relaySignature(segment, key) {
+  return createHmac("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
+}
+function constantTimeEquals(left, right) {
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  if (a.length !== b.length)
+    return false;
+  return timingSafeEqual(a, b);
+}
+function refuse(reason) {
+  return { ok: false, reason };
+}
+var OAUTH_RELAY_STATE_VERSION = 1, DEFAULT_OAUTH_RELAY_URL = "https://auth.olympusplugin.ai/oauth/callback/", DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = "https://auth.olympusplugin.ai/exchange/google", OAUTH_RELAY_MAX_STATE_LENGTH = 2048, OAUTH_RELAY_STATE_TTL_MS, OAUTH_RELAY_NONCE_PATTERN, BASE64URL_SEGMENT;
+var init_oauth_relay = __esm(() => {
+  OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
+  OAUTH_RELAY_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+  BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
+});
+
+// src/core/publisher-oauth-client.ts
+function dropboxPublisherAppKey(env = process.env) {
+  return firstConfigured(env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY, DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
+}
+function googlePublisherWebClientId(env = process.env) {
+  return firstConfigured(env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID, DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+}
+function firstConfigured(...candidates) {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed)
+      return trimmed;
+  }
+  return;
+}
+var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com";
+
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync6 } from "node:fs";
@@ -3830,7 +4052,8 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
         clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
         ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
         refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
-        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes]
+        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
+        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
       };
     }
     if (handle.backendState) {
@@ -3917,6 +4140,7 @@ function normalizeOAuth2(value) {
     return { ok: false, reason: "invalid_oauth2_refresh" };
   }
   const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
+  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
   return {
     ok: true,
     oauth2Refresh: {
@@ -3924,7 +4148,8 @@ function normalizeOAuth2(value) {
       clientIdSecretRef,
       ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
       refreshTokenSecretRef,
-      scopes: stringArray(record.scopes)
+      scopes: stringArray(record.scopes),
+      ...exchangeVia ? { exchangeVia } : {}
     }
   };
 }
@@ -4312,7 +4537,8 @@ class EnvCredentialBroker {
         clientId,
         clientSecret,
         refreshToken,
-        fetchImpl: this.fetchImpl
+        fetchImpl: this.fetchImpl,
+        ...oauth2.exchangeVia ? { exchangeVia: oauth2.exchangeVia } : {}
       });
     } catch (error) {
       await lease?.assertOwned();
@@ -4773,23 +4999,41 @@ function sessionKindFromDefinition(definition) {
   return definition.sessionKind ?? "bearer_token";
 }
 async function refreshOAuth2AccessToken(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", "refresh_token");
-  body.set("refresh_token", options.refreshToken);
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
-  if (options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+  const usesPublisherExchange = options.exchangeVia === "publisher_endpoint" || options.clientId !== "" && options.clientId === googlePublisherWebClientId();
+  let response;
+  if (usesPublisherExchange) {
+    try {
+      response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeRefreshUrl(), {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: options.refreshToken })
+      }, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS);
+    } catch (error) {
+      throw new OAuth2TokenEndpointError({
+        status: isAbortError(error) ? 504 : 502,
+        providerError: isAbortError(error) ? "upstream_timeout" : "upstream_unreachable",
+        safeDetail: isAbortError(error) ? `publisher token-exchange endpoint timed out after ${GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS}ms` : "publisher token-exchange endpoint was unreachable"
+      });
+    }
   } else {
-    body.set("client_id", options.clientId);
+    const body = new URLSearchParams;
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", options.refreshToken);
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+    } else {
+      body.set("client_id", options.clientId);
+    }
+    response = await options.fetchImpl(options.tokenUrl, {
+      method: "POST",
+      headers,
+      body
+    });
   }
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: "POST",
-    headers,
-    body
-  });
   const text = await response.text();
   if (!response.ok) {
     const providerError = providerErrorFromText(text);
@@ -5210,11 +5454,12 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_google_service_account();
+  init_oauth_relay();
   init_google_service_account();
   init_secret_store();
   init_connected_handles();
@@ -29736,7 +29981,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/core/worker-auth.ts
-import { createHmac } from "node:crypto";
+import { createHmac as createHmac2 } from "node:crypto";
 import { readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { join as join22 } from "node:path";
@@ -29758,7 +30003,7 @@ function dashboardQueryTokenFromWorkerAuthToken(authToken) {
   const token = optionalToken2(authToken);
   if (!token)
     return;
-  return `dash_${createHmac("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
+  return `dash_${createHmac2("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
 }
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken2(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
@@ -29978,13 +30223,13 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
-      if (isAbortError(firstError)) {
+      if (isAbortError2(firstError)) {
         throw argusTimeoutError(lane, url, timeoutMs);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
-        if (isAbortError(secondError)) {
+        if (isAbortError2(secondError)) {
           throw argusTimeoutError(lane, url, timeoutMs);
         }
         throw new OperationError("argus_unreachable", `Argus ${lane} lane is unreachable at ${url}.`, firstError instanceof Error ? firstError.message : "Check that the Argus endpoint is running or tunneled.");
@@ -30032,7 +30277,7 @@ async function safeText(response) {
     return "";
   }
 }
-function isAbortError(error) {
+function isAbortError2(error) {
   return error instanceof Error && error.name === "AbortError";
 }
 function argusTimeoutError(lane, url, timeoutMs) {
@@ -30084,38 +30329,6 @@ var init_email_policy = __esm(() => {
     "vectors"
   ]);
 });
-
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-function isAbortError2(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
 
 // src/core/source-watch.ts
 import { createHash as createHash23, randomUUID as randomUUID11 } from "node:crypto";
@@ -31931,7 +32144,7 @@ class DirectHttpEmailTransport {
     try {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
     } catch (error) {
-      if (isAbortError2(error)) {
+      if (isAbortError(error)) {
         throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${this.timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
@@ -33316,7 +33529,7 @@ var init_unpaired_sources = __esm(() => {
 // src/core/connect.ts
 import { Buffer as Buffer4 } from "node:buffer";
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash24, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash24, randomBytes as randomBytes3 } from "node:crypto";
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir23 } from "node:os";
@@ -33551,11 +33764,11 @@ async function finishOAuthSourceConnection(options) {
   }
 }
 function createOAuthPkceState() {
-  const verifier = base64Url2(randomBytes2(32));
+  const verifier = base64Url2(randomBytes3(32));
   return {
     verifier,
     challenge: base64Url2(createHash24("sha256").update(verifier).digest()),
-    state: base64Url2(randomBytes2(24))
+    state: base64Url2(randomBytes3(24))
   };
 }
 function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
@@ -33603,6 +33816,7 @@ function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPk
 }
 async function completeOAuthSourceConnection(prepared, code) {
   const clientSecret = await resolveOAuthClientSecret(prepared);
+  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
   const token = await exchangeAuthorizationCode({
     source: prepared.options.source,
     tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
@@ -33612,7 +33826,8 @@ async function completeOAuthSourceConnection(prepared, code) {
     redirectUri: prepared.redirectUri,
     verifier: prepared.verifier,
     fetchImpl: prepared.options.fetch ?? fetch,
-    timeoutMs: prepared.tokenExchangeTimeoutMs
+    timeoutMs: prepared.tokenExchangeTimeoutMs,
+    state: prepared.state
   });
   if (!token.refreshToken)
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
@@ -33676,7 +33891,8 @@ async function completeOAuthSourceConnection(prepared, code) {
             clientIdSecretRef: `store:${clientIdKey}`,
             ...clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {},
             refreshTokenSecretRef: `store:${refreshKey}`,
-            scopes: handleDefinition.scopes
+            scopes: handleDefinition.scopes,
+            ...usesGooglePublisherExchange ? { exchangeVia: "publisher_endpoint" } : {}
           }
         } : {},
         connectedAt: connectedAt.toISOString(),
@@ -33803,7 +34019,7 @@ async function validatePublicApiKeySource(options) {
         headers: { Authorization: `Token ${options.apiKey}`, Accept: "application/json" }
       }, options.timeoutMs);
     } catch (error) {
-      if (isAbortError2(error)) {
+      if (isAbortError(error)) {
         throw new Error("Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.");
       }
       throw new Error("Could not validate the Readwise token. No credentials were stored; try again when Readwise is reachable.");
@@ -33821,7 +34037,7 @@ async function validatePublicApiKeySource(options) {
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" }
     }, options.timeoutMs);
   } catch (error) {
-    if (isAbortError2(error)) {
+    if (isAbortError(error)) {
       throw new Error("Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.");
     }
     throw new Error("Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.");
@@ -33842,7 +34058,7 @@ async function fetchXUserId(options) {
       }
     }, options.timeoutMs);
   } catch (error) {
-    if (isAbortError2(error)) {
+    if (isAbortError(error)) {
       throw new Error("X user lookup timed out. No credentials were stored; re-run connect when X is reachable.");
     }
     throw new Error("Could not read your X user id. No credentials were stored; re-run connect when X is reachable.");
@@ -34120,34 +34336,55 @@ async function createLoopbackCallbackServer(options) {
   return { port: address.port, server, waitForCode };
 }
 async function exchangeAuthorizationCode(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", "authorization_code");
-  body.set("code", options.code);
-  body.set("redirect_uri", options.redirectUri);
-  body.set("code_verifier", options.verifier);
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
-  if (options.source === "x" && options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer4.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
-  } else {
-    body.set("client_id", options.clientId);
-    if (isGoogleOAuthSource(options.source) && options.clientSecret)
-      body.set("client_secret", options.clientSecret);
-  }
+  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(options.source, options.clientId);
   let response;
-  try {
-    response = await fetchWithTimeout(options.fetchImpl, options.tokenUrl, {
-      method: "POST",
-      headers,
-      body
-    }, options.timeoutMs);
-  } catch (error) {
-    if (isAbortError2(error)) {
-      throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
+  if (usesGooglePublisherExchange) {
+    try {
+      response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeUrl(), {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: options.code,
+          code_verifier: options.verifier,
+          redirect_uri: options.redirectUri,
+          ...options.state ? { state: options.state } : {}
+        })
+      }, options.timeoutMs);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
+      }
+      throw error;
     }
-    throw error;
+  } else {
+    const body = new URLSearchParams;
+    body.set("grant_type", "authorization_code");
+    body.set("code", options.code);
+    body.set("redirect_uri", options.redirectUri);
+    body.set("code_verifier", options.verifier);
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (options.source === "x" && options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer4.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+    } else {
+      body.set("client_id", options.clientId);
+      if (isGoogleOAuthSource(options.source) && options.clientSecret)
+        body.set("client_secret", options.clientSecret);
+    }
+    try {
+      response = await fetchWithTimeout(options.fetchImpl, options.tokenUrl, {
+        method: "POST",
+        headers,
+        body
+      }, options.timeoutMs);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
+      }
+      throw error;
+    }
   }
   const text = await response.text();
   if (!response.ok) {
@@ -34172,6 +34409,10 @@ async function exchangeAuthorizationCode(options) {
 }
 function isGoogleOAuthSource(source) {
   return source === "google" || source === "gmail" || source === "google-drive";
+}
+function isGooglePublisherExchangeClient(source, clientId) {
+  const publisherClientId = googlePublisherWebClientId();
+  return isGoogleOAuthSource(source) && publisherClientId !== undefined && clientId === publisherClientId;
 }
 function shouldStoreOAuthClientSecret(source) {
   return isGoogleOAuthSource(source) || source === "x";
@@ -34372,6 +34613,7 @@ function retryableErrorDisposition(error, now) {
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_secret_store();
+  init_oauth_relay();
   init_connected_handles();
   init_unpaired_sources();
   init_credential_broker();
@@ -56235,7 +56477,7 @@ class DirectHttpFileDeliveryTransport {
     try {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
     } catch (error2) {
-      if (isAbortError2(error2)) {
+      if (isAbortError(error2)) {
         throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker timed out at ${url} after ${this.timeoutMs}ms.`, "The file-delivery worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos file-delivery worker is running.");
@@ -56381,7 +56623,7 @@ class DirectHttpCastorWorkspaceTransport {
     try {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
     } catch (error2) {
-      if (isAbortError2(error2)) {
+      if (isAbortError(error2)) {
         throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker timed out at ${url} after ${this.timeoutMs}ms.`, "The delegated workspace worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos delegated workspace worker is running.");
@@ -56475,7 +56717,7 @@ class DirectHttpDomainExpertTransport {
     try {
       response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
     } catch (error2) {
-      if (isAbortError2(error2)) {
+      if (isAbortError(error2)) {
         throw new OperationError("domain_expert_unreachable", `Domain expert worker timed out at ${url} after ${this.timeoutMs}ms.`, "The domain expert worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("domain_expert_unreachable", `Domain expert worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Olympus domain expert worker is running.");
@@ -62199,178 +62441,6 @@ function packagedGooglePilotClientId() {
   return resolveGooglePilotClientId(PACKAGED_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
 }
 var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
-
-// src/core/publisher-oauth-client.ts
-function dropboxPublisherAppKey(env = process.env) {
-  return firstConfigured(env.OLYMPUS_DROPBOX_PUBLISHER_APP_KEY, DEFAULT_DROPBOX_PUBLISHER_APP_KEY);
-}
-function googlePublisherWebClientId(env = process.env) {
-  return firstConfigured(env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID, DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
-}
-function firstConfigured(...candidates) {
-  for (const candidate of candidates) {
-    const trimmed2 = candidate?.trim();
-    if (trimmed2)
-      return trimmed2;
-  }
-  return;
-}
-var DEFAULT_DROPBOX_PUBLISHER_APP_KEY = "1y1l05nqd24xaaw", DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "";
-
-// src/core/oauth-relay.ts
-import { createHmac as createHmac2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
-function oauthRelayUrl(env = process.env) {
-  const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
-  if (!override)
-    return DEFAULT_OAUTH_RELAY_URL;
-  let parsed;
-  try {
-    parsed = new URL(override);
-  } catch {
-    return DEFAULT_OAUTH_RELAY_URL;
-  }
-  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
-  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
-    return override;
-  return DEFAULT_OAUTH_RELAY_URL;
-}
-function createOAuthRelayNonce() {
-  return randomBytes4(32).toString("base64url");
-}
-function createOAuthRelayStateKey() {
-  return randomBytes4(32).toString("base64url");
-}
-function createOAuthRelayStateKeys() {
-  return { current: createOAuthRelayStateKey() };
-}
-function serializeOAuthRelayStateKeys(keys) {
-  const json = {
-    current: keys.current,
-    ...keys.previous ? { previous: keys.previous } : {},
-    ...keys.rotatedAt ? { rotatedAt: keys.rotatedAt.toISOString() } : {}
-  };
-  return JSON.stringify(json);
-}
-function parseOAuthRelayStateKeys(raw) {
-  if (!raw)
-    return;
-  let decoded;
-  try {
-    decoded = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
-    return;
-  const record3 = decoded;
-  if (typeof record3.current !== "string" || !record3.current)
-    return;
-  if (record3.previous !== undefined && (typeof record3.previous !== "string" || !record3.previous))
-    return;
-  if (record3.rotatedAt !== undefined) {
-    if (typeof record3.rotatedAt !== "string")
-      return;
-    const parsed = Date.parse(record3.rotatedAt);
-    if (!Number.isFinite(parsed))
-      return;
-    return {
-      current: record3.current,
-      ...record3.previous ? { previous: record3.previous } : {},
-      rotatedAt: new Date(parsed)
-    };
-  }
-  return {
-    current: record3.current,
-    ...record3.previous ? { previous: record3.previous } : {}
-  };
-}
-function signOAuthRelayState(payload, key) {
-  const body = {
-    v: payload.v ?? OAUTH_RELAY_STATE_VERSION,
-    origin: payload.origin,
-    source: payload.source,
-    nonce: payload.nonce,
-    iat: payload.iat
-  };
-  const segment = Buffer.from(JSON.stringify(body), "utf8").toString("base64url");
-  return `${segment}.${relaySignature(segment, key)}`;
-}
-function verifyOAuthRelayState(state, expectation) {
-  if (typeof state !== "string" || state.length === 0)
-    return refuse("malformed_state");
-  if (state.length > OAUTH_RELAY_MAX_STATE_LENGTH)
-    return refuse("malformed_state");
-  const segments = state.split(".");
-  if (segments.length !== 2)
-    return refuse("malformed_state");
-  const [segment, signature] = segments;
-  if (!BASE64URL_SEGMENT.test(segment) || !BASE64URL_SEGMENT.test(signature))
-    return refuse("malformed_state");
-  const ttlMs = expectation.ttlMs ?? OAUTH_RELAY_STATE_TTL_MS;
-  const signedWithCurrent = constantTimeEquals(signature, relaySignature(segment, expectation.keys.current));
-  if (!signedWithCurrent) {
-    const { previous, rotatedAt } = expectation.keys;
-    const previousStillHonored = previous !== undefined && rotatedAt !== undefined && expectation.now.getTime() - rotatedAt.getTime() <= ttlMs;
-    if (!previousStillHonored || !constantTimeEquals(signature, relaySignature(segment, previous))) {
-      return refuse("bad_signature");
-    }
-  }
-  let decoded;
-  try {
-    decoded = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
-  } catch {
-    return refuse("invalid_payload");
-  }
-  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
-    return refuse("invalid_payload");
-  const record3 = decoded;
-  if (record3.v !== OAUTH_RELAY_STATE_VERSION)
-    return refuse("unsupported_version");
-  if (typeof record3.origin !== "string" || typeof record3.source !== "string")
-    return refuse("invalid_payload");
-  if (typeof record3.nonce !== "string" || !OAUTH_RELAY_NONCE_PATTERN.test(record3.nonce))
-    return refuse("invalid_payload");
-  if (typeof record3.iat !== "number" || !Number.isFinite(record3.iat))
-    return refuse("invalid_payload");
-  if (!constantTimeEquals(record3.nonce, expectation.expectedNonce))
-    return refuse("nonce_mismatch");
-  if (record3.origin !== expectation.expectedOrigin)
-    return refuse("foreign_origin");
-  if (record3.source !== expectation.expectedSource)
-    return refuse("source_mismatch");
-  const ageMs = expectation.now.getTime() - record3.iat * 1000;
-  if (ageMs > ttlMs || ageMs < -60000)
-    return refuse("stale_iat");
-  return {
-    ok: true,
-    payload: {
-      v: record3.v,
-      origin: record3.origin,
-      source: record3.source,
-      nonce: record3.nonce,
-      iat: record3.iat
-    }
-  };
-}
-function relaySignature(segment, key) {
-  return createHmac2("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
-}
-function constantTimeEquals(left, right) {
-  const a = Buffer.from(left, "utf8");
-  const b = Buffer.from(right, "utf8");
-  if (a.length !== b.length)
-    return false;
-  return timingSafeEqual(a, b);
-}
-function refuse(reason) {
-  return { ok: false, reason };
-}
-var OAUTH_RELAY_STATE_VERSION = 1, DEFAULT_OAUTH_RELAY_URL = "https://auth.olympusplugin.ai/oauth/callback/", OAUTH_RELAY_MAX_STATE_LENGTH = 2048, OAUTH_RELAY_STATE_TTL_MS, OAUTH_RELAY_NONCE_PATTERN, BASE64URL_SEGMENT;
-var init_oauth_relay = __esm(() => {
-  OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
-  OAUTH_RELAY_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-  BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
-});
 
 // src/workers/source-index/answer-latency-log.ts
 import {
@@ -78791,7 +78861,7 @@ init_sovereignty();
 init_sensitivity_map();
 
 // src/core/setup.ts
-import { randomBytes as randomBytes3 } from "node:crypto";
+import { randomBytes as randomBytes4 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
 init_operation_error();
 init_sovereignty();
@@ -79030,7 +79100,7 @@ function repairHint(platform2, dependency) {
   return platform2 === "darwin" ? "Install Go from https://go.dev/doc/install or with brew install go." : "Install Go from https://go.dev/doc/install or your OS package manager.";
 }
 function generateWorkerToken() {
-  return randomBytes3(32).toString("base64url");
+  return randomBytes4(32).toString("base64url");
 }
 function shellQuote2(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;

@@ -13,6 +13,9 @@ import {
 import {
   GOOGLE_OAUTH_TOKEN_URL,
 } from '../../core/google-service-account.ts';
+import { fetchWithTimeout, isAbortError } from '../../core/http-timeout.ts';
+import { googlePublisherExchangeRefreshUrl } from '../../core/oauth-relay.ts';
+import { googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import {
   googleServiceAccountTokenUrl,
@@ -354,6 +357,15 @@ export interface EnvOAuth2RefreshDefinition {
   clientSecretSecretRef?: string;
   refreshTokenSecretRef?: string;
   scopes?: string[];
+  /**
+   * `'publisher_endpoint'` routes the refresh through
+   * `googlePublisherExchangeUrl()` instead of `tokenUrl` — see
+   * `refreshOAuth2AccessToken` and `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`.
+   * Written at connect time (`src/core/connect.ts`) onto a Google
+   * publisher-Web-client credential and carried here unchanged by
+   * `deriveEnvCredentialHandlesFromRegistry`.
+   */
+  exchangeVia?: 'publisher_endpoint';
 }
 
 /**
@@ -1298,6 +1310,7 @@ export class EnvCredentialBroker implements CredentialBroker {
         clientSecret,
         refreshToken,
         fetchImpl: this.fetchImpl,
+        ...(oauth2.exchangeVia ? { exchangeVia: oauth2.exchangeVia } : {}),
       });
     } catch (error) {
       await lease?.assertOwned();
@@ -2062,31 +2075,63 @@ function sessionKindFromDefinition(
   return definition.sessionKind ?? 'bearer_token';
 }
 
+/** Bounded so a stalled publisher endpoint cannot hang a refresh indefinitely. */
+const GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20_000;
+
 async function refreshOAuth2AccessToken(options: {
   tokenUrl: string;
   clientId: string;
   clientSecret: string | undefined;
   refreshToken: string;
   fetchImpl: CredentialBrokerFetch;
+  /** See `EnvOAuth2RefreshDefinition.exchangeVia`. Falls back to a clientId
+   * match against `googlePublisherWebClientId()` for a credential connected
+   * before this field existed. */
+  exchangeVia?: 'publisher_endpoint';
 }): Promise<OAuth2RefreshTokenResponse> {
-  const body = new URLSearchParams();
-  body.set('grant_type', 'refresh_token');
-  body.set('refresh_token', options.refreshToken);
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'Content-Type': 'application/x-www-form-urlencoded',
-  };
-  if (options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
-  } else {
-    body.set('client_id', options.clientId);
-  }
+  const usesPublisherExchange = options.exchangeVia === 'publisher_endpoint'
+    || (options.clientId !== '' && options.clientId === googlePublisherWebClientId());
 
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: 'POST',
-    headers,
-    body,
-  });
+  let response: Response;
+  if (usesPublisherExchange) {
+    // The publisher exchange endpoint holds `GOOGLE_CLIENT_SECRET` itself and
+    // never accepts one from a caller, so this call carries no client
+    // credential at all — just the refresh token
+    // (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`, "POST /exchange/google/refresh").
+    try {
+      response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeRefreshUrl(), {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: options.refreshToken }),
+      }, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS);
+    } catch (error) {
+      throw new OAuth2TokenEndpointError({
+        status: isAbortError(error) ? 504 : 502,
+        providerError: isAbortError(error) ? 'upstream_timeout' : 'upstream_unreachable',
+        safeDetail: isAbortError(error)
+          ? `publisher token-exchange endpoint timed out after ${GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS}ms`
+          : 'publisher token-exchange endpoint was unreachable',
+      });
+    }
+  } else {
+    const body = new URLSearchParams();
+    body.set('grant_type', 'refresh_token');
+    body.set('refresh_token', options.refreshToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
+    } else {
+      body.set('client_id', options.clientId);
+    }
+    response = await options.fetchImpl(options.tokenUrl, {
+      method: 'POST',
+      headers,
+      body,
+    });
+  }
   const text = await response.text();
   if (!response.ok) {
     const providerError = providerErrorFromText(text);

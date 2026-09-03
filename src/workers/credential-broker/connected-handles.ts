@@ -46,6 +46,18 @@ export interface ConnectedCredentialHandle {
     clientSecretSecretRef?: string;
     refreshTokenSecretRef: string;
     scopes?: string[];
+    /**
+     * How this credential's token exchange happened, when it was not a
+     * direct exchange with the provider. `'publisher_endpoint'` marks a
+     * Google publisher-Web-client credential minted through
+     * `googlePublisherExchangeUrl()` (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`)
+     * rather than directly against Google — refresh must go back through the
+     * same endpoint, because that client's secret was never in this process
+     * to send. Absent for every other credential, including the packaged
+     * Google Desktop pilot client and any bring-your-own registration, all of
+     * which refresh directly with the provider as before.
+     */
+    exchangeVia?: 'publisher_endpoint';
   };
   backendState?: {
     kind: Exclude<CredentialSessionKind, 'bearer_token'> | 'oauth2_refresh';
@@ -386,6 +398,7 @@ export function deriveEnvCredentialHandlesFromRegistry(
           : {}),
         refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
         scopes: [...(handle.oauth2Refresh.scopes ?? handle.scopes)],
+        ...(handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}),
       };
     }
     if (handle.backendState) {
@@ -476,6 +489,11 @@ function normalizeOAuth2(value: unknown): { ok: true; oauth2Refresh?: ConnectedC
   const clientSecretSecretRef = typeof record.clientSecretSecretRef === 'string' && isStoreRef(record.clientSecretSecretRef)
     ? record.clientSecretSecretRef
     : undefined;
+  // A value the writer did not recognize is dropped rather than trusted: this
+  // field decides whether a refresh sends a stored secret nowhere or reaches
+  // out to the publisher endpoint, so a foreign or corrupted value must fall
+  // back to "ordinary direct refresh" rather than be passed through blind.
+  const exchangeVia = record.exchangeVia === 'publisher_endpoint' ? 'publisher_endpoint' as const : undefined;
   return {
     ok: true,
     oauth2Refresh: {
@@ -484,6 +502,7 @@ function normalizeOAuth2(value: unknown): { ok: true; oauth2Refresh?: ConnectedC
       ...(clientSecretSecretRef ? { clientSecretSecretRef } : {}),
       refreshTokenSecretRef,
       scopes: stringArray(record.scopes),
+      ...(exchangeVia ? { exchangeVia } : {}),
     },
   };
 }

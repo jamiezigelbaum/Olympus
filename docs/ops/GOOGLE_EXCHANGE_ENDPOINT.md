@@ -12,8 +12,8 @@ service that holds the secret instead: a Cloudflare Worker on the owner's own
 zone, `olympusplugin.ai`, implemented at [`exchange/`](../../exchange).
 
 This document is the contract for that Worker: why it exists, its threat
-model and controls, its API, the (not yet applied) worker-side change that
-uses it, and the owner's deployment runbook.
+model and controls, its API, the worker-side change that uses it (applied —
+see "Worker-side integration" below), and the owner's deployment runbook.
 
 Dropbox needs no such endpoint — Dropbox's OAuth client with PKCE does not
 require a secret at the token endpoint, so the Dropbox publisher flow talks to
@@ -245,103 +245,99 @@ If a second route is ever added under this Worker (unrelated to Google), the
 existing `docs/ops/OAUTH_RELAY.md` note about growing past one route into
 `api.olympusplugin.ai` still applies — nothing here forecloses that.
 
-## Worker-side integration (not yet applied)
+## Worker-side integration (applied)
 
-**This pull request does not modify PR #2's files.** PR #2
-(`claude/oauth-relay-worker`) adds the worker-side plumbing for the relay flow
-— `src/core/oauth-relay.ts`, `src/core/publisher-oauth-client.ts`, and the
-`/dashboard/connect/oauth/*` routes in `src/workers/email-source/index.ts` —
-and none of it is touched here. This section specifies precisely what changes
-once PR #2 has merged, so that work can be applied as its own small, reviewable
-follow-up rather than guessed at.
+PR #2 (`claude/oauth-relay-worker`, merged) added the worker-side plumbing for
+the relay flow — `src/core/oauth-relay.ts`, `src/core/publisher-oauth-client.ts`,
+and the `/dashboard/connect/oauth/*` routes in
+`src/workers/email-source/index.ts`. This section originally specified, and now
+documents as built, the follow-up that makes the dashboard's Google connect
+flow call this endpoint.
 
-### New configuration
+### Configuration
 
-Add an accessor next to `oauthRelayUrl()` in `src/core/oauth-relay.ts` (or
-`src/core/publisher-oauth-client.ts`, whichever the merged PR #2 makes the more
-natural home):
-
-```ts
-const DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = 'https://auth.olympusplugin.ai/exchange/google';
-
-export function googlePublisherExchangeUrl(env = process.env): string {
-  const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
-  // Same validation shape as `oauthRelayUrl()`: an unparseable or non-https
-  // (non-loopback) override is ignored rather than obeyed, and the refresh
-  // URL is always derived from the same base so the two routes can never
-  // point at different hosts.
-  ...
-}
-```
-
-The refresh route is `${googlePublisherExchangeUrl(env)}/refresh` — derived,
-never a second independent env var, so the two can never drift apart.
+`googlePublisherExchangeUrl()` lives in `src/core/oauth-relay.ts`, next to
+`oauthRelayUrl()`, with the identical validation shape: an unparseable or
+non-https (non-loopback) `OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL` override is
+ignored rather than obeyed. `googlePublisherExchangeRefreshUrl()` derives the
+refresh route as `${googlePublisherExchangeUrl()}/refresh` — never a second
+independent env var, so the two can never drift apart.
+`DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID` in `src/core/publisher-oauth-client.ts`
+is filled in with the owner's "Olympus Publisher" Web-application client id
+(`OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID` overrides it, same as every other
+publisher identifier in that file).
 
 ### `src/core/connect.ts` — `exchangeAuthorizationCode`
 
-The function that currently builds a form-encoded POST straight to
-`options.tokenUrl` (`https://oauth2.googleapis.com/token`) needs one new
-branch, taken only when this flow is going out with the publisher web client:
+The function that builds the token-exchange request now branches before
+choosing a transport: `isGooglePublisherExchangeClient(source, clientId)` is
+true only when the flow's `clientId` equals `googlePublisherWebClientId()`.
+When it is, the exchange POSTs JSON --
+`{code, code_verifier, redirect_uri, state?}`, no `client_secret` field at
+all — to `googlePublisherExchangeUrl()` instead of form-encoding a request
+straight to `options.tokenUrl`. Every other path — the packaged Desktop pilot
+client (loopback), a bring-your-own Google client, Dropbox, X — is unchanged
+and still exchanges directly with its provider. The response parsing below the
+HTTP call is shared by both branches unmodified: the exchange endpoint returns
+Google's token response unchanged (see "API" above), so the existing
+`payload.access_token` / `payload.refresh_token` / `payload.expires_in` /
+`payload.scope` handling applies identically either way.
 
-```ts
-const usesPublisherExchange = isGoogleOAuthSource(options.source)
-  && options.clientId === googlePublisherWebClientId();
-
-if (usesPublisherExchange) {
-  const response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({
-      code: options.code,
-      code_verifier: options.verifier,
-      redirect_uri: options.redirectUri,
-      ...(options.state ? { state: options.state } : {}),
-    }),
-  }, options.timeoutMs);
-  // Same response parsing as today: read `text`, check `response.ok`, parse
-  // JSON, pull `access_token`/`refresh_token`/`expires_in`/`scope` — the
-  // exchange endpoint's success and error shapes are Google's own, unchanged
-  // (see "API" above), so nothing downstream of the HTTP call needs to change.
-  ...
-}
-// else: today's direct-to-Google path, unchanged, still used for the Desktop
-// pilot client (loopback) and for a bring-your-own client id.
-```
-
-Two things fall out of this for free and need no extra code:
-
-- **No `client_secret` is ever sent, read, or stored for this path.**
-  `dashboardOAuthClientSecretRequired()` already returns `false` for Google
-  sources and `dashboardGoogleOAuthClientSecret()` already returns `undefined`
-  when no matching stored secret exists — the publisher web client id will
-  never match a stored client id, so this already resolves to "no secret" with
-  zero changes there. The worker's secret store never needs to hold anything
-  for a publisher-web-client Google account.
-- **The response parsing is unchanged.** The exchange endpoint returns
-  Google's token response unchanged (see "API"), so
-  `exchangeAuthorizationCode`'s existing `payload.access_token` /
-  `payload.refresh_token` / `payload.expires_in` / `payload.scope` handling
-  applies identically to both branches.
+`dashboardOAuthClientSecretRequired()` already returns `false` for Google
+sources and `dashboardGoogleOAuthClientSecret()` already returns `undefined`
+when no matching stored secret exists — the publisher web client id never
+matches a stored client id, so no client secret is ever resolved for this
+path in the first place, and the publisher branch's JSON body has no field to
+put one in even if it were.
 
 ### `src/workers/credential-broker/index.ts` — `refreshOAuth2AccessToken`
 
-The same branch, in the same shape, applies to the refresh path. The broker
-already threads `clientId` into this function (for the `Authorization: Basic`
-header X uses); the publisher-web-client branch instead compares that
-`clientId` against `googlePublisherWebClientId()` and, when it matches, POSTs
-JSON `{refresh_token}` to `${googlePublisherExchangeUrl()}/refresh` instead of
+The same branch, in the same shape, applies to the refresh path: when the
+stored credential's `oauth2Refresh.exchangeVia === 'publisher_endpoint'` (or,
+for a credential connected before that field existed, when its resolved
+`clientId` still equals `googlePublisherWebClientId()`), the refresh POSTs
+JSON `{refresh_token}` to `googlePublisherExchangeRefreshUrl()` instead of
 form-encoding a request straight to `options.tokenUrl` — again with no
-`client_secret` involved on the worker's side at all.
+`client_secret` involved on the worker's side. The HTTP call is wrapped in a
+bounded timeout (`fetchWithTimeout`, 20s) and a network failure or timeout is
+raised as the same `OAuth2TokenEndpointError` shape the direct path uses
+(`502`/`upstream_unreachable` or `504`/`upstream_timeout`), so it flows through
+the broker's existing refusal handling and reaches the dashboard as an
+ordinary provider refusal.
 
-### What does *not* need to change
+### Provenance: `exchangeVia`
+
+`src/core/connect.ts` writes `oauth2Refresh.exchangeVia: 'publisher_endpoint'`
+onto the connected-handle registry entry at the moment a Google
+publisher-Web-client connection completes — a fact about how *that* exchange
+actually happened, not a value re-derived from the stored client id on every
+read. This is the same "provenance, not presence" reasoning
+`client_id_source` already uses (`docs/ops/OAUTH_RELAY.md`): a future rotation
+of `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID` must not stop an
+already-connected publisher credential's refresh from finding the exchange
+endpoint. `src/workers/credential-broker/connected-handles.ts` carries the
+field through normalization (`normalizeOAuth2`, rejecting any value other than
+the one literal) and into the broker's `EnvOAuth2RefreshDefinition`
+(`deriveEnvCredentialHandlesFromRegistry`). Absent for every other credential
+-- the Desktop pilot client, any bring-your-own registration, Dropbox, X --
+all of which keep refreshing directly with their provider exactly as before.
+
+### What did *not* change
 
 - The relay page (`relay/oauth/callback/index.html`) and its contract
   (`docs/ops/OAUTH_RELAY.md`) are untouched — this endpoint is never in the
   browser's path.
 - `dashboardPublisherOAuthFlow` and the rest of PR #2's routing (which client,
-  which redirect URI, when the relay's signed state is minted) are untouched —
+  which redirect URI, when the relay's signed state is minted) are untouched --
   this only changes where the *token exchange* HTTP call goes once that
   routing has already decided "publisher web client."
+- The connect card: `dashboardPublisherOAuthSources` already offered
+  publisher mode to Gmail and Google Drive generically the moment
+  `googlePublisherWebClientId()` answers a value, and the sheet's copy
+  (`src/workers/dashboard/components.ts`) is source-name-driven already — one
+  Connect button, "Use my own app instead" behind a disclosure, identical to
+  Dropbox's card. Filling in the client id is what turns it on; nothing about
+  the card itself needed to change.
 - Nothing about how a connected handle is stored, displayed, or disconnected
   changes — a publisher-web-client Google account looks identical to any other
   Google account everywhere downstream of the token response.
@@ -369,6 +365,19 @@ cd exchange && ../node_modules/.bin/tsc --noEmit
 # or, from the repo root:
 node_modules/.bin/tsc -p exchange/tsconfig.json --noEmit
 ```
+
+`test/google-publisher-exchange.test.ts`, in the main project, covers the
+worker-side integration this document specifies above: the publisher relay
+flow end to end through `withWorkerBearerAuth` with a fake relay bounce and a
+fake exchange endpoint (asserting the exact JSON body shape, that
+`redirect_uri` equals the relay URL, and that no `client_secret` field is
+ever sent); a loopback dashboard still using the packaged Desktop pilot
+client and exchanging directly with Google; refresh routed to the endpoint
+for an endpoint-minted credential (by `exchangeVia` and, for a
+pre-migration credential, by client-id fallback) and to Google directly for
+a bring-your-own credential; the endpoint's 400/401/502/504 error shapes
+rendered as ordinary connect refusals; and that no secret-shaped string
+appears in any response. Run it with `bun test test/google-publisher-exchange.test.ts`.
 
 ## Owner runbook
 
@@ -452,11 +461,12 @@ in `exchange/wrangler.toml`.
    A real end-to-end exchange proof needs a live authorization code and
    verifier, which only exists mid-flow; the checks above only confirm both
    services are deployed, routed correctly, and fail closed on bad input. The
-   first real exchange proof is the first live "Connect Gmail" click once the
-   worker-side integration (above) has also been applied.
-8. **Apply the worker-side integration** described above, once PR #2 has
-   merged — this is a separate, small pull request, not part of deploying the
-   endpoint itself.
+   first real exchange proof is the first live "Connect Gmail" click, which
+   the worker-side integration (above, applied) now makes possible.
+8. **The worker-side integration is applied** (see above) — no further pull
+   request is needed for it. What remains here is deployment: steps 1-7 are
+   the owner's own Cloudflare and Google Cloud console actions, none of which
+   this repository can perform on the owner's behalf.
 9. **Google verification thresholds**, unchanged from
    `docs/ops/OAUTH_RELAY.md` but worth restating here because this endpoint is
    what makes clearing them possible at all: `gmail.readonly` and

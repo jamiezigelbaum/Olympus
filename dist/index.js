@@ -2705,6 +2705,38 @@ var init_config = __esm(() => {
   ];
 });
 
+// src/core/http-timeout.ts
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+function isAbortError2(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 // src/core/sqlite-migrations.ts
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
@@ -3541,6 +3573,44 @@ function base64Url(value) {
 var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer", DEFAULT_ASSERTION_LIFETIME_SECONDS = 3600, MAX_ASSERTION_LIFETIME_SECONDS = 3600;
 var init_google_service_account = () => {};
 
+// src/core/oauth-relay.ts
+function googlePublisherExchangeUrl(env = process.env) {
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
+  if (!override)
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  let parsed;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
+    return override;
+  return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+}
+function googlePublisherExchangeRefreshUrl(env = process.env) {
+  return `${googlePublisherExchangeUrl(env)}/refresh`;
+}
+var DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = "https://auth.olympusplugin.ai/exchange/google", OAUTH_RELAY_STATE_TTL_MS;
+var init_oauth_relay = __esm(() => {
+  OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
+});
+
+// src/core/publisher-oauth-client.ts
+function googlePublisherWebClientId(env = process.env) {
+  return firstConfigured(env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID, DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+}
+function firstConfigured(...candidates) {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed)
+      return trimmed;
+  }
+  return;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com";
+
 // src/workers/credential-broker/index.ts
 import { createHash } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
@@ -3858,7 +3928,8 @@ class EnvCredentialBroker {
         clientId,
         clientSecret,
         refreshToken,
-        fetchImpl: this.fetchImpl
+        fetchImpl: this.fetchImpl,
+        ...oauth2.exchangeVia ? { exchangeVia: oauth2.exchangeVia } : {}
       });
     } catch (error) {
       await lease?.assertOwned();
@@ -4319,23 +4390,41 @@ function sessionKindFromDefinition(definition) {
   return definition.sessionKind ?? "bearer_token";
 }
 async function refreshOAuth2AccessToken(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", "refresh_token");
-  body.set("refresh_token", options.refreshToken);
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
-  if (options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+  const usesPublisherExchange = options.exchangeVia === "publisher_endpoint" || options.clientId !== "" && options.clientId === googlePublisherWebClientId();
+  let response;
+  if (usesPublisherExchange) {
+    try {
+      response = await fetchWithTimeout(options.fetchImpl, googlePublisherExchangeRefreshUrl(), {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: options.refreshToken })
+      }, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS);
+    } catch (error) {
+      throw new OAuth2TokenEndpointError({
+        status: isAbortError2(error) ? 504 : 502,
+        providerError: isAbortError2(error) ? "upstream_timeout" : "upstream_unreachable",
+        safeDetail: isAbortError2(error) ? `publisher token-exchange endpoint timed out after ${GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS}ms` : "publisher token-exchange endpoint was unreachable"
+      });
+    }
   } else {
-    body.set("client_id", options.clientId);
+    const body = new URLSearchParams;
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", options.refreshToken);
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+    } else {
+      body.set("client_id", options.clientId);
+    }
+    response = await options.fetchImpl(options.tokenUrl, {
+      method: "POST",
+      headers,
+      body
+    });
   }
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: "POST",
-    headers,
-    body
-  });
   const text = await response.text();
   if (!response.ok) {
     const providerError = providerErrorFromText(text);
@@ -4756,11 +4845,12 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_google_service_account();
+  init_oauth_relay();
   init_google_service_account();
   init_secret_store();
   init_connected_handles();
@@ -5282,7 +5372,8 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
         clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
         ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
         refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
-        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes]
+        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
+        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
       };
     }
     if (handle.backendState) {
@@ -5369,6 +5460,7 @@ function normalizeOAuth2(value) {
     return { ok: false, reason: "invalid_oauth2_refresh" };
   }
   const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
+  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
   return {
     ok: true,
     oauth2Refresh: {
@@ -5376,7 +5468,8 @@ function normalizeOAuth2(value) {
       clientIdSecretRef,
       ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
       refreshTokenSecretRef,
-      scopes: stringArray(record.scopes)
+      scopes: stringArray(record.scopes),
+      ...exchangeVia ? { exchangeVia } : {}
     }
   };
 }
@@ -9633,38 +9726,6 @@ function assertNoRawEmailFieldsAtPath(value, path) {
   }
 }
 
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-function isAbortError2(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
-
 // src/core/email.ts
 init_operation_error();
 init_source_corpus_registry();
@@ -11835,7 +11896,6 @@ function shouldExposeOperation(operation, context) {
   }
   return true;
 }
-
 // src/workers/source-watch-runtime.ts
 init_source_corpus_registry();
 init_router();
@@ -12000,6 +12060,7 @@ import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, rmSync as rmSyn
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join5 } from "node:path";
 init_secret_store();
+init_oauth_relay();
 init_connected_handles();
 
 // src/workers/credential-broker/unpaired-sources.ts

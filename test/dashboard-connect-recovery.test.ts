@@ -127,7 +127,17 @@ describe('a Google reconnect keeps the client secret its own registration was is
     });
 
     try {
-      const response = await worker.fetch(jsonRequest('/dashboard/connect/oauth/start', { source: 'gmail' }));
+      // Loopback, not `jsonRequest`'s `http://worker.test`: with the Google
+      // publisher Web client filled in (docs/ops/OAUTH_RELAY.md), a
+      // NON-loopback dashboard with nothing registered now takes the
+      // publisher relay flow instead of this fallback, exactly as intended —
+      // the packaged Desktop pilot client is reachable at all only on a
+      // loopback origin, because it cannot register an https redirect URI.
+      const response = await worker.fetch(new Request('http://127.0.0.1:8010/dashboard/connect/oauth/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'gmail' }),
+      }));
       expect(response.status).toBe(200);
       expect(starts).toEqual([{ clientId: 'pilot-client-id' }]);
     } finally {

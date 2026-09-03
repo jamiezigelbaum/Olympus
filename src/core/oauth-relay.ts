@@ -25,6 +25,13 @@ export const OAUTH_RELAY_STATE_VERSION = 1;
  */
 export const DEFAULT_OAUTH_RELAY_URL = 'https://auth.olympusplugin.ai/oauth/callback/';
 
+/**
+ * The publisher-side Google token-exchange endpoint, same zone as the relay.
+ * `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md` is the contract; `exchange/` is the
+ * implementation.
+ */
+export const DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = 'https://auth.olympusplugin.ai/exchange/google';
+
 /** The relay refuses a longer `state` before decoding anything. */
 export const OAUTH_RELAY_MAX_STATE_LENGTH = 2048;
 
@@ -116,6 +123,51 @@ export function oauthRelayUrl(env: Record<string, string | undefined> = process.
     || parsed.hostname === '[::1]';
   if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback)) return override;
   return DEFAULT_OAUTH_RELAY_URL;
+}
+
+/**
+ * The publisher-side Google token-exchange endpoint's base URL.
+ *
+ * Contract: `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`. Google's Web-application
+ * OAuth client is a confidential client — its token endpoint requires
+ * `client_secret` on every exchange and refresh, and Olympus ships as public
+ * source, so that secret cannot live in the distributed worker. This Worker,
+ * on the owner's own Cloudflare zone, holds the secret instead; the worker
+ * calls it as a plain server-to-server API and never sees or sends the secret
+ * itself. Used only for the publisher **Web** client's flow (the relay case,
+ * any non-loopback dashboard origin) — the loopback Desktop pilot client still
+ * exchanges directly with Google, exactly as before, because it is a public
+ * client with no secret requirement.
+ *
+ * `OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL` exists for the same reason
+ * `OLYMPUS_OAUTH_RELAY_URL` does: a test or a staging deployment of the
+ * exchange endpoint. Validation mirrors `oauthRelayUrl()` exactly — an
+ * unparseable or non-https (non-loopback) override is ignored rather than
+ * obeyed, because a malformed exchange URL turns every publisher-web-client
+ * connect into a network error after the consent round is already spent.
+ */
+export function googlePublisherExchangeUrl(env: Record<string, string | undefined> = process.env): string {
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
+  if (!override) return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  }
+  const loopback = parsed.hostname === 'localhost'
+    || parsed.hostname === '127.0.0.1'
+    || parsed.hostname === '[::1]';
+  if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback)) return override;
+  return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+}
+
+/**
+ * The refresh route, derived from `googlePublisherExchangeUrl()` rather than a
+ * second independent env var — the two can never point at different hosts.
+ */
+export function googlePublisherExchangeRefreshUrl(env: Record<string, string | undefined> = process.env): string {
+  return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 
 /** A fresh single-use nonce: 32 random bytes, base64url. */
