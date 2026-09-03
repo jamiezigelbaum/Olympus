@@ -400,6 +400,44 @@ describe('worker: POST /exchange/google', () => {
     expect(body.error).toBe('upstream_timeout');
   }, 20_000);
 
+  // The cleanup half of the same deadline (Codex round 2 on 98d4a946): when the
+  // deadline wins the race the read is still in flight and still holds the
+  // body's lock, and an upstream that ignores `AbortSignal` will not end it on
+  // its own. The reader must be cancelled explicitly, or this Worker is left
+  // with a pending read against a permanently locked stream.
+  test('a stalled upstream body is cancelled and unlocked, not left pending on a locked stream', async () => {
+    let cancels = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"access_token":"'));
+        // ...and never closes, and never watches the signal.
+      },
+      cancel() {
+        cancels += 1;
+      },
+    });
+    const upstream = new Response(stream, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const fetchImpl = mock(() => Promise.resolve(upstream));
+
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+
+    expect(response.status).toBe(504);
+    expect(cancels).toBe(1);
+    expect(upstream.body?.locked).toBe(false);
+  }, 20_000);
+
+  test('an upstream body read to completion is unlocked as well', async () => {
+    const upstream = googleSuccess({ access_token: 'tok', expires_in: 3600 });
+    const fetchImpl = mock(() => Promise.resolve(upstream));
+    const request = jsonRequest('/exchange/google', { code: 'c', code_verifier: VERIFIER, redirect_uri: RELAY_URL });
+
+    const response = await handleRequest(request, baseEnv(), deps(fetchImpl));
+
+    expect(response.status).toBe(200);
+    expect(upstream.body?.locked).toBe(false);
+  });
+
   test('an oversized Google response is refused, with none of it echoed', async () => {
     const oversized = `{"marker":"${'A'.repeat(80 * 1024)}"}`;
     const fetchImpl = mock(() => Promise.resolve(new Response(oversized, {

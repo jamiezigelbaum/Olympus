@@ -3703,20 +3703,37 @@ async function fetchBoundedText(fetchImpl, url, init, options = {}) {
       reject(error);
     }, timeoutMs);
   });
+  let activeReader;
   try {
     const response = await Promise.race([
       fetchImpl(url, { ...init, signal: controller.signal }),
       deadline
     ]);
-    const text = await Promise.race([readBoundedText(response, limitBytes, controller), deadline]);
+    const read = readBoundedText(response, limitBytes, controller, (reader) => {
+      activeReader = reader;
+    });
+    read.catch(() => {
+      return;
+    });
+    const text = await Promise.race([read, deadline]);
     return { response, text };
   } finally {
     if (timer !== undefined)
       clearTimeout(timer);
     removeUpstreamAbortListener?.();
+    if (activeReader)
+      await releaseBodyReader(activeReader);
   }
 }
-async function readBoundedText(response, limitBytes, controller) {
+async function releaseBodyReader(reader) {
+  try {
+    await reader.cancel();
+  } catch {}
+  try {
+    reader.releaseLock();
+  } catch {}
+}
+async function readBoundedText(response, limitBytes, controller, onReader) {
   const body = response.body;
   if (!body) {
     const text = await response.text();
@@ -3726,6 +3743,7 @@ async function readBoundedText(response, limitBytes, controller) {
     return text;
   }
   const reader = body.getReader();
+  onReader?.(reader);
   const chunks = [];
   let total = 0;
   try {
@@ -3742,19 +3760,16 @@ async function readBoundedText(response, limitBytes, controller) {
       }
       chunks.push(value);
     }
-  } catch (error) {
-    await reader.cancel().catch(() => {
-      return;
-    });
-    throw error;
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    await releaseBodyReader(reader);
   }
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
 }
 var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
 var init_http_timeout = __esm(() => {

@@ -68,6 +68,13 @@ async function postToGoogle(
       reject(error);
     }, timeoutMs);
   });
+  // When the deadline wins the race below, the read is still in flight and
+  // still holds the body's lock. An abort only ends it if the peer honours the
+  // signal, so the reader is recorded here and cancelled explicitly in the
+  // `finally` — otherwise an upstream that ignores `AbortSignal` leaves this
+  // Worker with a pending read against a permanently locked stream (Codex
+  // round 2 on 98d4a946).
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const response = await Promise.race([
       fetchImpl(GOOGLE_TOKEN_URL, {
@@ -81,10 +88,13 @@ async function postToGoogle(
       }),
       deadline,
     ]);
-    const text = await Promise.race([
-      readBoundedText(response, MAX_UPSTREAM_RESPONSE_BYTES, controller),
-      deadline,
-    ]);
+    const read = readBoundedText(response, MAX_UPSTREAM_RESPONSE_BYTES, controller, (reader) => {
+      activeReader = reader;
+    });
+    // The race may abandon this promise; a handler attached now keeps an
+    // abandoned rejection from surfacing as an unhandled one.
+    read.catch(() => undefined);
+    const text = await Promise.race([read, deadline]);
     return { ok: true, status: response.status, contentType: response.headers.get('content-type'), text };
   } catch (error) {
     if (error instanceof ResponseTooLargeError) return { ok: false, kind: 'oversized_response' };
@@ -92,16 +102,37 @@ async function postToGoogle(
     return { ok: false, kind: 'network_error' };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (activeReader) await releaseBodyReader(activeReader);
   }
 }
 
 class ResponseTooLargeError extends Error {}
+
+/**
+ * Cancel then unlock, each independently guarded: the read loop may already
+ * have cancelled, the reader may already be released, or the stream may have
+ * errored. Cancelling first is what settles a pending read, which is what
+ * makes `releaseLock` legal and leaves the body unlocked.
+ */
+async function releaseBodyReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Already cancelled, or the stream errored.
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // Already released.
+  }
+}
 
 /** Refuses rather than truncating: a half-read token response is not an answer. */
 async function readBoundedText(
   response: Response,
   limitBytes: number,
   controller: AbortController,
+  onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void,
 ): Promise<string> {
   const body = response.body;
   if (!body) {
@@ -110,6 +141,7 @@ async function readBoundedText(
     return text;
   }
   const reader = body.getReader();
+  onReader?.(reader);
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
@@ -124,17 +156,18 @@ async function readBoundedText(
       }
       chunks.push(value);
     }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(joined);
+  } finally {
+    // Read to completion, over the cap, or abandoned by the deadline: the body
+    // ends up unlocked either way.
+    await releaseBodyReader(reader);
   }
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
 }
 
 /**
