@@ -443,13 +443,18 @@ the URI is registered with any provider.
 > Pages workflow. Kept here only so the earlier plan is not mistaken for the
 > current one.
 
-### Planned, not in this change: the token-exchange endpoint
+### The token-exchange endpoint
 
-If the owner picks the publisher-side exchange option for Google (see the
-runbook), it will be a **Cloudflare Worker on this same zone** —
-`https://auth.olympusplugin.ai/exchange`, or `api.olympusplugin.ai` if it ever
-grows past one route. Same domain, same account, no new vendor. Designing and
-implementing it is out of scope here, and nothing in this contract depends on it.
+The owner picked the publisher-side exchange option for Google (see the
+runbook below). It is a **Cloudflare Worker on this same zone**,
+`https://auth.olympusplugin.ai/exchange/*` — same domain, same account, no new
+vendor — implemented at [`exchange/`](../../exchange) and fully specified in
+[`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`](GOOGLE_EXCHANGE_ENDPOINT.md). That
+document also specifies the small worker-side change — not yet applied; see
+its "Worker-side integration" section — that makes the dashboard's Google
+connect flow call it. Nothing in this relay contract depends on it: the relay
+still only ever sees `code` and `state` in a query string, never a secret or a
+token.
 
 ## Publisher app runbook
 
@@ -489,22 +494,19 @@ implementing it is out of scope here, and nothing in this contract depends on it
    normal Search Console flow — either the DNS TXT record (easiest, the zone is
    already on Cloudflare) or an HTML file dropped into `relay/`. The Public
    Suffix List problem that `github.io` would have raised does not exist here.
-5. **Open decision — the web client secret.** A Google *Web application* client
-   must send `client_secret` at the token endpoint, even with PKCE. The worker
-   runs on the user's machine, so a publisher secret shipped with Olympus is not
-   secret. The options, none of them free:
-   - ship the secret anyway and treat it as a public identifier (works today;
-     contradicts Google's terms for web clients, and a leak means rotating a
-     credential every user depends on);
-   - run a minimal publisher-side token-exchange endpoint — concretely, a
-     Cloudflare Worker on the same zone (`https://auth.olympusplugin.ai/exchange`
-     or `api.olympusplugin.ai`), which restores the secret's confidentiality and
-     ends the "no server" property of this design;
-   - keep Google on loopback-only (Desktop client) and ship the relay for
-     Dropbox first (no secret needed with PKCE).
-   This is an owner decision and it is **not** settled by this document. The
-   relay contract is unaffected either way — the exchange happens in the worker
-   or in a publisher endpoint, never in the relay.
+5. **Settled — the web client secret goes through a publisher-side exchange.**
+   A Google *Web application* client must send `client_secret` at the token
+   endpoint, even with PKCE, and the worker runs on the user's machine, so a
+   publisher secret shipped with Olympus would not be secret. The owner picked
+   the publisher-side token-exchange endpoint over the alternatives (shipping
+   the secret as a public identifier; staying loopback-only for Google). It is
+   a Cloudflare Worker on this same zone at `https://auth.olympusplugin.ai/exchange/*`,
+   specified and implemented in
+   [`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`](GOOGLE_EXCHANGE_ENDPOINT.md) and
+   [`exchange/`](../../exchange). Deploying it (creating the Web application
+   client below, setting the secret, `wrangler deploy`) is the remaining owner
+   step that runbook walks through. The relay contract is unaffected either
+   way — the exchange happens in a publisher endpoint, never in the relay.
 6. **Thresholds**: `gmail.readonly` and `drive.readonly` are *restricted*
    scopes. An unpublished app stays in Testing with a hard cap (currently 100
    test users). Publishing an app with restricted scopes requires Google's
