@@ -699,3 +699,5 @@ step 5 creates the repository private.
 - Add a `SECURITY.md` and issue templates; a public repository gets
   unsolicited reports.
 - Delete or archive this runbook once every step has run.
+
+<!-- CI smoke check after the public flip: proves the required contexts are wired on this repository. -->
