@@ -966,7 +966,13 @@ describe('multi-source source dashboard', () => {
       headers: { Authorization: 'Bearer dashboard-secret' },
     }));
     const beforeBody = await before.json();
-    expect(sourceState(beforeBody, 'gmail.email')).toBe('needs_setup');
+    // Not 'needs_setup': with the Google publisher Web client filled in
+    // (docs/ops/OAUTH_RELAY.md), this non-loopback dashboard offers gmail
+    // through Olympus's own publisher app before it ever asks the owner to
+    // register anything — the same one-click state Dropbox's card already
+    // has. This test's own point (a registry write is picked up on the next
+    // render, without a worker restart) is unaffected either way.
+    expect(sourceState(beforeBody, 'gmail.email')).toBe('not_connected');
 
     writeConnectedHandleRegistry({
       version: 1,

@@ -130,7 +130,7 @@ async function handleExchange(request: Request, env: Env, deps: Deps): Promise<R
     deps.fetchImpl,
     UPSTREAM_TIMEOUT_MS,
   );
-  return await respondFromGoogle(outcome);
+  return respondFromGoogle(outcome);
 }
 
 async function handleRefresh(request: Request, env: Env, deps: Deps): Promise<Response> {
@@ -149,28 +149,33 @@ async function handleRefresh(request: Request, env: Env, deps: Deps): Promise<Re
     deps.fetchImpl,
     UPSTREAM_TIMEOUT_MS,
   );
-  return await respondFromGoogle(outcome);
+  return respondFromGoogle(outcome);
 }
 
 function credentials(env: Env): GoogleExchangeCredentials {
   return { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
 }
 
-async function respondFromGoogle(outcome: GoogleUpstreamOutcome): Promise<Response> {
+function respondFromGoogle(outcome: GoogleUpstreamOutcome): Response {
   if (!outcome.ok) {
     if (outcome.kind === 'timeout') return errorResponse(504, 'upstream_timeout', 'Google token endpoint did not respond in time.');
+    if (outcome.kind === 'oversized_response') {
+      // Nothing of the body is echoed: an answer this large is not a token
+      // response, and repeating any of it would forward whatever produced it.
+      return errorResponse(502, 'upstream_response_too_large', 'Google token endpoint returned an oversized response.');
+    }
     return errorResponse(502, 'upstream_unreachable', 'Could not reach the Google token endpoint.');
   }
   // Passed through unchanged (docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md): Google's
   // token response never contains this endpoint's own secret, so there is
   // nothing to redact. Headers are rebuilt from scratch rather than copied,
   // so nothing Google or an intermediary set (cookies, caching, infra
-  // headers) survives the hop.
-  const text = await outcome.response.text();
-  return new Response(text, {
-    status: outcome.response.status,
+  // headers) survives the hop. The body was already read under the upstream
+  // deadline and size cap (`postToGoogle`).
+  return new Response(outcome.text, {
+    status: outcome.status,
     headers: {
-      'Content-Type': outcome.response.headers.get('content-type') ?? 'application/json',
+      'Content-Type': outcome.contentType ?? 'application/json',
       'Cache-Control': 'no-store',
     },
   });

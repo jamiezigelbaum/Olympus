@@ -2705,6 +2705,135 @@ var init_config = __esm(() => {
   ];
 });
 
+// src/core/http-timeout.ts
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetchImpl(url, init);
+  }
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+function isAbortError2(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+function isBoundedResponseTooLargeError(error) {
+  return error instanceof BoundedResponseTooLargeError;
+}
+async function fetchBoundedText(fetchImpl, url, init, options = {}) {
+  const limitBytes = options.limitBytes ?? DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES;
+  const timeoutMs = options.timeoutMs;
+  const deadlineWanted = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  if (!deadlineWanted) {
+    const response = await fetchImpl(url, init);
+    return { response, text: await readBoundedText(response, limitBytes) };
+  }
+  const controller = new AbortController;
+  const upstreamSignal = init.signal;
+  let removeUpstreamAbortListener;
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort(upstreamSignal.reason);
+    } else {
+      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
+      error.name = "AbortError";
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    const response = await Promise.race([
+      fetchImpl(url, { ...init, signal: controller.signal }),
+      deadline
+    ]);
+    const text = await Promise.race([readBoundedText(response, limitBytes, controller), deadline]);
+    return { response, text };
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    removeUpstreamAbortListener?.();
+  }
+}
+async function readBoundedText(response, limitBytes, controller) {
+  const body = response.body;
+  if (!body) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > limitBytes) {
+      throw new BoundedResponseTooLargeError(limitBytes);
+    }
+    return text;
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;; ) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      total += value.byteLength;
+      if (total > limitBytes) {
+        controller?.abort();
+        throw new BoundedResponseTooLargeError(limitBytes);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {
+      return;
+    });
+    throw error;
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES, BoundedResponseTooLargeError;
+var init_http_timeout = __esm(() => {
+  DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  BoundedResponseTooLargeError = class BoundedResponseTooLargeError extends Error {
+    limitBytes;
+    constructor(limitBytes) {
+      super(`Response body exceeded the ${limitBytes}-byte cap.`);
+      this.name = "BoundedResponseTooLargeError";
+      this.limitBytes = limitBytes;
+    }
+  };
+});
+
 // src/core/sqlite-migrations.ts
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
@@ -3541,6 +3670,47 @@ function base64Url(value) {
 var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer", DEFAULT_ASSERTION_LIFETIME_SECONDS = 3600, MAX_ASSERTION_LIFETIME_SECONDS = 3600;
 var init_google_service_account = () => {};
 
+// src/core/oauth-relay.ts
+function googlePublisherExchangeUrl(env = process.env) {
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
+  if (!override)
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  let parsed;
+  try {
+    parsed = new URL(override);
+  } catch {
+    return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+  }
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol === "https:" || parsed.protocol === "http:" && loopback)
+    return override;
+  return DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL;
+}
+function googlePublisherExchangeRefreshUrl(env = process.env) {
+  return `${googlePublisherExchangeUrl(env)}/refresh`;
+}
+var DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL = "https://auth.olympusplugin.ai/exchange/google", OAUTH_RELAY_STATE_TTL_MS;
+var init_oauth_relay = __esm(() => {
+  OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
+});
+
+// src/core/publisher-oauth-client.ts
+function isGooglePublisherWebClientId(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return false;
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
+  if (override && candidate === override)
+    return true;
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS;
+var init_publisher_oauth_client = __esm(() => {
+  GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
+    DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+});
+
 // src/workers/credential-broker/index.ts
 import { createHash } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
@@ -3851,6 +4021,7 @@ class EnvCredentialBroker {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
     await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
+    const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
     let tokenResponse;
     try {
       tokenResponse = await refreshOAuth2AccessToken({
@@ -3858,7 +4029,8 @@ class EnvCredentialBroker {
         clientId,
         clientSecret,
         refreshToken,
-        fetchImpl: this.fetchImpl
+        fetchImpl: this.fetchImpl,
+        ...exchangeVia ? { exchangeVia } : {}
       });
     } catch (error) {
       await lease?.assertOwned();
@@ -4059,6 +4231,18 @@ class EnvCredentialBroker {
     if (!this.connectedHandleRegistryPath)
       return;
     markConnectedHandleReauthRequired(handle, this.connectedHandleRegistryPath, now);
+  }
+  resolveExchangeVia(definition, oauth2, clientId) {
+    if (oauth2.exchangeVia)
+      return oauth2.exchangeVia;
+    if (!isGooglePublisherWebClientId(clientId, this.env))
+      return;
+    if (this.connectedHandleRegistryPath) {
+      try {
+        markConnectedHandleExchangeVia(definition.handle, "publisher_endpoint", this.connectedHandleRegistryPath);
+      } catch {}
+    }
+    return "publisher_endpoint";
   }
   async issueDescriptorSession(definition, capability, sessionKind) {
     const now = this.now();
@@ -4318,25 +4502,73 @@ function statusFromDefinition(definition, status, _now) {
 function sessionKindFromDefinition(definition) {
   return definition.sessionKind ?? "bearer_token";
 }
-async function refreshOAuth2AccessToken(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", "refresh_token");
-  body.set("refresh_token", options.refreshToken);
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
-  if (options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
-  } else {
-    body.set("client_id", options.clientId);
+function publisherExchangeTransportError(error) {
+  if (isAbortError2(error)) {
+    return new OAuth2TokenEndpointError({
+      status: 504,
+      providerError: "upstream_timeout",
+      safeDetail: `publisher token-exchange endpoint timed out after ${GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS}ms`
+    });
   }
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: "POST",
-    headers,
-    body
+  if (isBoundedResponseTooLargeError(error)) {
+    return new OAuth2TokenEndpointError({
+      status: 502,
+      providerError: "upstream_response_too_large",
+      safeDetail: "publisher token-exchange endpoint response exceeded the response size cap"
+    });
+  }
+  return new OAuth2TokenEndpointError({
+    status: 502,
+    providerError: "upstream_unreachable",
+    safeDetail: "publisher token-exchange endpoint was unreachable"
   });
-  const text = await response.text();
+}
+async function refreshOAuth2AccessToken(options) {
+  const usesPublisherExchange = options.exchangeVia === "publisher_endpoint";
+  let response;
+  let text;
+  if (usesPublisherExchange) {
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl, googlePublisherExchangeRefreshUrl(), {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: options.refreshToken })
+      }, {
+        timeoutMs: GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS,
+        limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES
+      }));
+    } catch (error) {
+      throw publisherExchangeTransportError(error);
+    }
+  } else {
+    const body = new URLSearchParams;
+    body.set("grant_type", "refresh_token");
+    body.set("refresh_token", options.refreshToken);
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    if (options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+    } else {
+      body.set("client_id", options.clientId);
+    }
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl, options.tokenUrl, {
+        method: "POST",
+        headers,
+        body
+      }, { limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
+    } catch (error) {
+      if (!isBoundedResponseTooLargeError(error))
+        throw error;
+      throw new OAuth2TokenEndpointError({
+        status: 502,
+        providerError: "upstream_response_too_large",
+        safeDetail: "token endpoint response exceeded the response size cap"
+      });
+    }
+  }
   if (!response.ok) {
     const providerError = providerErrorFromText(text);
     throw new OAuth2TokenEndpointError({
@@ -4756,11 +4988,14 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_google_service_account();
+  init_http_timeout();
+  init_oauth_relay();
+  init_publisher_oauth_client();
   init_google_service_account();
   init_secret_store();
   init_connected_handles();
@@ -5158,6 +5393,7 @@ var init_credential_broker = __esm(() => {
   PROCESS_MINTED_SESSION_CACHE = new Map;
   PROCESS_MINT_IN_FLIGHT = new Map;
   PROCESS_MINT_FAILURE_BACKOFF = new Map;
+  OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
   ASSERTION_TIMING_REJECTED_DETAIL = /(?:short-lived token|reasonable timeframe|check your iat and exp|jwt is (?:not yet valid|expired)|assertion (?:is )?expired)/i;
   OAuth2TokenEndpointError = class OAuth2TokenEndpointError extends Error {
     status;
@@ -5255,6 +5491,30 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
     return true;
   });
 }
+function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
+  if (!existsSync4(path))
+    return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId || !handle.oauth2Refresh)
+        return handle;
+      if (handle.oauth2Refresh.exchangeVia === exchangeVia)
+        return handle;
+      changed = true;
+      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
+    });
+    if (!changed)
+      return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
 function deriveEnvCredentialHandlesFromRegistry(registry) {
   return registry.handles.map((handle) => {
     const definition = {
@@ -5282,7 +5542,8 @@ function deriveEnvCredentialHandlesFromRegistry(registry) {
         clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
         ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
         refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
-        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes]
+        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
+        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
       };
     }
     if (handle.backendState) {
@@ -5369,6 +5630,7 @@ function normalizeOAuth2(value) {
     return { ok: false, reason: "invalid_oauth2_refresh" };
   }
   const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
+  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
   return {
     ok: true,
     oauth2Refresh: {
@@ -5376,7 +5638,8 @@ function normalizeOAuth2(value) {
       clientIdSecretRef,
       ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
       refreshTokenSecretRef,
-      scopes: stringArray(record.scopes)
+      scopes: stringArray(record.scopes),
+      ...exchangeVia ? { exchangeVia } : {}
     }
   };
 }
@@ -9633,39 +9896,8 @@ function assertNoRawEmailFieldsAtPath(value, path) {
   }
 }
 
-// src/core/http-timeout.ts
-async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return fetchImpl(url, init);
-  }
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const upstreamSignal = init.signal;
-  let removeUpstreamAbortListener;
-  if (upstreamSignal) {
-    if (upstreamSignal.aborted) {
-      controller.abort(upstreamSignal.reason);
-    } else {
-      const abortFromUpstream = () => controller.abort(upstreamSignal.reason);
-      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-      removeUpstreamAbortListener = () => upstreamSignal.removeEventListener("abort", abortFromUpstream);
-    }
-  }
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-    removeUpstreamAbortListener?.();
-  }
-}
-function isAbortError2(error) {
-  return error instanceof Error && error.name === "AbortError";
-}
-
 // src/core/email.ts
+init_http_timeout();
 init_operation_error();
 init_source_corpus_registry();
 
@@ -11386,6 +11618,7 @@ async function safeText2(response) {
 }
 
 // src/core/file-delivery.ts
+init_http_timeout();
 init_operation_error();
 class FileDeliveryClient {
   config;
@@ -11567,6 +11800,7 @@ async function safeText3(response) {
 }
 
 // src/core/castor-workspace.ts
+init_http_timeout();
 init_operation_error();
 class CastorWorkspaceClient {
   config;
@@ -11668,6 +11902,7 @@ function asRecord7(value) {
 }
 
 // src/core/domain-expert-client.ts
+init_http_timeout();
 init_operation_error();
 var MAX_WORKER_ERROR_BODY_BYTES = 8 * 1024;
 var MAX_WORKER_ERROR_CODE_LENGTH = 64;
@@ -11837,6 +12072,7 @@ function shouldExposeOperation(operation, context) {
 }
 
 // src/workers/source-watch-runtime.ts
+init_http_timeout();
 init_source_corpus_registry();
 init_router();
 var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery";
@@ -12000,6 +12236,9 @@ import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, rmSync as rmSyn
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join5 } from "node:path";
 init_secret_store();
+init_http_timeout();
+init_oauth_relay();
+init_publisher_oauth_client();
 init_connected_handles();
 
 // src/workers/credential-broker/unpaired-sources.ts
@@ -12011,6 +12250,7 @@ var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_
 init_credential_broker();
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 var KNOWN_OAUTH_ERROR_CODES = new Set([
   "invalid_request",
   "invalid_client",

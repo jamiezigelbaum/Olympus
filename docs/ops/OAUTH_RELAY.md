@@ -54,17 +54,23 @@ Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
   relay — and does not need to: a loopback callback reaches the worker directly.
   Same publisher app, no relay, no signed state.
 
-Dropbox ships **filled in**: the owner created the "Olympus-Plugin" app
-2026-09-03, registered both redirect URIs it needs (the relay and the loopback
-fallback), and the app key — a public OAuth client identifier, not a secret —
-is `DEFAULT_DROPBOX_PUBLISHER_APP_KEY` in `core/publisher-oauth-client.ts`.
-Google's publisher web client stays **empty** until the owner creates that app
-too; until then every non-loopback Google case answers "not configured" and
-the dashboard shows the bring-your-own path it shows today.
+Both publisher apps ship **filled in**. Dropbox: the owner created the
+"Olympus-Plugin" app 2026-09-03, registered both redirect URIs it needs (the
+relay and the loopback fallback), and the app key — a public OAuth client
+identifier, not a secret — is `DEFAULT_DROPBOX_PUBLISHER_APP_KEY` in
+`core/publisher-oauth-client.ts`. Google: the owner created the "Olympus
+Publisher" Web-application client the same day, registered the relay as its
+one redirect URI, and its client id is `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID`
+in the same file.
 
-The publisher-side token-exchange endpoint is still unbuilt. When it lands, only
-the exchange leg moves: the relay contract, the state format, and the registered
-`redirect_uri` are unchanged by it.
+The publisher-side token-exchange endpoint the Google web client needs
+(`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is built, DEPLOYED — verified live
+2026-09-03 — and wired into the worker: a non-loopback Google flow's token
+exchange and refresh go through it instead of straight to Google, with
+`oauth2Refresh.exchangeVia: 'publisher_endpoint'` recorded on the resulting
+credential so refresh knows which path to use. Only the exchange leg moves —
+the relay contract, the state format, and the registered `redirect_uri` are
+unchanged by it.
 
 ### The worker's state signing key
 
@@ -525,10 +531,10 @@ runbook below). It is a **Cloudflare Worker on this same zone**,
 `https://auth.olympusplugin.ai/exchange/*` — same domain, same account, no new
 vendor — implemented at [`exchange/`](../../exchange) and fully specified in
 [`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`](GOOGLE_EXCHANGE_ENDPOINT.md). That
-document also specifies the small worker-side change — not yet applied; see
-its "Worker-side integration" section — that makes the dashboard's Google
-connect flow call it. Nothing in this relay contract depends on it: the relay
-still only ever sees `code` and `state` in a query string, never a secret or a
+document also specifies the small worker-side change — applied; see its
+"Worker-side integration" section — that makes the dashboard's Google connect
+flow call it. Nothing in this relay contract depends on it: the relay still
+only ever sees `code` and `state` in a query string, never a secret or a
 token.
 
 ## Publisher app runbook
@@ -578,10 +584,11 @@ token.
    a Cloudflare Worker on this same zone at `https://auth.olympusplugin.ai/exchange/*`,
    specified and implemented in
    [`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`](GOOGLE_EXCHANGE_ENDPOINT.md) and
-   [`exchange/`](../../exchange). Deploying it (creating the Web application
-   client below, setting the secret, `wrangler deploy`) is the remaining owner
-   step that runbook walks through. The relay contract is unaffected either
-   way — the exchange happens in a publisher endpoint, never in the relay.
+   [`exchange/`](../../exchange). It is **deployed and verified live**
+   (2026-09-03); that document's owner runbook is the record of how, and the
+   procedure to repeat after any change to `exchange/`, which only the owner
+   can redeploy. The relay contract is unaffected either way — the exchange
+   happens in a publisher endpoint, never in the relay.
 6. **Thresholds**: `gmail.readonly` and `drive.readonly` are *restricted*
    scopes. An unpublished app stays in Testing with a hard cap (currently 100
    test users). Publishing an app with restricted scopes requires Google's

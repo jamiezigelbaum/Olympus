@@ -13,6 +13,13 @@ import {
 import {
   GOOGLE_OAUTH_TOKEN_URL,
 } from '../../core/google-service-account.ts';
+import {
+  fetchBoundedText,
+  isAbortError,
+  isBoundedResponseTooLargeError,
+} from '../../core/http-timeout.ts';
+import { googlePublisherExchangeRefreshUrl } from '../../core/oauth-relay.ts';
+import { isGooglePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import {
   googleServiceAccountTokenUrl,
@@ -32,6 +39,7 @@ import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import {
   deriveEnvCredentialHandlesFromRegistry,
   handleRegistryPathFromEnv,
+  markConnectedHandleExchangeVia,
   markConnectedHandleReauthRequired,
   readConnectedHandleRegistry,
 } from './connected-handles.ts';
@@ -354,6 +362,15 @@ export interface EnvOAuth2RefreshDefinition {
   clientSecretSecretRef?: string;
   refreshTokenSecretRef?: string;
   scopes?: string[];
+  /**
+   * `'publisher_endpoint'` routes the refresh through
+   * `googlePublisherExchangeUrl()` instead of `tokenUrl` — see
+   * `refreshOAuth2AccessToken` and `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`.
+   * Written at connect time (`src/core/connect.ts`) onto a Google
+   * publisher-Web-client credential and carried here unchanged by
+   * `deriveEnvCredentialHandlesFromRegistry`.
+   */
+  exchangeVia?: 'publisher_endpoint';
 }
 
 /**
@@ -1290,6 +1307,8 @@ export class EnvCredentialBroker implements CredentialBroker {
       () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now),
     );
 
+    const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
+
     let tokenResponse: OAuth2RefreshTokenResponse;
     try {
       tokenResponse = await refreshOAuth2AccessToken({
@@ -1298,6 +1317,7 @@ export class EnvCredentialBroker implements CredentialBroker {
         clientSecret,
         refreshToken,
         fetchImpl: this.fetchImpl,
+        ...(exchangeVia ? { exchangeVia } : {}),
       });
     } catch (error) {
       await lease?.assertOwned();
@@ -1629,6 +1649,42 @@ export class EnvCredentialBroker implements CredentialBroker {
   private markRegistryHandleReauthRequired(handle: string, now: Date): void {
     if (!this.connectedHandleRegistryPath) return;
     markConnectedHandleReauthRequired(handle, this.connectedHandleRegistryPath, now);
+  }
+
+  /**
+   * How this credential's refresh must be exchanged — and, for a credential
+   * that predates the field, the one-time write that makes the answer durable.
+   *
+   * A Google publisher web client's secret exists only inside the publisher
+   * exchange endpoint, so a refresh that goes anywhere else is refused by
+   * Google and latches the handle into `reauth_required`. Handles connected
+   * before `exchangeVia` existed are recognised only by their stored client id
+   * matching a published publisher id — a test that stops being true the day
+   * the default rotates, silently killing ingestion for every such install
+   * (Codex round 1 on 5cb644b9). Recognising them against the APPEND-ONLY
+   * published set rather than the current default is what keeps the fallback
+   * correct across a rotation; writing the field on first sight is what means
+   * the fallback only has to be right once.
+   *
+   * The migration is best-effort on purpose: a registry that cannot be written
+   * (read-only mount, a lease another process holds) must not fail a refresh
+   * that this same answer already routed correctly in memory.
+   */
+  private resolveExchangeVia(
+    definition: EnvCredentialHandleDefinition,
+    oauth2: EnvOAuth2RefreshDefinition,
+    clientId: string,
+  ): EnvOAuth2RefreshDefinition['exchangeVia'] {
+    if (oauth2.exchangeVia) return oauth2.exchangeVia;
+    if (!isGooglePublisherWebClientId(clientId, this.env)) return undefined;
+    if (this.connectedHandleRegistryPath) {
+      try {
+        markConnectedHandleExchangeVia(definition.handle, 'publisher_endpoint', this.connectedHandleRegistryPath);
+      } catch {
+        // Durability is an optimisation here; the routing below is not.
+      }
+    }
+    return 'publisher_endpoint';
   }
 
   private async issueDescriptorSession(
@@ -2062,32 +2118,114 @@ function sessionKindFromDefinition(
   return definition.sessionKind ?? 'bearer_token';
 }
 
+/** Bounded so a stalled publisher endpoint cannot hang a refresh indefinitely. */
+const GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20_000;
+
+/** A token response is a small JSON object on every provider Olympus talks to. */
+const OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+/**
+ * A transport failure reaching the publisher exchange endpoint, in the same
+ * shape a provider refusal takes, so the broker's existing classification
+ * (nothing terminal, marker left standing) applies unchanged. No cause text is
+ * repeated: these are fixed strings.
+ */
+function publisherExchangeTransportError(error: unknown): OAuth2TokenEndpointError {
+  if (isAbortError(error)) {
+    return new OAuth2TokenEndpointError({
+      status: 504,
+      providerError: 'upstream_timeout',
+      safeDetail: `publisher token-exchange endpoint timed out after ${GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS}ms`,
+    });
+  }
+  if (isBoundedResponseTooLargeError(error)) {
+    return new OAuth2TokenEndpointError({
+      status: 502,
+      providerError: 'upstream_response_too_large',
+      safeDetail: 'publisher token-exchange endpoint response exceeded the response size cap',
+    });
+  }
+  return new OAuth2TokenEndpointError({
+    status: 502,
+    providerError: 'upstream_unreachable',
+    safeDetail: 'publisher token-exchange endpoint was unreachable',
+  });
+}
+
 async function refreshOAuth2AccessToken(options: {
   tokenUrl: string;
   clientId: string;
   clientSecret: string | undefined;
   refreshToken: string;
   fetchImpl: CredentialBrokerFetch;
+  /**
+   * Where this refresh goes, decided by the caller.
+   *
+   * The legacy client-id fallback lives in `EnvCredentialBroker.resolveExchangeVia`
+   * and nowhere else: this function reading `process.env` on its own made the
+   * broker's `env` and this check two different authorities, which disagreed
+   * the moment a broker was constructed with an explicit `env` — the routing
+   * said "publisher endpoint" while the migration said "not a publisher
+   * credential", so the durable write never happened and the next rotation
+   * would still have stranded the handle.
+   */
+  exchangeVia?: 'publisher_endpoint';
 }): Promise<OAuth2RefreshTokenResponse> {
-  const body = new URLSearchParams();
-  body.set('grant_type', 'refresh_token');
-  body.set('refresh_token', options.refreshToken);
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'Content-Type': 'application/x-www-form-urlencoded',
-  };
-  if (options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
-  } else {
-    body.set('client_id', options.clientId);
-  }
+  const usesPublisherExchange = options.exchangeVia === 'publisher_endpoint';
 
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: 'POST',
-    headers,
-    body,
-  });
-  const text = await response.text();
+  let response: Response;
+  let text: string;
+  if (usesPublisherExchange) {
+    // The publisher exchange endpoint holds `GOOGLE_CLIENT_SECRET` itself and
+    // never accepts one from a caller, so this call carries no client
+    // credential at all — just the refresh token
+    // (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`, "POST /exchange/google/refresh").
+    // Headers AND body under one deadline, with a byte cap: a deadline that
+    // ends at the status line bounds the handshake, not the call (Codex round
+    // 1 on 5cb644b9).
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl, googlePublisherExchangeRefreshUrl(), {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: options.refreshToken }),
+      }, {
+        timeoutMs: GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS,
+        limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES,
+      }));
+    } catch (error) {
+      throw publisherExchangeTransportError(error);
+    }
+  } else {
+    const body = new URLSearchParams();
+    body.set('grant_type', 'refresh_token');
+    body.set('refresh_token', options.refreshToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (options.clientSecret) {
+      headers.Authorization = `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')}`;
+    } else {
+      body.set('client_id', options.clientId);
+    }
+    // No deadline here: the direct-provider lane's timeout behaviour is
+    // unchanged. The byte cap is not a deadline and applies to every lane —
+    // no token endpoint has an honest answer measured in megabytes.
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl, options.tokenUrl, {
+        method: 'POST',
+        headers,
+        body,
+      }, { limitBytes: OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES }));
+    } catch (error) {
+      if (!isBoundedResponseTooLargeError(error)) throw error;
+      throw new OAuth2TokenEndpointError({
+        status: 502,
+        providerError: 'upstream_response_too_large',
+        safeDetail: 'token endpoint response exceeded the response size cap',
+      });
+    }
+  }
   if (!response.ok) {
     const providerError = providerErrorFromText(text);
     throw new OAuth2TokenEndpointError({
