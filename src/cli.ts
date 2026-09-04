@@ -2202,7 +2202,7 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-function runDashboardCommand(): { url: string; opened: boolean; hint?: string } {
+function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
   const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
   const token = workerAuthTokenFromConfig(config);
@@ -2217,10 +2217,15 @@ function runDashboardCommand(): { url: string; opened: boolean; hint?: string } 
   } catch {
     opened = false;
   }
+  // The URL and whether the browser opened, and nothing else. No token and no
+  // token-shaped field: this output is pasted into issues and chat logs, and
+  // the one place a token is handed over is the command that exists to do it.
   return {
     url,
     opened,
-    ...(dashboardToken ? { auth: 'dashboard_query_token_used_for_browser_open' } : { hint: 'No worker auth token found; if the worker enforces one, run olympus setup first.' }),
+    hint: dashboardToken
+      ? 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.'
+      : 'No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value.',
   };
 }
 

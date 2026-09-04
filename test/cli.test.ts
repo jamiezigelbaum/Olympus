@@ -754,11 +754,14 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toMatchObject({
+      expect(output).toEqual({
         url: 'http://127.0.0.1:8010/dashboard',
         opened: true,
-        auth: 'dashboard_query_token_used_for_browser_open',
+        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
       });
+      // The URL and whether it opened, and nothing else: no token and no
+      // token-shaped field in output that gets pasted into issues.
+      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
       expect(openedUrl).not.toContain(workerToken);
@@ -797,8 +800,9 @@ describe('CLI tool surface', () => {
       expect(output).toMatchObject({
         url: 'http://127.0.0.1:8010/dashboard',
         opened: true,
-        auth: 'dashboard_query_token_used_for_browser_open',
+        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
       });
+      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
       expect(openedUrl).not.toContain(workerToken);
