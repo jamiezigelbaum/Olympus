@@ -10,6 +10,13 @@ OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
 `>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
 `node --version` before blaming an install failure on Olympus.
 
+If `bun --version` says `command not found`, check `~/.bun/bin/bun --version`
+before reinstalling anything — Bun's installer puts the binary there and wires
+up PATH from your shell rc, which non-interactive shells never read. Adding
+`export PATH="$HOME/.bun/bin:$PATH"` to the shell you are working in is enough.
+The `olympus` CLI is a Bun script, so it needs `bun` on PATH wherever you run
+it.
+
 **Fastest path — let your agent install it.** Paste into any agent with a
 terminal: *"Retrieve and follow the instructions in INSTALL_FOR_AGENTS.md"*
 (at the repo root and inside the release tarball). The agent runs this
@@ -20,10 +27,14 @@ Before first setup, have these preset prerequisites ready:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` | `GEMINI_API_KEY`, a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
-| `local-only` | `GEMINI_API_KEY`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
-| `private-cloud-only` | `GEMINI_API_KEY` and a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`. |
-| `no-sensitive` | `GEMINI_API_KEY` for source embeddings. |
+| `local-first` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin`, a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
+| `local-only` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
+| `private-cloud-only` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin` and a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`. |
+| `no-sensitive` | a Gemini API key, connected the same way, for source embeddings. |
+
+A local runtime means a server actually answering on those two ports. An
+installed plugin is not a runtime — OpenClaw ships a built-in `llama-cpp`
+provider plugin on machines that have never run a local model.
 
 Setup and `olympus doctor` print any missing preset prerequisites with the
 exact command or local-server action to take.
@@ -40,18 +51,29 @@ The pilot installs from the Olympus repository. Replace `<owner>/<repo>` with
 the repository you were given:
 
 ```bash
-openclaw plugins install git:<owner>/<repo> --accept-capabilities
-# ^ on OpenClaw 2026.7.1 the flag is unknown: re-run without it
+openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
+# ^ on OpenClaw 2026.7.1 neither flag exists: re-run with no flags
 openclaw plugins enable olympus
 ```
 
 You should see `Installed plugin: olympus`. (The gateway picks it up on its
 next restart — step 5.)
 
-`--accept-capabilities` is required on OpenClaw `2026.8.1+`, where a non-TTY
-install otherwise exits 1 asking for capability consent. Omit it on `2026.7.1`,
-which rejects the flag as unknown. The clone runs with terminal prompts
-disabled, so git credentials for a private repository must already work.
+Both flags are required on OpenClaw `2026.8.1+`, and neither exists on
+`2026.7.1` — omit them there. `--accept-capabilities` supplies the capability
+consent a non-TTY install cannot be prompted for; without it the command exits
+1. `--force` confirms a non-ClawHub install source, which a `git:` install is;
+without it the command refuses with `Install cancelled; rerun with --force
+after reviewing the source.` On these versions `--force` also means "overwrite
+an existing plugin", so on a machine that already has olympus installed, be
+sure that is what you want. The clone runs with terminal prompts disabled, so
+git credentials for a private repository must already work.
+
+The install command prints only `Installed plugin: olympus`, and `openclaw
+plugins list` truncates the path in its table. To find where the plugin landed
+— the git clone uses a URL-hash directory name — read
+`openclaw plugins inspect olympus --json` and take `plugin.rootDir`. The
+standalone CLI is `bin/olympus` inside it.
 
 Two other install sources exist and are **not** the pilot path:
 
@@ -69,6 +91,7 @@ Two other install sources exist and are **not** the pilot path:
 First write your sensitivity map:
 
 ```bash
+mkdir -p ~/.olympus          # setup creates this too, but it runs after this step
 $EDITOR ~/.olympus/sensitivity-map.json
 olympus sensitivity validate
 ```
@@ -84,16 +107,29 @@ downgrade them.
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes
 ```
 
+Setup also registers the background sync worker (a launchd agent on macOS, a
+user systemd unit on Linux) and writes its environment file, so macOS shows a
+"Background Items Added" notification when you run it. Step 3 checks that
+worker rather than installing a second one.
+
 If setup reports unmet prerequisites, follow the printed remedies before your
 first indexing or `source_answer` call. Common examples:
 
 ```bash
-export GEMINI_API_KEY=...
+printf '%s' "$GEMINI_API_KEY" | olympus connect gemini --api-key-stdin
 printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
 ```
 
+Connect is how API keys reach the worker. Exporting `GEMINI_API_KEY` in your
+own shell does not reach the background worker, and `worker.env` is a generated
+managed file — do not hand-edit it.
+
 For `local-first` and `local-only`, start your local OpenAI-compatible model
 server before relying on secure source answers.
+
+On `no-sensitive`, setup and doctor still list the secure corpora as configured
+and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
+gap the preset promises, not a misconfiguration.
 
 For a no-write preview of the same setup surface:
 
@@ -133,22 +169,27 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 Everything it writes is shown in the summary, and `olympus data delete --all`
 removes all of it later.
 
-## 3. Start the worker
+## 3. Check the worker
 
-The worker is the private engine that syncs, indexes, and answers. Pick one:
+The worker is the private engine that syncs, indexes, and answers. Step 2
+already installed and started it, so this is a check, not a second install:
 
 ```bash
-olympus worker foreground   # foreground, great for a first session (Ctrl-C stops it)
+olympus worker status
 ```
 
+Expect a reachable worker with no `degraded_credentials` and no interrupted
+transaction. To watch it run in the foreground for a first session instead,
+stop the background service first (`olympus worker stop`), then:
+
 ```bash
-olympus worker install      # or: enable, start now, restart on failure
-olympus worker status
+olympus worker foreground   # Ctrl-C stops it
 ```
 
 The public worker lifecycle is the same on macOS and Linux:
 
 ```bash
+olympus worker install      # idempotent; also the repair for an interrupted install
 olympus worker start
 olympus worker stop
 olympus worker restart
@@ -205,8 +246,17 @@ openclaw doctor --lint
 openclaw gateway restart
 ```
 
+`openclaw config validate` is the one that has to be green before you restart.
+`openclaw doctor --lint` is a report on your whole OpenClaw install and often
+exits 1 on pre-existing warnings that have nothing to do with Olympus; read
+those, but they do not block the restart.
+
 This loads the Olympus tools into your agent: `source_answer`,
-`source_index_status`, and `source_index_search`.
+`source_index_status`, and `source_index_search`. They register when the plugin
+initializes, so `openclaw plugins inspect olympus --json` reports an empty
+`toolNames` by design — that is not a failed load. Verify instead that the
+gateway boot line lists olympus, that inspect reports `Status: loaded`, and
+that `olympus source index status` returns.
 
 ## 6. Watch it ingest
 
@@ -214,11 +264,13 @@ This loads the Olympus tools into your agent: `source_answer`,
 olympus dashboard
 ```
 
-Your browser opens a local, token-protected dashboard: source freshness, how
-much is indexed, and where public, private, secure, and secrets are allowed to
-go.
+The command prints the dashboard URL. Your browser opens a local,
+token-protected dashboard: source freshness, how much is indexed, and where
+public, private, secure, and secrets are allowed to go.
 Reading is open on that link; changing anything (connecting, reauthenticating,
-sync now) asks once for the worker token — `olympus dashboard token` prints it,
+sync now) asks once for the worker token — `olympus dashboard token` prints it
+(treat that value like any other secret: it authorizes changes, so keep it out
+of chat logs and notes),
 or ask your agent for it with the prompt behind the dashboard's "Where is my
 token?" button. The setup page follows one journey: security preset → dependencies →
 credential or pairing → scope → initial sync → source health → cited-answer
@@ -295,6 +347,10 @@ Or from the terminal:
 olympus source answer "what did I commit to this week?"
 ```
 
+If that fails with `email_not_configured`, the email lane is off. Setup enables
+it, so a fresh install should not hit this; if you do, run the command the
+error's remedy names.
+
 Non-OpenClaw agents (Claude, etc.) can get the same tools over MCP:
 `olympus serve` — see the README's MCP section.
 
@@ -309,4 +365,6 @@ olympus data delete --all   # complete removal: indexes, embeddings, configs, to
 ---
 
 **Something not working?** `olympus doctor` first. Every failure it knows
-about comes with the command that fixes it.
+about comes with the command that fixes it. Doctor exits non-zero while any
+check is red and prints a summary of what failed, so its exit status is a
+reliable pass/fail signal in scripts.
