@@ -376,9 +376,13 @@ function laneStuckBanner(
   // connected source carries no connect action at all, and it is exactly the
   // connected-but-stuck source this banner is for.
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
-  const syncSource = definition?.connect_action.kind === 'oauth' || definition?.connect_action.kind === 'api_key'
-    ? definition.connect_action.source
-    : undefined;
+  const syncSource = source.sync_now_available === false
+    // This worker cannot run Sync now for this source. Offering the button, and
+    // then advising the reader to press it, produced a 501 and no next step.
+    ? undefined
+    : definition?.connect_action.kind === 'oauth' || definition?.connect_action.kind === 'api_key'
+      ? definition.connect_action.source
+      : undefined;
   const action: DashboardActionInput | undefined = syncSource === undefined
     ? undefined
     : options.readOnly === true

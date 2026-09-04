@@ -1645,7 +1645,35 @@ describe('multi-source source dashboard', () => {
     const gmailBody = await gmail.json();
     expect(gmail.status).toBe(501);
     expect(gmailBody.error.code).toBe('source_sync_not_supported');
-    expect(gmailBody.error.message).toContain('gmail');
+    // The card's own name for the source, not its connect id, and a reason:
+    // "does not support Sync now for google-drive" read as a missing feature.
+    expect(gmailBody.error.message).toBe(
+      'Sync now cannot run for Gmail: this worker has no sync lane for it, so Gmail only updates on its own schedule.',
+    );
+  });
+
+  test('a worker with the scheduler switched off says so, rather than naming the source as unsupported', async () => {
+    const worker = createEmailSourceWorker({
+      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine() },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+
+    const response = await fetch(new Request('http://worker.test/dashboard/sync-now', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer dashboard-secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ source: 'google-drive' }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(501);
+    expect(body.error.code).toBe('source_sync_not_supported');
+    expect(body.error.message).toBe(
+      'Sync now cannot run for Google Drive: the background scheduler is switched off on this worker, so no source can be synced.',
+    );
+    expect(body.error.suggestion).toContain('olympus worker restart');
   });
 
   test('Sync now answers 501 rather than 500 when the worker has no dispatch path at all', async () => {

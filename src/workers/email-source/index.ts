@@ -149,6 +149,7 @@ import {
 import { readBackgroundRuntime } from '../dashboard/background-runtime.ts';
 import type { DashboardBackgroundPageOptions } from '../dashboard/pages/background.ts';
 import {
+  DASHBOARD_SUPPORTED_SOURCES,
   buildSourceDashboardViewModel,
   type DashboardApiKeySource,
   type DashboardConnectSource,
@@ -392,6 +393,18 @@ export interface EmailSourceWorkerOptions {
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
+    /**
+     * The sources `triggerSourceSync` actually serves.
+     *
+     * One callback carries every source, and the product server's hook serves
+     * Dropbox and raises `source_sync_not_supported` for the rest. Treating the
+     * hook's mere existence as "this source is syncable" is what put a Sync now
+     * button on a Google Drive card that could only answer 501 (owner,
+     * 2026-09-04). Absent means the hook makes no claim, and every source it is
+     * asked about is assumed served -- today's behaviour for hosts and tests
+     * that wire a hook serving everything.
+     */
+    triggerSourceSyncSources?: readonly DashboardConnectSource[];
     refreshSchedulerSources?: (
       connectedHandlesOverride?: ConnectedCredentialHandle[],
     ) => SourceSchedulerSource[] | Promise<SourceSchedulerSource[]>;
@@ -491,17 +504,56 @@ export class EmailSourceWorkerError extends Error {
 }
 
 /**
+ * Why Sync now cannot run, when it cannot.
+ *
+ * `scheduler_disabled` is the one the owner hit: the worker was started with
+ * OLYMPUS_WORKER_SCHEDULER_ENABLED=false, so there is no scheduler to run a
+ * source on and every source answers the same way. It is a setting, not a
+ * property of the source, and the message has to say so.
+ *
+ * `no_lane` is the source-specific case: the scheduler is running but has built
+ * no lane for this source, because nothing here can sync it.
+ */
+export type DashboardSourceSyncUnsupportedReason = 'scheduler_disabled' | 'no_lane';
+
+/**
  * The one honest answer for "Sync now reached the end of the dispatch chain".
  * A host `triggerSourceSync` hook that does not serve the requested source
  * raises this too, so a missing lane is a typed 501 the dashboard can read
  * rather than an anonymous 500 that reads as a worker crash.
+ *
+ * The message is read verbatim under the Sync now button, so it names the
+ * source the way the card does ("Google Drive", not "google-drive"), says why,
+ * and says what would change it. "Private source worker does not support Sync
+ * now for google-drive" said none of the three and read as a missing feature
+ * over a worker whose scheduler somebody had switched off.
  */
-export function dashboardSourceSyncNotSupportedError(source: string): EmailSourceWorkerError {
-  return new EmailSourceWorkerError(
-    501,
-    'source_sync_not_supported',
-    `Private source worker does not support Sync now for ${source}.`,
-  );
+export function dashboardSourceSyncNotSupportedError(
+  source: string,
+  reason: DashboardSourceSyncUnsupportedReason = 'no_lane',
+): EmailSourceWorkerError {
+  const label = dashboardConnectSourceLabel(source);
+  return reason === 'scheduler_disabled'
+    ? new EmailSourceWorkerError(
+      501,
+      'source_sync_not_supported',
+      `Sync now cannot run for ${label}: the background scheduler is switched off on this worker, so no source can be synced.`,
+      'Re-run olympus setup, or restore OLYMPUS_WORKER_SCHEDULER_ENABLED=true, then run olympus worker restart.',
+    )
+    : new EmailSourceWorkerError(
+      501,
+      'source_sync_not_supported',
+      `Sync now cannot run for ${label}: this worker has no sync lane for it, so ${label} only updates on its own schedule.`,
+      'Check olympus doctor and the worker log for why this lane was not built.',
+    );
+}
+
+/** The card's own name for a connect source; the id itself when nothing claims it. */
+function dashboardConnectSourceLabel(source: string): string {
+  return DASHBOARD_SUPPORTED_SOURCES.find((definition) =>
+    (definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key')
+    && definition.connect_action.source === source)?.label
+    ?? source;
 }
 
 export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}): {
@@ -967,6 +1019,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
             ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
+            // The dispatch chain is this worker's to know. Without it the card
+            // offered Sync now for a source nothing here can sync.
+            syncNowAvailable: dashboardSourceSyncAvailable,
             ...(sensitivityMap ? { sensitivityMap } : {}),
           });
           assertNoRawEmailFields(view);
@@ -2470,7 +2525,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       return sourceDashboard.triggerSourceSync(request);
     }
 
-    throw dashboardSourceSyncNotSupportedError(request.source);
+    // A worker with no scheduler at all refuses every source for the same
+    // reason, and that reason is a setting the reader can change. Reporting it
+    // as "does not support Sync now for google-drive" sent the owner looking
+    // for a missing Drive feature.
+    throw dashboardSourceSyncNotSupportedError(
+      request.source,
+      sourceScheduler === undefined ? 'scheduler_disabled' : 'no_lane',
+    );
   }
 
   async function refreshDashboardSchedulerSources(): Promise<void> {
@@ -2552,23 +2614,33 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     }
   }
 
+  /**
+   * True when the host's dashboard hook serves this source, not merely when a
+   * hook exists. See `triggerSourceSyncSources`.
+   */
+  function dashboardSyncHookServes(source: DashboardConnectSource): boolean {
+    if (sourceDashboard?.triggerSourceSync === undefined) return false;
+    const served = sourceDashboard.triggerSourceSyncSources;
+    return served === undefined || served.includes(source);
+  }
+
   function dashboardSourceSyncAvailable(source: DashboardConnectSource): boolean {
     if (source === 'gmail') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'gmail.email' || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true
-        || sourceDashboard?.triggerSourceSync !== undefined;
+        || dashboardSyncHookServes(source);
     }
     if (source === 'google-drive') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'google_drive.docs' || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true
-        || sourceDashboard?.triggerSourceSync !== undefined;
+        || dashboardSyncHookServes(source);
     }
-    if (source === 'readwise') return readwiseConnectorStoreSync !== undefined || sourceDashboard?.triggerSourceSync !== undefined;
-    if (source === 'x') return xBookmarksConnectorStoreSync !== undefined || sourceDashboard?.triggerSourceSync !== undefined;
+    if (source === 'readwise') return readwiseConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
+    if (source === 'x') return xBookmarksConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
     if (source === 'dropbox') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'dropbox.files' || candidate.corpus_id === DROPBOX_FILES_CORPUS_ID) === true
-        || sourceDashboard?.triggerSourceSync !== undefined;
+        || dashboardSyncHookServes(source);
     }
     return false;
   }

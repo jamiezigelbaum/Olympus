@@ -2421,6 +2421,10 @@ export async function main(): Promise<void> {
             refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(
               activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env),
             ).sources,
+            // The hook below is the Dropbox lane and nothing else; every other
+            // source reaches it only to be refused. Saying so keeps a Sync now
+            // button off the cards it could only 501 for.
+            triggerSourceSyncSources: ['dropbox'],
             triggerSourceSync: async (request) => {
               // This hook is the Dropbox lane only. Every other source reaches
               // it after its own dispatch paths declined, so the honest answer

@@ -739,6 +739,14 @@ export interface DashboardSourceCard {
    * declaration and hidden work is the one outcome this must not produce.
    */
   content_arrives_extracted?: boolean;
+  /**
+   * False when this worker cannot run Sync now for this source, so nothing on
+   * the page offers the control or advises pressing it.
+   *
+   * Absent means the caller declared nothing, which keeps the control offered:
+   * a hand-written fixture and an older payload must not lose a button.
+   */
+  sync_now_available?: boolean;
 }
 
 export interface DashboardSourceSetupStatus {
@@ -974,6 +982,17 @@ export interface SourceDashboardBuildOptions {
    * rather than one that 501s.
    */
   ingestionDispositionsAvailable?: boolean;
+  /**
+   * Whether this worker can actually run Sync now for a given source.
+   *
+   * Declared by the caller that owns the dispatch chain, for the same reason
+   * `ingestionDispositionsAvailable` is: the view model cannot see whether a
+   * scheduler lane or a host sync hook exists, and a card that advertises the
+   * control anyway sends the reader to a 501 (owner, 2026-09-04: "Private
+   * source worker does not support Sync now for google-drive"). Absent means
+   * unknown, and unknown keeps today's behaviour of offering the control.
+   */
+  syncNowAvailable?: (source: DashboardConnectSource) => boolean;
   /**
    * The owner's sensitivity map, already loaded and parsed by the caller.
    *
@@ -1735,7 +1754,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     const corpora = options.sourceIndexStatus.corpora
       .filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora) claimedCorpusIds.add(corpus.corpus_id);
-    return sourceCardFromDefinition(
+    const card = sourceCardFromDefinition(
       definition,
       corpora,
       schedulerByCorpus,
@@ -1756,6 +1775,13 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
     );
+    // Stamped after the card is built rather than threaded through it: this is
+    // a fact about the worker's dispatch chain, not about the source.
+    const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
+      ? definition.connect_action.source
+      : undefined;
+    if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
+    return { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
   });
   // Anything no card claimed is still the owner's data in the local store. It
   // is surfaced and counted rather than dropped: a corpus vanishing from this
