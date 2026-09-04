@@ -10047,36 +10047,10 @@ function parseWorkerSetupEnv(text) {
 }
 function unquoteEnvValue(value) {
   const trimmed = value.trim();
-  if (trimmed.startsWith("'")) {
-    const joined = joinSingleQuotedWord(trimmed);
-    if (joined !== undefined)
-      return joined;
-  }
   if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-function joinSingleQuotedWord(text) {
-  let out = "";
-  let index = 0;
-  while (index < text.length) {
-    if (text[index] === "'") {
-      const end = text.indexOf("'", index + 1);
-      if (end === -1)
-        return;
-      out += text.slice(index + 1, end);
-      index = end + 1;
-      continue;
-    }
-    if (text[index] === "\\" && text[index + 1] === "'") {
-      out += "'";
-      index += 2;
-      continue;
-    }
-    return;
-  }
-  return out;
 }
 
 // src/core/email.ts

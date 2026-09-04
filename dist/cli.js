@@ -30282,36 +30282,10 @@ function parseWorkerSetupEnv(text) {
 }
 function unquoteEnvValue(value) {
   const trimmed2 = value.trim();
-  if (trimmed2.startsWith("'")) {
-    const joined = joinSingleQuotedWord(trimmed2);
-    if (joined !== undefined)
-      return joined;
-  }
   if (trimmed2.startsWith('"') && trimmed2.endsWith('"') || trimmed2.startsWith("'") && trimmed2.endsWith("'")) {
     return trimmed2.slice(1, -1);
   }
   return trimmed2;
-}
-function joinSingleQuotedWord(text) {
-  let out = "";
-  let index = 0;
-  while (index < text.length) {
-    if (text[index] === "'") {
-      const end = text.indexOf("'", index + 1);
-      if (end === -1)
-        return;
-      out += text.slice(index + 1, end);
-      index = end + 1;
-      continue;
-    }
-    if (text[index] === "\\" && text[index + 1] === "'") {
-      out += "'";
-      index += 2;
-      continue;
-    }
-    return;
-  }
-  return out;
 }
 var init_worker_auth = () => {};
 
@@ -30815,6 +30789,9 @@ function writeManagedWorkerEnvSecret(input) {
   if (/\p{Cc}/u.test(value)) {
     throw new OperationError("invalid_params", `${input.key} must not contain control characters.`);
   }
+  if (value.includes("'")) {
+    throw new OperationError("invalid_params", `${input.key} value must not contain a single quote.`, "A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.");
+  }
   const platform2 = normalizePlatform(input.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(input.homeDir ?? homedir20(), "home directory");
   const envPath = input.envPath ?? workerServicePaths(platform2, homeDir).envPath;
@@ -30856,7 +30833,7 @@ function writeManagedWorkerEnvSecret(input) {
   return { ok: true, path: envPath, key: input.key, wrote };
 }
 function shellSingleQuote(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return `'${value}'`;
 }
 function normalizePlatform(value) {
   if (value === "darwin" || value === "linux")
