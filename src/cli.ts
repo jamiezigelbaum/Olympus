@@ -1529,6 +1529,13 @@ export function lifecycleRecoverySignalsFromWorkerHttpState(
     const answerReadiness = asRecord(source.answer_readiness);
     const queue = asRecord(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === 'number' && queue.needs_attention > 0;
+    // Recovery is a list of things the operator can resume. A source nobody has
+    // connected has nothing to resume: `olympus worker status` on a machine
+    // with no accounts listed partial_sync for three sources and a pairing to
+    // finish for two more (clean-install rehearsal, 2026-09-05). Only a source
+    // that is connected, or has a handshake actually in flight, may contribute.
+    const inFlight = connectionState === 'awaiting_consent' || connectionState === 'reauth_required';
+    if (source.configured !== true && !inFlight) continue;
 
     if (connectionState === 'awaiting_consent') add({ kind: 'oauth_pending', source_id: sourceId });
     if (connectionState === 'reauth_required') {
@@ -1537,12 +1544,6 @@ export function lifecycleRecoverySignalsFromWorkerHttpState(
       else if (capability.dependencies[0]) {
         add({ kind: 'missing_dependency', source_id: sourceId, dependency_id: capability.dependencies[0].id });
       }
-    }
-    if (
-      capability.authentication.type === 'paired_session'
-      && (connectionState === 'not_connected' || connectionState === 'needs_setup')
-    ) {
-      add({ kind: 'pairing_pending', source_id: sourceId });
     }
     if (answerReadiness?.state === 'needs_attention' || needsAttention) {
       add({

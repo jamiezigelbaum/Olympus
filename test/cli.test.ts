@@ -15,6 +15,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   formatCliFatalError,
   isV04PublicCliInvocation,
+  lifecycleRecoverySignalsFromWorkerHttpState,
   parseArgs,
   parseEvalShardExportArgs,
   parseQueuedContentRetargetArgs,
@@ -27,6 +28,77 @@ import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
 
 describe('CLI tool surface', () => {
+  test('worker status recovery names only sources with something to resume', () => {
+    // On a machine with nothing connected, recovery listed partial_sync for
+    // three sources and a pairing to finish for two more (clean-install
+    // rehearsal, 2026-09-05). Recovery is a list of resumable work.
+    const fresh = lifecycleRecoverySignalsFromWorkerHttpState({
+      source_dashboard: {
+        sources: [
+          {
+            source_id: 'google_drive.docs',
+            configured: false,
+            connection: { state: 'not_connected' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 2 },
+            embedding_lane_state: 'embedding_lane_disabled',
+          },
+          {
+            source_id: 'telegram.messages',
+            configured: false,
+            connection: { state: 'not_connected' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+          {
+            source_id: 'whatsapp_personal.messages',
+            configured: false,
+            connection: { state: 'needs_setup' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+        ],
+      },
+    });
+    expect(fresh).toEqual([]);
+
+    // A connected source with real work, and a handshake actually in flight,
+    // still report.
+    const connected = lifecycleRecoverySignalsFromWorkerHttpState({
+      source_dashboard: {
+        sources: [
+          {
+            source_id: 'google_drive.docs',
+            configured: true,
+            connection: { state: 'synced' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 2 },
+          },
+          {
+            source_id: 'gmail.email',
+            configured: false,
+            connection: { state: 'awaiting_consent' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+          {
+            source_id: 'telegram.messages',
+            configured: false,
+            connection: { state: 'reauth_required' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 0 },
+          },
+        ],
+      },
+    });
+    expect(connected).toEqual([
+      { kind: 'partial_sync', source_id: 'google_drive.docs' },
+      { kind: 'oauth_pending', source_id: 'gmail.email' },
+      { kind: 'pairing_pending', source_id: 'telegram.messages' },
+      { kind: 'capture_interrupted', source_id: 'telegram.messages' },
+    ]);
+  });
+
   test('operator errors preserve typed credential contention and retry guidance', () => {
     const error = new CredentialBrokerError(
       'credential_refresh_busy',
