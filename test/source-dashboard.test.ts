@@ -31,6 +31,7 @@ import {
   writeConnectedHandleRegistry,
   type ConnectedHandleRegistry,
 } from '../src/workers/credential-broker/connected-handles.ts';
+import type { CredentialHealthReport } from '../src/workers/credential-health.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import type { OAuthFetch } from '../src/core/connect.ts';
 import {
@@ -662,6 +663,62 @@ describe('multi-source source dashboard', () => {
       .not.toBe('reauth_required');
     expect(view.degraded_credentials?.map((item) => item.display_name))
       .toContain('Credential health: stale probe report');
+  });
+
+  // The nightly probe runs at 00:20 and the report is not rewritten by a
+  // reconnect. Owner reconnected Dropbox one-click at 09:38, the sync ran and
+  // completed, and the card still read "reauth required" all day off a probe
+  // checked at 23:20 the night before (owner, 2026-09-04).
+  test('a probe result older than the reconnect it names stops demanding a reconnect', () => {
+    const registry = fixtureHandleRegistry();
+    registry.handles.push(reconnectedDropboxHandle('2026-09-04T09:38:11.020Z'));
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: registry,
+      credentialHealth: dropboxReauthReport('2026-09-03T23:20:00.000Z'),
+      now: new Date('2026-09-04T10:00:00.000Z'),
+    });
+
+    const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files');
+    expect(dropbox?.connection.state).not.toBe('reauth_required');
+    expect(dropbox?.connection.handles).toContain('dropbox.personal');
+  });
+
+  test('a probe result checked after the reconnect still demands a reconnect', () => {
+    const registry = fixtureHandleRegistry();
+    registry.handles.push(reconnectedDropboxHandle('2026-09-04T09:38:11.020Z'));
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: registry,
+      credentialHealth: dropboxReauthReport('2026-09-04T09:50:00.000Z'),
+      now: new Date('2026-09-04T10:00:00.000Z'),
+    });
+
+    expect(view.sources.find((source) => source.source_id === 'dropbox.files')?.connection.state)
+      .toBe('reauth_required');
+  });
+
+  // The timestamp that silences a repair demand is the one a broken clock (or
+  // a tampered registry) would want to move: dated 2099 it would outrank every
+  // probe this dashboard will ever read.
+  test('a future-dated connectedAt does not silence a probe checked a minute ago', () => {
+    const registry = fixtureHandleRegistry();
+    registry.handles.push(reconnectedDropboxHandle('2099-01-01T00:00:00.000Z'));
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: registry,
+      credentialHealth: dropboxReauthReport('2026-09-04T09:59:00.000Z'),
+      now: new Date('2026-09-04T10:00:00.000Z'),
+    });
+
+    expect(view.sources.find((source) => source.source_id === 'dropbox.files')?.connection.state)
+      .toBe('reauth_required');
   });
 
   test('reports an unreadable credential cache as degradation rather than a reconnect demand', () => {
@@ -1856,7 +1913,7 @@ describe('multi-source source dashboard', () => {
     // (R61/R61B), so it never renders.
     expect(text).toContain('invalid_client');
     expect(text).not.toContain('client authentication failed');
-    expect(text).toContain('Return to dashboard');
+    expect(text).toContain('Back to the dashboard tab');
     // The failure page is unauthenticated HTML too, and the same rule holds:
     // the link back carries the origin and nothing else.
     expect(text).toContain('href="/dashboard"');
@@ -4390,6 +4447,38 @@ function fixtureHandleRegistry(): ConnectedHandleRegistry {
         connectedAt: '2026-07-02T10:00:00.000Z',
       },
     ],
+  };
+}
+
+/** A Dropbox handle as a one-click reconnect leaves it: no `backendState`. */
+function reconnectedDropboxHandle(connectedAt: string): ConnectedHandleRegistry['handles'][number] {
+  return {
+    handle: 'dropbox.personal',
+    provider: 'dropbox',
+    accountRole: 'personal',
+    trustDomain: 'internal',
+    allowedCapabilities: ['dropbox.files.sync'],
+    scopes: ['files.metadata.read'],
+    connectedAt,
+  };
+}
+
+function dropboxReauthReport(checkedAt: string): CredentialHealthReport {
+  return {
+    kind: 'credential_health_report',
+    version: 1,
+    generated_at: checkedAt,
+    results: [
+      {
+        handle: 'dropbox.personal', provider: 'dropbox', source_ids: ['dropbox.files'],
+        credential_type: 'oauth2_refresh', status: 'reauth_required',
+        checked_at: checkedAt, reason: 'credential_reauth_required',
+      },
+    ],
+    policy: {
+      counts_only: true, raw_source_exposed: false, secrets_exposed: false,
+      x_refresh_forced: false, op_cached_read_only: true,
+    },
   };
 }
 

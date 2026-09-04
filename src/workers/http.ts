@@ -135,6 +135,25 @@ export function withWorkerBearerAuth(
         return dashboardControlForbiddenResponse(authorization.status);
       }
     }
+    if (isDashboardHtmlNavigationRoute(request)) {
+      // An unlocked browser may navigate to the dashboard PAGE without the
+      // dash_ token in the URL. This exists because the OAuth "done" tab's
+      // link back landed the owner on a raw 401 JSON body: that page is served
+      // with `Referrer-Policy: no-referrer`, and a top-level GET navigation
+      // sends no `Origin` either, so the link arrived with no token and no way
+      // for the cookie check to name an origin.
+      //
+      // Only the HTML page, never `/dashboard.json`: the page is the surface a
+      // human navigates to, and the JSON keeps its existing two proofs.
+      const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
+      if (authorization.status === 'allowed') {
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        return withRenewedDashboardControlCookie(response, authorization, now());
+      }
+      if (authorization.status === 'origin_mismatch') {
+        return dashboardControlForbiddenResponse(authorization.status);
+      }
+    }
     if (isDashboardControlRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
       if (authorization.status === 'allowed') {
@@ -152,6 +171,18 @@ function isDashboardControlReadRoute(request: Request): boolean {
   if (request.method !== 'GET') return false;
   const path = new URL(request.url).pathname;
   return path === '/dashboard/dispositions' || path === '/dashboard/dispositions.json';
+}
+
+/**
+ * The dashboard PAGE, reached by a browser navigation rather than by a fetch.
+ *
+ * `/dashboard.json` is deliberately excluded: a data endpoint is what a
+ * cross-site page would want to reach, and it has no navigation problem to
+ * solve.
+ */
+function isDashboardHtmlNavigationRoute(request: Request): boolean {
+  if (request.method !== 'GET') return false;
+  return new URL(request.url).pathname === '/dashboard';
 }
 
 function isDashboardControlSessionRequest(request: Request): boolean {
@@ -270,6 +301,25 @@ function authorizeDashboardControlSession(
   authToken: string,
   nowMs: number,
   requireCsrf: boolean,
+  /**
+   * Accept a read whose request states no origin at all, taking the origin
+   * this request was actually made to as the one to check the cookie against.
+   * Only ever for a read (see the `!requireCsrf` guard below), and only for a
+   * top-level navigation, which by construction carries neither `Origin` nor —
+   * once the sending page says `Referrer-Policy: no-referrer` — `Referer`.
+   *
+   * What still holds without a stated origin: the cookie is signed by this
+   * worker's token, unexpired, HttpOnly, and `SameSite=Strict`, so a genuinely
+   * cross-SITE page cannot cause the browser to send it at all; and its origin
+   * tag must still match the origin this request was made to, so a session
+   * minted against a different worker origin is refused exactly as before.
+   * What is given up is the narrower same-site-different-port case, where a
+   * page could make the browser navigate to this worker's dashboard. That page
+   * cannot READ the response — a cross-origin navigation or frame is opaque to
+   * script — and the route changes nothing, which is why this is confined to
+   * the read and never extended to a control POST.
+   */
+  allowOriginlessNavigation = false,
 ): AuthorizedDashboardControlSession | { status: 'missing' | 'origin_mismatch' | 'csrf_mismatch' } {
   const cookie = cookieValue(request.headers.get('Cookie'), DASHBOARD_CONTROL_COOKIE);
   if (!cookie) return { status: 'missing' };
@@ -282,7 +332,7 @@ function authorizeDashboardControlSession(
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   // A cookie dated in the future was not issued by this worker's clock.
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60_000) return { status: 'missing' };
-  const origin = sameRequestOrigin(request, !requireCsrf);
+  const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined) return { status: 'origin_mismatch' };
   if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(authToken, origin))) {
     return { status: 'origin_mismatch' };
@@ -353,23 +403,34 @@ function remainingSessionSeconds(expiresAtMs: number, nowMs: number): number {
   return Math.max(1, Math.round((expiresAtMs - nowMs) / 1000));
 }
 
-function sameRequestOrigin(request: Request, allowReferer = false): string | undefined {
+function sameRequestOrigin(
+  request: Request,
+  allowReferer = false,
+  allowRequestTargetWhenUnstated = false,
+): string | undefined {
+  const target = requestTargetOrigin(request);
   const claimed = request.headers.get('Origin')
     ?? (allowReferer ? request.headers.get('Referer') : null);
-  if (!claimed || claimed === 'null') return undefined;
+  // An UNSTATED origin may fall back to the one this request was made to; a
+  // STATED one that does not match is still a mismatch, and `null` — an opaque
+  // origin, which is a statement — is never treated as unstated.
+  if (!claimed) return allowRequestTargetWhenUnstated ? target : undefined;
+  if (claimed === 'null') return undefined;
   let origin: string;
   try {
     origin = new URL(claimed).origin;
   } catch {
     return undefined;
   }
+  return origin === target ? origin : undefined;
+}
+
+function requestTargetOrigin(request: Request): string {
   const url = new URL(request.url);
-  const direct = url.origin;
   const forwardedProto = request.headers.get('X-Forwarded-Proto')?.split(',')[0]?.trim().toLowerCase();
-  const forwarded = forwardedProto === 'http' || forwardedProto === 'https'
+  return forwardedProto === 'http' || forwardedProto === 'https'
     ? `${forwardedProto}://${url.host}`
-    : direct;
-  return origin === forwarded ? origin : undefined;
+    : url.origin;
 }
 
 function withoutDashboardControlContextHeader(request: Request): Request {
