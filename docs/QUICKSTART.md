@@ -237,7 +237,7 @@ Every OAuth card walks you through registering Olympus's callback on your own
 provider app, in numbered steps above the Client ID field: the console page to
 open, the app type and permissions it needs, the exact setting the callback goes
 in — Google's **Authorized redirect URIs**, Dropbox's **OAuth 2 → Redirect
-URIs**, X's **User authentication settings → Callback URI** — with the exact URL
+URIs**, X's **Settings → Callback URI / Redirect URL** — with the exact URL
 and a copy button, and what to bring back to the card. Every bring-your-own
 client has to do this once. The URL is derived from the address you are reading
 the dashboard on, so a dashboard reached over a proxy or tunnel has a different

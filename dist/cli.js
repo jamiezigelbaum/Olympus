@@ -37056,7 +37056,7 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
     app_requirements: "Create or pick an app, then press Settings on the app's page. Under App permissions choose Read, and under Type of App choose Web App, Automated App or Bot (a Confidential client). Reading bookmarks needs paid X API access.",
     setting_label: "Callback URI / Redirect URL",
     redirect_uri: redirectUri,
-    finish: "Press Add another, paste it, and press Save Changes. Then go Back to Keys and copy the OAuth 2.0 Client ID and Client secret into the fields below and press Connect. X shows the secret only once; press Regenerate if you no longer have it."
+    finish: "Press Add another, paste it, and press Save Changes. Then press Back to Keys and, under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below and press Connect. X shows the secret only once; press Regenerate if you no longer have it."
   };
 }
 function providerRefusalReason(error, redirectUri, settingLabel) {
