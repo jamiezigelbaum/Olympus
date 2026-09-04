@@ -52,21 +52,25 @@ the repository you were given:
 
 ```bash
 openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
-# ^ on OpenClaw 2026.7.1 neither flag exists: re-run with no flags
+# ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
+#   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
 ```
 
 You should see `Installed plugin: olympus`. (The gateway picks it up on its
 next restart — step 5.)
 
-Both flags are required on OpenClaw `2026.8.1+`, and neither exists on
-`2026.7.1` — omit them there. `--accept-capabilities` supplies the capability
-consent a non-TTY install cannot be prompted for; without it the command exits
-1. `--force` confirms a non-ClawHub install source, which a `git:` install is;
-without it the command refuses with `Install cancelled; rerun with --force
-after reviewing the source.` On these versions `--force` also means "overwrite
-an existing plugin", so on a machine that already has olympus installed, be
-sure that is what you want. The clone runs with terminal prompts disabled, so
+Both flags are required on OpenClaw `2026.8.1+`. `--accept-capabilities`
+supplies the capability consent a non-TTY install cannot be prompted for;
+without it the command exits 1. `--force` confirms a non-ClawHub install
+source, which a `git:` install is; without it the command refuses with
+`Install cancelled; rerun with --force after reviewing the source.` On those
+versions `--force` also means "overwrite an existing plugin", so on a machine
+that already has olympus installed, be sure that is what you want.
+
+On `2026.7.1`, omit both: `--accept-capabilities` does not exist there, and
+`--force` exists but means only "overwrite an existing plugin" — which is not
+what a clean install wants. The clone runs with terminal prompts disabled, so
 git credentials for a private repository must already work.
 
 The install command prints only `Installed plugin: olympus`, and `openclaw
@@ -260,8 +264,8 @@ This loads the Olympus tools into your agent: `source_answer`,
 `source_index_status`, and `source_index_search`. They register when the plugin
 initializes, so `openclaw plugins inspect olympus --json` reports an empty
 `toolNames` by design — that is not a failed load. Verify instead that the
-gateway boot line lists olympus, that inspect reports `Status: loaded`, and
-that `olympus source index status` returns.
+gateway boot line lists olympus, that inspect reports `"status": "loaded"`,
+and that `olympus source index status` returns.
 
 ## 6. Watch it ingest
 
@@ -357,7 +361,8 @@ The private source worker lane is on by default, so `email_not_configured`
 should not appear on a fresh install — `OLYMPUS_EMAIL_ENABLED=false` is the
 explicit opt-out. If you do see it, run what its remedy names (`olympus setup`,
 then `olympus worker install`). A worker that simply is not running says so
-instead: `Email worker is not reachable at http://127.0.0.1:8010/v1`.
+instead: `Email worker is not reachable at http://127.0.0.1:8010/v1:`
+followed by the underlying connection error.
 
 Non-OpenClaw agents (Claude, etc.) can get the same tools over MCP:
 `olympus serve` — see the README's MCP section.
@@ -369,6 +374,13 @@ olympus doctor              # diagnoses anything unhealthy, with fix-it hints
 olympus data export --output ~/olympus-export    # your data, out (secrets excluded)
 olympus data delete --all   # complete removal: indexes, embeddings, configs, tokens
 ```
+
+Olympus owns seven directories, and `data delete --all` covers all of them:
+`~/.olympus`, `~/.config/olympus`, `~/.local/share/olympus`,
+`~/.local/share/openclaw/olympus`, `~/.local/state/olympus`, `~/.cache/olympus`
+(the Venice model-catalog cache), and `~/Library/Logs/Olympus` on macOS. If you
+are checking a machine for a previous install, those are the places to look —
+not just `~/.olympus`.
 
 ---
 

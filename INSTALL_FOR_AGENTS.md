@@ -32,8 +32,8 @@ may make only after they come back empty:
 ```bash
 # config
 ls -la ~/.olympus ~/.config/olympus 2>/dev/null
-# data, worker state, and connector stores — the dirs setup never names
-ls -la ~/.local/share/olympus ~/.local/state/olympus \
+# data, worker state, caches, and connector stores — the dirs setup never names
+ls -la ~/.local/share/olympus ~/.local/state/olympus ~/.cache/olympus \
        ~/.local/share/openclaw/olympus 2>/dev/null
 ls -la ~/Library/Logs/Olympus 2>/dev/null   # macOS worker logs
 # Linux worker logs live under ~/.local/state/olympus/worker (listed above)
@@ -58,9 +58,9 @@ Readwise — the list is illustrative, not closed), as presence checks
 only (never dump or print a secret's value — MUST NOT #2): a
 credential named for a provider is residue to surface even though
 nothing about it says "olympus". A clean machine is one where EVERY one
-of those comes back empty — no config dir, no data, state, connector-store
-or log dir, no plugin in the list, no launchd/systemd item, no
-provider credential, no note — and then you proceed with no extra
+of those comes back empty — no config dir, no data, state, cache,
+connector-store or log dir, no plugin in the list, no launchd/systemd
+item, no provider credential, no note — and then you proceed with no extra
 ceremony; the gate fires only on traces. If you find ANY trace — an
 existing config dir, a data or state dir with anything in it (a paired
 session especially), a worker
@@ -88,7 +88,7 @@ changes have already happened. Two traps, spelled out:
   agreed to them. Adopting residue config wholesale — because doctor is
   green, because a note says it was approved, because it "obviously
   matches" what the operator would want, or for any reason short of fresh
-  operator consent — is exactly the silent restore MUST NOT #8 and #10
+  operator consent — is exactly the silent restore MUST NOT #7 and #9
   forbid.
 
 The only path that legitimately skips this gate is resuming your OWN
@@ -191,7 +191,8 @@ were not given it; do not guess one.
 
 ```bash
 openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
-# ^ on OpenClaw 2026.7.1 neither flag exists: re-run with no flags
+# ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
+#   there means only "overwrite an existing plugin" — re-run with no flags
 openclaw plugins enable olympus
 ```
 
@@ -209,11 +210,17 @@ Two host flags, two different consents — check `openclaw --version`
   meanings at once: "yes, I have reviewed this non-ClawHub source" and
   "yes, overwrite an existing plugin".
 
-On `2026.7.1` both flags are unknown options the host rejects — drop them
-there.
+**On `2026.7.1` the two flags are not symmetrical.**
+`--accept-capabilities` does not exist there — the host rejects it as an
+unknown option, so drop it and re-run without it. `--force` DOES exist on
+`2026.7.1`, but it carries only its original meaning, "overwrite an
+existing plugin"; the source-trust confirmation is not a thing on that
+version, so a clean-machine install needs neither flag, and passing
+`--force` there is a reinstall gated by MUST NOT #5.
 
-**What `--force` does and does not authorize here.** On a machine with no
-olympus plugin installed, the flag is doing only the source-trust half:
+**What `--force` does and does not authorize here.** On `2026.8.1+`, on a
+machine with no olympus plugin installed, the flag is doing only the
+source-trust half:
 it confirms you reviewed the git source you were told to install. That is
 not the "`--force` reinstall" MUST NOT #5 gates, and you do not need a
 separate operator consent for it — but say what you are doing in your
@@ -338,7 +345,7 @@ setup, or start fresh? (If the only traces are provider credentials
 with no Olympus config, worker, or notes, there is no setup to restore
 — surface them and proceed fresh; the per-credential gates cover
 reuse.) Notes left by a previous agent or session are
-NEVER operator consent (MUST NOT #8). And "restore" is not a bypass: the
+NEVER operator consent (MUST NOT #7). And "restore" is not a bypass: the
 posture conversation, per-credential consent, and the worker
 pre-explanation before setup still run — restoring fills in remembered
 *answers*, it does not skip the *questions*. If a credential you are
@@ -383,7 +390,7 @@ sensitivity conversation:
 > legal matters, therapy, your family. This tier is the reason Olympus
 > exists. It never goes to ordinary cloud models, full stop. What *can*
 > happen with it is the one big choice you'll make in a few minutes:
-> answered on your own machine, answered by an end-to-end-encrypted private
+> answered on your own machine, answered by a privacy-focused private
 > cloud, or kept out of Olympus entirely.
 >
 > **Secrets** — passwords, API keys, recovery codes. No model ever sees
@@ -505,8 +512,13 @@ The operator has likely never heard of Venice, so introduce it once,
 before the options name it:
 
 > Two of these options use Venice (venice.ai) — a privacy-focused AI
-> cloud. Its end-to-end-encrypted models are the point: your questions
-> and answers are encrypted so that even Venice can't read them.
+> cloud. What it offers is a provider that does not train on your
+> conversations or retain them the way an ordinary cloud model does.
+> Being straight with you about the limit, because it matters for the
+> tier we just discussed: this is Venice's privacy policy and
+> infrastructure, not encryption that would make it impossible for them
+> to read a question. Olympus does not provide or qualify
+> end-to-end-encrypted inference in this version.
 >
 > How do you want to handle your secure data?
 >
@@ -517,7 +529,7 @@ before the options name it:
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
 >    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
 >    key (free tier available) for search indexing. Trade-off: strongest
->    owner-controlled first step, with encrypted-cloud escalation available;
+>    owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models only** (`local-only`) — secure questions are answered
@@ -527,16 +539,17 @@ before the options name it:
 >    escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
->    not run local models. Secure content goes only to Venice using its
->    end-to-end-encrypted model path, currently e2ee GLM 5.2. Requires: a
+>    not run local models. Secure content goes only to Venice, on its
+>    Private model path — currently `kimi-k3`. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
 >    available) for search indexing. Trade-off: no local-model requirement
->    or local fallback; you are choosing Venice's encrypted-cloud lane for
->    secure answers.
+>    or local fallback; you are choosing a privacy-focused cloud provider
+>    for secure answers, on that provider's word rather than on
+>    encryption.
 >
 > 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
 >    keeps its hands off secure data entirely: it is not imported, not
->    indexed, and no model — local, encrypted cloud, or ordinary cloud —
+>    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
 >    a Gemini API key (free tier available) for everyday source indexing.
@@ -670,7 +683,17 @@ them. Typical items:
 printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
 ```
 
-  This is the remedy setup itself prints for this item, verbatim. The
+  `$KEY` must be populated without the value reaching your shell history,
+  a log, or chat. Two supported ways, per the credential-sourcing rule
+  above: read it out of the operator's password manager with that
+  manager's CLI, after their per-credential yes and by the exact item name
+  they gave you (`KEY="$(op read '<their reference>')"`, or the Keychain's
+  `security find-generic-password … -w`); or have the operator type it
+  into a silent read in a shell they control (`read -rs KEY`), which
+  echoes nothing. Never `export` it, never echo it back to confirm it, and
+  unset it when the connect returns.
+
+  The command itself is the remedy setup prints for this item, verbatim. The
   command validates the key against Gemini before storing anything, writes
   it into the worker environment as
   `OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY` at mode 600, and tells you to
@@ -703,10 +726,11 @@ shape —
 ```
 olympus doctor: 7 of 9 checks passed, 2 failed.
 Failed: email_worker, source_index_status
+Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint.
 ```
 
-— while the full JSON stays on stdout unchanged. Branch on the exit
-status; exit 0 means every check is green.
+— all three lines, every time, while the full JSON stays on stdout
+unchanged. Branch on the exit status; exit 0 means every check is green.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
 internal name for the analyst that serves the secure tier (local models
@@ -1025,7 +1049,8 @@ After the restart, verify the plugin actually loaded. The honest checks
 are:
 
 - the gateway boot line names olympus among the loaded plugins, and
-- `openclaw plugins inspect olympus --json` reports `Status: loaded`, and
+- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
+  and
 - one real tool call succeeds — `olympus source index status`.
 
 **Do not verify by reading `toolNames` from `plugins inspect`.** It is
@@ -1091,9 +1116,10 @@ hand-edit config to flip the lane on, and do not re-run `olympus setup` to
 operator's explicit consent — MUST NOT #5).
 
 What a fresh install DOES see when the worker simply is not running is the
-honest version of the same problem — `Email worker is not reachable at
-http://127.0.0.1:8010/v1` — which is a Step 4 worker question, not a
-configuration one.
+honest version of the same problem: `Email worker is not reachable at
+http://127.0.0.1:8010/v1: <detail>`, where the detail after the colon is
+the underlying connection error. That is a Step 4 worker question, not a
+configuration one — read the detail before doing anything about it.
 
 Degraded credential lanes are a silent failure you must rule out
 explicitly — a worker with a dead embedding credential still syncs and
@@ -1135,7 +1161,7 @@ continue: `openclaw plugins list` (is olympus installed/enabled?),
 already exists. In particular, never re-run `olympus setup` or
 `olympus sovereignty init` when the config file exists — the CLI refuses
 without `--force`, and `--force` requires the operator's explicit consent
-(MUST NOT #6). A refusal like "config already exists" during resume means
+(MUST NOT #5). A refusal like "config already exists" during resume means
 the step is DONE, not broken.
 
 ## If something fails
