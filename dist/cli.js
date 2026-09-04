@@ -37034,10 +37034,10 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
         label: "Open Google Cloud credentials",
         url: googleConsoleUrl("https://console.cloud.google.com/apis/credentials", googleCloudProjectId)
       },
-      app_requirements: desktop ? `Create or pick an OAuth client ID of type Desktop app, and enable the ${apiName} API for the same project.` : `Create or pick an OAuth client ID of type Web application, and enable the ${apiName} API for the same project. A Desktop app client cannot register an https redirect URI.`,
-      setting_label: "Authorized redirect URIs",
+      app_requirements: desktop ? `Create or pick an OAuth client ID of type Desktop app, and enable the ${apiName} API for the same project.` : `Press Create credentials, choose OAuth client ID, and set Application type to Web application. Only a Web application client has the redirect URI section below; a Desktop app client has none and cannot be reused, so make a new Web client instead of editing that one, and enable the ${apiName} API for the same project.`,
+      setting_label: desktop ? "Authorized redirect URIs" : "Authorized redirect URIs (press + Add URI on the new client's form)",
       redirect_uri: redirectUri,
-      finish: "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste."
+      finish: desktop ? "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste." : "Press Create, copy the Client ID from the confirmation dialog into the field below, and press Connect. PKCE protects the exchange, so there is no client secret to paste."
     };
   }
   if (source === "dropbox") {
