@@ -102,7 +102,10 @@ describe('config', () => {
       model: 'delphi/vision-fast',
       purpose: 'vision',
     });
-    expect(config.email.enabled).toBe(false);
+    // The worker is installed by every preset, so the honest default is on:
+    // a fresh install must fail with "worker not reachable", never with
+    // "private source worker is disabled" and no command to fix it.
+    expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://127.0.0.1:8010/v1');
     expect(config.email.requireLocalActiveModelForPrivateTools).toBe(false);
     expect(config.worker.authToken).toBeUndefined();

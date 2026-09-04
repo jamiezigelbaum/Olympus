@@ -522,8 +522,11 @@ describe('runDoctor', () => {
       },
     });
 
+    // The email lane is on by default now, so "disabled" is stated here.
+    const disabledEmailConfig = defaultConfig();
+    disabledEmailConfig.email.enabled = false;
     const result = await runDoctor(doctorDeps({
-      config: defaultConfig(),
+      config: disabledEmailConfig,
       delphi: healthyDelphi(),
       fetchImpl,
     }));
@@ -544,6 +547,7 @@ describe('runDoctor', () => {
   test('skips worker checks as ok when the email worker and source index are disabled', async () => {
     const { fetchImpl, requestedPaths } = fakeWorkerFetch({});
     const config = defaultConfig();
+    config.email.enabled = false;
     config.sourceIndex.enabled = false;
 
     const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));

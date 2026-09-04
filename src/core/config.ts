@@ -247,7 +247,15 @@ const DEFAULT_CONFIG: OlympusConfig = {
     },
   },
   email: {
-    enabled: false,
+    // The private source worker is the product, not an optional extra:
+    // `olympus setup` installs it on every preset. Defaulting this to false
+    // meant a fresh install answered `olympus source answer` with
+    // `email_not_configured: Private source worker is disabled`, whose only
+    // cure was an undocumented environment variable in a file the install
+    // guide forbids editing by hand. Enabled by default, the same machine
+    // reports the honest failure instead — the worker is not reachable yet.
+    // OLYMPUS_EMAIL_ENABLED=false remains the explicit opt-out.
+    enabled: true,
     baseUrl: 'http://127.0.0.1:8010/v1',
     requestTimeoutSeconds: 180,
     localPacketsDevEnabled: false,
