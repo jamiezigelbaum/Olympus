@@ -2262,9 +2262,13 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
     return {
       stage: 'source_health',
       condition: 'degraded',
+      // No CLI verb on a dashboard card. `olympus` is not on PATH after a clean
+      // install, so "Run Olympus doctor" named a command the reader cannot run
+      // from the page they are standing on (clean-install rehearsal,
+      // 2026-09-05); the agent is the path this page already sends people down.
       next_action: connection.action.kind === 'oauth' || connection.action.kind === 'api_key'
         ? `${connection.action.label} ${card.label}, then run Sync now.`
-        : `Run Olympus doctor, repair the reported ${card.label} dependency or queue, then run Sync now.`,
+        : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
       dependencies,
     };
   }

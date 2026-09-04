@@ -37262,7 +37262,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Run Olympus doctor, repair the reported ${card.label} dependency or queue, then run Sync now.`,
+      next_action: connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
       dependencies
     };
   }
@@ -81638,8 +81638,11 @@ function requireOptionValue(args, index, optionName) {
     throw new OperationError("invalid_params", `${optionName} requires a value.`);
   return value;
 }
+function resolveWorkerAuthToken(env = process.env, config2 = loadConfig(env)) {
+  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config2.worker.authToken);
+}
 function runDashboardTokenCommand(env = process.env) {
-  const token = normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(loadConfig().worker.authToken);
+  const token = resolveWorkerAuthToken(env);
   if (!token) {
     throw new OperationError("config_error", "No worker auth token is configured. Run olympus setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.");
   }
@@ -81648,7 +81651,7 @@ function runDashboardTokenCommand(env = process.env) {
 function runDashboardCommand() {
   const config2 = loadConfig();
   const base = config2.email.baseUrl.replace(/\/v1\/?$/, "");
-  const token = workerAuthTokenFromConfig(config2);
+  const token = resolveWorkerAuthToken(process.env, config2);
   const url = `${base}/dashboard`;
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
   const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
@@ -81663,9 +81666,10 @@ function runDashboardCommand() {
   return {
     url: openUrl,
     opened,
-    hint: dashboardToken ? "This URL carries the read-only view token, not the worker token; unlocking the controls still needs olympus dashboard token." : "No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value."
+    hint: dashboardToken ? `This URL carries the read-only view token, not the worker token; unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.` : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value (rootDir comes from openclaw plugins inspect olympus --json).`
   };
 }
+var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
 if (__require.main == __require.module) {
   main2().catch((error2) => {
     for (const line of formatCliFatalError(error2))

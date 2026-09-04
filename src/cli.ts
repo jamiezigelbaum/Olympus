@@ -2220,16 +2220,34 @@ function requireOptionValue(args: string[], index: number, optionName: string): 
 }
 
 
-/** The worker auth token from config or worker.env, or a clear refusal. */
-export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
-  // The worker authenticates from ITS process environment, which the service
-  // loads from worker.env — so that file outranks a token remembered in a
-  // legacy config file, and an explicit environment variable outranks both.
-  // Printing the config's token when worker.env holds a newer one would hand
-  // the reader a token the worker refuses.
-  const token = normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN)
+/**
+ * The worker auth token this install actually authenticates with.
+ *
+ * The worker authenticates from ITS process environment, which the service
+ * loads from worker.env — so that file outranks a token remembered in a legacy
+ * config file, and an explicit environment variable outranks both. Handing over
+ * the config's token when worker.env holds a newer one gives the reader a token
+ * the worker refuses.
+ *
+ * `workerAuthTokenFromConfig` reads the same three places in the OPPOSITE
+ * order, config first, because a caller holding a config is asking what that
+ * config says. Anything the reader is meant to authenticate WITH must come
+ * through here instead: `olympus dashboard` derived its dash_ query token from
+ * the config-first lookup and so could print a URL a re-run setup had already
+ * invalidated, while `olympus dashboard token` printed the working one.
+ */
+function resolveWorkerAuthToken(
+  env: Record<string, string | undefined> = process.env,
+  config: OlympusConfig = loadConfig(env),
+): string | undefined {
+  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN)
     ?? workerAuthTokenFromSetupEnv({ env })
-    ?? normalizeWorkerAuthToken(loadConfig().worker.authToken);
+    ?? normalizeWorkerAuthToken(config.worker.authToken);
+}
+
+/** The worker auth token from worker.env or config, or a clear refusal. */
+export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
+  const token = resolveWorkerAuthToken(env);
   if (!token) {
     throw new OperationError(
       'config_error',
@@ -2242,7 +2260,9 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
 function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
   const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
-  const token = workerAuthTokenFromConfig(config);
+  // The same resolution `olympus dashboard token` uses, and for the same
+  // reason: this token is minted into a URL the reader is about to open.
+  const token = resolveWorkerAuthToken(process.env, config);
   const url = `${base}/dashboard`;
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
   const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
@@ -2257,19 +2277,33 @@ function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
   // The URL printed is the URL that works. `dash_` is a DERIVED, read-only view
   // token, not the worker bearer: workers/dashboard/index.ts states it is the
   // only way a browser reaches this HTML, because a bearer header cannot be
-  // typed into an address bar, and workers/http.ts admits it to GET /dashboard
-  // alone. Printing the bare path handed the reader a URL that 401s and no way
-  // to tell why (clean-install rehearsal, 2026-09-05). It carries no control
-  // authority, so it is not the secret the token command exists to hand over —
-  // that one still never appears here.
+  // typed into an address bar. workers/http.ts admits it to GET /dashboard and
+  // GET /dashboard.json, and to nothing else — no control route, and no method
+  // but GET. Printing the bare path handed the reader a URL that 401s and no
+  // way to tell why (clean-install rehearsal, 2026-09-05). It carries no
+  // control authority, so it is not the secret the token command exists to hand
+  // over — that one still never appears here.
   return {
     url: openUrl,
     opened,
     hint: dashboardToken
-      ? 'This URL carries the read-only view token, not the worker token; unlocking the controls still needs olympus dashboard token.'
-      : 'No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value.',
+      ? 'This URL carries the read-only view token, not the worker token;'
+        + ` unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.`
+      : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then`
+        + ` ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value`
+        + ' (rootDir comes from openclaw plugins inspect olympus --json).',
   };
 }
+
+/**
+ * How a user-facing sentence names the Olympus CLI.
+ *
+ * `olympus` is not on PATH after a clean install — the install guide runs it as
+ * `"$OLYMPUS_BIN"` for exactly that reason — so a bare command sends the reader
+ * to "command not found" (clean-install rehearsal, 2026-09-05). Same phrasing
+ * the dashboard's worker-token gate uses.
+ */
+const OLYMPUS_PLUGIN_BIN_HINT = '<rootDir>/bin/olympus';
 
 if (import.meta.main) {
   main().catch((error) => {

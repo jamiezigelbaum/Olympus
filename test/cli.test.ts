@@ -23,6 +23,7 @@ import {
   parseTerminalContentRequalifyArgs,
   parseXContentRecoveryArgs,
 } from '../src/cli.ts';
+import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
@@ -803,6 +804,47 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('the opened dashboard URL is minted from the token the worker actually accepts', async () => {
+    // `olympus dashboard token` deliberately prefers worker.env over a token
+    // remembered in ~/.olympus/config.json, because the service loads its
+    // environment from that file. `olympus dashboard` derived its dash_ query
+    // token config-first, so a stale config token produced a URL the worker
+    // refuses while the token command printed the working one.
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-url-precedence-'));
+    const binDir = join(home, 'bin');
+    const openerLog = join(home, 'opener.url');
+    try {
+      mkdirSync(binDir, { recursive: true });
+      const openerScript = ['#!/bin/sh', `printf "%s\\n" "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
+      for (const opener of ['open', 'xdg-open']) {
+        writeFileSync(join(binDir, opener), openerScript);
+        chmodSync(join(binDir, opener), 0o755);
+      }
+      writeWorkerEnv(home, 'token-the-worker-loaded');
+      const configPath = join(home, 'config.json');
+      writeFileSync(configPath, JSON.stringify({ worker: { authToken: 'stale-config-token' } }));
+
+      const env = {
+        HOME: home,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        OLYMPUS_CONFIG: configPath,
+        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010',
+      };
+      const dashboard = await runSourceCli(['dashboard'], env);
+      const printedToken = new URL(JSON.parse(dashboard.stdout).url).searchParams.get('token');
+      const workerToken = (await runSourceCli(['dashboard', 'token'], env)).stdout.trim();
+
+      expect(workerToken).toBe('token-the-worker-loaded');
+      expect(printedToken).toBe(dashboardQueryTokenFromWorkerAuthToken(workerToken) ?? null);
+      expect(printedToken).not.toBe(dashboardQueryTokenFromWorkerAuthToken('stale-config-token') ?? null);
+      // The bearer itself is still nowhere in the output or the opened URL.
+      expect(dashboard.stdout).not.toContain(workerToken);
+      expect(readFileSync(openerLog, 'utf8')).not.toContain(workerToken);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('dashboard command does not print or open the worker bearer token', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-test-'));
     const binDir = join(dir, 'bin');
@@ -851,7 +893,7 @@ describe('CLI tool surface', () => {
       expect(output.opened).toBe(true);
       expect(output.hint).toBe(
         'This URL carries the read-only view token, not the worker token;'
-        + ' unlocking the controls still needs olympus dashboard token.',
+        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
       );
       expect(output.url).toBe(openedUrl.trim());
       // The shape stays three fields, and the WORKER bearer is still absent:
@@ -896,7 +938,7 @@ describe('CLI tool surface', () => {
       expect(output.opened).toBe(true);
       expect(output.hint).toBe(
         'This URL carries the read-only view token, not the worker token;'
-        + ' unlocking the controls still needs olympus dashboard token.',
+        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
       );
       expect(output.url).toBe(openedUrl.trim());
       expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
