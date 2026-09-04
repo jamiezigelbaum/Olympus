@@ -376,7 +376,17 @@ describe('dashboard view model additive facts', () => {
     expect(gmail.freshness.stale).toBe(false);
     // Key-set pins on the nested objects the diff does not touch, so a rename
     // inside one of them fails here rather than slipping past the card pin.
-    expect(Object.keys(gmail.connection)).toEqual(['state', 'label', 'action', 'handles', 'disconnect']);
+    // `connected_at` is the handle's own grant time: the clock the phase rows
+    // need to tell "connected a moment ago" from "connected and never syncing".
+    expect(Object.keys(gmail.connection)).toEqual([
+      'state',
+      'label',
+      'action',
+      'handles',
+      'connected_at',
+      'disconnect',
+    ]);
+    expect(gmail.connection.connected_at).toBe('2026-07-02T10:00:00.000Z');
     expect(gmail.connection.disconnect).toMatchObject({
       source_id: 'gmail.email',
       label: 'Disconnect Gmail',

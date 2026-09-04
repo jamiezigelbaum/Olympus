@@ -32,7 +32,12 @@ import type { DashboardSourceCard } from '../source-dashboard.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { DashboardActionInput } from './components.ts';
-import { dashboardSourceProgress } from './phases.ts';
+import {
+  DASHBOARD_PHASE_LABELS,
+  dashboardHasRunBefore,
+  dashboardSourceProgress,
+  type DashboardPhaseId,
+} from './phases.ts';
 import { dashboardCount, dashboardDuration } from './vocabulary.ts';
 
 export type DashboardAttentionKind = 'credential' | 'terminal_extraction' | 'lane_stuck';
@@ -340,13 +345,26 @@ function laneStuckBanner(
   options: DashboardAttentionOptions,
 ): DashboardAttentionBanner | undefined {
   if (!hasOpenWork(source)) return undefined;
-  const idleHours = idleEvidenceHours(source);
-  if (!switchedOff(source)) {
+  // The banner speaks about a lane the page itself renders as Stalled. Without
+  // this the two contradicted each other on a just-connected source: the rows
+  // said the metadata sync had not started while the banner, reading the whole
+  // card for a switched-off lane, announced the source was stuck and blamed
+  // embedding (owner, 2026-09-04). A phase that is Waiting is not stuck.
+  const stalledPhases = stoppedLanes(source, now);
+  if (stalledPhases.length === 0) return undefined;
+  const idleHours = idleEvidenceHours(source, now);
+  if (!switchedOff(source, stalledPhases)) {
     if (idleHours === undefined) return undefined;
     if (idleHours <= graceHours(source)) return undefined;
     if (isSelfHealing(source, now)) return undefined;
   }
-  const condition = governingCondition(source);
+  const condition = governingCondition(source, stalledPhases);
+  // Name the lane that stopped, not the source as a whole: "its lane" over a
+  // card with three of them left the reader to guess which, and the guess the
+  // page invited was the one the condition sentence happened to mention.
+  const laneName = stalledPhases.length === 1
+    ? `${DASHBOARD_PHASE_LABELS[stalledPhases[0]!].toLowerCase()} lane`
+    : 'lane';
   const stillness = idleHours === undefined
     ? 'has stopped moving'
     : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
@@ -368,10 +386,11 @@ function laneStuckBanner(
       : { label: 'Sync now', kind: 'sync_now', source: syncSource, primary: true };
   return {
     kind: 'lane_stuck',
-    sentence: `${source.label} still has work to do and its lane ${stillness}. Last condition on the lane:`
-      + ` ${condition}. Try a sync now; if it still does not move, ask your agent to look at the lane.`,
+    sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:`
+      + ` ${condition}.${action === undefined ? '' : ' Try a sync now;'}`
+      + `${action === undefined ? ' Ask' : ' if it still does not move, ask'} your agent to look at the lane.`,
     ...(action === undefined ? {} : { action }),
-    agent_prompt: `Olympus says the ${source.label} lane still has work to do and ${stillness}`
+    agent_prompt: `Olympus says the ${source.label} ${laneName} still has work to do and ${stillness}`
       + ` (last condition: ${condition}). Please check why the ${source.label} ingestion lane is not`
       + ' moving — the worker logs and the scheduler state for this source — and fix it using'
       + ' supported Olympus commands. Do not ask me to edit files, configuration, or code.',
@@ -387,10 +406,49 @@ function laneStuckBanner(
  * elapses, so neither waits for a grace window — a lane nothing is driving is
  * as stuck at one minute as it is at one week.
  */
-function switchedOff(source: DashboardSourceCard): boolean {
+/**
+ * The lanes that have actually stopped, in pipeline order.
+ *
+ * A lane the page renders as Stalled has stopped by the page's own reckoning.
+ * A lane somebody switched off has stopped too, even where its own row cannot
+ * measure the work — a store that publishes no per-item embedding parity draws
+ * a "not measured" row over a backlog that is nonetheless real — so a switch is
+ * added when there is outstanding work for it to be blocking. Both halves need
+ * evidence of work: a switched-off lane with nothing in front of it is not
+ * stuck, which is the whole of a source connected a minute ago.
+ */
+function stoppedLanes(source: DashboardSourceCard, now: Date): DashboardPhaseId[] {
+  const phases = dashboardSourceProgress(source, { now }).phases;
+  const stopped = new Set(phases.filter((phase) => phase.state === 'stalled').map((phase) => phase.id));
   const drain = source.ingestion_health.drain_state;
-  if (drain === 'held' || drain === 'disabled') return true;
-  return source.embedding_lane_state === 'embedding_lane_disabled';
+  const extraction = phases.find((phase) => phase.id === 'extraction');
+  if (
+    (drain === 'held' || drain === 'disabled')
+    && extraction?.state !== 'done'
+    && source.coverage.indexed_items > 0
+  ) {
+    stopped.add('extraction');
+  }
+  const embedding = phases.find((phase) => phase.id === 'embedding');
+  if (
+    source.embedding_lane_state === 'embedding_lane_disabled'
+    && embedding?.state !== 'done'
+    && (source.embedding_backlog?.missing_chunks ?? 0) > 0
+  ) {
+    stopped.add('embedding');
+  }
+  return phases.map((phase) => phase.id).filter((id) => stopped.has(id));
+}
+
+function switchedOff(source: DashboardSourceCard, stalledPhases: readonly DashboardPhaseId[]): boolean {
+  // Scoped to the lanes that actually stopped. A disabled embedding lane is a
+  // real fact, but it is not why a metadata sync is not running, and letting it
+  // waive the clock for every other phase is how a card with a switched-off
+  // embedder announced itself stuck the moment it was connected.
+  const stalled = new Set(stalledPhases);
+  const drain = source.ingestion_health.drain_state;
+  if (stalled.has('extraction') && (drain === 'held' || drain === 'disabled')) return true;
+  return stalled.has('embedding') && source.embedding_lane_state === 'embedding_lane_disabled';
 }
 
 /** True when some phase still has work, or something is stuck part-way. */
@@ -408,14 +466,33 @@ function hasOpenWork(source: DashboardSourceCard): boolean {
  * staleness rule says it is late; on a fresh lane it is just the time since the
  * last check, which proves nothing.
  */
-function idleEvidenceHours(source: DashboardSourceCard): number | undefined {
+function idleEvidenceHours(source: DashboardSourceCard, now: Date): number | undefined {
   const candidates = [
     source.freshness.stale ? source.freshness.hours : undefined,
     source.ingestion_health.last_drain_activity_hours,
     source.ingestion_health.oldest_stuck_age_hours,
+    firstSyncIdleHours(source, now),
   ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
   if (candidates.length === 0) return undefined;
   return Math.max(...candidates);
+}
+
+/**
+ * How long a source has been connected without ever running.
+ *
+ * A source with no runs has no counter that could have gone still, so none of
+ * the measures above says anything about it and the banner had no basis to arm
+ * on at all. The connection's own age is the one clock there is. It still
+ * passes through the ordinary grace window, so a source connected an hour ago
+ * says nothing here even while its rows already read Stalled: the row is a
+ * status, the banner is an interruption, and they are allowed to want
+ * different thresholds.
+ */
+function firstSyncIdleHours(source: DashboardSourceCard, now: Date): number | undefined {
+  if (dashboardHasRunBefore(source)) return undefined;
+  const connectedAt = Date.parse(source.connection.connected_at ?? '');
+  if (!Number.isFinite(connectedAt) || connectedAt > now.getTime()) return undefined;
+  return (now.getTime() - connectedAt) / 3_600_000;
 }
 
 /** The lane's own refresh window where it declares one; a day where it does not. */
@@ -455,10 +532,17 @@ function isSelfHealing(source: DashboardSourceCard, now: Date): boolean {
  * it recorded on the way in: a budget guard parks a lane holding whatever kind
  * it last saw, and printing that stale kind is the same mistake one level down.
  */
-function governingCondition(source: DashboardSourceCard): string {
+function governingCondition(source: DashboardSourceCard, stalledPhases: readonly DashboardPhaseId[]): string {
+  // Each switch explains exactly one lane. Reported against a phase that is
+  // not stalled, it is a true fact about the wrong thing: the live page blamed
+  // "the embedding lane is switched off" for a metadata sync that had never
+  // started, which sent the reader after a lane that was not the problem.
+  const stalled = new Set(stalledPhases);
   const drain = source.ingestion_health.drain_state;
-  if (drain === 'held' || drain === 'disabled') return DASHBOARD_DRAIN_CONSEQUENCES[drain];
-  if (source.embedding_lane_state === 'embedding_lane_disabled') {
+  if (stalled.has('extraction') && (drain === 'held' || drain === 'disabled')) {
+    return DASHBOARD_DRAIN_CONSEQUENCES[drain];
+  }
+  if (stalled.has('embedding') && source.embedding_lane_state === 'embedding_lane_disabled') {
     return 'the embedding lane is switched off, so no new chunks are being embedded';
   }
   const schedule = source.schedule;
@@ -466,5 +550,8 @@ function governingCondition(source: DashboardSourceCard): string {
   if (degradedReason) return DASHBOARD_GUARD_CONSEQUENCES[degradedReason] ?? degradedReason;
   const errorKind = schedule && schedule.consecutive_failures > 0 ? schedule.last_error_kind : undefined;
   if (errorKind) return DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind;
+  if (stalled.has('metadata_sync') && !dashboardHasRunBefore(source)) {
+    return 'the first sync has not run yet';
+  }
   return 'nothing has reported a reason';
 }

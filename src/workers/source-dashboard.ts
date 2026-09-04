@@ -649,6 +649,15 @@ export interface DashboardSourceCard {
     label: string;
     action: DashboardSourceAction;
     handles: string[];
+    /**
+     * When the credential this card connects through was granted, from the
+     * handle registry. The clock a phase needs to tell "connected a minute ago
+     * and the first sync has not started" from "connected and never syncing":
+     * without it a source that has never run reads as stalled the instant it is
+     * connected. Absent for a family that owns no broker handle (the paired
+     * chat sources) and for a card that is not connected at all.
+     */
+    connected_at?: string;
     /** Present only for a locally connected broker-backed v0.4 source. */
     disconnect?: DashboardDisconnectAction;
     /** Present only for a paired-session source that currently reads paired. */
@@ -2700,6 +2709,17 @@ function connectionStateFromDefinition(
       ? sessionEvidence !== 'none' || activeHandles.length > 0
       : activeHandles.length > 0;
   const handleIds = handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b));
+  // The most recent active grant: a reconnect restarts the first-sync clock,
+  // and an older sibling handle must not hold it back. A timestamp that does
+  // not parse, or that is in the future, is no evidence of anything and is
+  // dropped rather than trusted -- the same rule the reconnect-vs-probe
+  // comparison above already applies to this field.
+  const connectedAtMs = activeHandles
+    .map((handle) => Date.parse(handle.connectedAt))
+    .filter((value) => Number.isFinite(value) && value <= now.getTime());
+  const connectedAt = connectedAtMs.length > 0
+    ? { connected_at: new Date(Math.max(...connectedAtMs)).toISOString() }
+    : {};
   if (unpaired !== undefined) {
     // The one connection fact on this card that is known rather than inferred.
     // An Unpair changes nothing the session evidence above reads — the items
@@ -2776,22 +2796,28 @@ function connectionStateFromDefinition(
   }
   if (!connected && !reauthRequired) return { state: 'not_connected', label: notConnectedLabel, action, handles: handleIds };
   if (queue.active > 0 || queue.waiting > 0 || syncRunning) {
-    return { state: 'syncing', label: 'syncing', action, handles: handleIds };
+    return { state: 'syncing', label: 'syncing', action, handles: handleIds, ...connectedAt };
   }
   // A past sync proves a session existed; nothing readable here proves it still
   // does. Saying so is the honest middle between the false pairing alarm and a
   // confident "synced" over a timestamp outside this source's own window.
   if (sessionEvidence === 'unconfirmed') {
-    return { state: 'connected', label: 'connected · live session not checked', action, handles: handleIds };
+    return { state: 'connected', label: 'connected · live session not checked', action, handles: handleIds, ...connectedAt };
   }
   if (definition.answer_capable_without_sync) {
-    return { state: 'connected', label: 'connected', action, handles: handleIds };
+    return { state: 'connected', label: 'connected', action, handles: handleIds, ...connectedAt };
   }
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
-    return { state: 'waiting_for_first_sync', label: 'connected, waiting for first sync', action, handles: handleIds };
+    return {
+      state: 'waiting_for_first_sync',
+      label: 'connected, waiting for first sync',
+      action,
+      handles: handleIds,
+      ...connectedAt,
+    };
   }
   const syncedAt = syncedRelativeLabel(freshness);
-  return { state: 'synced', label: syncedAt ? `synced ${syncedAt}` : 'synced', action, handles: handleIds };
+  return { state: 'synced', label: syncedAt ? `synced ${syncedAt}` : 'synced', action, handles: handleIds, ...connectedAt };
 }
 
 /**

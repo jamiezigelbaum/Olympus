@@ -189,6 +189,21 @@ const DELTA_OVERSTATE_SHARE = 0.005;
  */
 export const DASHBOARD_PHASE_STALL_HOURS = 1;
 
+/**
+ * How long after a source is connected its rows may still say "waiting for the
+ * first sync" rather than "stalled".
+ *
+ * A source connected two minutes ago has had nothing to move yet, so measured
+ * stillness says nothing about it: `movedAt` is NaN because no counter has ever
+ * risen, no lane reports live because none has run, and with the scheduler off
+ * there is no next-sync time either. Every one of those is the absence of
+ * evidence, and the row fell through all three to `Stalled · no movement seen`
+ * on a source the owner had just connected (2026-09-04). The same window the
+ * stall check uses: a lane that has not started an hour after connecting is
+ * genuinely not starting, and then the row says so and names the reason.
+ */
+export const DASHBOARD_FIRST_SYNC_GRACE_HOURS = DASHBOARD_PHASE_STALL_HOURS;
+
 /** The three bars for one source, their states, and whether anything is left. */
 export function dashboardSourceProgress(
   source: DashboardSourceCard,
@@ -228,6 +243,43 @@ export function dashboardHasSettledPass(source: DashboardSourceCard): boolean {
   if (source.connection.state === 'synced') return true;
   if (source.last_run?.status === 'completed') return true;
   return Number.isFinite(Date.parse(source.last_sync_at ?? ''));
+}
+
+/**
+ * True when nothing has ever run for this source.
+ *
+ * Every clause is positive evidence that a run happened, so the answer is
+ * "never" only when no evidence of any kind exists. `last_run` and
+ * `last_sync_at` are the ledger's record, `synced`/`syncing` are the states the
+ * view model only reaches from sync evidence, a non-zero item count cannot have
+ * appeared without a run, and a scheduler attempt is a run that started even if
+ * it failed.
+ */
+export function dashboardHasRunBefore(source: DashboardSourceCard): boolean {
+  if (source.last_run !== undefined) return true;
+  if (Number.isFinite(Date.parse(source.last_sync_at ?? ''))) return true;
+  if (source.connection.state === 'synced' || source.connection.state === 'syncing') return true;
+  if (source.coverage.indexed_items > 0 || source.coverage.content_ready_items > 0) return true;
+  return source.schedule?.last_attempt_at !== undefined;
+}
+
+/**
+ * True when this source has never run and is still inside its first-sync
+ * window, so its empty rows are waiting rather than stalled.
+ *
+ * With no connection timestamp there is no clock to measure the window with —
+ * the paired chat sources own no broker handle — so the card's own freshness
+ * verdict stands in: a card its own view model has not called stale is still
+ * within its declared refresh window, and a stale one has waited long enough
+ * for "stalled" to be the honest word.
+ */
+export function dashboardAwaitingFirstSync(source: DashboardSourceCard, now: Date): boolean {
+  if (dashboardHasRunBefore(source)) return false;
+  const connectedAt = Date.parse(source.connection.connected_at ?? '');
+  if (Number.isFinite(connectedAt) && connectedAt <= now.getTime()) {
+    return now.getTime() - connectedAt <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3_600_000;
+  }
+  return !source.freshness.stale;
 }
 
 /** A phase with nothing left to do. An indeterminate phase never qualifies. */
@@ -444,6 +496,12 @@ function withState(
   if (due !== undefined) {
     return { ...phase, state: 'waiting', state_words: `Waiting · next sync in ${due}` };
   }
+  // Nothing above found evidence, and for a source that has never run that is
+  // the expected answer rather than a finding. Stillness is only meaningful
+  // once there has been something to be still about.
+  if (dashboardAwaitingFirstSync(source, now)) {
+    return { ...phase, state: 'waiting', state_words: 'Waiting for the first sync' };
+  }
   return { ...phase, state: 'stalled', state_words: `Stalled · ${stillnessWords(source, phase.id)}` };
 }
 
@@ -511,6 +569,9 @@ function stillnessWords(source: DashboardSourceCard, id: DashboardPhaseId): stri
   if (id === 'metadata_sync' && schedule && schedule.consecutive_failures > 0) {
     return `last ${schedule.consecutive_failures === 1 ? 'sync' : `${schedule.consecutive_failures} syncs`} failed`;
   }
+  // "No movement seen" over a source that has never run reads as a lane that
+  // stopped. Nothing stopped: nothing started.
+  if (!dashboardHasRunBefore(source)) return 'the first sync has not run yet';
   return 'no movement seen';
 }
 
