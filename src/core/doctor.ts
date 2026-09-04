@@ -5,7 +5,13 @@
 // every check returns statuses and counts only — never tokens, source text,
 // or packets. Each check is isolated, and runDoctor itself never throws.
 
-import { parseOptionalBooleanEnv, type ArgusLane, type ArgusModelProfile, type OlympusConfig } from './config.ts';
+import {
+  configWithEnvironmentOverrides,
+  parseOptionalBooleanEnv,
+  type ArgusLane,
+  type ArgusModelProfile,
+  type OlympusConfig,
+} from './config.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -98,15 +104,10 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   // reading only process.env reports settings the running worker has as
   // missing. Only merged when the caller handed in an environment at all: a
   // caller that passed none is not asking about any install.
-  const deps: DoctorDeps = input.env === undefined
+  const inputEnv = input.env;
+  const deps: DoctorDeps = inputEnv === undefined
     ? input
-    : {
-      ...input,
-      env: environmentWithWorkerSetupEnv({
-        env: input.env,
-        ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
-      }),
-    };
+    : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
@@ -146,6 +147,39 @@ async function sourceCapabilityCatalogCheck(deps: DoctorDeps): Promise<DoctorChe
     ok: true,
     detail: `Public source catalog declares ${V0_4_PUBLIC_SOURCE_CAPABILITIES.length} sources; ${connected.length} connected. Source-conditioned dependencies for connected sources: ${dependencyLabels.join(', ') || 'none until a source is connected'}.`,
   };
+}
+
+/**
+ * The environment the managed worker actually runs with, and the config that
+ * environment produces.
+ *
+ * Layering worker.env under process.env was only half the repair. The config
+ * doctor's checks read came from the CALLER, built off the unlayered
+ * `process.env`, so `source_scheduler_status` reported the scheduler "disabled
+ * in config" over a worker.env that enables it, and the email and sovereignty
+ * gates read the same stale values (clean-install rehearsal, 2026-09-05). The
+ * environment layer is re-applied to the caller's config rather than rebuilding
+ * one, so a plugin-supplied config keeps everything the environment does not
+ * speak to.
+ */
+function doctorDepsWithLayeredEnvironment(
+  input: DoctorDeps,
+  inputEnv: Record<string, string | undefined>,
+): DoctorDeps {
+  const env = environmentWithWorkerSetupEnv({
+    env: inputEnv,
+    ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
+  });
+  let config = input.config;
+  try {
+    config = configWithEnvironmentOverrides(input.config, env);
+  } catch {
+    // A worker.env value this build refuses to parse must not take the whole
+    // health walk down with it; the individual checks still report on the
+    // config the caller handed in.
+    config = input.config;
+  }
+  return { ...input, env, config };
 }
 
 /**

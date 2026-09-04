@@ -301,6 +301,35 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     mergeConfig(config, raw);
   }
 
+  applyEnvironmentOverrides(config, env);
+
+  validateConfig(config);
+  return config;
+}
+
+/**
+ * The same environment layer `loadConfig` applies, re-applied to a config a
+ * caller already holds.
+ *
+ * The supervised worker's environment comes from worker.env, and a caller that
+ * builds its config from the unlayered `process.env` therefore reads settings
+ * the running worker does not have: `olympus doctor` reported the scheduler
+ * "disabled in config" against a worker.env that enables it (clean-install
+ * rehearsal, 2026-09-05). Layering here rather than rebuilding from scratch
+ * keeps whatever the caller's config carries that the environment does not
+ * speak to — a plugin-supplied config, most of all.
+ */
+export function configWithEnvironmentOverrides(
+  config: OlympusConfig,
+  env: Record<string, string | undefined>,
+): OlympusConfig {
+  const next = structuredClone(config);
+  applyEnvironmentOverrides(next, env);
+  validateConfig(next);
+  return next;
+}
+
+function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, string | undefined>): void {
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }
@@ -511,9 +540,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
   }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-
-  validateConfig(config);
-  return config;
 }
 
 export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
