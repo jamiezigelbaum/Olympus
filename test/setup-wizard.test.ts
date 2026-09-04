@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { acquireLifecycleMutationLock } from '../src/core/lifecycle-lock.ts';
+import { runWorkerLifecycle } from '../src/core/lifecycle.ts';
 import {
   runSetupDependencyCheck,
   runSetupWizard,
@@ -305,6 +306,71 @@ describe('olympus setup wizard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('setup starts the managed worker and reports the state the guide checks next', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-activation-'));
+    const manager = linuxManager();
+    try {
+      const result = await runSetupWizard({
+        preset: 'no-sensitive',
+        yes: true,
+        sovereigntyPath: join(dir, 'sovereignty.json'),
+        platform: 'linux',
+        homeDir: dir,
+        workingDirectory: dir,
+        tokenGenerator: () => 'activation-token',
+        dependencyCheck: healthyDependencyCheck,
+        exec: manager.exec,
+      });
+
+      // Writing the unit and walking away left the operator with an inactive
+      // worker and a guide whose very next step was to verify it running.
+      expect(manager.calls).toContain('systemctl --user enable --now olympus-worker.service');
+      expect(result.worker.state).toBe('active');
+      expect(result.worker.next).toBe('The managed worker is running; open the dashboard with olympus dashboard.');
+      expect(result.worker).not.toHaveProperty('activation_detail');
+
+      // olympus worker install stays the idempotent no-op on top of it: the
+      // files are byte-identical and the service is already active.
+      const install = runWorkerLifecycle('install', {
+        platform: 'linux',
+        homeDir: dir,
+        workingDirectory: dir,
+        exec: manager.exec,
+      });
+      expect(install).toMatchObject({ action: 'install', ok: true, changed: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('setup keeps the managed files when the service manager refuses to start them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-activation-refused-'));
+    const paths = workerServicePaths('linux', dir);
+    try {
+      const result = await runSetupWizard({
+        preset: 'no-sensitive',
+        yes: true,
+        sovereigntyPath: join(dir, 'sovereignty.json'),
+        platform: 'linux',
+        homeDir: dir,
+        workingDirectory: dir,
+        tokenGenerator: () => 'refused-token',
+        dependencyCheck: healthyDependencyCheck,
+        exec: () => ({ status: 1, stdout: '', stderr: 'systemctl: command not found\n' }),
+      });
+
+      // The unit and env are the durable artifact: a service manager that will
+      // not start them must not take them away with it.
+      expect(existsSync(paths.unitPath)).toBe(true);
+      expect(readFileSync(paths.envPath, 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=refused-token');
+      expect(result.worker.state).not.toBe('active');
+      expect(result.worker.next).toBe('Run olympus worker install, then olympus worker status.');
+      expect(result.worker.activation_detail).toBeString();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test('setup mutates the managed worker files under the lifecycle lock and transaction', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-lifecycle-custody-'));

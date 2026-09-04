@@ -355,43 +355,107 @@ function installOrUpgradeLifecycle(
   }
 }
 
+export interface ManagedWorkerFilesResult {
+  install: WorkerServiceInstallResult;
+  /**
+   * What the service manager reported after this lane finished. `undefined`
+   * only on a dry run, which touches no service manager at all.
+   */
+  service?: WorkerServiceInspection;
+  activation: 'skipped' | 'started' | 'failed';
+  /** Why activation did not take. Present only when `activation` is 'failed'. */
+  activation_detail?: string;
+}
+
 /**
  * Write the managed worker unit and environment under the same exclusive lock
- * and crash-durable transaction the lifecycle facade uses, without activating
- * the service.
+ * and crash-durable transaction the lifecycle facade uses, and — unless the
+ * caller opts out — start the service the way `olympus worker install` does.
  *
  * `olympus setup` mutates exactly the files the facade owns. Doing that outside
  * the lock lets a concurrent install or upgrade interleave with it — and its
  * rollback then discards setup's write — so setup takes this lane instead of
  * calling the installer directly.
+ *
+ * Writing the unit and stopping used to be the whole lane, which left a fresh
+ * `olympus setup` with an inactive worker and sent the operator straight into a
+ * status check that could only fail (clean-install rehearsal, 2026-09-05). The
+ * activation is the same `install` service action the facade runs, so a later
+ * `olympus worker install` writes nothing, sees an already-active service, and
+ * stays the idempotent no-op it was.
  */
 export function installManagedWorkerFiles(
-  options: WorkerLifecycleOptions = {},
-): WorkerServiceInstallResult {
+  options: WorkerLifecycleOptions & { activate?: boolean } = {},
+): ManagedWorkerFilesResult {
   const platform = normalizeLifecyclePlatform(options.platform ?? osPlatform());
   const homeDir = validateHomeDir(options.homeDir ?? homedir());
   const effective = { ...options, platform, homeDir };
-  if (options.dryRun === true) return installWorkerService(serviceInstallOptions(effective, true));
+  const activate = options.activate !== false;
+  if (options.dryRun === true) {
+    return { install: installWorkerService(serviceInstallOptions(effective, true)), activation: 'skipped' };
+  }
   ensurePrivateRootDirectorySync(homeDir);
   const lock = acquireLifecycleMutationLock(homeDir, 'install', options.now);
   try {
     recoverInterruptedTransaction(effective);
     const preview = installWorkerService(serviceInstallOptions(effective, true));
-    // This lane never inspects the service manager, so the previous run state is
-    // genuinely undetermined; recording it as such keeps a later recovery from
-    // reactivating a worker on this transaction's authority.
+    // The transaction covers the FILE write only, so the previous run state is
+    // genuinely undetermined here; recording it as such keeps a later recovery
+    // from reactivating a worker on this transaction's authority.
     beginTransaction('install', effective, preview, 'unknown');
+    let install: WorkerServiceInstallResult;
     try {
-      const install = installWorkerService(serviceInstallOptions(effective, false));
+      install = installWorkerService(serviceInstallOptions(effective, false));
       markTransactionCommitReady(effective);
       clearTransaction(effective);
-      return install;
     } catch (error) {
       rollbackTransaction(effective, { activatePrevious: false, touchServiceManager: false });
       throw error;
     }
+    if (!activate) return { install, activation: 'skipped' };
+    // Activation runs AFTER the file transaction commits, deliberately. The
+    // unit and the environment are the durable artifact and must survive a
+    // service manager that is absent, refusing, or slow — rolling them back
+    // over a failed start would leave setup with nothing at all. A start that
+    // does not take is reported, and `olympus worker install` is the retry.
+    return activateManagedWorkerFiles(install, effective);
   } finally {
     lock.release();
+  }
+}
+
+function activateManagedWorkerFiles(
+  install: WorkerServiceInstallResult,
+  effective: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): ManagedWorkerFilesResult {
+  try {
+    runWorkerServiceAction('install', serviceActionOptions(effective));
+    const service = settleWorkerServiceState(effective, ['active']);
+    if (service.state === 'active') return { install, service, activation: 'started' };
+    return {
+      install,
+      service,
+      activation: 'failed',
+      activation_detail: lifecycleActionFailure('install', service.state, effective).message,
+    };
+  } catch (error) {
+    const service = inspectWorkerServiceSafely(effective);
+    return {
+      install,
+      ...(service ? { service } : {}),
+      activation: 'failed',
+      activation_detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function inspectWorkerServiceSafely(
+  effective: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): WorkerServiceInspection | undefined {
+  try {
+    return inspectWorkerService(serviceActionOptions(effective));
+  } catch {
+    return undefined;
   }
 }
 
