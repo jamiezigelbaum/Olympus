@@ -36719,7 +36719,7 @@ function connectionFromDefinition(definition, registry, credentialHealth, covera
 function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
   const handles = handlesForDefinition(definition, registry);
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
-  const probeNeedsRepair = probeResults.some((result) => (result.status === "reauth_required" || result.status === "missing") && !probeEvidencePredatesReconnect(result, handles));
+  const probeNeedsRepair = probeResults.some((result) => (result.status === "reauth_required" || result.status === "missing") && !probeEvidencePredatesReconnect(result, handles, now));
   const reauthRequired = probeNeedsRepair || handles.some((handle) => backendStatus(handle) === "reauth_required");
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== "reauth_required");
   const sessionEvidence = definition.connect_action.kind === "guided_session" ? sessionConnectionEvidence(coverage, freshness) : undefined;
@@ -37076,14 +37076,16 @@ function credentialHealthForDefinition(definition, report) {
     return [];
   return report.results.filter((result) => result.source_ids.includes(definition.source_id) || result.provider === definition.provider);
 }
-function probeEvidencePredatesReconnect(result, handles) {
+function probeEvidencePredatesReconnect(result, handles, now) {
   const checkedAt = Date.parse(result.checked_at);
   if (!Number.isFinite(checkedAt))
     return false;
   const named = result.handle ? handles.filter((handle) => handle.handle === result.handle) : handles;
   return named.some((handle) => {
     const connectedAt = Date.parse(handle.connectedAt);
-    return Number.isFinite(connectedAt) && connectedAt > checkedAt;
+    if (!Number.isFinite(connectedAt) || connectedAt > now.getTime())
+      return false;
+    return connectedAt > checkedAt;
   });
 }
 function backendStatus(handle) {
@@ -72705,7 +72707,9 @@ function html(value, status = 200, extraHeaders) {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      ...extraHeaders
+      ...extraHeaders,
+      "Content-Security-Policy": "frame-ancestors 'none'",
+      "X-Frame-Options": "DENY"
     }
   });
 }

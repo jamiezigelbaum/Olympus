@@ -5709,6 +5709,23 @@ function embeddingLedgerBasePath(url: URL): string | undefined {
   return `/dashboard?token=${encodeURIComponent(token)}`;
 }
 
+/**
+ * The one place this worker emits HTML: the dashboard pages, the dispositions
+ * page, the embedding ledger, and both OAuth landing pages.
+ *
+ * The framing refusal is stated LAST so no caller can drop it by passing its
+ * own header map. `SameSite=Strict` on the control cookie stops a cross-SITE
+ * page from framing an unlocked dashboard with the cookie attached, but
+ * same-site is registrable-domain-wide: another port or subdomain of this host
+ * is same-site, and since the control cookie alone now renders GET /dashboard
+ * (see http.ts) such a page could frame the real, controlled dashboard. It
+ * could not READ that frame — same-origin policy — but it could position and
+ * overlay it, which is the whole of clickjacking. Both headers, because
+ * `frame-ancestors` is the modern one and `X-Frame-Options` is what older
+ * engines obey; the relay's own `_headers` sends the same pair for the same
+ * reason. CSP is otherwise unset on these responses, so `frame-ancestors` can
+ * be a policy of its own rather than an addition to an existing one.
+ */
 function html(value: string, status = 200, extraHeaders?: Record<string, string>): Response {
   return new Response(value, {
     status,
@@ -5716,6 +5733,8 @@ function html(value: string, status = 200, extraHeaders?: Record<string, string>
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       ...extraHeaders,
+      'Content-Security-Policy': "frame-ancestors 'none'",
+      'X-Frame-Options': 'DENY',
     },
   });
 }

@@ -702,6 +702,25 @@ describe('multi-source source dashboard', () => {
       .toBe('reauth_required');
   });
 
+  // The timestamp that silences a repair demand is the one a broken clock (or
+  // a tampered registry) would want to move: dated 2099 it would outrank every
+  // probe this dashboard will ever read.
+  test('a future-dated connectedAt does not silence a probe checked a minute ago', () => {
+    const registry = fixtureHandleRegistry();
+    registry.handles.push(reconnectedDropboxHandle('2099-01-01T00:00:00.000Z'));
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: registry,
+      credentialHealth: dropboxReauthReport('2026-09-04T09:59:00.000Z'),
+      now: new Date('2026-09-04T10:00:00.000Z'),
+    });
+
+    expect(view.sources.find((source) => source.source_id === 'dropbox.files')?.connection.state)
+      .toBe('reauth_required');
+  });
+
   test('reports an unreadable credential cache as degradation rather than a reconnect demand', () => {
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: fixtureStatus(),

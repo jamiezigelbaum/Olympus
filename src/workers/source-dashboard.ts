@@ -2678,7 +2678,7 @@ function connectionStateFromDefinition(
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
   const probeNeedsRepair = probeResults.some((result) =>
     (result.status === 'reauth_required' || result.status === 'missing')
-    && !probeEvidencePredatesReconnect(result, handles));
+    && !probeEvidencePredatesReconnect(result, handles, now));
   const reauthRequired = probeNeedsRepair
     || handles.some((handle) => backendStatus(handle) === 'reauth_required');
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== 'reauth_required');
@@ -3312,10 +3312,21 @@ function credentialHealthForDefinition(
  *
  * Both timestamps must parse. An unparseable one is no evidence of anything,
  * and today's behaviour (the probe counts) is the safe answer there.
+ *
+ * A `connectedAt` in the FUTURE is disregarded rather than trusted. This rule
+ * silences a repair demand, so the timestamp that silences it is the one an
+ * attacker or a broken clock would want to move: a handle dated 2099 would
+ * outrank every probe this dashboard will ever read, permanently. The registry
+ * is owner-owned local state, not hostile input, but a fact that cannot be true
+ * is not evidence, and the same worker already refuses a control-session cookie
+ * dated ahead of its own clock. Clamping to `now` would be the wrong repair —
+ * it would make the impossible timestamp read as "connected this instant",
+ * which is exactly the suppression being refused.
  */
 function probeEvidencePredatesReconnect(
   result: CredentialHealthResult,
   handles: readonly ConnectedCredentialHandle[],
+  now: Date,
 ): boolean {
   const checkedAt = Date.parse(result.checked_at);
   if (!Number.isFinite(checkedAt)) return false;
@@ -3324,7 +3335,8 @@ function probeEvidencePredatesReconnect(
     : handles;
   return named.some((handle) => {
     const connectedAt = Date.parse(handle.connectedAt);
-    return Number.isFinite(connectedAt) && connectedAt > checkedAt;
+    if (!Number.isFinite(connectedAt) || connectedAt > now.getTime()) return false;
+    return connectedAt > checkedAt;
   });
 }
 

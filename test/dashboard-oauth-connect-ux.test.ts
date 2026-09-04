@@ -27,6 +27,7 @@ import { oauthAuthorizeOrigin } from '../src/core/connect.ts';
 import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
+import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -584,6 +585,47 @@ describe('an unauthenticated callback cannot touch an attempt without its state'
       expect(page).toContain('>Back to the dashboard tab</a>');
     }
     expect(completed).toContain('The Olympus dashboard tab you started from is still open.');
+  });
+
+  // SameSite=Strict stops a cross-SITE page from framing an unlocked dashboard
+  // with the control cookie attached, but same-site is registrable-domain-wide:
+  // another port or subdomain of this host is same-site, and the cookie alone
+  // now renders GET /dashboard. Framing is the one thing such a page could
+  // still do with a page it cannot read.
+  test('every dashboard HTML response refuses to be framed', async () => {
+    const origin = 'http://worker.test';
+    const worker = fixtureWorker();
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const dashboardToken = dashboardQueryTokenFromWorkerAuthToken('dashboard-secret')!;
+
+    const mint = await fetch(new Request(`${origin}/dashboard/control/session`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dashboard-secret', Origin: origin },
+    }));
+    expect(mint.status).toBe(200);
+    const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
+
+    const state = await startAttempt(worker, 'dropbox');
+    const done = await followOAuthDone(worker, await worker.fetch(new Request(
+      `${origin}/oauth/callback/dropbox?code=dropbox-code&state=${encodeURIComponent(state)}`,
+    )));
+
+    const pages = [
+      ['query token', await fetch(new Request(`${origin}/dashboard?token=${dashboardToken}`))],
+      ['control cookie only', await fetch(new Request(`${origin}/dashboard`, { headers: { Cookie: cookie } }))],
+      ['oauth done page', done],
+    ] as const;
+
+    for (const [label, response] of pages) {
+      expect(response.status, label).toBe(200);
+      expect(response.headers.get('Content-Type'), label).toContain('text/html');
+      expect(response.headers.get('X-Frame-Options'), label).toBe('DENY');
+      expect(response.headers.get('Content-Security-Policy'), label).toBe("frame-ancestors 'none'");
+    }
+
+    // The done page keeps the header it already had; the framing refusal is
+    // added to it, not instead of it.
+    expect(done.headers.get('Referrer-Policy')).toBe('no-referrer');
   });
 
   test('the expired-attempt page is the same fixed link, with no origin echoed', async () => {
