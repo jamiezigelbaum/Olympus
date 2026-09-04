@@ -36915,15 +36915,15 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   }
   return {
     plain_intro: "To read your X bookmarks, Olympus needs an X app Client ID and Client secret you create once in your X developer account. X bookmark reads now require paid API access, so connect only after you accept X's costs.",
-    agent_prompt: "Help me connect X bookmarks to Olympus. Walk me through creating an app at https://console.x.com with OAuth 2.0 user authentication (read access, the bookmark.read, tweet.read and users.read scopes), adding the redirect URI shown on the Olympus dashboard's X bookmarks card, and finding the Client ID and Client secret so I can paste them into that card and press Connect. Remind me that reading bookmarks needs paid X API access before I start. Do not ask me to edit files, configuration, or code.",
+    agent_prompt: "Help me connect X bookmarks to Olympus. Walk me through creating an app at https://console.x.com, opening the app's Settings (Authentication settings: App permissions Read, Type of App Web App, Automated App or Bot), adding the redirect URI shown on the Olympus dashboard's X bookmarks card under Callback URI / Redirect URL, saving, and finding the OAuth 2.0 Client ID and Client secret under Keys & Tokens so I can paste them into that card and press Connect. Remind me that reading bookmarks needs paid X API access before I start. Do not ask me to edit files, configuration, or code.",
     provider_console_url: "https://console.x.com",
     diy_summary: "Or set it up yourself (about 5 minutes)",
     diy_steps: [
       { text: "Sign in to the X Developer Portal.", link: { label: "Open X developer console", url: "https://console.x.com" } },
       { text: "Create or choose a project and app named Olympus." },
-      { text: "In the app's OAuth 2.0 settings choose a Confidential client, and save the Client secret X shows you." },
-      { text: "Register the exact redirect URI shown on this card." },
-      { text: "Copy the Client ID and Client secret into the fields below." }
+      { text: "Open the app's Settings. Under Type of App choose Web App, Automated App or Bot (a Confidential client); under App permissions, Read is enough." },
+      { text: "Under Callback URI / Redirect URL press Add another, paste the exact redirect URI shown on this card, and press Save Changes." },
+      { text: "Back on Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below. X shows the secret once; Regenerate it if you no longer have it." }
     ],
     secret_shown_once: true,
     fields: [clientIdField, clientSecretField]
@@ -37005,7 +37005,7 @@ function oauthRedirectUriGuidance(source, baseUrl) {
   }
   if (source === "dropbox")
     return "Add this exact URI under OAuth 2 → Redirect URIs in the Dropbox app console.";
-  return "Add this exact URI under User authentication settings → Callback URI in the X developer portal.";
+  return "Add this exact URI under Settings → Callback URI / Redirect URL on the app's page in the X developer portal.";
 }
 function googleOAuthClientType(baseUrl) {
   if (!baseUrl)
@@ -37034,10 +37034,10 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
         label: "Open Google Cloud credentials",
         url: googleConsoleUrl("https://console.cloud.google.com/apis/credentials", googleCloudProjectId)
       },
-      app_requirements: desktop ? `Create or pick an OAuth client ID of type Desktop app, and enable the ${apiName} API for the same project.` : `Create or pick an OAuth client ID of type Web application, and enable the ${apiName} API for the same project. A Desktop app client cannot register an https redirect URI.`,
+      app_requirements: desktop ? `Create or pick an OAuth client ID of type Desktop app, and enable the ${apiName} API for the same project.` : `Press Create credentials and choose OAuth client ID (on the Google Auth Platform Clients page the button is Create client). Set Application type to Web application: a Desktop app client cannot register an https redirect URI and shows no redirect URI section, so make a new Web client rather than reusing one. Separately, enable the ${apiName} API for the same project under APIs & Services → Library.`,
       setting_label: "Authorized redirect URIs",
       redirect_uri: redirectUri,
-      finish: "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste."
+      finish: desktop ? "Copy the Client ID back into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste." : "Add it with + Add URI, press Create, then copy the Client ID from the confirmation dialog into the field below and press Connect. PKCE protects the exchange, so there is no client secret to paste."
     };
   }
   if (source === "dropbox") {
@@ -37053,10 +37053,10 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
   return {
     required: true,
     console: { label: "Open the X developer portal", url: "https://console.x.com" },
-    app_requirements: "Create or pick an app, turn on OAuth 2.0 user authentication with read access and the bookmark.read, tweet.read and users.read scopes, and choose a Confidential client. Reading bookmarks needs paid X API access.",
-    setting_label: "User authentication settings → Callback URI",
+    app_requirements: "Create or pick an app, then press Settings on the app's page. Under App permissions choose Read, and under Type of App choose Web App, Automated App or Bot (a Confidential client). Reading bookmarks needs paid X API access.",
+    setting_label: "Callback URI / Redirect URL",
     redirect_uri: redirectUri,
-    finish: "Copy the Client ID and Client secret back into the fields below and press Connect."
+    finish: "Press Add another, paste it, and press Save Changes. Then press Back to Keys and, under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below and press Connect. X shows the secret only once; press Regenerate if you no longer have it."
   };
 }
 function providerRefusalReason(error, redirectUri, settingLabel) {

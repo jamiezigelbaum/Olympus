@@ -93,7 +93,7 @@ describe('the redirect URI the provider has to accept is a fact the page states'
     const view = buildView({ oauthRedirectBaseUrl: TAILNET });
 
     expect(guidanceOf(view, 'dropbox.files')).toContain('OAuth 2 → Redirect URIs');
-    expect(guidanceOf(view, 'x.bookmarks')).toContain('User authentication settings → Callback URI');
+    expect(guidanceOf(view, 'x.bookmarks')).toContain('Settings → Callback URI / Redirect URL');
   });
 });
 
@@ -241,10 +241,16 @@ describe('the card walks the owner through registering the callback itself', () 
     const sheet = setupSheet('x.bookmarks');
 
     expect(sheet).toContain('href="https://console.x.com/"');
-    expect(sheet).toContain('OAuth 2.0 user authentication');
-    expect(sheet).toContain('bookmark.read, tweet.read and users.read');
+    // Scopes are requested by Olympus at authorization time, not configured in
+    // the console, so the card names the console's own controls instead.
+    expect(sheet).toContain('Under App permissions choose Read');
+    expect(sheet).toContain('OAuth 2.0 Client ID and Client secret');
     expect(sheet).toContain('paid X API access');
-    expect(sheet).toContain('<b>User authentication settings → Callback URI</b>');
+    expect(sheet).toContain('<b>Callback URI / Redirect URL</b>');
+    // The 2026 X console has no "User authentication settings" page: the
+    // callback list lives under the app's Settings button (owner, 2026-09-04).
+    expect(sheet).toContain('press Settings on the app&#39;s page');
+    expect(sheet).toContain('Web App, Automated App or Bot');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/x`);
   });
 
@@ -252,9 +258,14 @@ describe('the card walks the owner through registering the callback itself', () 
     const sheet = setupSheet('gmail.email');
 
     expect(sheet).toContain('href="https://console.cloud.google.com/apis/credentials"');
-    expect(sheet).toContain('type Web application');
+    expect(sheet).toContain('Application type to Web application');
+    // The owner's existing Desktop client showed no redirect-URI section at
+    // all (2026-09-04): the steps must say why a Desktop client cannot be reused.
+    expect(sheet).toContain('a Desktop app client cannot register an https redirect URI and shows no redirect URI section');
     expect(sheet).toContain('enable the Gmail API');
     expect(sheet).toContain('<b>Authorized redirect URIs</b>');
+    expect(sheet).toContain('Add it with + Add URI');
+    expect(sheet).toContain('copy the Client ID from the confirmation dialog');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/gmail`);
     expect(setupSheet('google_drive.docs')).toContain('enable the Google Drive API');
   });
@@ -286,7 +297,7 @@ describe('the card walks the owner through registering the callback itself', () 
 
     expect(cardOf(refused, 'x.bookmarks').connection.provider_refusal?.reason).toBe(
       `Provider refused the callback (redirect_uri_mismatch): register ${TAILNET}/oauth/callback/x`
-      + ' at User authentication settings → Callback URI, then Connect again',
+      + ' at Callback URI / Redirect URL, then Connect again',
     );
   });
 });
