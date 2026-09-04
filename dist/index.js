@@ -12420,7 +12420,14 @@ var INGESTION_STUCK_WARNING_HOURS = 24;
 var INGESTION_STUCK_ERROR_HOURS = 72;
 var INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 var CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
-async function runDoctor(deps) {
+async function runDoctor(input) {
+  const deps = input.env === undefined ? input : {
+    ...input,
+    env: environmentWithWorkerSetupEnv({
+      env: input.env,
+      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+    })
+  };
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),

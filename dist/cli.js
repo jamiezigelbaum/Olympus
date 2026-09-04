@@ -39697,7 +39697,14 @@ var init_source_ingestion_ledger = __esm(() => {
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync18, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname22, join as join30 } from "node:path";
-async function runDoctor(deps) {
+async function runDoctor(input) {
+  const deps = input.env === undefined ? input : {
+    ...input,
+    env: environmentWithWorkerSetupEnv({
+      env: input.env,
+      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+    })
+  };
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
