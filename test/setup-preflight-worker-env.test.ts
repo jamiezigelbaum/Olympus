@@ -52,7 +52,23 @@ describe('preflight over the managed worker environment', () => {
     });
   });
 
-  test('an explicitly set environment variable still outranks the stored one', async () => {
+  test('a shell key cannot satisfy a missing managed-worker credential', async () => {
+    await withWorkerEnv(async (envPath) => {
+      const config = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config;
+      const unmet = await setupPreflight({
+        config,
+        env: {
+          GEMINI_API_KEY: 'shell-key',
+          OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'shell-prefixed-key',
+        },
+        secretStore: EMPTY_STORE,
+        workerEnvPath: envPath,
+      });
+      expect(unmet.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
+    });
+  });
+
+  test('the installed credential is present even when the caller also has a shell key', async () => {
     await withWorkerEnv(async (envPath) => {
       writeManagedWorkerEnvSecret({
         key: 'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
@@ -61,7 +77,7 @@ describe('preflight over the managed worker environment', () => {
       });
       const config = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config;
 
-      // Both satisfy it; the point is that neither source is ignored.
+      // The persisted value proves availability to the supervised worker.
       const both = await setupPreflight({
         config,
         env: { OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'process-gemini-key' },
@@ -81,6 +97,45 @@ describe('preflight over the managed worker environment', () => {
       secretStore: EMPTY_STORE,
     });
     expect(unmet.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
+
+    // A standalone preflight still supports a deliberately scoped runtime env.
+    const standalone = await setupPreflight({
+      config: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config,
+      env: { GEMINI_API_KEY: 'standalone-runtime-key' },
+      secretStore: EMPTY_STORE,
+    });
+    expect(standalone.map((item) => item.id)).not.toContain('env:GEMINI_API_KEY');
+  });
+
+  test('doctor reports a shell-only key missing from a selected worker install', async () => {
+    await withWorkerEnv(async (envPath) => {
+      const config = defaultConfig();
+      config.email.enabled = false;
+      config.sourceIndex.enabled = false;
+      config.sovereignty = { policy: loadSovereigntyPreset('no-sensitive') };
+      const result = await runDoctor({
+        config,
+        delphi: healthyDelphi(),
+        env: { GEMINI_API_KEY: 'shell-key' },
+        secretStore: EMPTY_STORE,
+        workerEnvPath: envPath,
+      });
+      expect(result.checks.find((check) => check.name === 'sovereignty_prerequisites')?.ok).toBe(false);
+    });
+  });
+
+  test('an unmanaged runtime with a HOME still accepts its own environment credentials', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-preflight-unmanaged-'));
+    try {
+      const unmet = await setupPreflight({
+        config: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')).config,
+        env: { HOME: home, GEMINI_API_KEY: 'runtime-key' },
+        secretStore: EMPTY_STORE,
+      });
+      expect(unmet).toEqual([]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('a lane gate set in worker.env is the gate doctor reports on', async () => {

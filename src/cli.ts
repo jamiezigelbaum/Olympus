@@ -178,6 +178,7 @@ async function main(): Promise<void> {
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
       console.log(JSON.stringify(result, null, 2));
+      if (!result.ok) process.exitCode = 1;
       if (result.unmet_prerequisites.length > 0) {
         console.error('Unmet preset prerequisites:');
         for (const item of result.unmet_prerequisites) {

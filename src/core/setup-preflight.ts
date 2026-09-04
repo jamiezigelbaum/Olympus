@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs';
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from './secret-store.ts';
-import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
+import { environmentWithWorkerSetupEnv, readWorkerSetupEnv, workerSetupEnvPath } from './worker-auth.ts';
 import type { SovereigntyConfig, SovereigntyModelProfile } from './sovereignty.ts';
 
 export type SetupPrerequisiteKind = 'env_secret' | 'store_secret' | 'local_model_server';
@@ -32,13 +33,20 @@ export async function setupPreflight(options: SetupPreflightOptions): Promise<Se
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
   });
+  // A shell export does not reach launchd/systemd. When checking a managed
+  // install, only its persisted environment proves an env-secret prerequisite.
+  // Keep scoped, standalone preflights usable when no install was selected.
+  const inputEnv = options.env ?? process.env;
+  const managedInstall = options.workerEnvPath || options.homeDir
+    || (inputEnv.HOME?.trim() && existsSync(workerSetupEnvPath(options)));
+  const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet: SetupPrerequisite[] = [];
   const seen = new Set<string>();
 
   for (const [profileId, profile] of Object.entries(options.config.modelProfiles)) {
     if (profile.secretRef) {
-      const prerequisite = await secretRefPrerequisite(profileId, profile, env, secretStore);
+      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, secretStore);
       if (prerequisite && !seen.has(prerequisite.id)) {
         seen.add(prerequisite.id);
         unmet.push(prerequisite);

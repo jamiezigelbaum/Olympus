@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
@@ -801,10 +801,22 @@ describe('runDoctor', () => {
       expect(modelPool.detail).not.toContain('no sovereignty posture configured yet');
       expect(modelPool.detail).toContain('no local model lane');
 
-      const withKey = await runDoctor(doctorDeps({
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'), '', { mode: 0o600 });
+      const shellOnly = await runDoctor(doctorDeps({
         config: defaultConfig(),
         delphi: healthyDelphi(),
         env: { HOME: home, GEMINI_API_KEY: 'gemini-test-key' },
+        secretStore: memorySecretStore({}),
+      }));
+      expect(checkByName(shellOnly.checks, 'sovereignty_prerequisites').ok).toBe(false);
+
+      writeFileSync(join(home, '.config', 'olympus', 'worker.env'),
+        'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY=stored-test-key\n', { mode: 0o600 });
+      const withKey = await runDoctor(doctorDeps({
+        config: defaultConfig(),
+        delphi: healthyDelphi(),
+        env: { HOME: home },
         secretStore: memorySecretStore({}),
       }));
       expect(checkByName(withKey.checks, 'sovereignty_prerequisites').ok).toBe(true);

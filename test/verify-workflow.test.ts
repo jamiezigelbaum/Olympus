@@ -67,4 +67,19 @@ describe('verification contract', () => {
     expect(workflow).toContain('go test -count=1 ./...');
     expect(workflow).not.toMatch(/uses: [^\n]+@(v|main\b)/);
   });
+
+  test('the required CI lanes include the separately configured publisher exchange package', () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+    const workflow = readFileSync(join(ROOT, '.github/workflows/verify.yml'), 'utf8');
+    const staticSection = workflow.slice(workflow.indexOf('\n  static:\n'), workflow.indexOf('\n  fast:\n'));
+    const fastSection = workflow.slice(workflow.indexOf('\n  fast:\n'), workflow.indexOf('\n  deploy:\n'));
+    expect(staticSection).toContain('run: bun run typecheck');
+    expect(pkg.scripts.typecheck).toBe('tsc --noEmit && bun run typecheck:exchange');
+    expect(pkg.scripts['typecheck:exchange']).toBe('tsc --noEmit -p exchange/tsconfig.json');
+    expect(fastSection).toContain('run: bun run test:fast');
+    expect(pkg.scripts['test:fast']).toBe('bun run build && bun scripts/test-lane.ts fast && bun run test:exchange');
+    // Directory discovery includes new exchange tests, including nested tests.
+    expect(pkg.scripts['test:exchange']).toBe('bun test ./exchange/test');
+    expect(existsSync(join(ROOT, 'exchange/test/google-exchange.test.ts'))).toBe(true);
+  });
 });

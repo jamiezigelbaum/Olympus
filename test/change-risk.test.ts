@@ -104,4 +104,18 @@ describe('change risk', () => {
     const stale = { ...config, schemaVersion: 1 } as unknown as ChangeRiskConfig;
     expect(() => classifyChange(['AGENTS.md'], stale)).toThrow(/Unsupported change-risk configuration/);
   });
+
+  test('publisher token exchange code, configuration, and its tests require critical review', () => {
+    const surfaces = [
+      'exchange/src/index.ts',
+      'exchange/src/google.ts',
+      'exchange/src/redirect-allowlist.ts',
+      'exchange/src/new-handler.ts',
+      'exchange/wrangler.toml',
+      'exchange/package.json',
+      'exchange/tsconfig.json',
+      'exchange/test/google-exchange.test.ts',
+    ];
+    expect(classifyChange(surfaces, config).criticalFiles).toEqual([...surfaces].sort());
+  });
 });

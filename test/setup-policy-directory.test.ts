@@ -22,6 +22,7 @@ describe('olympus setup private policy directory', () => {
         workingDirectory: process.cwd(),
         tokenGenerator: () => 'policy-dir-token',
         dependencyCheck: healthyDependencyCheck,
+        exec: () => ({ status: 0, stdout: 'active\n', stderr: '' }),
       });
       // The install guide has an agent write ~/.olympus/sensitivity-map.json
       // next to sovereignty.json, so the directory must exist afterwards, and
@@ -54,4 +55,3 @@ function healthyDependencyCheck() {
     pythonModuleExists: () => false,
   });
 }
-

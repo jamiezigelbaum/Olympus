@@ -49,6 +49,10 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    directly: `static checks`, `fast tests`, all three `deploy tests` shards,
    `Go bridge tests`, and `critical-review`. A local result is useful evidence,
    never a substitute for those exact-head checks.
+   The fast lane also runs `test:exchange` for the publisher Google exchange
+   service; `typecheck` checks both the plugin and the exchange service's
+   separate WebWorker configuration. The `exchange/` subtree is critical,
+   including its deployment configuration and tests.
 6. **Review in proportion to risk.** Standard changes may auto-merge after
    required checks. Critical changes require a recorded independent review.
    Live mutations additionally follow the OpenClaw change protocol and remain

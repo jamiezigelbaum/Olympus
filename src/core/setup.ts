@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { installManagedWorkerFiles, type ManagedWorkerFilesResult } from './lifecycle.ts';
 import { OperationError } from './operation-error.ts';
 import {
@@ -20,6 +21,7 @@ import {
 import { setupPreflight, type SetupPrerequisite } from './setup-preflight.ts';
 import type { SecretStore } from './secret-store.ts';
 import type { ConnectSource } from './connect.ts';
+import { workerSetupEnvPath } from './worker-auth.ts';
 
 export type SetupCloudLane = 'subscription' | 'api-key';
 export type SetupSecureTierDecision =
@@ -65,7 +67,7 @@ export interface SetupWizardOptions {
 }
 
 export interface SetupWizardResult {
-  ok: true;
+  ok: boolean;
   mode: 'non_interactive';
   dependencyCheck: SetupDependencyCheck;
   venicePitch: {
@@ -90,6 +92,8 @@ export interface SetupWizardResult {
      * has something true to check; `not_started` is the dry-run answer only.
      */
     state: WorkerServiceState | 'not_started';
+    /** An active old process does not prove a failed policy restart applied. */
+    activation: ManagedWorkerFilesResult['activation'];
     /** The next step this state calls for, in the operator's words. */
     next: string;
     /** Why the start did not take, when it did not. Absent on the healthy path. */
@@ -206,8 +210,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     ...(options.secretStore ? { secretStore: options.secretStore } : {}),
     // This install's own worker.env, not $HOME's: a wizard run against a
     // different home must preflight against that home's stored keys.
-    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
-    ...(options.envPath ? { workerEnvPath: options.envPath } : {}),
+    workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir() }),
   });
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
@@ -251,7 +254,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   }
 
   return {
-    ok: true,
+    ok: managedWorker.activation !== 'failed',
     mode: 'non_interactive',
     dependencyCheck,
     venicePitch: {
@@ -271,11 +274,14 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       authTokenRef: 'worker.env:OLYMPUS_WORKER_AUTH_TOKEN',
       install: managedWorker.install,
       state: workerState,
-      next: workerState === 'active'
-        ? 'The managed worker is running; open the dashboard with olympus dashboard.'
-        : workerState === 'not_started'
-          ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
-          : 'Run olympus worker install, then olympus worker status.',
+      activation: managedWorker.activation,
+      next: managedWorker.activation === 'failed' && workerState === 'active'
+        ? 'The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status.'
+        : workerState === 'active'
+          ? 'The managed worker is running; open the dashboard with olympus dashboard.'
+          : workerState === 'not_started'
+            ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
+            : 'Run olympus worker install, then olympus worker status.',
       ...(managedWorker.activation_detail ? { activation_detail: managedWorker.activation_detail } : {}),
     },
     connections,

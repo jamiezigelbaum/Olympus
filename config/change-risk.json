@@ -39,9 +39,11 @@
     "test/plugin-bundle-no-top-level-await.test.ts",
     "test/plugin-host-loader-compatibility.test.ts",
     "test/helpers/test-lanes.ts",
-    "test/verify-workflow.test.ts"
+    "test/verify-workflow.test.ts",
+    "test/install-guide-consistency.test.ts"
   ],
   "criticalPrefixes": [
+    "exchange/",
     ".changes/",
     ".github/",
     ".githooks/",

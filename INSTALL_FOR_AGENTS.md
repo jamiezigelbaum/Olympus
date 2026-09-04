@@ -189,12 +189,22 @@ prior Olympus setup — including an already-installed olympus plugin the
 command below would update — and you have not already cleared the residue
 gate in this flow, STOP and run Rule zero before the commands below.
 
-**Pilot install — this is the path you use.** Olympus installs from its GitHub
-repository. **ASK THE OPERATOR** for the repository (`<owner>/<repo>`) if you
-were not given it; do not guess one.
+**Pilot install — this is the path you use.** Install the exact qualified
+`olympus-0.4.0.tgz` supplied by the maintainer, with its SHA-256 and byte count.
+**ASK THE OPERATOR** for the candidate and receipt if either is missing; do
+not build a replacement or substitute a Git checkout. Compare both values
+before installing and stop on any mismatch:
 
 ```bash
-openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
+shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
+wc -c < /absolute/path/to/olympus-0.4.0.tgz
+```
+
+Record the matching artifact identity in the install report. Read this guide
+from that same archive; npm archives place it at `package/INSTALL_FOR_AGENTS.md`.
+
+```bash
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there means only "overwrite an existing plugin" — re-run with no flags
 openclaw plugins enable olympus
@@ -208,7 +218,7 @@ Two host flags, two different consents — check `openclaw --version`
   capability-consent prompt only to a TTY or to this flag, so without it
   the command exits 1 with `requires capability consent`.
 - **`--force`** is mandatory on `2026.8.1+` (confirmed on `2026.9.1`) for
-  ANY non-ClawHub source, which a `git:` install is. Without it the host
+  ANY non-ClawHub source, which a `npm-pack:` install is. Without it the host
   refuses non-interactively with `Install cancelled; rerun with --force
   after reviewing the source.` On these versions `--force` carries two
   meanings at once: "yes, I have reviewed this non-ClawHub source" and
@@ -225,7 +235,7 @@ version, so a clean-machine install needs neither flag, and passing
 **What `--force` does and does not authorize here.** On `2026.8.1+`, on a
 machine with no olympus plugin installed, the flag is doing only the
 source-trust half:
-it confirms you reviewed the git source you were told to install. That is
+it confirms you reviewed the supplied package you were told to install. That is
 not the "`--force` reinstall" MUST NOT #5 gates, and you do not need a
 separate operator consent for it — but say what you are doing in your
 install report ("the host requires `--force` to accept a non-ClawHub
@@ -236,29 +246,16 @@ is live: the same command would overwrite that plugin. Then MUST NOT #5
 binds in full — stop, surface the existing install, and get the
 operator's explicit consent to overwrite before you run anything.
 
-The clone runs with terminal prompts disabled. If the repository is private,
-the operator's git credentials must already work non-interactively; a
-`could not read Username for 'https://github.com'` failure is a credentials
-problem on their machine, not an Olympus problem.
+The `npm-pack:` prefix creates OpenClaw's per-plugin npm project and verifies
+the installed dependency shape. A raw archive/path install or Git checkout
+does not qualify these package bytes. Pilot testers and internal release
+qualification use the same candidate; a product fix needs a newly qualified
+candidate and receipt before an affected tester retries.
 
-**The other two install sources are not the pilot path. Do not substitute
-them.**
-
-- `clawhub:olympus` — the one-line public install, **available after the
-  pilot**. Until Olympus is published, `openclaw plugins search olympus`
-  returns nothing and `openclaw plugins install clawhub:olympus` fails with
-  `Package not found on ClawHub.`
-- `npm-pack:/path/to/olympus-0.4.0.tgz` — the maintainer's release-proof
-  mechanism, run during release qualification, not during a pilot install. It
-  creates OpenClaw's per-plugin npm project and verifies the installed
-  dependency shape, which a raw archive/path install does not. If a maintainer
-  directs you to it, use `--force --accept-capabilities`, and note that npm
-  packages use the standard `package/` root when reading files out of the
-  archive:
-
-```bash
-mkdir olympus-package && tar -xzf /path/to/olympus-0.4.0.tgz -C olympus-package
-```
+`clawhub:olympus` becomes the one-line public install **after the pilot**,
+using the byte-identical qualified package. Until publication,
+`openclaw plugins install clawhub:olympus` fails with `Package not found on
+ClawHub.` Do not substitute it during the pilot.
 
 Success looks like `Installed plugin: olympus`. **Do NOT restart the
 gateway YOURSELF now, and do not restart it to "verify" the plugin
@@ -286,8 +283,8 @@ through the standalone `olympus` CLI, which does not depend on the gateway
 having loaded the plugin.
 
 **CLI exposure (canonical — do not improvise):** the standalone CLI is
-`bin/olympus` inside the installed plugin directory. The git clone lands
-under a URL-hash directory name, so never hardcode the path. Resolve it
+`bin/olympus` inside the installed plugin directory. Managed storage uses
+an internal directory name, so never hardcode the path. Resolve it
 from `openclaw plugins inspect olympus --json` → `plugin.rootDir`, which
 is the one command that reports the directory in full:
 
@@ -852,6 +849,12 @@ start did not take. On the healthy path `worker.state` is `active` and
 `worker.next` reads `The managed worker is running; open the dashboard with
 olympus dashboard.` Read those three fields before you run anything here —
 they usually make this step a confirmation.
+
+Also check setup's `ok` and `worker.activation`: a failed start or policy
+restart exits nonzero with `ok: false` and `activation: failed`. An old worker
+may still be `active` after a failed restart. Do not call the new privacy
+posture applied in that case; report the failure and follow `worker.next`
+within the existing repair authorization.
 
 That is why the background-items consent gate lives before setup and not
 here. Do not run `olympus worker install` as a FIRST install: by now there

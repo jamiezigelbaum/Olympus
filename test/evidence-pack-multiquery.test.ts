@@ -15,6 +15,7 @@ import type {
   SourceIndexSearchContext,
 } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
 
 const CORPUS = 'internal.dropbox.files';
 const CHAT_CORPUS = 'internal.chat.messages';
@@ -106,6 +107,75 @@ function contentProviders(): LocalContentProviderMap {
 }
 
 describe('buildEvidencePackDetailed multi-query expansion', () => {
+  const multiCorpusAnswer = async (
+    queriesByCorpus: Record<string, Record<string, string[]>>,
+    maxResults: number,
+  ) => {
+    const corpusIds = Object.keys(queriesByCorpus);
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: {
+        async analyze(pack) {
+          const claims = pack.candidates.map((candidate) => ({
+            provenance: candidate.provenance,
+            claim: `Result ${candidate.provenance.sourceItem.providerItemId} is available.`,
+          }));
+          return { answer: claims.map((citation) => citation.claim).join(' '), citations: claims, unanswered: [] };
+        },
+      },
+      queryPlanner: async () => ['expanded-one', 'expanded-two'],
+      lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry(corpusIds.map((corpusId) =>
+          defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' }))),
+        adapters: Object.fromEntries(Object.entries(queriesByCorpus).map(([corpusId, queries]) =>
+          [corpusId, adapterByQuery(queries, [])])),
+        contentProviders: Object.fromEntries(corpusIds.map((corpusId) => [corpusId, {
+          async fetchLocalContent(request) {
+            return internalBlock(`Result ${request.provenance.sourceItem.providerItemId} is available.`);
+          },
+        } satisfies LocalContentProvider])),
+      }),
+    });
+    return handler.answer({ question: QUESTION, max_results: maxResults });
+  };
+
+  test('multi-query fusion keeps each matching corpus in the released answer before taking second hits', async () => {
+    const result = await multiCorpusAnswer({
+      [CORPUS]: {
+        [QUESTION]: ['doc-a'],
+        'expanded-one': ['doc-a', 'doc-b', 'doc-c'],
+        'expanded-two': ['doc-a', 'doc-b', 'doc-c'],
+      },
+      [CHAT_CORPUS]: { [QUESTION]: ['chat-a'] },
+    }, 3);
+
+    expect(result.evidence).toHaveLength(3);
+    expect([...new Set(result.evidence.map((item) => item.corpus_id))].sort())
+      .toEqual([CHAT_CORPUS, CORPUS].sort());
+    expect(result.answer).toContain('Result chat-a is available.');
+    expect(result.audit.retrieval_degradations).toBeUndefined();
+  });
+
+  test('a final fusion budget smaller than the corpus count reports the loss in the released audit', async () => {
+    // Each individual query fits within the budget, so only the final fusion
+    // can account for losing the one corpus found by the literal query.
+    const result = await multiCorpusAnswer({
+      [CORPUS]: { [QUESTION]: ['doc-a'] },
+      [CHAT_CORPUS]: { 'expanded-one': ['chat-a'], 'expanded-two': ['chat-a'] },
+      [NO_ADAPTER_CORPUS]: { 'expanded-one': ['other-a'], 'expanded-two': ['other-a'] },
+    }, 2);
+
+    expect(result.evidence).toHaveLength(2);
+    expect(result.audit.searched_corpora).toEqual([CORPUS, CHAT_CORPUS, NO_ADAPTER_CORPUS]);
+    expect(result.audit.skipped_corpora).toEqual([]);
+    expect(result.audit.retrieval_degradations).toEqual([{
+      lane_name: CORPUS,
+      lane_type: 'keyword',
+      reason: 'lane_budget_cut',
+      occurrences: 1,
+    }]);
+    expect(result.answer).toBe('Result chat-a is available. Result other-a is available.');
+  });
+
   test('fuses candidates found by different planned queries and dedupes shared hits', async () => {
     const calls: string[] = [];
     const detail = await buildEvidencePackDetailed({

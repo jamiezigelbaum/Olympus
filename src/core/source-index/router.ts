@@ -13,6 +13,7 @@ import type {
   SourceIndexCorpusSelection,
 } from './corpus.ts';
 import {
+  applyPerCorpusResultBudget,
   assessSourceIndexRetrievalState,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
@@ -323,7 +324,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
   // one ordering available here that is neither adapter-scale-derived nor
   // spelling-derived, so it is what the tie-break falls back on.
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
-  const fused = applyPerCorpusResultBudget(
+  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(
     fuseRankedCandidateLanes({
       lanes,
       getId: routedHitCandidateId,
@@ -348,30 +349,12 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     request.maxResults,
   );
 
-  // A corpus that searched successfully, returned hits, and still put nothing
-  // in the response is a real loss with nowhere else to show up: it is in
-  // searchedCorpora and it is correctly absent from skippedCorpora, which
-  // records scoping decisions rather than budget outcomes. A caller that asked
-  // for zero results lost nothing to a budget, so that case is not a loss.
-  if (request.maxResults > 0) {
-    for (const lane of lanes) {
-      if (lane.items.length === 0) continue;
-      if (fused.some((hit) => hit.corpusId === lane.name)) continue;
-      degradations.push({
-        laneName: lane.name,
-        laneType: 'keyword',
-        reason: 'lane_budget_cut',
-        occurrences: 1,
-      });
-    }
-  }
-
   const result: SourceIndexRoutedSearchResponse = {
     hits: fused,
     searchedCorpora,
     skippedCorpora,
     laneAudits,
-    degradations: mergeRetrievalDegradations(degradations),
+    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
@@ -425,46 +408,6 @@ function bestLaneRank(candidate: FusedRankedCandidate<SourceIndexRoutedSearchHit
 
 function laneIndex(laneOrder: ReadonlyMap<string, number>, corpusId: string): number {
   return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
-}
-
-/**
- * Spend the caller's result budget across corpora rather than down the fused
- * list, keeping the fused order of whatever survives.
- *
- * Each corpus is seated once, best candidate first, before any corpus is seated
- * twice. When the budget is smaller than the number of corpora that returned
- * hits, the corpora that do get seated are the ones whose best candidate fused
- * highest — never the ones whose names sort first. Corpora that get no seat at
- * all are reported by the caller as a `lane_budget_cut` degradation.
- */
-function applyPerCorpusResultBudget(
-  ranked: readonly FusedRankedCandidate<SourceIndexRoutedSearchHit>[],
-  budget: number,
-): SourceIndexRoutedSearchHit[] {
-  if (budget <= 0) return [];
-  if (ranked.length <= budget) return ranked.map((candidate) => candidate.item);
-
-  const byCorpus = new Map<string, FusedRankedCandidate<SourceIndexRoutedSearchHit>[]>();
-  for (const candidate of ranked) {
-    const bucket = byCorpus.get(candidate.item.corpusId);
-    if (bucket) bucket.push(candidate);
-    else byCorpus.set(candidate.item.corpusId, [candidate]);
-  }
-
-  const seated = new Set<SourceIndexCandidateId>();
-  for (let round = 0; seated.size < budget; round += 1) {
-    let seatedThisRound = false;
-    for (const bucket of byCorpus.values()) {
-      const candidate = bucket[round];
-      if (!candidate) continue;
-      seated.add(candidate.id);
-      seatedThisRound = true;
-      if (seated.size >= budget) break;
-    }
-    if (!seatedThisRound) break;
-  }
-
-  return ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item);
 }
 
 /**

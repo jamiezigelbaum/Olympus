@@ -15,6 +15,7 @@ import {
   type WorkerServiceExec,
 } from '../src/core/worker-service.ts';
 import { createSourceSchedulerFromConfig } from '../src/workers/source-scheduler.ts';
+import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 
 describe('fresh install worker scheduler', () => {
   test('setup installs a worker whose environment loads, with an enabled scheduler and no sources', async () => {
@@ -29,6 +30,7 @@ describe('fresh install worker scheduler', () => {
         workingDirectory: process.cwd(),
         tokenGenerator: () => 'fresh-install-token',
         dependencyCheck: healthyDependencyCheck,
+        exec: () => ({ status: 0, stdout: 'active\n', stderr: '' }),
       });
       expect(result.ok).toBe(true);
 
@@ -49,7 +51,8 @@ describe('fresh install worker scheduler', () => {
 
       // With nothing connected the worker constructs no lanes; the scheduler
       // must still start, and must stay ready to adopt the first source.
-      const scheduler = createSourceSchedulerFromConfig({ config, sources: [] });
+      const stateStore = new LocalSourceSchedulerStateStore(':memory:');
+      const scheduler = createSourceSchedulerFromConfig({ config, sources: [], stateStore });
       scheduler.start();
       try {
         const status = scheduler.status();
@@ -59,6 +62,7 @@ describe('fresh install worker scheduler', () => {
         expect(status.missing_selected_source_ids).toEqual([]);
       } finally {
         scheduler.stop();
+        stateStore.close();
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
