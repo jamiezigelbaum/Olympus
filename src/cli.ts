@@ -1452,6 +1452,7 @@ async function runWorkerForeground(): Promise<void> {
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const config = loadConfig();
   const baseUrl = config.email.baseUrl;
+  const workerRoot = baseUrl.replace(/\/v1\/?$/, '');
   const authToken = workerAuthTokenFromConfig(config);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
@@ -1474,7 +1475,11 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     }
     if (authToken) {
       try {
-        output.source_dashboard = await fetchJson(`${baseUrl}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        // /dashboard.json is served at the worker ROOT, beside /dashboard --
+        // not under the /v1 API base. Probing `${baseUrl}/dashboard.json`
+        // asked for /v1/dashboard.json and reported the resulting 404 as a
+        // broken dashboard on every healthy install.
+        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
       } catch (error) {
         output.source_dashboard = { reachable: false, error: cliErrorDetail(error) };
       }
