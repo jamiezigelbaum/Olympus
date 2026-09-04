@@ -58,6 +58,12 @@ export interface DoctorDeps {
   oauthStateDir?: string;
   oauthPidAlive?: (pid: number) => boolean;
   ingestionHealthStatePath?: string;
+  /**
+   * The managed worker environment whose stored credentials count as present.
+   * Defaults to the one `env`'s HOME points at; named explicitly so a test
+   * never reads the developer's own install.
+   */
+  workerEnvPath?: string;
 }
 
 export interface DoctorResult {
@@ -329,6 +335,7 @@ async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorChe
     config: engine.config,
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.secretStore ? { secretStore: deps.secretStore } : {}),
+    ...(deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}),
   })).filter((item) => item.kind !== 'local_model_server');
   if (unmet.length === 0) {
     return {
