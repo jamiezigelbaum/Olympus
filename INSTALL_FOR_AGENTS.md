@@ -37,7 +37,11 @@ ls -la ~/.local/share/olympus ~/.local/state/olympus ~/.cache/olympus \
        ~/.local/share/openclaw/olympus 2>/dev/null
 ls -la ~/Library/Logs/Olympus 2>/dev/null   # macOS worker logs
 # Linux worker logs live under ~/.local/state/olympus/worker (listed above)
-openclaw plugins list      # olympus already installed?
+openclaw plugins list | grep -i olympus   # olympus already installed?
+# The bare list is a ~200-line table on a populated machine and buries the
+# answer. If you prefer a yes/no, `openclaw plugins inspect olympus --json`
+# fails with a not-found error when nothing is installed — that error IS the
+# clean-machine answer, not a problem to debug.
 ls ~/Library/LaunchAgents 2>/dev/null | grep -i olympus   # macOS
 # Linux: systemctl --user list-unit-files | grep -i olympus
 ```
@@ -257,15 +261,29 @@ mkdir olympus-package && tar -xzf /path/to/olympus-0.4.0.tgz -C olympus-package
 ```
 
 Success looks like `Installed plugin: olympus`. **Do NOT restart the
-gateway now, and do not restart it to "verify" the plugin loaded.** This
-whole install needs exactly ONE gateway restart, and it comes at the end
-(Step 6). Everything between here and there — setup, keys, the worker,
-connecting sources — runs through the standalone `olympus` CLI, which does
-not depend on the gateway having loaded the plugin. The agent-facing tools
-(`source_answer` etc.) are the only thing that needs the restart, so it is
-deferred until all config is in place. Restarting early just doubles the
-disruption (and, if you are running inside this gateway, strands you — see
-Step 6).
+gateway YOURSELF now, and do not restart it to "verify" the plugin
+loaded.** You still owe exactly one DELIBERATE restart and it comes at the
+end (Step 6).
+
+**Be honest about what the install itself already did.** On OpenClaw
+`2026.9.1` installing a plugin can make the gateway reload its plugin set
+on its own, and its boot line can list `olympus` among the loaded plugins
+long before Step 6. So do not tell the operator Olympus "stays dormant
+until one restart at the very end" — it is not true on this version, and
+they can read the log. What IS true, and is the part that matters to them:
+Olympus is registered but has no posture, no credentials and no sources
+yet, so it reads nothing and sends nothing. It stays inert until the
+operator connects a source in Step 5.
+
+Step 6's restart is still required, and not as ceremony: it is what makes
+the gateway load the plugin against the FINAL config — the posture, worker
+and credentials setup writes — so the agent-facing tools (`source_answer`
+etc.) come up against the configuration the operator actually approved. An
+early restart of your own just doubles the disruption (and, if you are
+running inside this gateway, strands you — see Step 6). Everything between
+here and there — setup, keys, the worker, connecting sources — runs
+through the standalone `olympus` CLI, which does not depend on the gateway
+having loaded the plugin.
 
 **CLI exposure (canonical — do not improvise):** the standalone CLI is
 `bin/olympus` inside the installed plugin directory. The git clone lands
@@ -314,11 +332,14 @@ hands the operator an obvious next move. End the install report like this
 (adapt the words, keep the shape — short proof, then an invitation that
 opens Step 2):
 
-> Olympus is installed. Quick proof: the plugin loads, the `olympus` CLI
-> runs (reachable at its plugin path — I haven't touched your PATH or
-> shell setup), and I haven't restarted anything — Olympus stays dormant
-> until one single gateway restart at the very end of setup, and I'll warn
-> you before that happens.
+> Olympus is installed. Quick proof: the plugin loads, and the `olympus`
+> CLI runs (reachable at its plugin path — I haven't touched your PATH or
+> shell setup). I haven't restarted anything myself; OpenClaw may have
+> reloaded on its own to pick the plugin up, so you might already see
+> olympus in its log. That only registers it — it has no posture, no keys
+> and no sources yet, so it isn't reading anything of yours and won't
+> until we connect a source together. There's one deliberate gateway
+> restart at the end of setup, and I'll warn you before it happens.
 >
 > Next comes the part that actually matters: before Olympus touches any of
 > your data, you and I make two decisions together — what counts as
@@ -439,6 +460,24 @@ default umask would leave it world-readable.
 ```bash
 mkdir -p ~/.olympus && chmod 700 ~/.olympus
 ```
+
+That `chmod` covers the DIRECTORY. The map file inside it is a second
+thing, and it matters: nothing in Olympus WRITES this file — you do — so
+it lands at your umask, which is 0644 on a clean macOS install. A 0700
+directory hides it from other users but not from anything running as the
+operator, and the file is a list of what they consider sensitive and what
+it looks like. Set the mode yourself right after writing it:
+
+```bash
+chmod 600 ~/.olympus/sensitivity-map.json
+```
+
+`olympus sensitivity validate` also enforces this: it is the one command
+that opens the map by name, so it leaves the file 0600 and reports both
+`permissions` (a 4-digit octal string) and `permissionsTightened: true`
+when it had to change anything. It refuses to chmod through a symlink or
+a non-regular file. Doing it yourself first means `permissionsTightened`
+never appears — which is the result you want, not a step you can skip.
 
 `olympus setup` creates the same directory at mode 0700, but it runs after
 this step. (If you skip ahead and `olympus sensitivity validate` cannot
@@ -724,13 +763,74 @@ the signal: a red walk exits 1 and writes a summary to **stderr** in this
 shape —
 
 ```
-olympus doctor: 7 of 9 checks passed, 2 failed.
-Failed: email_worker, source_index_status
+olympus doctor: N of M checks passed, K failed.
+Failed: email_worker, worker_credential_lanes, source_index_status
 Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint.
 ```
 
 — all three lines, every time, while the full JSON stays on stdout
-unchanged. Branch on the exit status; exit 0 means every check is green.
+unchanged. Branch on the exit status, never on the counts; exit 0 means
+every check is green. `M` is doctor's whole check list — 15 on a current
+build, on a fresh install as much as a loaded one — so read the number off
+the line rather than quoting one you remember.
+
+**`sovereignty_prerequisites` is the check to watch for the Gemini key,
+and it really does evaluate.** Doctor resolves the same policy file every
+other path uses — `~/.olympus/sovereignty.json` by default, or
+`OLYMPUS_SOVEREIGNTY_CONFIG` / an explicit config path — so once setup has
+written the posture, this check runs the same preflight setup ran (minus
+the local-model-server probe, which `sovereignty_model_lanes` owns) and
+names each unmet prerequisite with the exact remedy in its `hint`. It goes
+green with a `Skipped: no sovereignty policy is configured for prerequisite
+checks.` detail only when there is genuinely no policy to read; on a fresh
+install that has run setup, a `Skipped:` here means something is wrong with
+the policy path, not that the prerequisites are met.
+
+Doctor also reads the config the managed worker actually runs with —
+`worker.env` layered under the environment, and the config that layered
+environment produces — so `source_scheduler_status` and the email and
+sovereignty gates no longer report a value `worker.env` has already
+overridden.
+
+**One missing key turns three checks red at once. Read that before you
+report "broken."** `email_worker`, `worker_credential_lanes` and
+`source_index_status` all interrogate the same worker, so a single missing
+Gemini embedding key fails all three together. That is ONE problem with
+three symptoms — the fix is the one connect command above, not three
+investigations. The discriminator is whether the worker answered, and what
+it said:
+
+- **One missing key (expected on a fresh install).** The worker answered
+  and says what is wrong: `email_worker` reports `Email worker is running
+  in degraded mode: …`, `worker_credential_lanes` reports `Worker
+  credential lanes are degraded: …`, `source_index_status` lists the same
+  credential among its problems, and the status JSON carries an
+  `embedding_lane` of `{"state": "embedding_lane_disabled", "reason":
+  "embedding_provider_unavailable"}`. All three name the SAME credential.
+  Connect the key, run `olympus worker restart`, re-run doctor — the three
+  go green together.
+- **No email account connected yet (also expected, and NOT breakage).**
+  Once no credential is degraded, `email_worker` falls through to
+  `Email worker at http://127.0.0.1:8010/v1 answered /health
+  (reachable=true configured=false).` with the hint `The worker is running
+  but reports configured=false; check its connector configuration.` That is
+  a red check whose whole meaning is "no mailbox yet" — the worker's own
+  health detail says it plainly: `No email account is connected yet.
+  Connect Gmail from the Olympus dashboard to enable email answers.` It
+  clears when the operator connects Gmail in Step 5, and it is not a reason
+  to touch config. Note the ordering: the degraded-credential line wins
+  while a credential is degraded, so this sentence usually appears only
+  after the Gemini key is in.
+- **Real breakage.** The worker never answered: the details read `… is not
+  reachable at http://127.0.0.1:8010/v1: <connection error>` and the hint
+  is `Run olympus worker status, then olympus worker start or olympus
+  worker install.` No credential is named, because nothing could be asked.
+  Go back to Step 4 and get `service.state` to `active` first; the
+  credential checks say nothing until the worker answers.
+
+Report this to the operator as what it is — "one key is still missing, and
+three checks are reporting the same gap", or "no mailbox is connected yet"
+— never as a count of failures.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
 internal name for the analyst that serves the secure tier (local models
@@ -744,11 +844,22 @@ lanes only for `local-first`/`local-only` postures, in plain words
 ## Step 4 — Verify the worker
 
 **This step verifies; it does not install.** `olympus setup` in Step 2
-already registered the background service and wrote `worker.env`, which is
-why the background-items consent gate lives before setup and not here. Do
-not run `olympus worker install` as a first install — by now there is
-nothing to install, and treating this as the registration moment is how
-the consent gate ends up asked after the notification already fired.
+already registered the background service, wrote `worker.env`, AND started
+it. Setup's own output says so, under `worker`: `worker.state` is the state
+the service manager reported when setup returned, `worker.next` is the step
+that state calls for, and `worker.activation_detail` appears only when the
+start did not take. On the healthy path `worker.state` is `active` and
+`worker.next` reads `The managed worker is running; open the dashboard with
+olympus dashboard.` Read those three fields before you run anything here —
+they usually make this step a confirmation.
+
+That is why the background-items consent gate lives before setup and not
+here. Do not run `olympus worker install` as a FIRST install: by now there
+is nothing to register, and treating this as the registration moment is how
+the consent gate ends up asked after the notification has already fired.
+The ban is on treating `worker install` as the registration step; as a
+repair of the service your own setup wrote, it is idempotent, documented,
+and allowed — see the remedies below.
 
 **Residue check first (Rule zero):** if the service or plist on this
 machine is NOT the one your own setup just wrote — a pre-existing unit, a
@@ -759,19 +870,63 @@ enabling, re-enabling, or restarting anything here.
 olympus worker status
 ```
 
-Expect a reachable worker with no `degraded_credentials` and no
-interrupted managed-file transaction. Two things that look wrong here and
-are not: with no sources connected yet the scheduler is **enabled and
-idle**, which is the healthy fresh-install state and leaves doctor green;
-and the dashboard probe reports reachable, because it asks the worker root
-for `/dashboard.json` rather than the `/v1` API base.
+**The field you are verifying is `service.state`, and it must say
+`active`.** The service facts are nested under `service`, so on a healthy
+fresh install `service.state` is `active`, `service.unit_present` is
+`true`, `service.env_present` is `true`, `lifecycle_transaction.state` is
+`none`, and the top-level `recovery` list is **empty** — a fresh install
+has nothing to resume, and a recovery list naming sources nobody has
+connected would be the old bug, not a finding.
+
+**Do not read the top-level `ok` as "the worker is up."** `ok` is false
+only for `failed` and `unknown`, so a registered-but-stopped worker reports
+`ok: true` with `service.state: inactive`. Read the state.
+
+If you get `service.unit_present: true` with `service.state: inactive`, the
+service is registered but not running. Do not read that as a failed install
+and do not reach for `worker install` first — the remedy is one command:
+
+```bash
+olympus worker start
+olympus worker status    # confirm service.state: active
+```
+
+`olympus worker start` polls the service manager for up to 15 seconds
+before it decides, and a worker already answering its own loopback health
+route gets the last word — so the state it prints is the settled state, not
+a race with `launchctl kickstart`, which returns when the job is submitted
+rather than when the worker is serving. When a start genuinely does not
+take, it refuses in this shape, carrying the worker's own last log line:
+
+```
+olympus worker start completed but status is inactive. The worker's last log line was: <line>
+```
+
+with the remedy `Read the worker log at <errorLogPath> and <logPath>, then
+run olympus worker status and follow its recovery action.` (on macOS both
+paths are under `~/Library/Logs/Olympus`). Read the log before changing
+anything — the reason a worker exits at boot is one line away, and a
+missing Gemini key is a common one.
+
+Only if `start` still leaves it `inactive` or `failed` do you reach for
+`olympus worker install`. It is idempotent, it writes nothing over an
+already-active service, it recovers an interrupted managed-file
+transaction, and re-running it over the service your own setup registered
+is a repair rather than a new background item — so it needs no fresh
+background-items consent. It is also what setup's own `worker.next` names
+when its start did not take (`Run olympus worker install, then olympus
+worker status.`), and `worker.activation_detail` carries the same
+`completed but status is …` sentence with the same log line.
+
+Two things that look wrong here and are not: with no sources connected yet
+the scheduler is **enabled and idle**, which is the healthy fresh-install
+state and leaves doctor green; and the dashboard probe reports reachable,
+because it asks the worker root for `/dashboard.json` rather than the
+`/v1` API base.
 
 If status names an interrupted transaction, it also names the exact next
-action; `olympus worker install` is idempotent and re-running it is the
-documented recovery for that case — that is a repair of your own setup's
-work, not a new background item. If activation fails, the error quotes the
-worker's own last log line and names both log paths (on macOS under
-`~/Library/Logs/Olympus`) — read those before changing anything.
+action; re-running `olympus worker install` is the documented recovery for
+that case too.
 
 Use only the public worker lifecycle: `install`, `start`, `stop`, `restart`,
 `status`, `foreground`, `upgrade`, and `uninstall`. Install and upgrade are
@@ -800,20 +955,55 @@ Say: "I've opened your Olympus dashboard. Click Connect on the sources you
 want; I'll watch status and help with any one-time setup."
 
 `olympus dashboard` prints three fields and no fourth: `url`, `opened`
-(whether it managed to open a browser), and a `hint` naming
-`olympus dashboard token`. No token and no token-shaped field — the
-printed `url` carries no query token either, so it is safe to hand to the
-operator as-is. If an older build shows you an `auth` field beside the
-URL, that build predates this guide; do not read it as the token.
+(whether it managed to open a browser), and `hint`. **Hand the printed
+`url` to the operator exactly as printed.** It ends in
+`?token=dash_…` — the read-only view token — and that is the URL the
+command just opened in the browser. It is also the only URL that works: a
+browser cannot send a bearer header from the address bar, so the bare
+`/dashboard` path returns 401 and gives the reader no way to tell why.
+Copy the URL whole; do not "clean up" the query string.
 
-**`olympus dashboard token` prints a secret — treat it like one.** It is
-the worker bearer that authorizes changing things (connecting,
-reauthenticating, sync now), and MUST NOT #2 covers it exactly as it
-covers an API key: never paste it into chat, a summary, a note, or a
-commit. When the operator needs it, the dashboard's own "Where is my
-token?" prompt describes how it should reach them — follow that method,
-and if you cannot, tell them the command to run themselves rather than
-running it and relaying the value.
+The `hint` is the sentence that explains the split, and it is worth
+reading to the operator almost verbatim:
+
+```
+This URL carries the read-only view token, not the worker token; unlocking the controls still needs <rootDir>/bin/olympus dashboard token.
+```
+
+(If no worker token exists yet, the hint instead says
+`No worker auth token found; run <rootDir>/bin/olympus setup first, then
+<rootDir>/bin/olympus dashboard token for the unlock value (rootDir comes
+from openclaw plugins inspect olympus --json).` — that means setup has not
+run, not that the dashboard is broken.)
+
+**The `dash_` token is not the worker token.** It is derived from the
+worker bearer, it is read-only, and the worker admits it on exactly two
+routes — `GET /dashboard` and `GET /dashboard.json` — and no others: no
+control route, and no method but GET. So it is not the secret MUST NOT #2
+governs; treat it as you would the dashboard screen itself. Fine to hand
+the operator, not something to drop into a public issue or a shared log,
+because it does open their dashboard to whoever holds the link.
+
+**`olympus dashboard token` is the secret — treat it like one.** That
+command prints the worker bearer, which authorizes every change
+(**Connect**, **Sync now**, **Disconnect**, Unpair), and MUST NOT #2
+covers it exactly as it covers an API key: never paste it into chat, a
+summary, a note, or a commit. The operator pastes it into the dashboard's
+"Worker token" field with their own hands. When they need it, the
+dashboard's "Where is my token?" sheet gives them the command as
+`<rootDir>/bin/olympus dashboard token`, with `rootDir comes from
+openclaw plugins inspect olympus --json` under it — the same path your
+`$OLYMPUS_BIN` already resolves to, so what you tell them and what the
+page tells them agree. Follow that method, and if you cannot, give them
+the command to run themselves rather than running it and relaying the
+value.
+
+Both commands resolve the worker token the same way — worker.env first,
+then config — so the URL you hand over and the token the operator pastes
+always belong to the same worker. If an older build shows you an `auth`
+field beside the URL, or prints a `url` with no `dash_` query token at
+all, that build predates this guide: do not read the `auth` field as the
+token, and do not hand over a tokenless URL as if it worked.
 
 Ask which sources they want now, but do not bulk-connect anything yourself.
 Sources can be started in any order from the dashboard, and OAuth sources can
@@ -1048,10 +1238,37 @@ before restarting.
 After the restart, verify the plugin actually loaded. The honest checks
 are:
 
-- the gateway boot line names olympus among the loaded plugins, and
+- the gateway boot line names olympus among the loaded plugins — read it
+  where it actually is, see below, and
 - `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
   and
 - one real tool call succeeds — `olympus source index status`.
+
+**Where the gateway boot line actually lives.** Do not go looking in
+`openclaw logs` or `~/.openclaw/logs/gateway.log`. On `2026.9.1` the
+former printed nothing, and the latter is a stale file that can be months
+old — believing it will tell you the plugin failed to load on a machine
+where it loaded fine. On macOS the live gateway log is a per-day
+JSON-lines file under `/tmp/openclaw/`, so grep the newest one:
+
+```bash
+grep -h 'http server listening' "$(ls -t /tmp/openclaw/openclaw-*.log | head -1)"
+```
+
+Every line is a JSON object, so the boot record and its loaded-plugin list
+sit inside the `message` field rather than reading as plain text; pipe
+through `jq -r .message` if you want it legible. On Linux the gateway runs
+as a user systemd unit and the same line comes from the journal:
+
+```bash
+journalctl --user -u openclaw -n 200 --no-pager | grep 'http server listening'
+```
+
+If neither surface shows the line — a machine whose log rotated since the
+last restart, for instance — do not manufacture the proof and do not
+restart again to produce one. Say the boot line was not observable, and
+lean on the other two checks: `"status": "loaded"` plus a successful
+`olympus source index status` are conclusive on their own.
 
 **Do not verify by reading `toolNames` from `plugins inspect`.** It is
 `[]` for olympus by design: the tools (`source_answer`,
