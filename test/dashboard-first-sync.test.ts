@@ -75,6 +75,68 @@ describe('a source that has never run', () => {
     expect(banner?.sentence).not.toContain('embedding lane is switched off');
   });
 
+  test('a paired source with no credential grant is dated from the ledger, not left waiting forever', () => {
+    // Telegram and WhatsApp pair as sessions and own no broker handle, so their
+    // card carries no connected_at. The card's own freshness cannot stand in:
+    // the view model hard-codes stale:false on the never-checked branch, so a
+    // pairing that died a year ago read "Waiting for the first sync" forever.
+    const paired = justConnectedCard({
+      label: 'Telegram',
+      source_id: 'telegram.messages',
+      provider: 'telegram',
+      family: 'chat',
+      connection: {
+        state: 'waiting_for_first_sync',
+        label: 'connected, waiting for first sync',
+        action: { kind: 'none' },
+        handles: [],
+      },
+      movement: { first_seen_at: NOW.toISOString() },
+    });
+
+    const withinWindow = new Date(NOW.getTime() + 3_600_000);
+    expect(dashboardSourceProgress(paired, { now: withinWindow }).phases[0]!.state_words)
+      .toBe('Waiting for the first sync');
+
+    const wellPast = new Date(NOW.getTime() + 31 * 3_600_000);
+    expect(dashboardSourceProgress(paired, { now: wellPast }).phases[0]).toMatchObject({
+      state: 'stalled',
+      state_words: 'Stalled · the first sync has not run yet',
+    });
+  });
+
+  test('nothing dates the wait, so the wait is not called young', () => {
+    // No credential grant and no ledger entry: an unmeasurable wait is stated
+    // as stalled rather than kept in a window that can never close.
+    const undated = justConnectedCard({
+      connection: {
+        state: 'waiting_for_first_sync',
+        label: 'connected, waiting for first sync',
+        action: { kind: 'none' },
+        handles: [],
+      },
+    });
+
+    expect(dashboardSourceProgress(undated, { now: NOW }).phases[0]).toMatchObject({
+      state: 'stalled',
+      state_words: 'Stalled · the first sync has not run yet',
+    });
+  });
+
+  test('a first-seen timestamp in the future is ignored rather than trusted', () => {
+    const future = justConnectedCard({
+      connection: {
+        state: 'waiting_for_first_sync',
+        label: 'connected, waiting for first sync',
+        action: { kind: 'none' },
+        handles: [],
+      },
+      movement: { first_seen_at: new Date(NOW.getTime() + 365 * 24 * 3_600_000).toISOString() },
+    });
+
+    expect(dashboardSourceProgress(future, { now: NOW }).phases[0]!.state).toBe('stalled');
+  });
+
   test('a first run of any kind ends the window, whatever the clock says', () => {
     const wellPast = new Date(NOW.getTime() + 30 * GRACE_MS);
     const ran = justConnectedCard({

@@ -3834,8 +3834,24 @@ describe('per-phase movement history', () => {
 
       // Nothing has been seen lower, so no counter has a movement time: an
       // absent time is "no movement seen", a different sentence from "moved
-      // at the start of the window".
-      expect(history.movementFor(sample, new Date('2026-07-02T12:00:00.000Z'))).toBeUndefined();
+      // at the start of the window". What the first observation DOES record is
+      // when this dashboard first saw the corpus, which is the only clock a
+      // source with no credential grant has for its first-sync window.
+      const movement = history.movementFor(sample, new Date('2026-07-02T12:00:00.000Z'));
+      expect(movement).toEqual({ first_seen_at: '2026-07-02T12:00:00.000Z' });
+      expect(movement?.metadata_sync_at).toBeUndefined();
+      expect(movement?.extraction_at).toBeUndefined();
+      expect(movement?.embedding_at).toBeUndefined();
+
+      // And it is never rewritten: a later sample cannot make the source look
+      // younger than the moment it was first recorded.
+      history.record([at('2026-07-02T13:00:00.000Z', {
+        indexed_items: 140,
+        content_ready_items: 90,
+        embedded_files: 40,
+      })]);
+      expect(history.movementFor(sample, new Date('2026-07-02T13:00:00.000Z'))?.first_seen_at)
+        .toBe('2026-07-02T12:00:00.000Z');
     } finally {
       history.close();
     }

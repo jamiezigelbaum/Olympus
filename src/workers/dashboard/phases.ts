@@ -267,19 +267,34 @@ export function dashboardHasRunBefore(source: DashboardSourceCard): boolean {
  * True when this source has never run and is still inside its first-sync
  * window, so its empty rows are waiting rather than stalled.
  *
- * With no connection timestamp there is no clock to measure the window with —
- * the paired chat sources own no broker handle — so the card's own freshness
- * verdict stands in: a card its own view model has not called stale is still
- * within its declared refresh window, and a stale one has waited long enough
- * for "stalled" to be the honest word.
+ * ALWAYS bounded by a real timestamp. The credential's grant time is the first
+ * choice; a source with no broker handle — Telegram and WhatsApp pair as
+ * sessions and own no credential grant — falls back to the moment this
+ * dashboard first recorded the corpus at all, which its movement ledger keeps
+ * and never rewrites.
+ *
+ * The card's own `freshness.stale` is NOT a fallback: the view model hard-codes
+ * `stale: false` on the never-checked branch, so a source that has never run
+ * can never become stale, and reading the window off it meant a dead pairing
+ * announcing "waiting for the first sync" a year later. With no clock at all
+ * the window is over — an unmeasurable wait cannot be called young.
  */
 export function dashboardAwaitingFirstSync(source: DashboardSourceCard, now: Date): boolean {
   if (dashboardHasRunBefore(source)) return false;
-  const connectedAt = Date.parse(source.connection.connected_at ?? '');
-  if (Number.isFinite(connectedAt) && connectedAt <= now.getTime()) {
-    return now.getTime() - connectedAt <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3_600_000;
+  const since = firstSyncClock(source, now);
+  if (since === undefined) return false;
+  return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3_600_000;
+}
+
+/** The moment the first-sync window runs from, or undefined when nothing dates it. */
+function firstSyncClock(source: DashboardSourceCard, now: Date): number | undefined {
+  for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
+    const at = Date.parse(candidate ?? '');
+    // A timestamp in the future is no evidence of anything, and is exactly the
+    // one an unbounded "waiting" would want: it is ignored, not clamped.
+    if (Number.isFinite(at) && at <= now.getTime()) return at;
   }
-  return !source.freshness.stale;
+  return undefined;
 }
 
 /** A phase with nothing left to do. An indeterminate phase never qualifies. */

@@ -242,6 +242,16 @@ export interface DashboardPhaseMovement {
   extraction_settled_value?: number;
   /** The same baseline for the embedding counter. Recorded only while extraction is also complete. */
   embedding_settled_value?: number;
+  /**
+   * The first time this dashboard ever recorded a sample for this corpus, and
+   * never rewritten afterwards.
+   *
+   * The only durable clock a source with no broker handle has. Telegram and
+   * WhatsApp pair as sessions and own no credential grant, so their card
+   * carries no `connected_at`; without this, "has never run" had no age and a
+   * dead pairing could read "waiting for the first sync" indefinitely.
+   */
+  first_seen_at?: string;
 }
 
 export interface DashboardEmbeddingBacklog {
@@ -1465,6 +1475,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         last_value INTEGER NOT NULL,
         rose_at TEXT,
         seen_at TEXT,
+        first_seen_at TEXT,
         settled_value INTEGER,
         settled_at TEXT,
         PRIMARY KEY (corpus_id, counter)
@@ -1500,10 +1511,18 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
       }
     };
     addMovementColumn('seen_at', 'TEXT');
+    addMovementColumn('first_seen_at', 'TEXT');
     addMovementColumn('settled_value', 'INTEGER');
     addMovementColumn('settled_at', 'TEXT');
     this.db.run(
       'UPDATE source_dashboard_movement SET seen_at = COALESCE(rose_at, ?) WHERE seen_at IS NULL',
+      [new Date().toISOString()],
+    );
+    // A row written before this column existed has been observed at least once
+    // already, so the oldest moment it can honestly claim is the oldest one it
+    // still holds. Backfilled once; `first_seen_at` is never written again.
+    this.db.run(
+      'UPDATE source_dashboard_movement SET first_seen_at = COALESCE(rose_at, seen_at, ?) WHERE first_seen_at IS NULL',
       [new Date().toISOString()],
     );
   }
@@ -1628,8 +1647,13 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
    */
   movementFor(sample: SourceDashboardHistorySample, _now: Date): DashboardPhaseMovement | undefined {
     const rows = this.db.query(`
-      SELECT counter, rose_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
-    `).all(sample.corpus_id) as Array<{ counter: string; rose_at: string | null; settled_value: number | null }>;
+      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
+    `).all(sample.corpus_id) as Array<{
+      counter: string;
+      rose_at: string | null;
+      first_seen_at: string | null;
+      settled_value: number | null;
+    }>;
     const at = (counter: string): string | undefined => {
       const value = rows.find((row) => row.counter === counter)?.rose_at;
       return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
@@ -1643,7 +1667,17 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
     const embeddingAt = at('embedded_files');
     const extractionSettled = settled('content_ready_items');
     const embeddingSettled = settled('embedded_files');
+    // The oldest first-observation across this corpus's counters: the earliest
+    // moment the dashboard can prove it was looking at this source at all.
+    const firstSeenTimes = rows
+      .map((row) => row.first_seen_at)
+      .filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)))
+      .map((value) => Date.parse(value));
+    const firstSeenAt = firstSeenTimes.length > 0
+      ? new Date(Math.min(...firstSeenTimes)).toISOString()
+      : undefined;
     const movement: DashboardPhaseMovement = {
+      ...(firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt }),
       ...(metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt }),
       ...(extractionAt === undefined ? {} : { extraction_at: extractionAt }),
       ...(embeddingAt === undefined ? {} : { embedding_at: embeddingAt }),
@@ -1673,8 +1707,10 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         // than the first — two batches in a row each get their own
         // denominator instead of being summed into one.
         this.db.run(`
-          INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, settled_value, settled_at)
-          VALUES (?, ?, ?, NULL, ?, ?, ?)
+          INSERT INTO source_dashboard_movement (
+            corpus_id, counter, last_value, rose_at, seen_at, first_seen_at, settled_value, settled_at
+          )
+          VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
           ON CONFLICT (corpus_id, counter) DO UPDATE SET
             last_value = excluded.last_value,
             rose_at = CASE WHEN excluded.last_value > source_dashboard_movement.last_value
@@ -1682,7 +1718,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
             seen_at = excluded.seen_at,
             settled_value = excluded.settled_value,
             settled_at = excluded.settled_at
-        `, [sample.corpus_id, counter, value, sample.sampled_at, value, sample.sampled_at]);
+        `, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at, value, sample.sampled_at]);
         continue;
       }
       const row = this.db.query(`
@@ -1692,8 +1728,9 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         // First observation: the value is known, the rise is not, and a corpus
         // whose history starts here has settled nothing to measure against.
         this.db.run(
-          'INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at) VALUES (?, ?, ?, NULL, ?)',
-          [sample.corpus_id, counter, value, sample.sampled_at],
+          `INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, first_seen_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`,
+          [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at],
         );
         continue;
       }
