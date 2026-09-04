@@ -2194,14 +2194,25 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
   const dependenciesReady = synced;
-  const dependencies = (card.capabilities?.dependencies ?? []).map((dependency) => ({
-    id: dependency.id,
-    label: dependency.label,
-    status: dependenciesReady ? 'ready' as const : 'check_required' as const,
-    next_action: dependenciesReady
-      ? 'No action needed; a completed source read proves this dependency path.'
-      : `Run Olympus doctor and repair ${dependency.label} before relying on the first sync.`,
-  }));
+  // A source whose embedding lane is switched off, or which is served without
+  // embeddings at all, does not depend on an embedding lane. Listing it anyway
+  // put "Approved local embedding lane" on a Dropbox card under a posture with
+  // no such lane (clean-install rehearsal, 2026-09-05).
+  const embeddingLaneApplies = card.embedding_lane_state !== 'embedding_lane_disabled'
+    && card.embedding_required !== false;
+  const dependencies = (card.capabilities?.dependencies ?? [])
+    .filter((dependency) => dependency.id !== 'local_embedding_lane' || embeddingLaneApplies)
+    .map((dependency) => ({
+      id: dependency.id,
+      label: dependency.label,
+      // Unchecked is not broken. "Run Olympus doctor and repair X" named a
+      // repair for a dependency nothing had yet had reason to exercise, on a
+      // card that had never synced; the first sync is what checks it.
+      status: dependenciesReady ? 'ready' as const : 'check_required' as const,
+      next_action: dependenciesReady
+        ? 'No action needed; a completed source read proves this dependency path.'
+        : 'Checked after the first sync.',
+    }));
   if (connection.state === 'not_connected' || connection.state === 'needs_setup') {
     const action = connection.action;
     const pairing = action.kind === 'guided_session';

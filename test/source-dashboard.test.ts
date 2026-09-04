@@ -65,6 +65,60 @@ import type {
 } from '../src/workers/x-bookmarks/index.ts';
 
 describe('multi-source source dashboard', () => {
+  test('an unchecked dependency is not described as a repair, and a lane that is off is not a dependency', () => {
+    // "Run Olympus doctor and repair Google OAuth client" named a repair for a
+    // dependency nothing had yet had reason to exercise, and Dropbox listed
+    // "Approved local embedding lane" under a posture whose embedding lane is
+    // off (clean-install rehearsal, 2026-09-05).
+    const disabledLane = {
+      state: 'embedding_lane_disabled' as const,
+      reason: 'embedding_provider_unavailable' as const,
+      affected_credentials: [],
+      affected_profiles: [],
+      affected_capabilities: ['embedding'],
+      hint: 'Fix the affected credential, then restart the worker if needed.',
+    };
+    const status = fixtureStatus();
+    status.corpora.push({
+      corpus_id: 'secure_local.dropbox.files',
+      family: 'file',
+      trust_domain: 'secure_local',
+      activation_mode: 'hybrid_primary',
+      embedding_policy: 'local_only',
+      configured: true,
+      provider: 'dropbox',
+      read_authority: 'connector_store',
+      embedding_lane: disabledLane,
+      counts: {
+        indexed_items: 0,
+        tombstoned_items: 0,
+        chunks: 0,
+        embedded_chunks: 0,
+        sync_runs: 0,
+      },
+    } as unknown as (typeof status.corpora)[number]);
+
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+
+    const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(dropbox.embedding_lane_state).toBe('embedding_lane_disabled');
+    expect(dropbox.setup?.dependencies.map((dependency) => dependency.id))
+      .not.toContain('local_embedding_lane');
+
+    const unchecked = view.sources
+      .flatMap((source) => source.setup?.dependencies ?? [])
+      .filter((dependency) => dependency.status === 'check_required');
+    expect(unchecked.length).toBeGreaterThan(0);
+    for (const dependency of unchecked) {
+      expect(dependency.next_action).toBe('Checked after the first sync.');
+    }
+  });
+
   test('a fresh install reads the same way for every unconnected source and needs nothing', () => {
     // Five identically-unconnected sources read three different ways on a
     // machine with nothing connected: gmail and dropbox said "Connect this
