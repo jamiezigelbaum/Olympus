@@ -452,6 +452,13 @@ async function main(): Promise<void> {
     }
     const result = await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
+    // A health walk that reports ok:false and exits 0 cannot be looped on:
+    // "run it until it goes green" needs an exit code and a line a human can
+    // read without a JSON parser. The JSON on stdout is unchanged.
+    if (operation.name === 'olympus_doctor' && isFailedDoctorResult(result)) {
+      for (const line of doctorFailureSummary(result)) console.error(line);
+      process.exit(1);
+    }
   } catch (error) {
     if (error instanceof OperationError) {
       console.error(`Error [${error.code}]: ${error.message}`);
@@ -460,6 +467,30 @@ async function main(): Promise<void> {
     }
     throw error;
   }
+}
+
+interface DoctorSummaryShape {
+  ok: boolean;
+  checks: Array<{ name?: unknown; ok?: unknown; detail?: unknown; hint?: unknown }>;
+}
+
+function isFailedDoctorResult(result: unknown): result is DoctorSummaryShape {
+  if (!result || typeof result !== 'object') return false;
+  const candidate = result as { ok?: unknown; checks?: unknown };
+  return candidate.ok === false && Array.isArray(candidate.checks);
+}
+
+/** Counts and check names only: the same content-free discipline doctor keeps. */
+export function doctorFailureSummary(result: DoctorSummaryShape): string[] {
+  const failed = result.checks.filter((check) => check.ok !== true);
+  const passed = result.checks.length - failed.length;
+  const names = failed
+    .map((check) => (typeof check.name === 'string' ? check.name : 'unnamed_check'));
+  return [
+    `olympus doctor: ${passed} of ${result.checks.length} checks passed, ${failed.length} failed.`,
+    `Failed: ${names.join(', ') || 'none named'}`,
+    'Fix the failed checks and run olympus doctor again; the JSON above carries each check\'s detail and hint.',
+  ];
 }
 
 export function parseArgs(operation: Operation, args: string[]): Record<string, unknown> {
