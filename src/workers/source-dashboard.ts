@@ -13,6 +13,7 @@ import {
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
 import type { SensitivityMap } from '../core/sensitivity-map.ts';
+import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
 import type {
   SovereigntyEngine,
   SovereigntyModelProfile,
@@ -2101,6 +2102,7 @@ function sourceCardFromDefinition(
       ? { unpair: dashboardUnpairAction(definition.source_id as V04PublicSourceId, definition.label) }
       : {}),
   };
+  const trustDomain = cardTrustDomain(definition, corpora);
   const configured = connection.state === 'connected'
     || connection.state === 'waiting_for_first_sync'
     || connection.state === 'syncing'
@@ -2137,7 +2139,7 @@ function sourceCardFromDefinition(
     label: definition.label,
     provider: definition.provider,
     family: definition.family,
-    trust_domain: definition.trust_domain,
+    trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
     configured,
     freshness,
@@ -2160,7 +2162,7 @@ function sourceCardFromDefinition(
     // that field and not a second reading of it.
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
     ingestion_health: ingestionHealth,
-    tier_composition: aggregateTierComposition(corpusCards, definition, coverage),
+    tier_composition: aggregateTierComposition(corpusCards, trustDomain, coverage),
     queue_health: queue,
     answer_readiness: answerReadiness,
     connection,
@@ -2699,15 +2701,38 @@ function aggregateFreshness(
   return { label: DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, stale };
 }
 
+/**
+ * The trust domain of the corpus this card actually reports on.
+ *
+ * The card publishes ONE `corpus_id`, and its trust domain is a fact about that
+ * corpus — but the definition carried a separate declared domain, so the Gmail
+ * card read `trust_domain: "secure_local"` over `corpus_id: "internal.email"`
+ * on a no-sensitive posture (clean-install rehearsal, 2026-09-05). The live
+ * corpus is the first authority; its id's own leading token is the second, and
+ * only when that token is a real trust domain; the declaration is the last
+ * word, which is what keeps a corpus id like `venice.api` reading as declared.
+ */
+function cardTrustDomain(
+  definition: DashboardSupportedSourceDefinition,
+  corpora: SourceIndexStatusCorpus[],
+): string {
+  const primary = corpora.find((corpus) => corpus.corpus_id === definition.primary_corpus_id);
+  if (primary?.trust_domain) return primary.trust_domain;
+  const prefix = definition.primary_corpus_id.split('.')[0];
+  return prefix !== undefined && (SOURCE_TRUST_DOMAINS as readonly string[]).includes(prefix)
+    ? prefix
+    : definition.trust_domain;
+}
+
 function aggregateTierComposition(
   cards: DashboardSourceCard[],
-  definition: DashboardSupportedSourceDefinition,
+  trustDomainWhenEmpty: string,
   coverage: DashboardSourceCard['coverage'],
 ): DashboardSourceCard['tier_composition'] {
   if (cards.length === 0) {
     return [{
-      trust_domain: definition.trust_domain,
-      label: trustDomainLabel(definition.trust_domain),
+      trust_domain: trustDomainWhenEmpty,
+      label: trustDomainLabel(trustDomainWhenEmpty),
       indexed_items: coverage.indexed_items,
       content_ready_items: coverage.content_ready_items,
     }];

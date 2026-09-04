@@ -65,6 +65,32 @@ import type {
 } from '../src/workers/x-bookmarks/index.ts';
 
 describe('multi-source source dashboard', () => {
+  test('a card\'s trust domain is the domain of the corpus it reports on', () => {
+    // The Gmail card read trust_domain "secure_local" over corpus_id
+    // "internal.email" on a no-sensitive posture: the definition carried a
+    // declared domain beside the corpus it actually reports (clean-install
+    // rehearsal, 2026-09-05).
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+    for (const card of view.sources) {
+      const corpus = view.sources.length > 0
+        ? fixtureStatus().corpora.find((entry) => entry.corpus_id === card.corpus_id)
+        : undefined;
+      if (corpus) expect(card.trust_domain).toBe(corpus.trust_domain);
+      const [prefix] = card.corpus_id.split('.');
+      if (prefix && ['public_safe', 'internal', 'secure_local'].includes(prefix)) {
+        expect(card.trust_domain).toBe(prefix);
+      }
+    }
+    const gmail = view.sources.find((source) => source.source_id === 'gmail.email')!;
+    expect(gmail.corpus_id).toBe('internal.email');
+    expect(gmail.trust_domain).toBe('internal');
+  });
+
   test('an unchecked dependency is not described as a repair, and a lane that is off is not a dependency', () => {
     // "Run Olympus doctor and repair Google OAuth client" named a repair for a
     // dependency nothing had yet had reason to exercise, and Dropbox listed
