@@ -17,6 +17,7 @@ import {
   dashboardSourceProgress,
 } from '../src/workers/dashboard/phases.ts';
 import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
+import { dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
 
 const NOW = new Date('2026-09-04T12:00:00.000Z');
@@ -38,6 +39,7 @@ describe('a source that has never run', () => {
   test('is not in Needs you, and its page carries no stuck banner', () => {
     const card = justConnectedCard();
 
+    expect(dashboardStatus({ source: card })).toBe('Waiting');
     expect(dashboardAttentionBanner(card, { now: NOW, setupPath: '/dashboard/setup' })).toBeUndefined();
     const html = renderDashboardDetailBody(card, { now: NOW });
     expect(html).not.toContain('class="attncard banner"');
