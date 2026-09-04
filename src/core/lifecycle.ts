@@ -74,6 +74,13 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
   artifactPath?: string;
   activationSettleMs?: number;
   readinessProbe?: (url: string) => boolean;
+  /**
+   * How long `start`/`restart`/`stop` may wait for the service manager to
+   * report the state it was asked for, in milliseconds. Defaults to 15000.
+   */
+  actionSettleTimeoutMs?: number;
+  /** Gap between state polls inside that window, in milliseconds. Defaults to 500. */
+  actionSettlePollMs?: number;
 }
 
 interface LifecycleTransactionV1 {
@@ -158,14 +165,10 @@ export function runWorkerLifecycle(
 
     refuseInterruptedTransaction(normalized);
     const serviceAction = runWorkerServiceAction(action, serviceActionOptions(normalized));
-    const service = inspectWorkerService(serviceActionOptions(normalized));
     const expected = action === 'stop' ? ['inactive', 'missing'] : ['active'];
+    const service = settleWorkerServiceState(normalized, expected);
     if (!expected.includes(service.state)) {
-      throw new OperationError(
-        'config_error',
-        `olympus worker ${action} completed but status is ${service.state}.`,
-        'Run olympus worker status and follow its recovery action.',
-      );
+      throw lifecycleActionFailure(action, service.state, normalized);
     }
     return {
       schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
@@ -843,6 +846,92 @@ function serviceInstallOptions(options: WorkerLifecycleOptions, dryRun: boolean)
     ...(options.schedulerEnabled !== undefined ? { schedulerEnabled: options.schedulerEnabled } : {}),
     dryRun,
   };
+}
+
+const DEFAULT_ACTION_SETTLE_TIMEOUT_MS = 15_000;
+const DEFAULT_ACTION_SETTLE_POLL_MS = 500;
+
+/**
+ * Wait, bounded, for the service manager to report one of `expected`.
+ *
+ * `launchctl kickstart` returns when the job has been SUBMITTED, not when the
+ * worker is serving, so the inspection that used to run on the next line read
+ * `inactive` on a service that was seconds from up and refused a start that had
+ * in fact succeeded (clean-install rehearsal, 2026-09-05). The same lag runs the
+ * other way on stop. Polling costs nothing on the common path — the first read
+ * already answers — and the window is bounded so a genuinely dead worker still
+ * fails, with its own log line, inside a quarter of a minute.
+ */
+function settleWorkerServiceState(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  expected: readonly string[],
+): WorkerServiceInspection {
+  const timeoutMs = validateSettleWindow(
+    options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS,
+    'Lifecycle action settle timeout',
+    120_000,
+  );
+  const pollMs = validateSettleWindow(
+    options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
+    'Lifecycle action settle poll interval',
+    10_000,
+  );
+  const deadline = Date.now() + timeoutMs;
+  let service = inspectWorkerService(serviceActionOptions(options));
+  while (!expected.includes(service.state) && Date.now() < deadline) {
+    waitForActivationSettle(pollMs);
+    service = inspectWorkerService(serviceActionOptions(options));
+  }
+  // The service manager's label is not the only witness. A worker already
+  // answering its own loopback health route IS started, whatever the manager
+  // has caught up to, so it gets the last word before a refusal — once, at the
+  // end, rather than inside the poll, because the probe costs a subprocess.
+  if (!expected.includes(service.state) && expected.includes('active') && workerAnswersReadiness(options)) {
+    return { ...service, state: 'active' };
+  }
+  return service;
+}
+
+function validateSettleWindow(value: number, label: string, max: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    throw new OperationError('invalid_params', `${label} must be between 0 and ${max} milliseconds.`);
+  }
+  return value;
+}
+
+/** Non-throwing readiness probe: an unreadable port is "no answer", not a refusal. */
+function workerAnswersReadiness(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): boolean {
+  try {
+    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
+    return options.readinessProbe
+      ? options.readinessProbe(url)
+      : defaultWorkerReadinessProbe(url, options.bunBin);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The refusal for a start/stop/restart that never reached its state, carrying
+ * the same last-log-line the activation path surfaces: the reason a worker
+ * exited on boot is one line away in its own log, and every report of this so
+ * far has been an operator going to find it by hand.
+ */
+function lifecycleActionFailure(
+  action: WorkerLifecycleAction,
+  state: WorkerServiceState,
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): OperationError {
+  const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+  const paths = workerServicePaths(options.platform, options.homeDir);
+  const message = `olympus worker ${action} completed but status is ${state}.`;
+  return new OperationError(
+    'config_error',
+    logLine ? `${message} The worker's last log line was: ${logLine}` : message,
+    `Read the worker log at ${paths.errorLogPath} and ${paths.logPath}, then run olympus worker status and follow its recovery action.`,
+  );
 }
 
 /**
