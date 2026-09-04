@@ -1405,12 +1405,13 @@ describe('runDoctor', () => {
     expect(scheduler.detail).not.toContain('google_drive.personal connected');
   });
 
-  test('an empty configured allowlist is no contract, so a runtime-adopted lane is not drift', async () => {
-    // The fresh install: the scheduler is enabled with no allowlist, and the
-    // dashboard connect flow builds gmail.email at runtime. The worker always
-    // sends selected_source_ids, so keying the contract off its presence made
-    // every adopted lane "unexpected" -- and with doctor's non-zero exit that
-    // left doctor permanently red from the first connect onwards.
+  // A fresh install enables the scheduler with no configured allowlist, then
+  // adopts its first source at runtime through the dashboard. The worker
+  // always reports selected_source_ids (the adopted set when unrestricted), so
+  // keying the contract off its presence made every adopted source read as
+  // "unexpected" -- and with doctor's non-zero exit that left doctor
+  // permanently red on a correctly working install from the first connect on.
+  test('accepts runtime-adopted sources when no scheduler allowlist is configured', async () => {
     const config = enabledEmailConfig();
     config.worker.scheduler.enabled = true;
     config.worker.scheduler.sourceIds = [];
@@ -1430,12 +1431,15 @@ describe('runDoctor', () => {
         sources: [{ source_id: 'gmail.email', corpus_id: 'internal.email', tasks: [] }],
       },
     });
-
-    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
-
+    const result = await runDoctor(doctorDeps({
+      config,
+      delphi: healthyDelphi(),
+      fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('gmail')] },
+    }));
     const scheduler = checkByName(result.checks, 'source_scheduler_status');
-    expect(scheduler.detail).not.toContain('worker selected unexpected scheduler source');
     expect(scheduler.ok).toBe(true);
+    expect(scheduler.detail).not.toContain('unexpected scheduler source');
   });
 
   test('source_ingestion_health reports stuck-work warning and error thresholds', async () => {
