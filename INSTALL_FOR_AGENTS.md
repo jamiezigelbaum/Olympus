@@ -30,11 +30,25 @@ prior Olympus setup. Actually run the checks; "no residue" is a claim you
 may make only after they come back empty:
 
 ```bash
+# config
 ls -la ~/.olympus ~/.config/olympus 2>/dev/null
+# data, worker state, caches, and connector stores — the dirs setup never names
+ls -la ~/.local/share/olympus ~/.local/state/olympus ~/.cache/olympus \
+       ~/.local/share/openclaw/olympus 2>/dev/null
+ls -la ~/Library/Logs/Olympus 2>/dev/null   # macOS worker logs
+# Linux worker logs live under ~/.local/state/olympus/worker (listed above)
 openclaw plugins list      # olympus already installed?
 ls ~/Library/LaunchAgents 2>/dev/null | grep -i olympus   # macOS
 # Linux: systemctl --user list-unit-files | grep -i olympus
 ```
+
+The data and state directories are not padding on that list. A leftover
+paired messaging session inside them — a `whatsapp` directory or a
+`telegram.session` file under `~/.local/share/olympus` — gets adopted by
+a later connect, and the source then reports **connected** although this
+operator paired nothing in this flow. A residue check that stops at
+`~/.olympus` and the LaunchAgents dir misses it and you will report a
+connection the operator never made.
 
 …plus a look through your own memory/bulletin files and any prior
 session's summary for Olympus notes, and — on macOS — per-provider
@@ -43,9 +57,13 @@ google and its `gog` helper, plus any Step 5 provider — Dropbox, X,
 Readwise — the list is illustrative, not closed), as presence checks
 only (never dump or print a secret's value — MUST NOT #2): a
 credential named for a provider is residue to surface even though
-nothing about it says "olympus". On a clean machine everything comes
-back empty and you proceed with no extra ceremony — the gate fires only
-on traces. If you find ANY trace — an existing config dir, a worker
+nothing about it says "olympus". A clean machine is one where EVERY one
+of those comes back empty — no config dir, no data, state, cache,
+connector-store or log dir, no plugin in the list, no launchd/systemd
+item, no provider credential, no note — and then you proceed with no extra
+ceremony; the gate fires only on traces. If you find ANY trace — an
+existing config dir, a data or state dir with anything in it (a paired
+session especially), a worker
 service or plist (enabled OR disabled), a note saying setup is "done" —
 run the Step 2 residue gate now: surface what you found to the operator
 and ask restore-vs-fresh before changing anything. One narrowing: if
@@ -70,7 +88,7 @@ changes have already happened. Two traps, spelled out:
   agreed to them. Adopting residue config wholesale — because doctor is
   green, because a note says it was approved, because it "obviously
   matches" what the operator would want, or for any reason short of fresh
-  operator consent — is exactly the silent restore MUST NOT #8 and #10
+  operator consent — is exactly the silent restore MUST NOT #7 and #9
   forbid.
 
 The only path that legitimately skips this gate is resuming your OWN
@@ -93,9 +111,12 @@ BEFORE the action is performed, every time:
 - **Each credential** (Steps 3 and 5) — one plain-language explanation
   and one ask per credential, with any recorded caveat surfaced; never
   a batched after-the-fact "your keys are set up."
-- **Worker registration** (Step 4) — the background-items
-  pre-explanation runs BEFORE `olympus worker install`, and you wait
-  for the operator's go; narrating past it is not consent.
+- **Worker registration** (Step 2, before `olympus setup`) — the
+  background-items pre-explanation runs BEFORE the command that
+  registers the service, and you wait for the operator's go; narrating
+  past it is not consent. `olympus setup` is that command: it installs
+  the launchd/systemd item itself, so this gate is cleared alongside the
+  posture gate and before setup runs, not later in Step 4.
 - **Gateway restart** (Step 6) — its own explicit go, never queued
   silently behind earlier consent.
 
@@ -124,6 +145,34 @@ node --version            # OpenClaw requires >=22.22.3 <23, >=24.15.0 <25, or >
 
 macOS or Linux. Do not continue until all three resolve.
 
+**`bun: command not found` usually means your PATH, not a missing Bun.**
+Bun's installer puts the binary in `~/.bun/bin` and adds it to PATH from
+the operator's shell rc — which a non-interactive agent shell does not
+read. So before you conclude anything is missing, check the install
+location directly:
+
+```bash
+~/.bun/bin/bun --version
+```
+
+If that prints a version, Bun is installed and nothing needs installing.
+Prepend it to PATH **for your session only** and continue:
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+Do NOT re-run the Bun installer and do NOT edit any shell startup file to
+fix this — editing `.zshrc`/`.zprofile`/`.bash_profile` and friends is
+forbidden (Step 1, MUST NOT #8), and a reinstall over a working Bun is a
+state change the operator did not ask for. Only if `~/.bun/bin/bun` is
+genuinely absent do you report Bun as missing, with the install command
+as the operator's to run.
+
+This matters past Step 0: `bin/olympus` is a Bun script, so every
+`"$OLYMPUS_BIN" …` call in this guide needs `bun` on PATH in the shell
+that runs it. Export it once per session, in the same shell.
+
 The Node range is OpenClaw's, enforced by an npm `preinstall` script that exits
 non-zero. On Node 23.x, or 24.0–24.14, the operator cannot install the host at
 all — say so plainly, because the failure looks like an Olympus problem and is
@@ -141,17 +190,47 @@ repository. **ASK THE OPERATOR** for the repository (`<owner>/<repo>`) if you
 were not given it; do not guess one.
 
 ```bash
-openclaw plugins install git:<owner>/<repo> --accept-capabilities
-# ^ on OpenClaw 2026.7.1 the flag is unknown: re-run without it
+openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
+# ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
+#   there means only "overwrite an existing plugin" — re-run with no flags
 openclaw plugins enable olympus
 ```
 
-`--accept-capabilities` is mandatory on OpenClaw `2026.8.1+`. Your install is
-non-TTY by definition, and the host offers the capability-consent prompt only
-to a TTY or to this flag, so without it the command exits 1 with
-`requires capability consent`. On `2026.7.1` the flag does not exist and the
-host rejects it as an unknown option — drop it there. Check
-`openclaw --version` (Step 0) and pick accordingly.
+Two host flags, two different consents — check `openclaw --version`
+(Step 0) and pick accordingly:
+
+- **`--accept-capabilities`** is mandatory on OpenClaw `2026.8.1+`. Your
+  install is non-TTY by definition, and the host offers the
+  capability-consent prompt only to a TTY or to this flag, so without it
+  the command exits 1 with `requires capability consent`.
+- **`--force`** is mandatory on `2026.8.1+` (confirmed on `2026.9.1`) for
+  ANY non-ClawHub source, which a `git:` install is. Without it the host
+  refuses non-interactively with `Install cancelled; rerun with --force
+  after reviewing the source.` On these versions `--force` carries two
+  meanings at once: "yes, I have reviewed this non-ClawHub source" and
+  "yes, overwrite an existing plugin".
+
+**On `2026.7.1` the two flags are not symmetrical.**
+`--accept-capabilities` does not exist there — the host rejects it as an
+unknown option, so drop it and re-run without it. `--force` DOES exist on
+`2026.7.1`, but it carries only its original meaning, "overwrite an
+existing plugin"; the source-trust confirmation is not a thing on that
+version, so a clean-machine install needs neither flag, and passing
+`--force` there is a reinstall gated by MUST NOT #5.
+
+**What `--force` does and does not authorize here.** On `2026.8.1+`, on a
+machine with no olympus plugin installed, the flag is doing only the
+source-trust half:
+it confirms you reviewed the git source you were told to install. That is
+not the "`--force` reinstall" MUST NOT #5 gates, and you do not need a
+separate operator consent for it — but say what you are doing in your
+install report ("the host requires `--force` to accept a non-ClawHub
+source; nothing is being overwritten").
+
+If Rule zero's checks found olympus already installed, the second meaning
+is live: the same command would overwrite that plugin. Then MUST NOT #5
+binds in full — stop, surface the existing install, and get the
+operator's explicit consent to overwrite before you run anything.
 
 The clone runs with terminal prompts disabled. If the repository is private,
 the operator's git credentials must already work non-interactively; a
@@ -189,16 +268,23 @@ disruption (and, if you are running inside this gateway, strands you — see
 Step 6).
 
 **CLI exposure (canonical — do not improvise):** the standalone CLI is
-`bin/olympus` inside the installed plugin directory. Resolve that directory
-dynamically (the install command prints it; `openclaw plugins list` shows
-it — the git clone lands under a URL-hash directory name, so never
-hardcode the path) and call the CLI by its full path for every step below,
-e.g. via a shell variable you set once:
+`bin/olympus` inside the installed plugin directory. The git clone lands
+under a URL-hash directory name, so never hardcode the path. Resolve it
+from `openclaw plugins inspect olympus --json` → `plugin.rootDir`, which
+is the one command that reports the directory in full:
 
 ```bash
-OLYMPUS_BIN="<resolved plugin dir>/bin/olympus"
+OLYMPUS_ROOT="$(openclaw plugins inspect olympus --json | jq -r .plugin.rootDir)"
+OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
 "$OLYMPUS_BIN" doctor
 ```
+
+Do not try to read the path off the other two surfaces. On `2026.9.1` the
+install command prints only `Installed plugin: olympus` — no directory —
+and `openclaw plugins list` renders a table that truncates the path to fit
+the column. Both look like they answered you; neither did. If `jq` is not
+available, parse the same `--json` output some other way, but keep
+`plugins inspect` as the source.
 
 Do NOT expose a bare `olympus` command on the operator's machine by ANY
 mechanism — no wrapper scripts (in `~/.local/bin`, `workspace/bin`, or
@@ -259,9 +345,9 @@ setup, or start fresh? (If the only traces are provider credentials
 with no Olympus config, worker, or notes, there is no setup to restore
 — surface them and proceed fresh; the per-credential gates cover
 reuse.) Notes left by a previous agent or session are
-NEVER operator consent (MUST NOT #8). And "restore" is not a bypass: the
+NEVER operator consent (MUST NOT #7). And "restore" is not a bypass: the
 posture conversation, per-credential consent, and the worker
-pre-explanation in Step 4 still run — restoring fills in remembered
+pre-explanation before setup still run — restoring fills in remembered
 *answers*, it does not skip the *questions*. If a credential you are
 about to reuse carries a recorded caveat (for example "rotate this key
 before treating it as clean"), surface the caveat and let the operator
@@ -304,7 +390,7 @@ sensitivity conversation:
 > legal matters, therapy, your family. This tier is the reason Olympus
 > exists. It never goes to ordinary cloud models, full stop. What *can*
 > happen with it is the one big choice you'll make in a few minutes:
-> answered on your own machine, answered by an end-to-end-encrypted private
+> answered on your own machine, answered by a privacy-focused private
 > cloud, or kept out of Olympus entirely.
 >
 > **Secrets** — passwords, API keys, recovery codes. No model ever sees
@@ -344,8 +430,20 @@ the operator's own words, never as a `tier: item, item, item` cram-list:
 > ever sees those. Did I get that right, and is there anything you'd move?
 
 Keep revising until the operator says yes. Default categories to **secure**
-unless the operator explicitly says **secrets**. Then write
-`~/.olympus/sensitivity-map.json` using schemaVersion 1:
+unless the operator explicitly says **secrets**. The map is written before
+`olympus setup` runs, so its directory does not exist yet on a fresh
+machine — create it first, or the write fails with `ENOENT`. Create it
+**owner-only**: this directory holds the operator's sensitivity map, and a
+default umask would leave it world-readable.
+
+```bash
+mkdir -p ~/.olympus && chmod 700 ~/.olympus
+```
+
+`olympus setup` creates the same directory at mode 0700, but it runs after
+this step. (If you skip ahead and `olympus sensitivity validate` cannot
+find the map, its own remedy names the directory and says setup creates
+it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 1:
 
 ```json
 {
@@ -392,19 +490,35 @@ own answer, so first ask:
 This moment — not earlier — is when local models enter the conversation.
 Do not mention machine checks, detected runtimes, or postures during the
 tier explainer or the sensitivity conversation; an unprompted "I checked
-this machine for Ollama" lands as a non sequitur. If you detected a local
-runtime (a llama.cpp plugin, an Ollama service, an MLX install), it is a
-conversational observation to verify aloud HERE — "I noticed this machine
-has llama.cpp set up; do you actually use local models?" — never a silent
-basis for recommending a posture. Use their answer to mark which option
-below is recommended for them, then present all four.
+this machine for Ollama" lands as a non sequitur.
+
+If you detected a local runtime, it is a conversational observation to
+verify aloud HERE — "I noticed this machine is already serving a local
+model; do you actually use it?" — never a silent basis for recommending a
+posture. But be strict about what counts as detection. **An installed
+plugin is not a runtime.** OpenClaw ships a built-in `llama-cpp` provider
+plugin, so "there is a llama.cpp plugin" is true on a machine that has
+never run a local model, and treating it as a cue recommends
+`local-first` to someone with nothing to serve it. The only thing worth
+reporting is a running OpenAI-compatible HTTP server actually answering on
+the ports Olympus's local lanes are configured to use — the answer
+endpoint and the embedding endpoint (`local-first`/`local-only` default to
+`http://127.0.0.1:8000/v1` and `http://127.0.0.1:28011/v1`). Probe those,
+and if nothing answers, you detected nothing: ask the question above with
+no preamble. Use their answer to mark which option below is recommended
+for them, then present all four.
 
 The operator has likely never heard of Venice, so introduce it once,
 before the options name it:
 
 > Two of these options use Venice (venice.ai) — a privacy-focused AI
-> cloud. Its end-to-end-encrypted models are the point: your questions
-> and answers are encrypted so that even Venice can't read them.
+> cloud. What it offers is a provider that does not train on your
+> conversations or retain them the way an ordinary cloud model does.
+> Being straight with you about the limit, because it matters for the
+> tier we just discussed: this is Venice's privacy policy and
+> infrastructure, not encryption that would make it impossible for them
+> to read a question. Olympus does not provide or qualify
+> end-to-end-encrypted inference in this version.
 >
 > How do you want to handle your secure data?
 >
@@ -415,7 +529,7 @@ before the options name it:
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
 >    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
 >    key (free tier available) for search indexing. Trade-off: strongest
->    owner-controlled first step, with encrypted-cloud escalation available;
+>    owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models only** (`local-only`) — secure questions are answered
@@ -425,16 +539,17 @@ before the options name it:
 >    escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
->    not run local models. Secure content goes only to Venice using its
->    end-to-end-encrypted model path, currently e2ee GLM 5.2. Requires: a
+>    not run local models. Secure content goes only to Venice, on its
+>    Private model path — currently `kimi-k3`. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
 >    available) for search indexing. Trade-off: no local-model requirement
->    or local fallback; you are choosing Venice's encrypted-cloud lane for
->    secure answers.
+>    or local fallback; you are choosing a privacy-focused cloud provider
+>    for secure answers, on that provider's word rather than on
+>    encryption.
 >
 > 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
 >    keeps its hands off secure data entirely: it is not imported, not
->    indexed, and no model — local, encrypted cloud, or ordinary cloud —
+>    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
 >    a Gemini API key (free tier available) for everyday source indexing.
@@ -456,11 +571,41 @@ Never leave the recommended option buried mid-list with only a
 "recommended" tag — the shape of the list is part of the guidance.
 
 Ask which posture fits how they feel about their most private data, answer
-their questions, and only then record the choice and run:
+their questions, and record the choice.
+
+**Now clear the second gate, before you run setup.** `olympus setup` does
+not only write config: it registers the background worker service
+(launchd on macOS, a user systemd unit on Linux) and writes the worker
+environment file. That is the Rule one worker-registration gate, and
+running setup spends it — so it is asked HERE, not in Step 4. macOS will
+show a "Background Items Added" notification the moment setup runs, and an
+unexplained notification on the operator's own machine reads as something
+being done TO them.
+
+One sentence first (adapt the words), then their yes, then the command:
+
+> Next I'll run setup. Two things happen: it writes your privacy policy
+> from the choice you just made, and it registers the sync worker — a
+> background service on this machine that keeps your sources indexed.
+> macOS will show a "background items added" notification when I do;
+> that's this, nothing else. You can see or remove it anytime under
+> System Settings → General → Login Items, or with `olympus worker
+> uninstall`.
+
+Then, and only then:
 
 ```bash
 olympus setup --preset <chosen-preset> --cloud-lane subscription --yes
 ```
+
+**Reading the summary: an honest gap looks like a leak until you know the
+shape.** On `no-sensitive` the summary and later `olympus doctor` output
+still show the secure corpora as configured with nothing in them, and the
+sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
+empty pool. That is `no-sensitive` working: the tier exists so Olympus can
+answer "that's not indexed" honestly, and it is routed nowhere. Do not
+report it to the operator as a problem, and do not try to "fix" it by
+adding a lane they did not choose.
 
 ## Step 3 — Prerequisites and secrets
 
@@ -527,13 +672,44 @@ limits:
 Setup prints `unmet_prerequisites` with an exact remedy per item. Follow
 them. Typical items:
 
-- `GEMINI_API_KEY` (source embeddings, all presets): **ASK THE OPERATOR**
+- Gemini API key (source embeddings, all presets): **ASK THE OPERATOR**
   to obtain a key from https://aistudio.google.com and provide it (or
-  source it per the credential-sourcing rule above). Put it in the
-  worker's env file — the one `olympus worker install` writes and
-  manages; the worker reads `OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY` or
-  `GEMINI_API_KEY` from it — never into a chat log or a world-readable
-  file.
+  source it per the credential-sourcing rule above). Connect it via
+  stdin, exactly like the Venice key, so it never reaches shell history,
+  a log, or a chat message (you run this; do not show it as a copy
+  block):
+
+```bash
+printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
+```
+
+  `$KEY` must be populated without the value reaching your shell history,
+  a log, or chat. Two supported ways, per the credential-sourcing rule
+  above: read it out of the operator's password manager with that
+  manager's CLI, after their per-credential yes and by the exact item name
+  they gave you (`KEY="$(op read '<their reference>')"`, or the Keychain's
+  `security find-generic-password … -w`); or have the operator type it
+  into a silent read in a shell they control (`read -rs KEY`), which
+  echoes nothing. Never `export` it, never echo it back to confirm it, and
+  unset it when the connect returns.
+
+  The command itself is the remedy setup prints for this item, verbatim. The
+  command validates the key against Gemini before storing anything, writes
+  it into the worker environment as
+  `OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY` at mode 600, and tells you to
+  `olympus worker restart` so the running worker picks it up — do that,
+  and re-run doctor afterwards.
+
+  Do NOT hand-edit the worker's env file to add the key: `worker.env` is a
+  generated managed file this guide forbids editing (see Step 4), and an
+  `export GEMINI_API_KEY=…` in your shell dies with your session and is
+  never seen by the background worker. Two refusals you may meet, neither
+  of which you may work around by editing the file: the command needs the
+  worker environment to exist (`No Olympus worker environment exists at
+  …` — that means setup has not run yet), and it refuses a key containing
+  a single quote (`… value must not contain a single quote.`), whose
+  remedy is the one the error gives — rotate the key at the provider and
+  store one without a quote.
 - Venice API key (`local-first` or `private-cloud-only`): the operator creates one at
   https://venice.ai, then you connect it via stdin so it never appears in
   shell history or logs (you run this; do not show it as a copy block):
@@ -543,7 +719,18 @@ printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
 ```
 
 Re-run `olympus doctor` until the `sovereignty_prerequisites` check is
-green (or explained and accepted by the operator).
+green (or explained and accepted by the operator). Doctor's exit status is
+the signal: a red walk exits 1 and writes a summary to **stderr** in this
+shape —
+
+```
+olympus doctor: 7 of 9 checks passed, 2 failed.
+Failed: email_worker, source_index_status
+Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint.
+```
+
+— all three lines, every time, while the full JSON stays on stdout
+unchanged. Branch on the exit status; exit 0 means every check is green.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
 internal name for the analyst that serves the secure tier (local models
@@ -554,17 +741,37 @@ just said they don't use local models reads as an error. Mention local
 lanes only for `local-first`/`local-only` postures, in plain words
 ("your local model isn't reachable yet").
 
-## Step 4 — Start the worker
+## Step 4 — Verify the worker
 
-**Residue check first (Rule zero):** a worker service or plist already on
-this machine — ESPECIALLY one that is disabled — means you stop and run
-Rule zero's gate before installing, enabling, re-enabling, or restarting
-anything here.
+**This step verifies; it does not install.** `olympus setup` in Step 2
+already registered the background service and wrote `worker.env`, which is
+why the background-items consent gate lives before setup and not here. Do
+not run `olympus worker install` as a first install — by now there is
+nothing to install, and treating this as the registration moment is how
+the consent gate ends up asked after the notification already fired.
+
+**Residue check first (Rule zero):** if the service or plist on this
+machine is NOT the one your own setup just wrote — a pre-existing unit, a
+disabled one especially — stop and run Rule zero's gate before starting,
+enabling, re-enabling, or restarting anything here.
 
 ```bash
-olympus worker install
 olympus worker status
 ```
+
+Expect a reachable worker with no `degraded_credentials` and no
+interrupted managed-file transaction. Two things that look wrong here and
+are not: with no sources connected yet the scheduler is **enabled and
+idle**, which is the healthy fresh-install state and leaves doctor green;
+and the dashboard probe reports reachable, because it asks the worker root
+for `/dashboard.json` rather than the `/v1` API base.
+
+If status names an interrupted transaction, it also names the exact next
+action; `olympus worker install` is idempotent and re-running it is the
+documented recovery for that case — that is a repair of your own setup's
+work, not a new background item. If activation fails, the error quotes the
+worker's own last log line and names both log paths (on macOS under
+`~/Library/Logs/Olympus`) — read those before changing anything.
 
 Use only the public worker lifecycle: `install`, `start`, `stop`, `restart`,
 `status`, `foreground`, `upgrade`, and `uninstall`. Install and upgrade are
@@ -576,24 +783,10 @@ normally uses the source-specific recovery action without restarting the
 worker. `worker uninstall` retains user data; `data delete` is the separate
 destructive boundary.
 
-`worker install` registers the background service (launchd/systemd) with
-restart-on-failure. If the operator prefers a foreground trial first, use
-`olympus worker foreground` in a terminal they control.
-
-**The pre-explanation below is a consent gate (Rule one), not a courtesy
-heads-up: give it BEFORE you run `worker install`, and wait for the
-operator's go.** A posture "ok" back in Step 2 did not authorize a
-background service. On macOS the system announces new background items
-("Background Items Added: … can run in the background"), and an
-unexplained notification on their own machine reads as something being
-done TO them. One sentence first, in this shape (adapt the words), then
-their yes, then the command:
-
-> Next I'm registering the sync worker — a background service on this
-> machine that keeps your sources indexed. macOS will show a "background
-> items added" notification when I do; that's this, nothing else. You can
-> see or remove it anytime under System Settings → General → Login Items,
-> or with `olympus worker uninstall`.
+The registered service is a launchd/systemd item with restart-on-failure.
+If the operator would rather watch it run in the foreground for a first
+session, `olympus worker foreground` runs it in a terminal they control —
+stop the background service first so the two do not race.
 
 ## Step 5 — Connect sources
 
@@ -605,6 +798,22 @@ olympus dashboard
 
 Say: "I've opened your Olympus dashboard. Click Connect on the sources you
 want; I'll watch status and help with any one-time setup."
+
+`olympus dashboard` prints three fields and no fourth: `url`, `opened`
+(whether it managed to open a browser), and a `hint` naming
+`olympus dashboard token`. No token and no token-shaped field — the
+printed `url` carries no query token either, so it is safe to hand to the
+operator as-is. If an older build shows you an `auth` field beside the
+URL, that build predates this guide; do not read it as the token.
+
+**`olympus dashboard token` prints a secret — treat it like one.** It is
+the worker bearer that authorizes changing things (connecting,
+reauthenticating, sync now), and MUST NOT #2 covers it exactly as it
+covers an API key: never paste it into chat, a summary, a note, or a
+commit. When the operator needs it, the dashboard's own "Where is my
+token?" prompt describes how it should reach them — follow that method,
+and if you cannot, tell them the command to run themselves rather than
+running it and relaying the value.
 
 Ask which sources they want now, but do not bulk-connect anything yourself.
 Sources can be started in any order from the dashboard, and OAuth sources can
@@ -823,8 +1032,33 @@ openclaw doctor --lint
 openclaw gateway restart
 ```
 
-This loads the agent tools: `source_answer`, `source_index_status`,
-`source_index_search`.
+**Only `openclaw config validate` is the gate.** It must exit green; if it
+does not, stop and fix the config before restarting (MUST NOT #3).
+
+`openclaw doctor --lint` is a report you read, not a gate you must clear.
+It lints the operator's whole OpenClaw install and routinely exits 1 on
+pre-existing warnings that have nothing to do with Olympus — another
+plugin's config, a deprecated key, an unrelated agent. Findings that are
+not about Olympus are **reported to the operator and left alone**: do not
+fix them (you did not cause them and nobody consented to those changes)
+and do not let them block the restart. A lint finding that IS about
+Olympus is a different matter — treat it as a real defect and resolve it
+before restarting.
+
+After the restart, verify the plugin actually loaded. The honest checks
+are:
+
+- the gateway boot line names olympus among the loaded plugins, and
+- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
+  and
+- one real tool call succeeds — `olympus source index status`.
+
+**Do not verify by reading `toolNames` from `plugins inspect`.** It is
+`[]` for olympus by design: the tools (`source_answer`,
+`source_index_status`, `source_index_search`) register at runtime when the
+plugin initializes, not in the static manifest inspect reads. An empty
+`toolNames` on a healthy install proves nothing is wrong, and chasing it
+sends you re-installing a plugin that already works.
 
 For a Hermes Agent install, use the package's narrower MCP-only lane:
 
@@ -858,9 +1092,34 @@ olympus doctor                                   # every check green or explaine
 olympus source answer "what's in my sources so far?"
 ```
 
+`olympus doctor` exits 1 while any check is red, naming the failed checks
+on stderr (counts and check names only), and leaves the full JSON on
+stdout. Its exit status is the pass/fail signal — you do not have to grade
+the output yourself. Exit 0 is green.
+
 Confirm in the answer's audit block that `analyst_backend` matches the
 chosen posture (e.g. `venice` for private-cloud-only secure answers, `local`
 for local-only secure answers).
+
+The private source worker lane is on by default, so a fresh install
+should not see `email_not_configured` at all. If it does, the lane was
+switched off deliberately — `OLYMPUS_EMAIL_ENABLED=false` is the only
+supported opt-out — and the error names its own remedy:
+
+> Run olympus setup, then olympus worker install, to bring up the private
+> source worker that owns OAuth and message fetch and reasons over an
+> approved local/private model lane.
+
+Run what the error names, nothing else. Do not invent a fix, do not
+hand-edit config to flip the lane on, and do not re-run `olympus setup` to
+"reset" it (the CLI refuses without `--force`, and `--force` needs the
+operator's explicit consent — MUST NOT #5).
+
+What a fresh install DOES see when the worker simply is not running is the
+honest version of the same problem: `Email worker is not reachable at
+http://127.0.0.1:8010/v1: <detail>`, where the detail after the colon is
+the underlying connection error. That is a Step 4 worker question, not a
+configuration one — read the detail before doing anything about it.
 
 Degraded credential lanes are a silent failure you must rule out
 explicitly — a worker with a dead embedding credential still syncs and
@@ -902,7 +1161,7 @@ continue: `openclaw plugins list` (is olympus installed/enabled?),
 already exists. In particular, never re-run `olympus setup` or
 `olympus sovereignty init` when the config file exists — the CLI refuses
 without `--force`, and `--force` requires the operator's explicit consent
-(MUST NOT #6). A refusal like "config already exists" during resume means
+(MUST NOT #5). A refusal like "config already exists" during resume means
 the step is DONE, not broken.
 
 ## If something fails
@@ -924,12 +1183,23 @@ the step is DONE, not broken.
 2. **Never echo, log, or store secrets in plain text.** Keys go through
    stdin connect flows or the worker environment; Olympus keeps them in an
    encrypted local secret store.
-3. **Never restart the gateway without a green `openclaw config validate`.**
+3. **Never restart the gateway without a green `openclaw config
+   validate`.** That is the gate. `openclaw doctor --lint` is a report:
+   its findings on things other than Olympus are surfaced to the
+   operator, not fixed, and do not block the restart.
 4. **Never edit `openclaw.json` by hand** — use `openclaw config set` or
-   the documented connect/setup commands only.
+   the documented connect/setup commands only. The same holds for
+   Olympus's own generated managed files: never hand-edit `worker.env` or
+   a generated service unit.
 5. **Never run `olympus data delete`, overwrite an existing
-   `~/.olympus/sovereignty.json`, or `--force` reinstall** without the
-   operator's explicit, informed consent.
+   `~/.olympus/sovereignty.json`, or reinstall over an existing plugin**
+   without the operator's explicit, informed consent. Read `--force`
+   by what it would do on THIS machine, not by its name: on OpenClaw
+   `2026.8.1+` the plugin install requires `--force` merely to accept a
+   non-ClawHub source, and on a machine with no olympus installed that
+   overwrites nothing and needs no separate consent (Step 1). The moment
+   an olympus plugin already exists, the same flag overwrites it and this
+   rule binds in full.
 6. **Never restart the gateway you are running inside without warning the
    operator first** and giving them the exact message that resumes you
    ("continue the Olympus install from Step N"). A silent self-restart
