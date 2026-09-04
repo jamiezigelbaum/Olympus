@@ -8,6 +8,11 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { dashboardAttentionBanner } from '../src/workers/dashboard/attention.ts';
+import {
+  buildSourceDashboardViewModel,
+  type SourceDashboardViewModel,
+} from '../src/workers/source-dashboard.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
 
 const NOW = new Date('2026-09-04T12:00:00.000Z');
@@ -39,6 +44,77 @@ describe('Sync now the worker cannot run', () => {
  * nothing synced, and an embedding lane switched off because no Gemini key had
  * been stored yet.
  */
+describe('the readiness ladder over a worker that cannot Sync now', () => {
+  test('advises keeping the worker running instead of pressing a control that 501s', () => {
+    const unavailable = viewModel(() => false);
+    const gmail = unavailable.sources.find((card) => card.source_id === 'gmail.email')!;
+    expect(gmail.sync_now_available).toBe(false);
+    expect(gmail.setup?.stage).toBe('initial_sync');
+    expect(gmail.setup?.next_action).toContain('no Sync now for Gmail');
+    expect(gmail.setup?.next_action).not.toContain('Start Sync now');
+
+    const step = unavailable.onboarding.steps.find((entry) => entry.id === 'initial_sync')!;
+    expect(step.next_action).toContain('sync on their own schedule');
+    expect(step.next_action).not.toContain('Start Sync now');
+  });
+
+  test('keeps the Sync now advice wherever the control actually works', () => {
+    const available = viewModel(() => true);
+    const gmail = available.sources.find((card) => card.source_id === 'gmail.email')!;
+    expect(gmail.setup?.next_action).toContain('Start Sync now for Gmail');
+    expect(available.onboarding.steps.find((entry) => entry.id === 'initial_sync')?.next_action)
+      .toContain('Start Sync now');
+  });
+
+  test('a caller that declares nothing keeps the advice it always had', () => {
+    const undeclared = buildSourceDashboardViewModel({
+      sourceIndexStatus: emptyStatus(),
+      sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+      now: NOW,
+    });
+    expect(undeclared.onboarding.steps.find((entry) => entry.id === 'initial_sync')?.next_action)
+      .toContain('Start Sync now');
+  });
+});
+
+function viewModel(syncNowAvailable: () => boolean): SourceDashboardViewModel {
+  return buildSourceDashboardViewModel({
+    sourceIndexStatus: emptyStatus(),
+    sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+    connectedHandleRegistry: {
+      version: 1,
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail',
+        accountRole: 'personal',
+        trustDomain: 'internal',
+        allowedCapabilities: ['gmail.sync'],
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        connectedAt: NOW.toISOString(),
+      }],
+    },
+    syncNowAvailable,
+    now: NOW,
+  });
+}
+
+/** A worker that has indexed nothing yet: the fresh install's own shape. */
+function emptyStatus() {
+  return {
+    kind: 'source_index_status' as const,
+    generated_at: NOW.toISOString(),
+    corpora: [],
+    policy: {
+      read_only: true as const,
+      raw_source_exposed: false as const,
+      source_packets_exposed: false as const,
+      source_text_returned: false as const,
+      secure_local_item_metadata_exposed: false as const,
+      castor_visible: true as const,
+    },
+  };
+}
+
 function justConnectedCard(overrides: Partial<DashboardSourceCard> = {}): DashboardSourceCard {
   return {
     corpus_id: 'internal.google_drive.docs',

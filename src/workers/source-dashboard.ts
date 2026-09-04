@@ -1818,7 +1818,11 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       ? definition.connect_action.source
       : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
-    return { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    // The readiness ladder's initial-sync advice names Sync now, so it is
+    // rebuilt once the card knows whether this worker can run it.
+    withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
+    return withSyncAnswer;
   });
   // Anything no card claimed is still the owner's data in the local store. It
   // is surfaced and counted rather than dropped: a corpus vanishing from this
@@ -2176,7 +2180,10 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       condition: connection.state === 'syncing' ? 'usable' : 'blocked',
       next_action: connection.state === 'syncing'
         ? 'Keep the worker running while the first sync and extraction queues finish.'
-        : `Start Sync now for ${card.label}; a service restart is not required.`,
+        // Naming a control this worker cannot run sends the reader to a 501.
+        : card.sync_now_available === false
+          ? `Keep the worker running; this worker has no Sync now for ${card.label}, so it syncs on its own schedule.`
+          : `Start Sync now for ${card.label}; a service restart is not required.`,
       dependencies,
     };
   }
@@ -4089,7 +4096,7 @@ function onboarding(
       { id: 'dependencies', label: 'Dependency check', state: cleared(dependenciesProven), next_action: 'Choose a source below, run Olympus doctor, and repair only that source’s declared dependency.' },
       { id: 'credential_or_pairing', label: 'Credential or pairing', state: cleared(connected), next_action: 'Connect one account or finish the local pairing instructions below.' },
       { id: 'scope', label: 'Scope', state: cleared(scopeReady), next_action: folderPicker.available ? 'Open scope rules to author and preview what Olympus may read.' : 'Confirm the contextual provider scope shown on the source card.' },
-      { id: 'initial_sync', label: 'Initial sync', state: cleared(firstSync), next_action: 'Start Sync now and keep the worker running; do not restart for setup changes.' },
+      { id: 'initial_sync', label: 'Initial sync', state: cleared(firstSync), next_action: initialSyncAdvice(configuredCards) },
       { id: 'source_health', label: 'Usable, degraded, or blocked', state: cleared(sourceHealthy), next_action: 'Follow the source card’s named next action until coverage and gaps are truthful.' },
       { id: 'cited_answer_readiness', label: 'Cited-answer readiness', state: cleared(answerReady), next_action: 'Ask a question and verify claim-level citations plus any stated gaps.' },
     ]),
@@ -4101,6 +4108,22 @@ function onboarding(
         : 'This unlocks as soon as one connected source has answer-ready text.',
     },
   };
+}
+
+/**
+ * What the initial-sync step tells the reader to do.
+ *
+ * Sync now is only advice where some connected source can actually run it. On a
+ * worker with no scheduler and no host hook, every press answers 501, and the
+ * ladder was sending the reader at a button that could only refuse.
+ */
+function initialSyncAdvice(configuredCards: readonly DashboardSourceCard[]): string {
+  const answered = configuredCards.filter((card) => card.sync_now_available !== undefined);
+  const anySyncable = answered.length === 0
+    || answered.some((card) => card.sync_now_available === true);
+  return anySyncable
+    ? 'Start Sync now and keep the worker running; do not restart for setup changes.'
+    : 'Keep the worker running; this worker has no Sync now, so connected sources sync on their own schedule.';
 }
 
 /**
