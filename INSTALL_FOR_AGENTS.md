@@ -425,14 +425,18 @@ the operator's own words, never as a `tier: item, item, item` cram-list:
 Keep revising until the operator says yes. Default categories to **secure**
 unless the operator explicitly says **secrets**. The map is written before
 `olympus setup` runs, so its directory does not exist yet on a fresh
-machine — create it first, or the write fails with `ENOENT`:
+machine — create it first, or the write fails with `ENOENT`. Create it
+**owner-only**: this directory holds the operator's sensitivity map, and a
+default umask would leave it world-readable.
 
 ```bash
-mkdir -p ~/.olympus
+mkdir -p ~/.olympus && chmod 700 ~/.olympus
 ```
 
-(`olympus setup` creates `~/.olympus` too, but it runs after this step.)
-Then write `~/.olympus/sensitivity-map.json` using schemaVersion 1:
+`olympus setup` creates the same directory at mode 0700, but it runs after
+this step. (If you skip ahead and `olympus sensitivity validate` cannot
+find the map, its own remedy names the directory and says setup creates
+it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 1:
 
 ```json
 {
@@ -666,11 +670,23 @@ them. Typical items:
 printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
 ```
 
-  That is the whole remedy. Do NOT hand-edit the worker's env file to add
-  the key: `worker.env` is a generated managed file this guide forbids
-  editing (see Step 4), and an `export GEMINI_API_KEY=…` in your shell
-  dies with your session and is never seen by the background worker.
-  Connect stores it where the worker resolves it.
+  This is the remedy setup itself prints for this item, verbatim. The
+  command validates the key against Gemini before storing anything, writes
+  it into the worker environment as
+  `OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY` at mode 600, and tells you to
+  `olympus worker restart` so the running worker picks it up — do that,
+  and re-run doctor afterwards.
+
+  Do NOT hand-edit the worker's env file to add the key: `worker.env` is a
+  generated managed file this guide forbids editing (see Step 4), and an
+  `export GEMINI_API_KEY=…` in your shell dies with your session and is
+  never seen by the background worker. Two refusals you may meet, neither
+  of which you may work around by editing the file: the command needs the
+  worker environment to exist (`No Olympus worker environment exists at
+  …` — that means setup has not run yet), and it refuses a key containing
+  a single quote (`… value must not contain a single quote.`), whose
+  remedy is the one the error gives — rotate the key at the provider and
+  store one without a quote.
 - Venice API key (`local-first` or `private-cloud-only`): the operator creates one at
   https://venice.ai, then you connect it via stdin so it never appears in
   shell history or logs (you run this; do not show it as a copy block):
@@ -681,9 +697,16 @@ printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
 
 Re-run `olympus doctor` until the `sovereignty_prerequisites` check is
 green (or explained and accepted by the operator). Doctor's exit status is
-the signal: it exits non-zero while any check is red and prints a summary
-naming what is failing, so you can branch on the status code rather than
-reading tea leaves in the output. Exit 0 means every check is green.
+the signal: a red walk exits 1 and writes a summary to **stderr** in this
+shape —
+
+```
+olympus doctor: 7 of 9 checks passed, 2 failed.
+Failed: email_worker, source_index_status
+```
+
+— while the full JSON stays on stdout unchanged. Branch on the exit
+status; exit 0 means every check is green.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
 internal name for the analyst that serves the secure tier (local models
@@ -713,10 +736,18 @@ olympus worker status
 ```
 
 Expect a reachable worker with no `degraded_credentials` and no
-interrupted managed-file transaction. If status names an interrupted
-transaction, it also names the exact next action; `olympus worker install`
-is idempotent and re-running it is the documented recovery for that case —
-that is a repair of your own setup's work, not a new background item.
+interrupted managed-file transaction. Two things that look wrong here and
+are not: with no sources connected yet the scheduler is **enabled and
+idle**, which is the healthy fresh-install state and leaves doctor green;
+and the dashboard probe reports reachable, because it asks the worker root
+for `/dashboard.json` rather than the `/v1` API base.
+
+If status names an interrupted transaction, it also names the exact next
+action; `olympus worker install` is idempotent and re-running it is the
+documented recovery for that case — that is a repair of your own setup's
+work, not a new background item. If activation fails, the error quotes the
+worker's own last log line and names both log paths (on macOS under
+`~/Library/Logs/Olympus`) — read those before changing anything.
 
 Use only the public worker lifecycle: `install`, `start`, `stop`, `restart`,
 `status`, `foreground`, `upgrade`, and `uninstall`. Install and upgrade are
@@ -744,8 +775,12 @@ olympus dashboard
 Say: "I've opened your Olympus dashboard. Click Connect on the sources you
 want; I'll watch status and help with any one-time setup."
 
-`olympus dashboard` prints the dashboard URL and nothing else. Hand the
-URL to the operator; that is all they need to read the dashboard.
+`olympus dashboard` prints three fields and no fourth: `url`, `opened`
+(whether it managed to open a browser), and a `hint` naming
+`olympus dashboard token`. No token and no token-shaped field — the
+printed `url` carries no query token either, so it is safe to hand to the
+operator as-is. If an older build shows you an `auth` field beside the
+URL, that build predates this guide; do not read it as the token.
 
 **`olympus dashboard token` prints a secret — treat it like one.** It is
 the worker bearer that authorizes changing things (connecting,
@@ -1032,22 +1067,33 @@ olympus doctor                                   # every check green or explaine
 olympus source answer "what's in my sources so far?"
 ```
 
-`olympus doctor` exits non-zero while any check is red and prints a
-summary of what failed, so its exit status is the pass/fail signal — you
-do not have to grade the output yourself. Exit 0 is green.
+`olympus doctor` exits 1 while any check is red, naming the failed checks
+on stderr (counts and check names only), and leaves the full JSON on
+stdout. Its exit status is the pass/fail signal — you do not have to grade
+the output yourself. Exit 0 is green.
 
 Confirm in the answer's audit block that `analyst_backend` matches the
 chosen posture (e.g. `venice` for private-cloud-only secure answers, `local`
 for local-only secure answers).
 
-If `olympus source answer` fails with `email_not_configured`, the email
-lane is disabled. Setup enables it, so this should not appear on a fresh
-install; if it does, run the command named in the error's remedy text —
-that text is the authority. Do not invent a fix, do not hand-edit config
-to flip the lane on, and do not re-run `olympus setup` to "reset" it (the
-CLI refuses without `--force`, and `--force` needs the operator's explicit
-consent — MUST NOT #5). If the error names no command, report the exact
-failing command and output to the operator and stop.
+The private source worker lane is on by default, so a fresh install
+should not see `email_not_configured` at all. If it does, the lane was
+switched off deliberately — `OLYMPUS_EMAIL_ENABLED=false` is the only
+supported opt-out — and the error names its own remedy:
+
+> Run olympus setup, then olympus worker install, to bring up the private
+> source worker that owns OAuth and message fetch and reasons over an
+> approved local/private model lane.
+
+Run what the error names, nothing else. Do not invent a fix, do not
+hand-edit config to flip the lane on, and do not re-run `olympus setup` to
+"reset" it (the CLI refuses without `--force`, and `--force` needs the
+operator's explicit consent — MUST NOT #5).
+
+What a fresh install DOES see when the worker simply is not running is the
+honest version of the same problem — `Email worker is not reachable at
+http://127.0.0.1:8010/v1` — which is a Step 4 worker question, not a
+configuration one.
 
 Degraded credential lanes are a silent failure you must rule out
 explicitly — a worker with a dead embedding credential still syncs and

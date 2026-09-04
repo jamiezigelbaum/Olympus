@@ -91,7 +91,7 @@ Two other install sources exist and are **not** the pilot path:
 First write your sensitivity map:
 
 ```bash
-mkdir -p ~/.olympus          # setup creates this too, but it runs after this step
+mkdir -p ~/.olympus && chmod 700 ~/.olympus   # setup makes it 0700 too, but runs later
 $EDITOR ~/.olympus/sensitivity-map.json
 olympus sensitivity validate
 ```
@@ -120,9 +120,12 @@ printf '%s' "$GEMINI_API_KEY" | olympus connect gemini --api-key-stdin
 printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
 ```
 
-Connect is how API keys reach the worker. Exporting `GEMINI_API_KEY` in your
-own shell does not reach the background worker, and `worker.env` is a generated
-managed file — do not hand-edit it.
+Connect is how API keys reach the worker: it validates the key, stores it in
+the worker environment at mode 600, and tells you to run `olympus worker
+restart` so the worker picks it up. Exporting `GEMINI_API_KEY` in your own shell
+does not reach the background worker, and `worker.env` is a generated managed
+file — do not hand-edit it. A key containing a single quote is refused rather
+than stored; rotate it at the provider for one without.
 
 For `local-first` and `local-only`, start your local OpenAI-compatible model
 server before relying on secure source answers.
@@ -179,8 +182,10 @@ olympus worker status
 ```
 
 Expect a reachable worker with no `degraded_credentials` and no interrupted
-transaction. To watch it run in the foreground for a first session instead,
-stop the background service first (`olympus worker stop`), then:
+transaction. With no sources connected yet the scheduler is enabled and idle —
+that is the healthy fresh-install state, and doctor stays green. To watch it run
+in the foreground for a first session instead, stop the background service first
+(`olympus worker stop`), then:
 
 ```bash
 olympus worker foreground   # Ctrl-C stops it
@@ -264,9 +269,10 @@ that `olympus source index status` returns.
 olympus dashboard
 ```
 
-The command prints the dashboard URL. Your browser opens a local,
-token-protected dashboard: source freshness, how much is indexed, and where
-public, private, secure, and secrets are allowed to go.
+The command prints the dashboard URL, whether it opened a browser, and a hint
+— never the token. Your browser opens a local, token-protected dashboard:
+source freshness, how much is indexed, and where public, private, secure, and
+secrets are allowed to go.
 Reading is open on that link; changing anything (connecting, reauthenticating,
 sync now) asks once for the worker token — `olympus dashboard token` prints it
 (treat that value like any other secret: it authorizes changes, so keep it out
@@ -347,9 +353,11 @@ Or from the terminal:
 olympus source answer "what did I commit to this week?"
 ```
 
-If that fails with `email_not_configured`, the email lane is off. Setup enables
-it, so a fresh install should not hit this; if you do, run the command the
-error's remedy names.
+The private source worker lane is on by default, so `email_not_configured`
+should not appear on a fresh install — `OLYMPUS_EMAIL_ENABLED=false` is the
+explicit opt-out. If you do see it, run what its remedy names (`olympus setup`,
+then `olympus worker install`). A worker that simply is not running says so
+instead: `Email worker is not reachable at http://127.0.0.1:8010/v1`.
 
 Non-OpenClaw agents (Claude, etc.) can get the same tools over MCP:
 `olympus serve` — see the README's MCP section.
@@ -365,6 +373,7 @@ olympus data delete --all   # complete removal: indexes, embeddings, configs, to
 ---
 
 **Something not working?** `olympus doctor` first. Every failure it knows
-about comes with the command that fixes it. Doctor exits non-zero while any
-check is red and prints a summary of what failed, so its exit status is a
-reliable pass/fail signal in scripts.
+about comes with the command that fixes it. A red walk exits 1 and prints a
+summary to stderr — `olympus doctor: 7 of 9 checks passed, 2 failed.` and the
+names of the failed checks — while the full JSON stays on stdout, so its exit
+status is a reliable pass/fail signal in scripts.
