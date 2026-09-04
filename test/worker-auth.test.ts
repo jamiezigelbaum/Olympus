@@ -14,6 +14,7 @@ import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
+  unquoteEnvValue,
   workerAuthTokenFromConfig,
 } from '../src/core/worker-auth.ts';
 import { createCastorWorkspaceWorker } from '../src/workers/castor-workspace/index.ts';
@@ -891,5 +892,32 @@ describe('domain expert bearer scope', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('worker.env value quoting', () => {
+  test('round-trips every shape Olympus writes, and leaves older shapes alone', () => {
+    // The writer emits POSIX single-quoted values, so this reader has to speak
+    // the same dialect the shell that sources the file speaks -- including the
+    // close-escape-reopen form an embedded quote takes.
+    const shellSingleQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    for (const value of [
+      'plain-key',
+      'x$(touch /tmp/pwned)',
+      "key-with-'-inside",
+      "it's a 'test'",
+      'has spaces',
+      "'",
+    ]) {
+      expect(unquoteEnvValue(shellSingleQuote(value))).toBe(value);
+    }
+
+    // Shapes that predate the quoting must keep meaning exactly what they meant.
+    expect(unquoteEnvValue('bare-value')).toBe('bare-value');
+    expect(unquoteEnvValue('  padded  ')).toBe('padded');
+    expect(unquoteEnvValue('"double"')).toBe('double');
+    expect(unquoteEnvValue("'single'")).toBe('single');
+    expect(unquoteEnvValue("'abc'def'")).toBe("abc'def");
+    expect(unquoteEnvValue("'unterminated")).toBe("'unterminated");
   });
 });

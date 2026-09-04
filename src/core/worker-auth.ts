@@ -121,9 +121,20 @@ function parseWorkerSetupEnv(text: string): Record<string, string> {
  * Both managed sourcing paths accept them — systemd's `EnvironmentFile=` parser
  * and the launchd unit's `set -a; . <env>` shell sourcing — so every reader of
  * that file must unquote the same way the running worker sees it.
+ *
+ * Olympus WRITES single-quoted values (see writeManagedWorkerEnvSecret), so a
+ * value carrying its own quote arrives in the POSIX close-escape-reopen form
+ * `'a'\''b'`. Read as a plain strip that is `a'\''b`, which is not the secret
+ * the worker holds — so this reads the concatenation the shell reads. Anything
+ * that is not that shape falls back to the plain strip, because a hand-written
+ * worker.env predates this and must keep meaning what it always meant.
  */
 export function unquoteEnvValue(value: string): string {
   const trimmed = value.trim();
+  if (trimmed.startsWith("'")) {
+    const joined = joinSingleQuotedWord(trimmed);
+    if (joined !== undefined) return joined;
+  }
   if (
     (trimmed.startsWith('"') && trimmed.endsWith('"'))
     || (trimmed.startsWith("'") && trimmed.endsWith("'"))
@@ -131,4 +142,30 @@ export function unquoteEnvValue(value: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+
+/**
+ * One shell word built only from single-quoted runs and escaped quotes, or
+ * undefined when the text is anything else. Undefined is the honest answer for
+ * a shape this cannot read: guessing would rewrite somebody's secret.
+ */
+function joinSingleQuotedWord(text: string): string | undefined {
+  let out = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "'") {
+      const end = text.indexOf("'", index + 1);
+      if (end === -1) return undefined;
+      out += text.slice(index + 1, end);
+      index = end + 1;
+      continue;
+    }
+    if (text[index] === '\\' && text[index + 1] === "'") {
+      out += "'";
+      index += 2;
+      continue;
+    }
+    return undefined;
+  }
+  return out;
 }

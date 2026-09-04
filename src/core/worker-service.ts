@@ -703,10 +703,12 @@ export function writeManagedWorkerEnvSecret(input: {
   if (!value) {
     throw new OperationError('invalid_params', `${input.key} must not be empty.`);
   }
-  // A newline would forge a second assignment in worker.env; NUL and CR would
-  // survive the parser differently in the shell that sources it.
-  if (/[\0\r\n]/.test(value)) {
-    throw new OperationError('invalid_params', `${input.key} must not contain line breaks or NUL bytes.`);
+  // A newline would forge a second assignment in worker.env, and no control
+  // byte belongs in an API key. Quoting below makes the value inert to the
+  // shell that sources the file; this keeps it inert to the FILE FORMAT, which
+  // quoting cannot do.
+  if (/\p{Cc}/u.test(value)) {
+    throw new OperationError('invalid_params', `${input.key} must not contain control characters.`);
   }
   const platform = normalizePlatform(input.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(input.homeDir ?? homedir(), 'home directory');
@@ -721,12 +723,32 @@ export function writeManagedWorkerEnvSecret(input: {
   }
   assertManagedRegularFile(envPath, 'worker environment');
   const current = readFileSync(envPath, 'utf8');
-  const assignment = `${input.key}=${value}`;
+  // Single-quoted, always. The launchd unit sources this file with
+  // `set -a; . worker.env`, so an unquoted value is shell source text: a key
+  // pasted as `x$(touch /tmp/pwned)` ran that command at every worker boot.
+  // Inside single quotes the shell expands nothing at all.
+  const assignment = `${input.key}=${shellSingleQuote(value)}`;
   // Horizontal whitespace only: `\s` would let a bare `#` line swallow the
   // newline after it and take the assignment below with it.
-  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`, 'm');
-  const next = pattern.test(current)
-    ? current.replace(pattern, assignment)
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
+  const lines = current.split('\n');
+  let replaced = false;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (!pattern.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    // The FIRST assignment keeps its position; any later duplicate is dropped.
+    // The shell that sources this file takes the last assignment, so leaving a
+    // stale duplicate below the one we just wrote would hand the worker the
+    // value this call was replacing.
+    if (replaced) continue;
+    kept.push(assignment);
+    replaced = true;
+  }
+  const next = replaced
+    ? kept.join('\n')
     : `${current.replace(/\n?$/, '\n')}${assignment}\n`;
   let wrote = false;
   if (next !== current) {
@@ -738,6 +760,17 @@ export function writeManagedWorkerEnvSecret(input: {
     wrote = true;
   }
   return { ok: true, path: envPath, key: input.key, wrote };
+}
+
+/**
+ * POSIX single-quoting, the form both managed sourcing paths understand.
+ *
+ * Everything between single quotes is literal to the shell, and an embedded
+ * quote is closed, escaped and reopened -- `'\''` -- which is the only way to
+ * put one inside a single-quoted word. `unquoteEnvValue` reads this shape back.
+ */
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function normalizePlatform(value: string): WorkerServicePlatform {

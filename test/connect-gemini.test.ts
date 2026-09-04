@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { connectGeminiApiKey } from '../src/core/connect.ts';
+import { unquoteEnvValue } from '../src/core/worker-auth.ts';
 import { writeManagedWorkerEnvSecret } from '../src/core/worker-service.ts';
 
 describe('olympus connect gemini', () => {
@@ -83,7 +84,7 @@ describe('olympus connect gemini', () => {
         key: 'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
         value: 'key\nOLYMPUS_WORKER_AUTH_TOKEN=stolen',
         envPath,
-      })).toThrow('must not contain line breaks');
+      })).toThrow('must not contain control characters');
       expect(readFileSync(envPath, 'utf8')).toBe('PATH=/usr/bin\n');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -91,11 +92,15 @@ describe('olympus connect gemini', () => {
   });
 });
 
+/**
+ * Reads worker.env the way the worker does: values are written single-quoted,
+ * so a parser that does not unquote reports the quotes as part of the secret.
+ */
 function parseEnvFile(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
     const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
-    if (match) env[match[1]!] = match[2] ?? '';
+    if (match) env[match[1]!] = unquoteEnvValue(match[2] ?? '');
   }
   return env;
 }
