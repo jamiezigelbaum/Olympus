@@ -1158,33 +1158,37 @@ export function dashboardOAuthConnectSheet(
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
   const sheetId = `connect-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+  // Everything inside the disclosure is the bring-your-own walkthrough, which
+  // on a publisher action lives under `advanced_byo` — the top level of a
+  // publisher action's instructions is the one-click text the sheet leads with.
+  const byo = instructions.advanced_byo ?? instructions;
   // Only the client id is required here. The secret this source already stored
   // is what makes it an `oauth` action rather than a `needs_setup` one, so a
   // required secret field would demand the owner re-paste a credential the
   // worker already holds; blank means "keep the stored one".
-  const fields = instructions.fields.map((field) => (
+  const fields = byo.fields.map((field) => (
     field.name === 'client_id' ? field : { ...field, required: false }
   ));
-  const secretPlaceholders = Object.fromEntries(instructions.fields
+  const secretPlaceholders = Object.fromEntries(byo.fields
     .filter((field) => field.name !== 'client_id')
     .map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${action.label} ${source.label}`,
-    intro: instructions.plain_intro,
-    promptText: instructions.agent_prompt,
+    intro: byo.plain_intro,
+    promptText: byo.agent_prompt,
     source: action.source,
     fields,
     submitLabel: action.label,
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
-    // one click away rather than deleting it.
+    // one click away rather than deleting it. The sentence is the action's own
+    // plain_intro, so the page and dashboard.json cannot drift apart.
     ...(action.publisher_client
       ? {
         publisher: {
-          intro: `Olympus connects ${source.label} through its own registered app. `
-            + 'Press Connect, approve it with your account, and come back to this page.',
-          byoSummary: 'Use my own app instead',
+          intro: instructions.plain_intro,
+          byoSummary: instructions.diy_summary,
         },
       }
       : {}),

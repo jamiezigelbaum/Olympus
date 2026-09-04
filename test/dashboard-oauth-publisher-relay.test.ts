@@ -30,7 +30,11 @@ import {
 } from '../src/core/oauth-relay.ts';
 import { DEFAULT_DROPBOX_PUBLISHER_APP_KEY } from '../src/core/publisher-oauth-client.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
-import type { DashboardSourceAction } from '../src/workers/source-dashboard.ts';
+import {
+  PUBLISHER_ADVANCED_BYO_SUMMARY,
+  publisherConnectIntro,
+  type DashboardSourceAction,
+} from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -761,6 +765,37 @@ describe('publisher-mode card', () => {
     expect(JSON.stringify(action)).not.toContain('auth.olympusplugin.ai');
   });
 
+  test('a publisher action reads publisher-first in JSON, with BYO under advanced_byo', async () => {
+    // The rendered card led with the one-click button from the day publisher
+    // mode shipped, but this model's `instructions` stayed BYO-only, so an
+    // agent diagnosing a connect problem from dashboard.json sent the operator
+    // to the Dropbox developer console for a source that needs one press
+    // (clean-install rehearsal, 2026-09-05).
+    const action = dropboxAction(await dashboardJson(fixture()));
+    expect(action.publisher_client).toBe(true);
+    expect(action.instructions.plain_intro).toBe(publisherConnectIntro('Dropbox'));
+    expect(action.instructions.fields).toEqual([]);
+    expect(action.instructions.diy_steps).toEqual([]);
+    expect(action.instructions.diy_summary).toBe(PUBLISHER_ADVANCED_BYO_SUMMARY);
+    expect(action.instructions.agent_prompt).not.toContain('developers/apps');
+    expect(action.instructions.agent_prompt).toContain('its own registered app');
+
+    // Nothing is lost: the whole walkthrough is one field down.
+    const byo = action.instructions.advanced_byo;
+    expect(byo.plain_intro).toContain('Dropbox App key');
+    expect(byo.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
+    expect(byo.diy_steps.length).toBeGreaterThan(0);
+    expect(byo.provider_console_url).toBe('https://www.dropbox.com/developers/apps');
+  });
+
+  test('a bring-your-own action carries no advanced_byo sub-object at all', async () => {
+    const instance = fixture({ 'dropbox.personal.oauth.client_id': 'stored-dropbox-app-key' });
+    const action = dropboxAction(await dashboardJson(instance));
+    expect(action.publisher_client).toBeUndefined();
+    expect(action.instructions.advanced_byo).toBeUndefined();
+    expect(action.instructions.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
+  });
+
   test('an install with its own app key keeps today’s bring-your-own card', async () => {
     const instance = fixture({ 'dropbox.personal.oauth.client_id': 'stored-dropbox-app-key' });
     const action = dropboxAction(await dashboardJson(instance));
@@ -844,6 +879,19 @@ describe('publisher-mode sheet', () => {
     finish: 'Copy the App key back into the field below and press Connect.',
   };
 
+  // The shape the model actually emits for a publisher action: the one-click
+  // text at the top level, the whole BYO walkthrough under advanced_byo.
+  const publisherInstructions = {
+    plain_intro: publisherConnectIntro('Dropbox'),
+    agent_prompt: 'Connect Dropbox to Olympus from the Olympus dashboard.',
+    provider_console_url: instructions.provider_console_url,
+    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_steps: [],
+    secret_shown_once: false,
+    fields: [],
+    advanced_byo: instructions,
+  };
+
   function sheetFor(action: Partial<Extract<DashboardSourceAction, { kind: 'oauth' }>>): string {
     return dashboardOAuthConnectSheet(
       { source_id: 'dropbox.files', label: 'Dropbox' },
@@ -860,7 +908,7 @@ describe('publisher-mode sheet', () => {
   }
 
   test('publisher mode leads with Connect alone and keeps bring-your-own one click away', () => {
-    const sheet = sheetFor({ publisher_client: true });
+    const sheet = sheetFor({ publisher_client: true, instructions: publisherInstructions });
     const [lead, disclosure] = sheet.split('<details') as [string, string];
     // Nothing to fill in and nothing to register before the button.
     expect(lead).not.toContain('keyfield');

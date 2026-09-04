@@ -142,6 +142,33 @@ export interface DashboardSetupInstructions {
   diy_steps: DashboardSetupStep[];
   secret_shown_once: boolean;
   fields: DashboardConnectField[];
+  /**
+   * The bring-your-own walkthrough, present only on a `publisher_client`
+   * action.
+   *
+   * The rendered card has led with the one-click publisher button and kept BYO
+   * behind a disclosure since publisher mode shipped, but this model's
+   * `instructions` stayed BYO-only — a "you create in your own Google account"
+   * intro, a required client_id field, six console steps — so an agent reading
+   * dashboard.json to diagnose a connect problem sent the operator to the
+   * Google Cloud Console for a source that needs one press (clean-install
+   * rehearsal, 2026-09-05). The top level now says what the card says; the BYO
+   * detail is all still here, one field down, and it is the same object the
+   * renderer feeds its disclosure.
+   */
+  advanced_byo?: DashboardAdvancedByoInstructions;
+}
+
+/** The BYO half of a publisher-mode action: exactly the pre-publisher shape. */
+export interface DashboardAdvancedByoInstructions {
+  plain_intro: string;
+  agent_prompt: string;
+  provider_console_url: string;
+  google_cloud_project_id?: string;
+  diy_summary: string;
+  diy_steps: DashboardSetupStep[];
+  secret_shown_once: boolean;
+  fields: DashboardConnectField[];
 }
 
 export interface SourceDashboardViewModel {
@@ -3001,7 +3028,11 @@ function sourceAction(
         label,
         publisher_client: true as const,
         ...redirectFields,
-        instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        instructions: publisherOAuthSetupInstructions(
+          definition.label,
+          label,
+          oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        ),
         ...(pending ? { pending_attempt: true as const } : {}),
       };
     }
@@ -3064,6 +3095,44 @@ function guidedSessionLabel(
   if (!connected || reauthRequired) return 'Pairing required';
   return sessionEvidence === 'unconfirmed' ? 'Session state not surfaced' : 'Session ready';
 }
+
+/**
+ * The one-click publisher instructions, with the bring-your-own walkthrough
+ * carried underneath rather than in front.
+ *
+ * `plain_intro` is the sentence the rendered card already leads with, so the
+ * page and the JSON say the same thing from one place, and `fields` is empty
+ * because a publisher connect asks the reader for nothing.
+ */
+function publisherOAuthSetupInstructions(
+  sourceLabel: string,
+  actionLabel: 'Connect' | 'Reauthenticate',
+  byo: DashboardSetupInstructions,
+): DashboardSetupInstructions {
+  return {
+    plain_intro: publisherConnectIntro(sourceLabel),
+    agent_prompt: `Connect ${sourceLabel} to Olympus from the Olympus dashboard: press ${actionLabel} on the `
+      + `${sourceLabel} card, approve the access in the provider tab that opens, and come back to the dashboard. `
+      + 'Olympus uses its own registered app, so there is nothing for me to create, register, or paste. '
+      + 'Do not ask me to edit files, configuration, or code.',
+    provider_console_url: byo.provider_console_url,
+    ...(byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {}),
+    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_steps: [],
+    secret_shown_once: false,
+    fields: [],
+    advanced_byo: byo,
+  };
+}
+
+/** The sentence the publisher card and the publisher JSON both lead with. */
+export function publisherConnectIntro(sourceLabel: string): string {
+  return `Olympus connects ${sourceLabel} through its own registered app. `
+    + 'Press Connect, approve it with your account, and come back to this page.';
+}
+
+/** The disclosure's summary on a publisher card, and its diy_summary in JSON. */
+export const PUBLISHER_ADVANCED_BYO_SUMMARY = 'Use my own app instead';
 
 function oauthSetupInstructions(
   source: DashboardOAuthSource,
