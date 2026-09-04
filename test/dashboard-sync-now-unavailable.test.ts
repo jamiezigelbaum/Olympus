@@ -124,7 +124,7 @@ function justConnectedCard(overrides: Partial<DashboardSourceCard> = {}): Dashbo
     family: 'file',
     trust_domain: 'internal',
     configured: true,
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     coverage: {
       indexed_items: 0,
       content_ready_items: 0,

@@ -74,6 +74,17 @@ export type DashboardConnectionState =
   | 'syncing'
   | 'synced';
 
+/**
+ * The freshness line for a source that has never completed a check.
+ *
+ * One string, exported, because three renderers branch on it by equality —
+ * phases, vocabulary and the detail page all ask "has this ever run?" that way
+ * — and the wording has to match the phase ladder's own words. "Waiting for
+ * first check" said something the phases never said (clean-install rehearsal,
+ * 2026-09-05).
+ */
+export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
+
 export type DashboardConnectFieldName = 'client_id' | 'client_secret' | 'api_key';
 
 export interface DashboardConnectField {
@@ -2057,17 +2068,27 @@ function sourceCardFromDefinition(
     || connection.state === 'waiting_for_first_sync'
     || connection.state === 'syncing'
     || connection.state === 'synced';
-  const answerReadiness = connection.state === 'reauth_required'
-    ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
-    : embeddingLaneDisabled
-      ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
-      : throughput?.state === 'stalled'
-        ? { state: 'needs_attention' as const, label: 'Content extraction is stalled' }
-        : definition.answer_capable_without_sync && configured
-          ? { state: 'ready' as const, label: 'Ready for questions' }
-          // Same `operatorPaused` the connect control is suppressed by, so the
-          // header, the control and the detail sentence read one pause.
-          : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
+  // A source nobody has connected has one readiness, and it is the same one for
+  // all of them: connect it first. The embedding-lane and extraction overrides
+  // below are facts about a lane that is running, and letting them speak over
+  // an unconnected source made five identically-empty sources read three
+  // different ways and put four of them in needs_attention on a machine with
+  // nothing connected (clean-install rehearsal, 2026-09-05). reauth_required is
+  // NOT this case: that source is connected and the credential has lapsed.
+  const notConnected = !configured && connection.state !== 'reauth_required';
+  const answerReadiness = notConnected
+    ? { state: 'disconnected' as const, label: 'Connect this source' }
+    : connection.state === 'reauth_required'
+      ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
+      : embeddingLaneDisabled
+        ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
+        : throughput?.state === 'stalled'
+          ? { state: 'needs_attention' as const, label: 'Content extraction is stalled' }
+          : definition.answer_capable_without_sync && configured
+            ? { state: 'ready' as const, label: 'Ready for questions' }
+            // Same `operatorPaused` the connect control is suppressed by, so the
+            // header, the control and the detail sentence read one pause.
+            : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
   const lastRun = lastRunFromCorpora(corpora);
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
@@ -2627,7 +2648,7 @@ function aggregateFreshness(
   if (cards.some((card) => card.coverage.indexed_items > 0)) {
     return { label: 'Last check time not recorded', stale };
   }
-  return { label: 'Waiting for first check', stale };
+  return { label: DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, stale };
 }
 
 function aggregateTierComposition(
@@ -3462,7 +3483,7 @@ function latestCompletedAt(corpora: SourceIndexStatusCorpus[]): Date | undefined
 // Undefined when nothing dates the last sync. The previous fallback was
 // relativeTime(now, now), which by construction returns 'just now', so the
 // absence of a timestamp was rendered as a confident "synced just now" over a
-// detail line reading "Waiting for first check".
+// detail line saying the first sync had not happened.
 function syncedRelativeLabel(freshness: DashboardSourceCard['freshness']): string | undefined {
   if (typeof freshness.hours === 'number' && Number.isFinite(freshness.hours)) {
     return relativeDurationFromHours(freshness.hours);
@@ -3784,7 +3805,10 @@ function freshnessFrom(
   if (completedAt) {
     return { label: 'Recently checked', stale: false };
   }
-  return { label: corpus.configured ? 'Waiting for first check' : 'Not connected yet', stale: false };
+  return {
+    label: corpus.configured ? DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL : 'Not connected yet',
+    stale: false,
+  };
 }
 
 /**

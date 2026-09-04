@@ -34,7 +34,10 @@ import type {
   DashboardSourceRun,
   SourceDashboardViewModel,
 } from '../../source-dashboard.ts';
-import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
+import {
+  DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
+  dashboardGuidedSessionAgentPrompt,
+} from '../../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
 import {
   DASHBOARD_POLICY_CSS,
@@ -392,7 +395,7 @@ function renderProgress(
 ): string {
   const headingText = progress.delta
     ? 'Current update'
-    : source.connection.state === 'syncing' || source.freshness.label === 'Waiting for first check'
+    : source.connection.state === 'syncing' || source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL
       ? 'Initial ingestion'
       : 'Ingestion';
   const heading = `

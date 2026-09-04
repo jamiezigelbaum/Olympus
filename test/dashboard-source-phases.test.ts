@@ -1103,7 +1103,7 @@ function updatePassCard(overrides: Partial<DashboardSourceCard> = {}): Dashboard
 /** The same source before it has ever finished a pass. */
 function firstIngestCard(overrides: Partial<DashboardSourceCard> = {}): DashboardSourceCard {
   return settledPassCard({
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     connection: {
       state: 'waiting_for_first_sync',
       label: 'connected, waiting for first sync',

@@ -652,7 +652,7 @@ function card(
     family: 'file',
     trust_domain: 'internal',
     configured: false,
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0, needs_review_items: 0 },
     ingestion_health: {
       coverage_percent: 0,

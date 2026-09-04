@@ -65,6 +65,50 @@ import type {
 } from '../src/workers/x-bookmarks/index.ts';
 
 describe('multi-source source dashboard', () => {
+  test('a fresh install reads the same way for every unconnected source and needs nothing', () => {
+    // Five identically-unconnected sources read three different ways on a
+    // machine with nothing connected: gmail and dropbox said "Connect this
+    // source" while drive, x and readwise said "Embedding lane needs
+    // attention", which counted four of them into needs_attention_sources
+    // (clean-install rehearsal, 2026-09-05).
+    const disabledLane = {
+      state: 'embedding_lane_disabled' as const,
+      reason: 'embedding_provider_unavailable' as const,
+      affected_credentials: [],
+      affected_profiles: [],
+      affected_capabilities: ['embedding'],
+      hint: 'Fix the affected credential, then restart the worker if needed.',
+    };
+    const status = fixtureStatus();
+    status.embedding_lane = disabledLane;
+    for (const corpus of status.corpora) {
+      corpus.configured = false;
+      corpus.embedding_lane = disabledLane;
+      if ('counts' in corpus && corpus.counts) {
+        corpus.counts = { ...corpus.counts, indexed_items: 0, chunks: 0, embedded_chunks: 0, sync_runs: 0 };
+      }
+      delete corpus.last_refresh;
+    }
+
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: { version: 1, handles: [] },
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+
+    const unconnected = view.sources.filter((source) => !source.configured
+      && source.connection.state !== 'reauth_required');
+    expect(unconnected.length).toBeGreaterThanOrEqual(5);
+    for (const source of unconnected) {
+      expect(source.answer_readiness).toEqual({ state: 'disconnected', label: 'Connect this source' });
+    }
+    expect(view.summary.needs_attention_sources).toBe(0);
+    // And a source that has never run says so in the phase ladder's own words.
+    expect(view.sources.find((source) => source.source_id === 'gmail.email')?.freshness.label)
+      .toBe('Waiting for the first sync');
+  });
+
   test('content-ready counts items with text once, never items plus their own chunks', () => {
     const status = fixtureStatus();
     const drive = status.corpora.find((corpus) => corpus.corpus_id === 'internal.drive.docs');
@@ -2929,7 +2973,7 @@ describe('freshness and sync labels', () => {
 
     expect(card?.connection.state).toBe('synced');
     expect(card?.connection.label).toBe('synced');
-    expect(card?.freshness.label).not.toBe('Waiting for first check');
+    expect(card?.freshness.label).not.toBe('Waiting for the first sync');
   });
 
   test('the freshness line renders hours the same way the connection label does', () => {
