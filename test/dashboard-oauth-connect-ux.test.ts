@@ -253,11 +253,12 @@ describe('the card walks the owner through registering the callback itself', () 
 
     expect(sheet).toContain('href="https://console.cloud.google.com/apis/credentials"');
     expect(sheet).toContain('Application type to Web application');
-    // The owner's existing Desktop client shows no redirect-URI section at
-    // all (2026-09-04): the steps must say a Desktop client cannot be reused.
-    expect(sheet).toContain('a Desktop app client has none and cannot be reused');
+    // The owner's existing Desktop client showed no redirect-URI section at
+    // all (2026-09-04): the steps must say why a Desktop client cannot be reused.
+    expect(sheet).toContain('a Desktop app client cannot register an https redirect URI and shows no redirect URI section');
     expect(sheet).toContain('enable the Gmail API');
-    expect(sheet).toContain('<b>Authorized redirect URIs (press + Add URI on the new client&#39;s form)</b>');
+    expect(sheet).toContain('<b>Authorized redirect URIs</b>');
+    expect(sheet).toContain('Add it with + Add URI');
     expect(sheet).toContain('copy the Client ID from the confirmation dialog');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/gmail`);
     expect(setupSheet('google_drive.docs')).toContain('enable the Google Drive API');
