@@ -78,6 +78,10 @@ export const V0_4_PUBLIC_CONNECT_SOURCES = [
   'whatsapp',
   'venice',
   'readwise',
+  // Not a data source: the model-provider API key every preset needs for
+  // source-index embeddings. It is on the connect roster because that is the
+  // only supported way to put the key where the supervised worker reads it.
+  'gemini',
 ] as const;
 
 export const V0_4_PUBLIC_SOURCE_IDS = [
@@ -111,6 +115,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connect whatsapp',
   'connect venice',
   'connect readwise',
+  'connect gemini',
   'connect status',
   'dashboard',
   'source answer',

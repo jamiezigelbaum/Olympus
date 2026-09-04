@@ -672,6 +672,72 @@ function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOption
   return false;
 }
 
+/**
+ * The environment names a connect command may write into the installed worker
+ * environment. worker.env is the worker's whole environment and the install
+ * guide forbids editing it by hand, so the set of keys a command may put there
+ * is a positive list — not "whatever the caller passes".
+ */
+export const MANAGED_WORKER_ENV_SECRET_KEYS = ['OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY'] as const;
+export type ManagedWorkerEnvSecretKey = typeof MANAGED_WORKER_ENV_SECRET_KEYS[number];
+
+/**
+ * Store one API key in the installed worker environment.
+ *
+ * The supervised worker reads this key from ITS process environment, which
+ * launchd/systemd load from worker.env, so an `export` in the operator's shell
+ * never reaches it. This is the only supported way to put such a key where the
+ * worker will actually find it.
+ */
+export function writeManagedWorkerEnvSecret(input: {
+  key: ManagedWorkerEnvSecretKey;
+  value: string;
+  platform?: WorkerServicePlatform;
+  homeDir?: string;
+  envPath?: string;
+}): { ok: true; path: string; key: ManagedWorkerEnvSecretKey; wrote: boolean } {
+  if (!(MANAGED_WORKER_ENV_SECRET_KEYS as readonly string[]).includes(input.key)) {
+    throw new OperationError('invalid_params', `${input.key} is not a managed worker environment key.`);
+  }
+  const value = input.value.trim();
+  if (!value) {
+    throw new OperationError('invalid_params', `${input.key} must not be empty.`);
+  }
+  // A newline would forge a second assignment in worker.env; NUL and CR would
+  // survive the parser differently in the shell that sources it.
+  if (/[\0\r\n]/.test(value)) {
+    throw new OperationError('invalid_params', `${input.key} must not contain line breaks or NUL bytes.`);
+  }
+  const platform = normalizePlatform(input.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(input.homeDir ?? homedir(), 'home directory');
+  const envPath = input.envPath ?? workerServicePaths(platform, homeDir).envPath;
+  validateManagedPath(envPath, 'worker environment');
+  if (!existsSync(envPath)) {
+    throw new OperationError(
+      'config_error',
+      `No Olympus worker environment exists at ${envPath}.`,
+      'Run olympus setup --preset <preset> --yes first; it creates the worker environment this key is stored in.',
+    );
+  }
+  assertManagedRegularFile(envPath, 'worker environment');
+  const current = readFileSync(envPath, 'utf8');
+  const assignment = `${input.key}=${value}`;
+  const pattern = new RegExp(`^#?\\s*${input.key}=.*$`, 'm');
+  const next = pattern.test(current)
+    ? current.replace(pattern, assignment)
+    : `${current.replace(/\n?$/, '\n')}${assignment}\n`;
+  let wrote = false;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    wrote = true;
+  }
+  if ((statSync(envPath).mode & 0o777) !== 0o600) {
+    chmodSync(envPath, 0o600);
+    wrote = true;
+  }
+  return { ok: true, path: envPath, key: input.key, wrote };
+}
+
 function normalizePlatform(value: string): WorkerServicePlatform {
   if (value === 'darwin' || value === 'linux') return value;
   throw new OperationError('invalid_params', 'olympus worker install supports macOS launchd and Linux user-systemd.');

@@ -26,6 +26,7 @@ import {
 } from './core/lifecycle.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import {
+  connectGeminiApiKey,
   connectPublicApiKeySource,
   connectOAuthSourceDetached,
   connectGuidedSession,
@@ -985,6 +986,7 @@ function printHelp(): void {
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --session-path <path>');
   console.log('  olympus connect venice|readwise --api-key-stdin');
+  console.log('  olympus connect gemini --api-key-stdin');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
@@ -1014,6 +1016,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
   'connect venice': 'olympus connect venice --api-key-stdin',
   'connect readwise': 'olympus connect readwise --api-key-stdin',
+  'connect gemini': 'olympus connect gemini --api-key-stdin',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
   dashboard: 'olympus dashboard',
   'data export': 'olympus data export --output <dir> [--source <id>]',
@@ -1077,6 +1080,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connect dropbox --client-id <id>',
     '  olympus connect telegram|whatsapp --session-path <path>',
     '  olympus connect venice|readwise --api-key-stdin',
+    '  olympus connect gemini --api-key-stdin',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1807,6 +1811,7 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
         'olympus connect venice|readwise --api-key-stdin',
+        'olympus connect gemini --api-key-stdin',
         'olympus connect status [google|gmail|google-drive|dropbox]',
       ],
     };
@@ -1914,6 +1919,12 @@ async function runConnect(args: string[]): Promise<unknown> {
       secretStore,
       sessionReady: options.sessionReady,
     });
+  }
+  if (source === 'gemini') {
+    if (!options.apiKeyStdin) {
+      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    }
+    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
   }
   if (source === 'venice' || source === 'readwise') {
     if (!options.apiKeyStdin) {

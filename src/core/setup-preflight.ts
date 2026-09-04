@@ -63,7 +63,7 @@ async function secretRefPrerequisite(
       profileId,
       label: `${displayKey} environment variable`,
       detail: `Profile ${profileId} needs ${displayKey} for ${profile.provider}.`,
-      remedy: `export ${displayKey}=...`,
+      remedy: envSecretRemedy(displayKey),
     };
   }
 
@@ -79,6 +79,19 @@ async function secretRefPrerequisite(
     detail: `Profile ${profileId} needs ${ref.key} in the Olympus secret store.`,
     remedy: storeSecretRemedy(ref.key),
   };
+}
+
+/**
+ * The supervised worker reads its environment from worker.env, loaded by
+ * launchd/systemd — an `export` in the operator's shell never reaches it, so a
+ * remedy that says `export ...` is a remedy that cannot work. Name the command
+ * that puts the key where the worker will find it.
+ */
+function envSecretRemedy(displayKey: string): string {
+  if (displayKey === 'GEMINI_API_KEY') {
+    return 'printf \'%s\' "$KEY" | olympus connect gemini --api-key-stdin';
+  }
+  return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
 
 function isLocalLoopbackProfile(profile: SovereigntyModelProfile): boolean {
