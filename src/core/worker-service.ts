@@ -722,7 +722,9 @@ export function writeManagedWorkerEnvSecret(input: {
   assertManagedRegularFile(envPath, 'worker environment');
   const current = readFileSync(envPath, 'utf8');
   const assignment = `${input.key}=${value}`;
-  const pattern = new RegExp(`^#?\\s*${input.key}=.*$`, 'm');
+  // Horizontal whitespace only: `\s` would let a bare `#` line swallow the
+  // newline after it and take the assignment below with it.
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`, 'm');
   const next = pattern.test(current)
     ? current.replace(pattern, assignment)
     : `${current.replace(/\n?$/, '\n')}${assignment}\n`;
