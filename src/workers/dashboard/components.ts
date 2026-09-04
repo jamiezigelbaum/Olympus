@@ -389,11 +389,17 @@ export const DASHBOARD_CONTROL_GATE_ID = 'dashboard-controls';
  * The prompt a reader hands their agent to get the worker token (owner ruling,
  * 2026-09-01: the agent may read it out of the worker env file and hand it
  * over in chat). Names the file and the command, never the value.
+ *
+ * `olympus` is NOT on PATH on a fresh install — the install guide runs it as
+ * `"$OLYMPUS_BIN"` for exactly that reason — so a bare command sent the reader
+ * to "command not found" (clean-install rehearsal, 2026-09-05). The prompt and
+ * the CLI line below both name where the binary lives.
  */
 export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
-  'I need the Olympus worker token to unlock the dashboard controls. Run `olympus dashboard token` '
-  + '(or read OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file) and give me the token so I can '
-  + 'paste it into the dashboard. Do not change any configuration.';
+  'I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from '
+  + '`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read '
+  + 'OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste '
+  + 'it into the dashboard. Do not change any configuration.';
 
 /**
  * The one dashboard-level custody gate for every mutating source control.
@@ -438,8 +444,9 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>`
     + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
-    + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus:</p>`
-    + `<div class="promptbox"><code>olympus dashboard token</code></div>`
+    + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus, from the plugin directory:</p>`
+    + `<div class="promptbox"><code>&lt;rootDir&gt;/bin/olympus dashboard token</code></div>`
+    + `<p class="hint">rootDir comes from <code>openclaw plugins inspect olympus --json</code>.</p>`
     + `</div>`;
 }
 
@@ -1158,33 +1165,37 @@ export function dashboardOAuthConnectSheet(
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
   const sheetId = `connect-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+  // Everything inside the disclosure is the bring-your-own walkthrough, which
+  // on a publisher action lives under `advanced_byo` — the top level of a
+  // publisher action's instructions is the one-click text the sheet leads with.
+  const byo = instructions.advanced_byo ?? instructions;
   // Only the client id is required here. The secret this source already stored
   // is what makes it an `oauth` action rather than a `needs_setup` one, so a
   // required secret field would demand the owner re-paste a credential the
   // worker already holds; blank means "keep the stored one".
-  const fields = instructions.fields.map((field) => (
+  const fields = byo.fields.map((field) => (
     field.name === 'client_id' ? field : { ...field, required: false }
   ));
-  const secretPlaceholders = Object.fromEntries(instructions.fields
+  const secretPlaceholders = Object.fromEntries(byo.fields
     .filter((field) => field.name !== 'client_id')
     .map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${action.label} ${source.label}`,
-    intro: instructions.plain_intro,
-    promptText: instructions.agent_prompt,
+    intro: byo.plain_intro,
+    promptText: byo.agent_prompt,
     source: action.source,
     fields,
     submitLabel: action.label,
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
-    // one click away rather than deleting it.
+    // one click away rather than deleting it. The sentence is the action's own
+    // plain_intro, so the page and dashboard.json cannot drift apart.
     ...(action.publisher_client
       ? {
         publisher: {
-          intro: `Olympus connects ${source.label} through its own registered app. `
-            + 'Press Connect, approve it with your account, and come back to this page.',
-          byoSummary: 'Use my own app instead',
+          intro: instructions.plain_intro,
+          byoSummary: instructions.diy_summary,
         },
       }
       : {}),

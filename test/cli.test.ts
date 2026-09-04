@@ -15,6 +15,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   formatCliFatalError,
   isV04PublicCliInvocation,
+  lifecycleRecoverySignalsFromWorkerHttpState,
   parseArgs,
   parseEvalShardExportArgs,
   parseQueuedContentRetargetArgs,
@@ -22,11 +23,83 @@ import {
   parseTerminalContentRequalifyArgs,
   parseXContentRecoveryArgs,
 } from '../src/cli.ts';
+import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
 
 describe('CLI tool surface', () => {
+  test('worker status recovery names only sources with something to resume', () => {
+    // On a machine with nothing connected, recovery listed partial_sync for
+    // three sources and a pairing to finish for two more (clean-install
+    // rehearsal, 2026-09-05). Recovery is a list of resumable work.
+    const fresh = lifecycleRecoverySignalsFromWorkerHttpState({
+      source_dashboard: {
+        sources: [
+          {
+            source_id: 'google_drive.docs',
+            configured: false,
+            connection: { state: 'not_connected' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 2 },
+            embedding_lane_state: 'embedding_lane_disabled',
+          },
+          {
+            source_id: 'telegram.messages',
+            configured: false,
+            connection: { state: 'not_connected' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+          {
+            source_id: 'whatsapp_personal.messages',
+            configured: false,
+            connection: { state: 'needs_setup' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+        ],
+      },
+    });
+    expect(fresh).toEqual([]);
+
+    // A connected source with real work, and a handshake actually in flight,
+    // still report.
+    const connected = lifecycleRecoverySignalsFromWorkerHttpState({
+      source_dashboard: {
+        sources: [
+          {
+            source_id: 'google_drive.docs',
+            configured: true,
+            connection: { state: 'synced' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 2 },
+          },
+          {
+            source_id: 'gmail.email',
+            configured: false,
+            connection: { state: 'awaiting_consent' },
+            answer_readiness: { state: 'disconnected' },
+            queue_health: { needs_attention: 0 },
+          },
+          {
+            source_id: 'telegram.messages',
+            configured: false,
+            connection: { state: 'reauth_required' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 0 },
+          },
+        ],
+      },
+    });
+    expect(connected).toEqual([
+      { kind: 'partial_sync', source_id: 'google_drive.docs' },
+      { kind: 'oauth_pending', source_id: 'gmail.email' },
+      { kind: 'pairing_pending', source_id: 'telegram.messages' },
+      { kind: 'capture_interrupted', source_id: 'telegram.messages' },
+    ]);
+  });
+
   test('operator errors preserve typed credential contention and retry guidance', () => {
     const error = new CredentialBrokerError(
       'credential_refresh_busy',
@@ -620,16 +693,25 @@ describe('CLI tool surface', () => {
             },
             {
               source_id: 'telegram.messages',
-              connection: { state: 'not_connected' },
-              answer_readiness: { state: 'disconnected' },
+              configured: false,
+              connection: { state: 'reauth_required' },
+              answer_readiness: { state: 'needs_attention' },
               queue_health: { needs_attention: 0 },
             },
             {
               source_id: 'dropbox.files',
+              configured: true,
               connection: { state: 'connected' },
               answer_readiness: { state: 'needs_attention' },
               queue_health: { needs_attention: 1 },
               embedding_lane_state: 'embedding_lane_disabled',
+            },
+            {
+              source_id: 'readwise.library',
+              configured: false,
+              connection: { state: 'not_connected' },
+              answer_readiness: { state: 'disconnected' },
+              queue_health: { needs_attention: 0 },
             },
           ],
         }));
@@ -692,6 +774,9 @@ describe('CLI tool surface', () => {
         expect.objectContaining({ kind: 'partial_sync', source_id: 'dropbox.files', restart_required: false }),
         expect.objectContaining({ kind: 'missing_dependency', source_id: 'dropbox.files', restart_required: false }),
       ]));
+      // And the unconnected source in the same payload contributes nothing:
+      // recovery is a list of work the operator can resume.
+      expect(JSON.stringify(onlineOutput.recovery)).not.toContain('readwise.library');
 
       await new Promise<void>((resolve) => server.close(() => resolve()));
       serverOpen = false;
@@ -716,6 +801,47 @@ describe('CLI tool surface', () => {
       server.closeAllConnections();
       if (serverOpen) await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('the opened dashboard URL is minted from the token the worker actually accepts', async () => {
+    // `olympus dashboard token` deliberately prefers worker.env over a token
+    // remembered in ~/.olympus/config.json, because the service loads its
+    // environment from that file. `olympus dashboard` derived its dash_ query
+    // token config-first, so a stale config token produced a URL the worker
+    // refuses while the token command printed the working one.
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-url-precedence-'));
+    const binDir = join(home, 'bin');
+    const openerLog = join(home, 'opener.url');
+    try {
+      mkdirSync(binDir, { recursive: true });
+      const openerScript = ['#!/bin/sh', `printf "%s\\n" "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
+      for (const opener of ['open', 'xdg-open']) {
+        writeFileSync(join(binDir, opener), openerScript);
+        chmodSync(join(binDir, opener), 0o755);
+      }
+      writeWorkerEnv(home, 'token-the-worker-loaded');
+      const configPath = join(home, 'config.json');
+      writeFileSync(configPath, JSON.stringify({ worker: { authToken: 'stale-config-token' } }));
+
+      const env = {
+        HOME: home,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        OLYMPUS_CONFIG: configPath,
+        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010',
+      };
+      const dashboard = await runSourceCli(['dashboard'], env);
+      const printedToken = new URL(JSON.parse(dashboard.stdout).url).searchParams.get('token');
+      const workerToken = (await runSourceCli(['dashboard', 'token'], env)).stdout.trim();
+
+      expect(workerToken).toBe('token-the-worker-loaded');
+      expect(printedToken).toBe(dashboardQueryTokenFromWorkerAuthToken(workerToken) ?? null);
+      expect(printedToken).not.toBe(dashboardQueryTokenFromWorkerAuthToken('stale-config-token') ?? null);
+      // The bearer itself is still nowhere in the output or the opened URL.
+      expect(dashboard.stdout).not.toContain(workerToken);
+      expect(readFileSync(openerLog, 'utf8')).not.toContain(workerToken);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
 
@@ -761,13 +887,17 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toEqual({
-        url: 'http://127.0.0.1:8010/dashboard',
-        opened: true,
-        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
-      });
-      // The URL and whether it opened, and nothing else: no token and no
-      // token-shaped field in output that gets pasted into issues.
+      // The printed URL is the one that works: it carries the derived read-only
+      // dash_ view token, which is the only way a browser reaches the HTML.
+      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
+      expect(output.opened).toBe(true);
+      expect(output.hint).toBe(
+        'This URL carries the read-only view token, not the worker token;'
+        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
+      );
+      expect(output.url).toBe(openedUrl.trim());
+      // The shape stays three fields, and the WORKER bearer is still absent:
+      // dash_ carries no control authority and is refused by every control route.
       expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
@@ -804,11 +934,13 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toMatchObject({
-        url: 'http://127.0.0.1:8010/dashboard',
-        opened: true,
-        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
-      });
+      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
+      expect(output.opened).toBe(true);
+      expect(output.hint).toBe(
+        'This URL carries the read-only view token, not the worker token;'
+        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
+      );
+      expect(output.url).toBe(openedUrl.trim());
       expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);

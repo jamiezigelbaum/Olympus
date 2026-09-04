@@ -13,6 +13,7 @@ import type {
   DashboardSourceCard,
   SourceDashboardViewModel,
 } from '../source-dashboard.ts';
+import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
@@ -731,7 +732,7 @@ export function dashboardOperatorPaused(source: DashboardSourceCard): boolean {
  */
 function workingLine(source: DashboardSourceCard): string {
   const parts: string[] = [];
-  const firstIngest = source.freshness.label === 'Waiting for first check' ? 'first ingest' : undefined;
+  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? 'first ingest' : undefined;
   const readyWhileUpdating = source.answer_readiness.state === 'ready'
     && source.coverage.indexed_items > 0
     && (source.connection.state === 'syncing' || source.queue_health.active > 0 || source.queue_health.waiting > 0);

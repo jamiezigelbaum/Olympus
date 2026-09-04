@@ -13,6 +13,7 @@ import {
   type SourceCorpusRegistry,
 } from '../core/source-corpus-registry.ts';
 import type { SensitivityMap } from '../core/sensitivity-map.ts';
+import { SOURCE_TRUST_DOMAINS } from '../core/source-index/types.ts';
 import type {
   SovereigntyEngine,
   SovereigntyModelProfile,
@@ -74,6 +75,17 @@ export type DashboardConnectionState =
   | 'syncing'
   | 'synced';
 
+/**
+ * The freshness line for a source that has never completed a check.
+ *
+ * One string, exported, because three renderers branch on it by equality —
+ * phases, vocabulary and the detail page all ask "has this ever run?" that way
+ * — and the wording has to match the phase ladder's own words. "Waiting for
+ * first check" said something the phases never said (clean-install rehearsal,
+ * 2026-09-05).
+ */
+export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync';
+
 export type DashboardConnectFieldName = 'client_id' | 'client_secret' | 'api_key';
 
 export interface DashboardConnectField {
@@ -123,6 +135,33 @@ export interface DashboardSetupStep {
 }
 
 export interface DashboardSetupInstructions {
+  plain_intro: string;
+  agent_prompt: string;
+  provider_console_url: string;
+  google_cloud_project_id?: string;
+  diy_summary: string;
+  diy_steps: DashboardSetupStep[];
+  secret_shown_once: boolean;
+  fields: DashboardConnectField[];
+  /**
+   * The bring-your-own walkthrough, present only on a `publisher_client`
+   * action.
+   *
+   * The rendered card has led with the one-click publisher button and kept BYO
+   * behind a disclosure since publisher mode shipped, but this model's
+   * `instructions` stayed BYO-only — a "you create in your own Google account"
+   * intro, a required client_id field, six console steps — so an agent reading
+   * dashboard.json to diagnose a connect problem sent the operator to the
+   * Google Cloud Console for a source that needs one press (clean-install
+   * rehearsal, 2026-09-05). The top level now says what the card says; the BYO
+   * detail is all still here, one field down, and it is the same object the
+   * renderer feeds its disclosure.
+   */
+  advanced_byo?: DashboardAdvancedByoInstructions;
+}
+
+/** The BYO half of a publisher-mode action: exactly the pre-publisher shape. */
+export interface DashboardAdvancedByoInstructions {
   plain_intro: string;
   agent_prompt: string;
   provider_console_url: string;
@@ -750,8 +789,14 @@ export interface DashboardSourceCard {
    */
   content_arrives_extracted?: boolean;
   /**
-   * False when this worker cannot run Sync now for this source, so nothing on
+   * False when Sync now cannot be run for this source right now, so nothing on
    * the page offers the control or advises pressing it.
+   *
+   * Two ways it is false: this worker has no sync route for the source, and the
+   * source is not connected. The second is why an unconnected Dropbox card read
+   * `sync_now_available: true` — the flag answered only "is the dispatch chain
+   * wired?" and there is nothing to sync from an account nobody has connected
+   * (clean-install rehearsal, 2026-09-05).
    *
    * Absent means the caller declared nothing, which keeps the control offered:
    * a hand-written fixture and an older payload must not lose a button.
@@ -1812,13 +1857,17 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
     );
-    // Stamped after the card is built rather than threaded through it: this is
-    // a fact about the worker's dispatch chain, not about the source.
+    // Stamped after the card is built rather than threaded through it: the
+    // dispatch chain is a fact about the worker, and whether there is anything
+    // to sync is a fact about the card.
     const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
       ? definition.connect_action.source
       : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
-    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    const withSyncAnswer = {
+      ...card,
+      sync_now_available: card.configured && options.syncNowAvailable(syncSource),
+    };
     // The readiness ladder's initial-sync advice names Sync now, so it is
     // rebuilt once the card knows whether this worker can run it.
     withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
@@ -2053,21 +2102,32 @@ function sourceCardFromDefinition(
       ? { unpair: dashboardUnpairAction(definition.source_id as V04PublicSourceId, definition.label) }
       : {}),
   };
+  const trustDomain = cardTrustDomain(definition, corpora);
   const configured = connection.state === 'connected'
     || connection.state === 'waiting_for_first_sync'
     || connection.state === 'syncing'
     || connection.state === 'synced';
-  const answerReadiness = connection.state === 'reauth_required'
-    ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
-    : embeddingLaneDisabled
-      ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
-      : throughput?.state === 'stalled'
-        ? { state: 'needs_attention' as const, label: 'Content extraction is stalled' }
-        : definition.answer_capable_without_sync && configured
-          ? { state: 'ready' as const, label: 'Ready for questions' }
-          // Same `operatorPaused` the connect control is suppressed by, so the
-          // header, the control and the detail sentence read one pause.
-          : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
+  // A source nobody has connected has one readiness, and it is the same one for
+  // all of them: connect it first. The embedding-lane and extraction overrides
+  // below are facts about a lane that is running, and letting them speak over
+  // an unconnected source made five identically-empty sources read three
+  // different ways and put four of them in needs_attention on a machine with
+  // nothing connected (clean-install rehearsal, 2026-09-05). reauth_required is
+  // NOT this case: that source is connected and the credential has lapsed.
+  const notConnected = !configured && connection.state !== 'reauth_required';
+  const answerReadiness = notConnected
+    ? { state: 'disconnected' as const, label: 'Connect this source' }
+    : connection.state === 'reauth_required'
+      ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
+      : embeddingLaneDisabled
+        ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
+        : throughput?.state === 'stalled'
+          ? { state: 'needs_attention' as const, label: 'Content extraction is stalled' }
+          : definition.answer_capable_without_sync && configured
+            ? { state: 'ready' as const, label: 'Ready for questions' }
+            // Same `operatorPaused` the connect control is suppressed by, so the
+            // header, the control and the detail sentence read one pause.
+            : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
   const lastRun = lastRunFromCorpora(corpora);
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
@@ -2079,7 +2139,7 @@ function sourceCardFromDefinition(
     label: definition.label,
     provider: definition.provider,
     family: definition.family,
-    trust_domain: definition.trust_domain,
+    trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
     configured,
     freshness,
@@ -2102,7 +2162,7 @@ function sourceCardFromDefinition(
     // that field and not a second reading of it.
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
     ingestion_health: ingestionHealth,
-    tier_composition: aggregateTierComposition(corpusCards, definition, coverage),
+    tier_composition: aggregateTierComposition(corpusCards, trustDomain, coverage),
     queue_health: queue,
     answer_readiness: answerReadiness,
     connection,
@@ -2136,14 +2196,25 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
   const dependenciesReady = synced;
-  const dependencies = (card.capabilities?.dependencies ?? []).map((dependency) => ({
-    id: dependency.id,
-    label: dependency.label,
-    status: dependenciesReady ? 'ready' as const : 'check_required' as const,
-    next_action: dependenciesReady
-      ? 'No action needed; a completed source read proves this dependency path.'
-      : `Run Olympus doctor and repair ${dependency.label} before relying on the first sync.`,
-  }));
+  // A source whose embedding lane is switched off, or which is served without
+  // embeddings at all, does not depend on an embedding lane. Listing it anyway
+  // put "Approved local embedding lane" on a Dropbox card under a posture with
+  // no such lane (clean-install rehearsal, 2026-09-05).
+  const embeddingLaneApplies = card.embedding_lane_state !== 'embedding_lane_disabled'
+    && card.embedding_required !== false;
+  const dependencies = (card.capabilities?.dependencies ?? [])
+    .filter((dependency) => dependency.id !== 'local_embedding_lane' || embeddingLaneApplies)
+    .map((dependency) => ({
+      id: dependency.id,
+      label: dependency.label,
+      // Unchecked is not broken. "Run Olympus doctor and repair X" named a
+      // repair for a dependency nothing had yet had reason to exercise, on a
+      // card that had never synced; the first sync is what checks it.
+      status: dependenciesReady ? 'ready' as const : 'check_required' as const,
+      next_action: dependenciesReady
+        ? 'No action needed; a completed source read proves this dependency path.'
+        : 'Checked after the first sync.',
+    }));
   if (connection.state === 'not_connected' || connection.state === 'needs_setup') {
     const action = connection.action;
     const pairing = action.kind === 'guided_session';
@@ -2191,9 +2262,13 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
     return {
       stage: 'source_health',
       condition: 'degraded',
+      // No CLI verb on a dashboard card. `olympus` is not on PATH after a clean
+      // install, so "Run Olympus doctor" named a command the reader cannot run
+      // from the page they are standing on (clean-install rehearsal,
+      // 2026-09-05); the agent is the path this page already sends people down.
       next_action: connection.action.kind === 'oauth' || connection.action.kind === 'api_key'
         ? `${connection.action.label} ${card.label}, then run Sync now.`
-        : `Run Olympus doctor, repair the reported ${card.label} dependency or queue, then run Sync now.`,
+        : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
       dependencies,
     };
   }
@@ -2627,18 +2702,41 @@ function aggregateFreshness(
   if (cards.some((card) => card.coverage.indexed_items > 0)) {
     return { label: 'Last check time not recorded', stale };
   }
-  return { label: 'Waiting for first check', stale };
+  return { label: DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, stale };
+}
+
+/**
+ * The trust domain of the corpus this card actually reports on.
+ *
+ * The card publishes ONE `corpus_id`, and its trust domain is a fact about that
+ * corpus — but the definition carried a separate declared domain, so the Gmail
+ * card read `trust_domain: "secure_local"` over `corpus_id: "internal.email"`
+ * on a no-sensitive posture (clean-install rehearsal, 2026-09-05). The live
+ * corpus is the first authority; its id's own leading token is the second, and
+ * only when that token is a real trust domain; the declaration is the last
+ * word, which is what keeps a corpus id like `venice.api` reading as declared.
+ */
+function cardTrustDomain(
+  definition: DashboardSupportedSourceDefinition,
+  corpora: SourceIndexStatusCorpus[],
+): string {
+  const primary = corpora.find((corpus) => corpus.corpus_id === definition.primary_corpus_id);
+  if (primary?.trust_domain) return primary.trust_domain;
+  const prefix = definition.primary_corpus_id.split('.')[0];
+  return prefix !== undefined && (SOURCE_TRUST_DOMAINS as readonly string[]).includes(prefix)
+    ? prefix
+    : definition.trust_domain;
 }
 
 function aggregateTierComposition(
   cards: DashboardSourceCard[],
-  definition: DashboardSupportedSourceDefinition,
+  trustDomainWhenEmpty: string,
   coverage: DashboardSourceCard['coverage'],
 ): DashboardSourceCard['tier_composition'] {
   if (cards.length === 0) {
     return [{
-      trust_domain: definition.trust_domain,
-      label: trustDomainLabel(definition.trust_domain),
+      trust_domain: trustDomainWhenEmpty,
+      label: trustDomainLabel(trustDomainWhenEmpty),
       indexed_items: coverage.indexed_items,
       content_ready_items: coverage.content_ready_items,
     }];
@@ -2980,7 +3078,11 @@ function sourceAction(
         label,
         publisher_client: true as const,
         ...redirectFields,
-        instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        instructions: publisherOAuthSetupInstructions(
+          definition.label,
+          label,
+          oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        ),
         ...(pending ? { pending_attempt: true as const } : {}),
       };
     }
@@ -3043,6 +3145,44 @@ function guidedSessionLabel(
   if (!connected || reauthRequired) return 'Pairing required';
   return sessionEvidence === 'unconfirmed' ? 'Session state not surfaced' : 'Session ready';
 }
+
+/**
+ * The one-click publisher instructions, with the bring-your-own walkthrough
+ * carried underneath rather than in front.
+ *
+ * `plain_intro` is the sentence the rendered card already leads with, so the
+ * page and the JSON say the same thing from one place, and `fields` is empty
+ * because a publisher connect asks the reader for nothing.
+ */
+function publisherOAuthSetupInstructions(
+  sourceLabel: string,
+  actionLabel: 'Connect' | 'Reauthenticate',
+  byo: DashboardSetupInstructions,
+): DashboardSetupInstructions {
+  return {
+    plain_intro: publisherConnectIntro(sourceLabel),
+    agent_prompt: `Connect ${sourceLabel} to Olympus from the Olympus dashboard: press ${actionLabel} on the `
+      + `${sourceLabel} card, approve the access in the provider tab that opens, and come back to the dashboard. `
+      + 'Olympus uses its own registered app, so there is nothing for me to create, register, or paste. '
+      + 'Do not ask me to edit files, configuration, or code.',
+    provider_console_url: byo.provider_console_url,
+    ...(byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {}),
+    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_steps: [],
+    secret_shown_once: false,
+    fields: [],
+    advanced_byo: byo,
+  };
+}
+
+/** The sentence the publisher card and the publisher JSON both lead with. */
+export function publisherConnectIntro(sourceLabel: string): string {
+  return `Olympus connects ${sourceLabel} through its own registered app. `
+    + 'Press Connect, approve it with your account, and come back to this page.';
+}
+
+/** The disclosure's summary on a publisher card, and its diy_summary in JSON. */
+export const PUBLISHER_ADVANCED_BYO_SUMMARY = 'Use my own app instead';
 
 function oauthSetupInstructions(
   source: DashboardOAuthSource,
@@ -3462,7 +3602,7 @@ function latestCompletedAt(corpora: SourceIndexStatusCorpus[]): Date | undefined
 // Undefined when nothing dates the last sync. The previous fallback was
 // relativeTime(now, now), which by construction returns 'just now', so the
 // absence of a timestamp was rendered as a confident "synced just now" over a
-// detail line reading "Waiting for first check".
+// detail line saying the first sync had not happened.
 function syncedRelativeLabel(freshness: DashboardSourceCard['freshness']): string | undefined {
   if (typeof freshness.hours === 'number' && Number.isFinite(freshness.hours)) {
     return relativeDurationFromHours(freshness.hours);
@@ -3784,7 +3924,10 @@ function freshnessFrom(
   if (completedAt) {
     return { label: 'Recently checked', stale: false };
   }
-  return { label: corpus.configured ? 'Waiting for first check' : 'Not connected yet', stale: false };
+  return {
+    label: corpus.configured ? DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL : 'Not connected yet',
+    stale: false,
+  };
 }
 
 /**

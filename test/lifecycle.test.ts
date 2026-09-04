@@ -138,6 +138,86 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   });
 
+  test('start waits for a service manager that reports the job as still coming up', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-start-settle-'));
+    const manager = slowDarwinManager(3);
+    try {
+      installWorkerService({
+        platform: 'darwin',
+        homeDir: home,
+        workingDirectory: process.cwd(),
+        bunBin: process.execPath,
+      });
+      const started = runWorkerLifecycle('start', {
+        platform: 'darwin',
+        homeDir: home,
+        exec: manager.exec,
+        actionSettleTimeoutMs: 5_000,
+        actionSettlePollMs: 0,
+      });
+      expect(started).toMatchObject({ action: 'start', ok: true, service: { state: 'active' } });
+      // The refusal used to fire on the FIRST read, one line after kickstart.
+      expect(manager.printCalls).toBeGreaterThan(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('start that never comes up refuses with the worker log line, not a bare status', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-start-dead-'));
+    const manager = slowDarwinManager(Number.POSITIVE_INFINITY);
+    try {
+      installWorkerService({
+        platform: 'darwin',
+        homeDir: home,
+        workingDirectory: process.cwd(),
+        bunBin: process.execPath,
+      });
+      const logPath = workerServicePaths('darwin', home).errorLogPath;
+      mkdirSync(dirname(logPath), { recursive: true });
+      writeFileSync(logPath, 'boom: OLYMPUS_WORKER_AUTH_TOKEN is not set\n');
+      expect(() => runWorkerLifecycle('start', {
+        platform: 'darwin',
+        homeDir: home,
+        exec: manager.exec,
+        actionSettleTimeoutMs: 20,
+        actionSettlePollMs: 0,
+        readinessProbe: () => false,
+      })).toThrow(/olympus worker start completed but status is inactive\. The worker's last log line was: boom/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('start accepts a worker already answering its own health route while the manager lags', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-start-readiness-'));
+    const manager = slowDarwinManager(Number.POSITIVE_INFINITY);
+    const probed: string[] = [];
+    try {
+      installWorkerService({
+        platform: 'darwin',
+        homeDir: home,
+        workingDirectory: process.cwd(),
+        bunBin: process.execPath,
+      });
+      const started = runWorkerLifecycle('start', {
+        platform: 'darwin',
+        homeDir: home,
+        exec: manager.exec,
+        actionSettleTimeoutMs: 20,
+        actionSettlePollMs: 0,
+        readinessProbe: (url) => {
+          probed.push(url);
+          return true;
+        },
+      });
+      expect(started).toMatchObject({ action: 'start', ok: true, service: { state: 'active' } });
+      expect(probed).toEqual(['http://127.0.0.1:8010/v1/health']);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('macOS waiting jobs with a nonzero last exit are failed, not healthy inactive', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-darwin-failed-'));
     try {
@@ -1065,6 +1145,42 @@ function linuxManager(initial: 'active' | 'inactive' | 'failed') {
     return { status: 1, stdout: '', stderr: `unexpected ${call}` };
   };
   return { calls, exec };
+}
+
+/**
+ * A launchd that reports the job as still coming up: `kickstart` succeeds, and
+ * the state stays `waiting` for `pollsBeforeActive` further `print` calls. This
+ * is the real lag the bounded settle exists for.
+ */
+function slowDarwinManager(pollsBeforeActive: number) {
+  let printsSinceKickstart = 0;
+  let kickstarted = false;
+  const calls: string[] = [];
+  const exec: WorkerServiceExec = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (args[0] === 'print') {
+      if (kickstarted) printsSinceKickstart += 1;
+      const active = kickstarted && printsSinceKickstart > pollsBeforeActive;
+      return {
+        status: 0,
+        stdout: active ? 'state = running\nlast exit code = 0\n' : 'state = waiting\nlast exit code = 0\n',
+        stderr: '',
+      };
+    }
+    if (args[0] === 'kickstart') {
+      kickstarted = true;
+      printsSinceKickstart = 0;
+      return { status: 0, stdout: 'started\n', stderr: '' };
+    }
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  return {
+    calls,
+    exec,
+    get printCalls(): number {
+      return calls.filter((call) => call.includes(' print ')).length;
+    },
+  };
 }
 
 function darwinManager(initial: 'active' | 'inactive' | 'missing' | 'failed') {

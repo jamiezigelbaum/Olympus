@@ -65,6 +65,130 @@ import type {
 } from '../src/workers/x-bookmarks/index.ts';
 
 describe('multi-source source dashboard', () => {
+  test('a card\'s trust domain is the domain of the corpus it reports on', () => {
+    // The Gmail card read trust_domain "secure_local" over corpus_id
+    // "internal.email" on a no-sensitive posture: the definition carried a
+    // declared domain beside the corpus it actually reports (clean-install
+    // rehearsal, 2026-09-05).
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+    for (const card of view.sources) {
+      const corpus = view.sources.length > 0
+        ? fixtureStatus().corpora.find((entry) => entry.corpus_id === card.corpus_id)
+        : undefined;
+      if (corpus) expect(card.trust_domain).toBe(corpus.trust_domain);
+      const [prefix] = card.corpus_id.split('.');
+      if (prefix && ['public_safe', 'internal', 'secure_local'].includes(prefix)) {
+        expect(card.trust_domain).toBe(prefix);
+      }
+    }
+    const gmail = view.sources.find((source) => source.source_id === 'gmail.email')!;
+    expect(gmail.corpus_id).toBe('internal.email');
+    expect(gmail.trust_domain).toBe('internal');
+  });
+
+  test('an unchecked dependency is not described as a repair, and a lane that is off is not a dependency', () => {
+    // "Run Olympus doctor and repair Google OAuth client" named a repair for a
+    // dependency nothing had yet had reason to exercise, and Dropbox listed
+    // "Approved local embedding lane" under a posture whose embedding lane is
+    // off (clean-install rehearsal, 2026-09-05).
+    const disabledLane = {
+      state: 'embedding_lane_disabled' as const,
+      reason: 'embedding_provider_unavailable' as const,
+      affected_credentials: [],
+      affected_profiles: [],
+      affected_capabilities: ['embedding'],
+      hint: 'Fix the affected credential, then restart the worker if needed.',
+    };
+    const status = fixtureStatus();
+    status.corpora.push({
+      corpus_id: 'secure_local.dropbox.files',
+      family: 'file',
+      trust_domain: 'secure_local',
+      activation_mode: 'hybrid_primary',
+      embedding_policy: 'local_only',
+      configured: true,
+      provider: 'dropbox',
+      read_authority: 'connector_store',
+      embedding_lane: disabledLane,
+      counts: {
+        indexed_items: 0,
+        tombstoned_items: 0,
+        chunks: 0,
+        embedded_chunks: 0,
+        sync_runs: 0,
+      },
+    } as unknown as (typeof status.corpora)[number]);
+
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: fixtureHandleRegistry(),
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+
+    const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(dropbox.embedding_lane_state).toBe('embedding_lane_disabled');
+    expect(dropbox.setup?.dependencies.map((dependency) => dependency.id))
+      .not.toContain('local_embedding_lane');
+
+    const unchecked = view.sources
+      .flatMap((source) => source.setup?.dependencies ?? [])
+      .filter((dependency) => dependency.status === 'check_required');
+    expect(unchecked.length).toBeGreaterThan(0);
+    for (const dependency of unchecked) {
+      expect(dependency.next_action).toBe('Checked after the first sync.');
+    }
+  });
+
+  test('a fresh install reads the same way for every unconnected source and needs nothing', () => {
+    // Five identically-unconnected sources read three different ways on a
+    // machine with nothing connected: gmail and dropbox said "Connect this
+    // source" while drive, x and readwise said "Embedding lane needs
+    // attention", which counted four of them into needs_attention_sources
+    // (clean-install rehearsal, 2026-09-05).
+    const disabledLane = {
+      state: 'embedding_lane_disabled' as const,
+      reason: 'embedding_provider_unavailable' as const,
+      affected_credentials: [],
+      affected_profiles: [],
+      affected_capabilities: ['embedding'],
+      hint: 'Fix the affected credential, then restart the worker if needed.',
+    };
+    const status = fixtureStatus();
+    status.embedding_lane = disabledLane;
+    for (const corpus of status.corpora) {
+      corpus.configured = false;
+      corpus.embedding_lane = disabledLane;
+      if ('counts' in corpus && corpus.counts) {
+        corpus.counts = { ...corpus.counts, indexed_items: 0, chunks: 0, embedded_chunks: 0, sync_runs: 0 };
+      }
+      delete corpus.last_refresh;
+    }
+
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: { version: 1, handles: [] },
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+
+    const unconnected = view.sources.filter((source) => !source.configured
+      && source.connection.state !== 'reauth_required');
+    expect(unconnected.length).toBeGreaterThanOrEqual(5);
+    for (const source of unconnected) {
+      expect(source.answer_readiness).toEqual({ state: 'disconnected', label: 'Connect this source' });
+    }
+    expect(view.summary.needs_attention_sources).toBe(0);
+    // And a source that has never run says so in the phase ladder's own words.
+    expect(view.sources.find((source) => source.source_id === 'gmail.email')?.freshness.label)
+      .toBe('Waiting for the first sync');
+  });
+
   test('content-ready counts items with text once, never items plus their own chunks', () => {
     const status = fixtureStatus();
     const drive = status.corpora.find((corpus) => corpus.corpus_id === 'internal.drive.docs');
@@ -2929,7 +3053,7 @@ describe('freshness and sync labels', () => {
 
     expect(card?.connection.state).toBe('synced');
     expect(card?.connection.label).toBe('synced');
-    expect(card?.freshness.label).not.toBe('Waiting for first check');
+    expect(card?.freshness.label).not.toBe('Waiting for the first sync');
   });
 
   test('the freshness line renders hours the same way the connection label does', () => {

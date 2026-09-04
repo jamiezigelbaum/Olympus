@@ -475,6 +475,18 @@ export interface SourceDispositionsRuntime {
   close?: () => void;
 }
 
+/**
+ * What the worker says about email answers before an email account exists.
+ *
+ * The old sentence — "gogcli is not wired yet. Configure the Gateway-side
+ * connector before enabling email answers." — named an internal component and a
+ * Gateway the reader does not have, on a clean install where the true and only
+ * fact is that no mail account is connected yet (clean-install rehearsal,
+ * 2026-09-05).
+ */
+export const EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL =
+  'No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.';
+
 export class GogcliEmailConnectorStub implements EmailSourceConnector {
   name = 'gogcli';
 
@@ -484,7 +496,7 @@ export class GogcliEmailConnectorStub implements EmailSourceConnector {
       configured: false,
       connector: this.name,
       raw_email_exposed: false,
-      detail: 'gogcli is not wired yet. Configure the Gateway-side connector before enabling email answers.',
+      detail: EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL,
     };
   }
 
@@ -5686,7 +5698,7 @@ function cheapWorkerHealth(
     dependency_check: 'not_run',
     detail: configured
       ? 'Worker process is alive; connector dependency health was not checked on this cheap liveness path.'
-      : 'gogcli is not wired yet. Configure the Gateway-side connector before enabling email answers.',
+      : EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL,
   };
 }
 

@@ -77,6 +77,24 @@ describe('the readiness ladder over a worker that cannot Sync now', () => {
   });
 });
 
+describe('Sync now for a source nobody has connected', () => {
+  test('is unavailable however wired the worker is', () => {
+    // The unconnected Dropbox card reported sync_now_available: true, because
+    // the flag answered only "is the dispatch chain wired?" — there is nothing
+    // to sync from an account nobody has connected (clean-install rehearsal,
+    // 2026-09-05).
+    const view = viewModel(() => true);
+    const dropbox = view.sources.find((card) => card.source_id === 'dropbox.files')!;
+    expect(dropbox.configured).toBe(false);
+    expect(dropbox.sync_now_available).toBe(false);
+
+    // The one connected source in this fixture keeps its control.
+    const gmail = view.sources.find((card) => card.source_id === 'gmail.email')!;
+    expect(gmail.configured).toBe(true);
+    expect(gmail.sync_now_available).toBe(true);
+  });
+});
+
 function viewModel(syncNowAvailable: () => boolean): SourceDashboardViewModel {
   return buildSourceDashboardViewModel({
     sourceIndexStatus: emptyStatus(),
@@ -124,7 +142,7 @@ function justConnectedCard(overrides: Partial<DashboardSourceCard> = {}): Dashbo
     family: 'file',
     trust_domain: 'internal',
     configured: true,
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     coverage: {
       indexed_items: 0,
       content_ready_items: 0,

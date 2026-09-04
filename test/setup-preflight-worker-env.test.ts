@@ -151,6 +151,64 @@ describe('preflight over the managed worker environment', () => {
     });
   });
 
+  test('a config-derived setting that lives only in worker.env is the setting doctor reads', async () => {
+    await withWorkerEnv(async (envPath) => {
+      // Layering worker.env under process.env was only half the repair: the
+      // CONFIG doctor's checks read was still built from the unlayered
+      // process.env, so source_scheduler_status skipped with "disabled in
+      // config" over a worker.env that enables the scheduler (clean-install
+      // rehearsal, 2026-09-05).
+      const config = defaultConfig();
+      config.email.enabled = true;
+      expect(config.worker.scheduler.enabled).toBe(false);
+
+      const fetchImpl = (async (input: string | URL | Request): Promise<Response> => {
+        const path = new URL(String(input)).pathname;
+        const body = path === '/v1/source/scheduler/status'
+          ? {
+            kind: 'source_scheduler_status',
+            enabled: true,
+            running: true,
+            selected_source_ids: [],
+            missing_selected_source_ids: [],
+            sources: [],
+          }
+          : { kind: 'source_index_status', corpora: [] };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as unknown as typeof fetch;
+
+      const schedulerCheck = async () => {
+        const result = await runDoctor({
+          config,
+          delphi: healthyDelphi(),
+          env: {},
+          secretStore: EMPTY_STORE,
+          workerEnvPath: envPath,
+          fetchImpl,
+        });
+        return result.checks.find((check) => check.name === 'source_scheduler_status')!;
+      };
+
+      expect((await schedulerCheck()).detail).toContain('disabled in config');
+
+      writeFileSync(
+        envPath,
+        ['PATH=/usr/bin', 'OLYMPUS_WORKER_SCHEDULER_ENABLED=true', ''].join('\n'),
+        { mode: 0o600 },
+      );
+
+      const evaluated = await schedulerCheck();
+      expect(evaluated.detail).not.toContain('disabled in config');
+      expect(evaluated.ok).toBe(true);
+      expect(evaluated.detail).toContain('Source scheduler is healthy');
+      // The caller's own config object is untouched; the layer is a copy.
+      expect(config.worker.scheduler.enabled).toBe(false);
+    });
+  });
+
   test('doctor stops asking for a key the operator has already stored', async () => {
     await withWorkerEnv(async (envPath) => {
       const config = defaultConfig();

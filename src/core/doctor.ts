@@ -5,7 +5,13 @@
 // every check returns statuses and counts only — never tokens, source text,
 // or packets. Each check is isolated, and runDoctor itself never throws.
 
-import { parseOptionalBooleanEnv, type ArgusLane, type ArgusModelProfile, type OlympusConfig } from './config.ts';
+import {
+  configWithEnvironmentOverrides,
+  parseOptionalBooleanEnv,
+  type ArgusLane,
+  type ArgusModelProfile,
+  type OlympusConfig,
+} from './config.ts';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,6 +22,7 @@ import {
   workerAuthTokenFromConfig,
 } from './worker-auth.ts';
 import {
+  defaultSovereigntyConfigPath,
   loadSovereigntyEngine,
   type SovereigntyEngine,
 } from './sovereignty.ts';
@@ -97,15 +104,10 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   // reading only process.env reports settings the running worker has as
   // missing. Only merged when the caller handed in an environment at all: a
   // caller that passed none is not asking about any install.
-  const deps: DoctorDeps = input.env === undefined
+  const inputEnv = input.env;
+  const deps: DoctorDeps = inputEnv === undefined
     ? input
-    : {
-      ...input,
-      env: environmentWithWorkerSetupEnv({
-        env: input.env,
-        ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
-      }),
-    };
+    : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
@@ -147,6 +149,82 @@ async function sourceCapabilityCatalogCheck(deps: DoctorDeps): Promise<DoctorChe
   };
 }
 
+/**
+ * The environment the managed worker actually runs with, and the config that
+ * environment produces.
+ *
+ * Layering worker.env under process.env was only half the repair. The config
+ * doctor's checks read came from the CALLER, built off the unlayered
+ * `process.env`, so `source_scheduler_status` reported the scheduler "disabled
+ * in config" over a worker.env that enables it, and the email and sovereignty
+ * gates read the same stale values (clean-install rehearsal, 2026-09-05). The
+ * environment layer is re-applied to the caller's config rather than rebuilding
+ * one, so a plugin-supplied config keeps everything the environment does not
+ * speak to.
+ */
+function doctorDepsWithLayeredEnvironment(
+  input: DoctorDeps,
+  inputEnv: Record<string, string | undefined>,
+): DoctorDeps {
+  const env = environmentWithWorkerSetupEnv({
+    env: inputEnv,
+    ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
+  });
+  let config = input.config;
+  try {
+    config = configWithEnvironmentOverrides(input.config, env);
+  } catch {
+    // A worker.env value this build refuses to parse must not take the whole
+    // health walk down with it; the individual checks still report on the
+    // config the caller handed in.
+    config = input.config;
+  }
+  return { ...input, env, config };
+}
+
+/**
+ * The sovereignty policy this install actually runs with, resolved the way
+ * `loadSovereigntyEngine` resolves it everywhere else: an injected engine, then
+ * an inline policy, then an explicit path, then the environment's configured
+ * path, then `~/.olympus/sovereignty.json`.
+ *
+ * Gating on `config.sovereignty.policy || configPath` — neither of which
+ * anything sets by default — meant `olympus setup` wrote the policy file and
+ * doctor then reported no posture configured: `sovereignty_prerequisites` went
+ * green by skipping over an unmet Gemini key, and `argus_model_pool` told the
+ * operator to run the setup they had just run (clean-install rehearsal,
+ * 2026-09-05).
+ *
+ * `undefined` means there is genuinely no policy to read — no file, no inline
+ * config — which is the only case that may still skip. The env-bridge fallback
+ * inside `loadSovereigntyEngine` is deliberately NOT taken here: a synthesised
+ * posture is not one the operator chose, and probing its lanes would report a
+ * local model server they never asked for.
+ */
+function doctorSovereigntyEngine(deps: DoctorDeps): SovereigntyEngine | undefined {
+  if (deps.sovereigntyEngine) return deps.sovereigntyEngine;
+  const inline = deps.config.sovereignty?.policy;
+  if (inline !== undefined) return loadSovereigntyEngine({ inlineConfig: inline });
+  const configPath = doctorSovereigntyConfigPath(deps);
+  if (configPath === undefined || !existsSync(configPath)) return undefined;
+  return loadSovereigntyEngine({ configPath, ...(deps.env ? { env: deps.env } : {}) });
+}
+
+function doctorSovereigntyConfigPath(deps: DoctorDeps): string | undefined {
+  const env = deps.env ?? process.env;
+  const explicit = deps.config.sovereignty?.configPath?.trim()
+    || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()
+    || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
+  if (explicit) return explicit;
+  // Located only from a HOME in the environment handed in, exactly as
+  // worker-auth locates worker.env. Falling back to the process owner's home
+  // would make a caller that passed a scoped environment silently read an
+  // install it never asked about.
+  if (deps.env === undefined) return defaultSovereigntyConfigPath();
+  const home = deps.env.HOME?.trim();
+  return home ? join(home, '.olympus', 'sovereignty.json') : undefined;
+}
+
 async function safeCheck(name: string, run: () => Promise<DoctorCheck>): Promise<DoctorCheck> {
   try {
     return await run();
@@ -163,14 +241,12 @@ async function argusProfileCheck(deps: DoctorDeps, profile: ArgusModelProfile): 
   const name = 'argus_model_pool';
   const profileConfig = deps.config.argus.modelProfiles[profile];
   // Posture decides whether a local Argus pool is even expected.
-  const hasSovereigntyPolicy = Boolean(
-    deps.sovereigntyEngine || deps.config.sovereignty?.policy || deps.config.sovereignty?.configPath,
-  );
+  const sovereigntyEngine = doctorSovereigntyEngine(deps);
   // A fresh install has not chosen a posture yet, so it declares no local
   // lane. Probing the default loopback endpoint would report a scary
   // "unreachable at 127.0.0.1:8000" before setup has run — never assume
   // local before the operator picks how sensitive data is handled.
-  if (!hasSovereigntyPolicy) {
+  if (!sovereigntyEngine) {
     return {
       name,
       ok: true,
@@ -180,10 +256,7 @@ async function argusProfileCheck(deps: DoctorDeps, profile: ArgusModelProfile): 
   // A posture with no local model lane (e.g. private-cloud-only) must not
   // demand a local Argus pool.
   {
-    const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-      ...(deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {}),
-      ...(deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}),
-    });
+    const engine = sovereigntyEngine;
     const profiles = Object.values(engine.config.modelProfiles);
     const hasLocalLane = profiles
       .some((p) => p.provider === 'local-openai-compatible');
@@ -286,17 +359,14 @@ async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 }
 
 async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck> {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: 'sovereignty_model_lanes',
       ok: true,
-      detail: 'Skipped: no explicit sovereignty policy is configured for lane probing.',
+      detail: 'Skipped: no sovereignty policy is configured for lane probing.',
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...(deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {}),
-    ...(deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}),
-  });
   const fetchImpl = deps.fetchImpl ?? fetch;
   const profiles = Object.entries(engine.config.modelProfiles)
     .filter(([, profile]) => profile.provider === 'local-openai-compatible' && profile.baseUrl);
@@ -334,17 +404,14 @@ async function sovereigntyModelLaneCheck(deps: DoctorDeps): Promise<DoctorCheck>
 }
 
 async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorCheck> {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: 'sovereignty_prerequisites',
       ok: true,
-      detail: 'Skipped: no explicit sovereignty policy is configured for prerequisite checks.',
+      detail: 'Skipped: no sovereignty policy is configured for prerequisite checks.',
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...(deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {}),
-    ...(deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}),
-  });
   // Setup's preflight declares a local model server unmet without probing it,
   // because the wizard must not make network calls. Doctor may, and
   // sovereignty_model_lanes below probes exactly those lanes behind the

@@ -583,7 +583,7 @@ function offSource(overrides: Partial<DashboardSourceCard>): DashboardSourceCard
   return baseSource({
     ...overrides,
     configured: false,
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0, needs_review_items: 0 },
     queue_health: { label: 'Caught up', waiting: 0, active: 0, needs_attention: 0 },
     answer_readiness: { state: 'disconnected', label: 'Connect this source' },
@@ -601,7 +601,7 @@ function needsSetupSource(overrides: Partial<DashboardSourceCard>): DashboardSou
   return baseSource({
     ...overrides,
     configured: false,
-    freshness: { label: 'Waiting for first check', stale: false },
+    freshness: { label: 'Waiting for the first sync', stale: false },
     coverage: { indexed_items: 0, content_ready_items: 0, embedded_items: 0, needs_review_items: 0 },
     queue_health: { label: 'Caught up', waiting: 0, active: 0, needs_attention: 0 },
     answer_readiness: { state: 'disconnected', label: 'Connect this source' },

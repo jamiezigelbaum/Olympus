@@ -1,12 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { installManagedWorkerFiles } from './lifecycle.ts';
+import { installManagedWorkerFiles, type ManagedWorkerFilesResult } from './lifecycle.ts';
 import { OperationError } from './operation-error.ts';
 import {
   type WorkerServiceExec,
   type WorkerServiceInstallOptions,
   type WorkerServiceInstallResult,
   type WorkerServicePlatform,
+  type WorkerServiceState,
 } from './worker-service.ts';
 import {
   SOVEREIGNTY_PRESETS,
@@ -83,6 +84,16 @@ export interface SetupWizardResult {
   worker: {
     authTokenRef: 'worker.env:OLYMPUS_WORKER_AUTH_TOKEN';
     install: WorkerServiceInstallResult;
+    /**
+     * What the service manager reports about the managed worker when setup
+     * returns. Setup starts it, so the guide's next step — check the status —
+     * has something true to check; `not_started` is the dry-run answer only.
+     */
+    state: WorkerServiceState | 'not_started';
+    /** The next step this state calls for, in the operator's words. */
+    next: string;
+    /** Why the start did not take, when it did not. Absent on the healthy path. */
+    activation_detail?: string;
   };
   connections: Array<{
     source: ConnectSource;
@@ -201,10 +212,10 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
   let wroteSovereignty = false;
-  let install: WorkerServiceInstallResult;
+  let managedWorker: ManagedWorkerFilesResult;
 
   if (options.dryRun) {
-    install = installManagedWorkerFiles(workerOptions(options, workerToken));
+    managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
     writeSovereigntyConfigFile({
       config: presetConfig,
@@ -212,8 +223,15 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       ...(options.force !== undefined ? { force: options.force } : {}),
     });
     wroteSovereignty = true;
-    install = installManagedWorkerFiles(workerOptions(options, workerToken));
+    // Writing the unit and walking away left the operator with an inactive
+    // worker and a guide whose next step was to verify it was running
+    // (clean-install rehearsal, 2026-09-05). Setup takes the same activation
+    // lane `olympus worker install` uses, so that step can pass.
+    managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   }
+  const workerState: WorkerServiceState | 'not_started' = managedWorker.activation === 'skipped'
+    ? 'not_started'
+    : managedWorker.service?.state ?? 'unknown';
 
   const connections = [];
   for (const source of options.connectSources ?? []) {
@@ -251,7 +269,14 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     },
     worker: {
       authTokenRef: 'worker.env:OLYMPUS_WORKER_AUTH_TOKEN',
-      install,
+      install: managedWorker.install,
+      state: workerState,
+      next: workerState === 'active'
+        ? 'The managed worker is running; open the dashboard with olympus dashboard.'
+        : workerState === 'not_started'
+          ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
+          : 'Run olympus worker install, then olympus worker status.',
+      ...(managedWorker.activation_detail ? { activation_detail: managedWorker.activation_detail } : {}),
     },
     connections,
     dashboard: {

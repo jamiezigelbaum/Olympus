@@ -74,6 +74,13 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
   artifactPath?: string;
   activationSettleMs?: number;
   readinessProbe?: (url: string) => boolean;
+  /**
+   * How long `start`/`restart`/`stop` may wait for the service manager to
+   * report the state it was asked for, in milliseconds. Defaults to 15000.
+   */
+  actionSettleTimeoutMs?: number;
+  /** Gap between state polls inside that window, in milliseconds. Defaults to 500. */
+  actionSettlePollMs?: number;
 }
 
 interface LifecycleTransactionV1 {
@@ -158,14 +165,10 @@ export function runWorkerLifecycle(
 
     refuseInterruptedTransaction(normalized);
     const serviceAction = runWorkerServiceAction(action, serviceActionOptions(normalized));
-    const service = inspectWorkerService(serviceActionOptions(normalized));
     const expected = action === 'stop' ? ['inactive', 'missing'] : ['active'];
+    const service = settleWorkerServiceState(normalized, expected);
     if (!expected.includes(service.state)) {
-      throw new OperationError(
-        'config_error',
-        `olympus worker ${action} completed but status is ${service.state}.`,
-        'Run olympus worker status and follow its recovery action.',
-      );
+      throw lifecycleActionFailure(action, service.state, normalized);
     }
     return {
       schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
@@ -352,43 +355,107 @@ function installOrUpgradeLifecycle(
   }
 }
 
+export interface ManagedWorkerFilesResult {
+  install: WorkerServiceInstallResult;
+  /**
+   * What the service manager reported after this lane finished. `undefined`
+   * only on a dry run, which touches no service manager at all.
+   */
+  service?: WorkerServiceInspection;
+  activation: 'skipped' | 'started' | 'failed';
+  /** Why activation did not take. Present only when `activation` is 'failed'. */
+  activation_detail?: string;
+}
+
 /**
  * Write the managed worker unit and environment under the same exclusive lock
- * and crash-durable transaction the lifecycle facade uses, without activating
- * the service.
+ * and crash-durable transaction the lifecycle facade uses, and — unless the
+ * caller opts out — start the service the way `olympus worker install` does.
  *
  * `olympus setup` mutates exactly the files the facade owns. Doing that outside
  * the lock lets a concurrent install or upgrade interleave with it — and its
  * rollback then discards setup's write — so setup takes this lane instead of
  * calling the installer directly.
+ *
+ * Writing the unit and stopping used to be the whole lane, which left a fresh
+ * `olympus setup` with an inactive worker and sent the operator straight into a
+ * status check that could only fail (clean-install rehearsal, 2026-09-05). The
+ * activation is the same `install` service action the facade runs, so a later
+ * `olympus worker install` writes nothing, sees an already-active service, and
+ * stays the idempotent no-op it was.
  */
 export function installManagedWorkerFiles(
-  options: WorkerLifecycleOptions = {},
-): WorkerServiceInstallResult {
+  options: WorkerLifecycleOptions & { activate?: boolean } = {},
+): ManagedWorkerFilesResult {
   const platform = normalizeLifecyclePlatform(options.platform ?? osPlatform());
   const homeDir = validateHomeDir(options.homeDir ?? homedir());
   const effective = { ...options, platform, homeDir };
-  if (options.dryRun === true) return installWorkerService(serviceInstallOptions(effective, true));
+  const activate = options.activate !== false;
+  if (options.dryRun === true) {
+    return { install: installWorkerService(serviceInstallOptions(effective, true)), activation: 'skipped' };
+  }
   ensurePrivateRootDirectorySync(homeDir);
   const lock = acquireLifecycleMutationLock(homeDir, 'install', options.now);
   try {
     recoverInterruptedTransaction(effective);
     const preview = installWorkerService(serviceInstallOptions(effective, true));
-    // This lane never inspects the service manager, so the previous run state is
-    // genuinely undetermined; recording it as such keeps a later recovery from
-    // reactivating a worker on this transaction's authority.
+    // The transaction covers the FILE write only, so the previous run state is
+    // genuinely undetermined here; recording it as such keeps a later recovery
+    // from reactivating a worker on this transaction's authority.
     beginTransaction('install', effective, preview, 'unknown');
+    let install: WorkerServiceInstallResult;
     try {
-      const install = installWorkerService(serviceInstallOptions(effective, false));
+      install = installWorkerService(serviceInstallOptions(effective, false));
       markTransactionCommitReady(effective);
       clearTransaction(effective);
-      return install;
     } catch (error) {
       rollbackTransaction(effective, { activatePrevious: false, touchServiceManager: false });
       throw error;
     }
+    if (!activate) return { install, activation: 'skipped' };
+    // Activation runs AFTER the file transaction commits, deliberately. The
+    // unit and the environment are the durable artifact and must survive a
+    // service manager that is absent, refusing, or slow — rolling them back
+    // over a failed start would leave setup with nothing at all. A start that
+    // does not take is reported, and `olympus worker install` is the retry.
+    return activateManagedWorkerFiles(install, effective);
   } finally {
     lock.release();
+  }
+}
+
+function activateManagedWorkerFiles(
+  install: WorkerServiceInstallResult,
+  effective: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): ManagedWorkerFilesResult {
+  try {
+    runWorkerServiceAction('install', serviceActionOptions(effective));
+    const service = settleWorkerServiceState(effective, ['active']);
+    if (service.state === 'active') return { install, service, activation: 'started' };
+    return {
+      install,
+      service,
+      activation: 'failed',
+      activation_detail: lifecycleActionFailure('install', service.state, effective).message,
+    };
+  } catch (error) {
+    const service = inspectWorkerServiceSafely(effective);
+    return {
+      install,
+      ...(service ? { service } : {}),
+      activation: 'failed',
+      activation_detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function inspectWorkerServiceSafely(
+  effective: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): WorkerServiceInspection | undefined {
+  try {
+    return inspectWorkerService(serviceActionOptions(effective));
+  } catch {
+    return undefined;
   }
 }
 
@@ -843,6 +910,92 @@ function serviceInstallOptions(options: WorkerLifecycleOptions, dryRun: boolean)
     ...(options.schedulerEnabled !== undefined ? { schedulerEnabled: options.schedulerEnabled } : {}),
     dryRun,
   };
+}
+
+const DEFAULT_ACTION_SETTLE_TIMEOUT_MS = 15_000;
+const DEFAULT_ACTION_SETTLE_POLL_MS = 500;
+
+/**
+ * Wait, bounded, for the service manager to report one of `expected`.
+ *
+ * `launchctl kickstart` returns when the job has been SUBMITTED, not when the
+ * worker is serving, so the inspection that used to run on the next line read
+ * `inactive` on a service that was seconds from up and refused a start that had
+ * in fact succeeded (clean-install rehearsal, 2026-09-05). The same lag runs the
+ * other way on stop. Polling costs nothing on the common path — the first read
+ * already answers — and the window is bounded so a genuinely dead worker still
+ * fails, with its own log line, inside a quarter of a minute.
+ */
+function settleWorkerServiceState(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  expected: readonly string[],
+): WorkerServiceInspection {
+  const timeoutMs = validateSettleWindow(
+    options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS,
+    'Lifecycle action settle timeout',
+    120_000,
+  );
+  const pollMs = validateSettleWindow(
+    options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
+    'Lifecycle action settle poll interval',
+    10_000,
+  );
+  const deadline = Date.now() + timeoutMs;
+  let service = inspectWorkerService(serviceActionOptions(options));
+  while (!expected.includes(service.state) && Date.now() < deadline) {
+    waitForActivationSettle(pollMs);
+    service = inspectWorkerService(serviceActionOptions(options));
+  }
+  // The service manager's label is not the only witness. A worker already
+  // answering its own loopback health route IS started, whatever the manager
+  // has caught up to, so it gets the last word before a refusal — once, at the
+  // end, rather than inside the poll, because the probe costs a subprocess.
+  if (!expected.includes(service.state) && expected.includes('active') && workerAnswersReadiness(options)) {
+    return { ...service, state: 'active' };
+  }
+  return service;
+}
+
+function validateSettleWindow(value: number, label: string, max: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    throw new OperationError('invalid_params', `${label} must be between 0 and ${max} milliseconds.`);
+  }
+  return value;
+}
+
+/** Non-throwing readiness probe: an unreadable port is "no answer", not a refusal. */
+function workerAnswersReadiness(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): boolean {
+  try {
+    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
+    return options.readinessProbe
+      ? options.readinessProbe(url)
+      : defaultWorkerReadinessProbe(url, options.bunBin);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The refusal for a start/stop/restart that never reached its state, carrying
+ * the same last-log-line the activation path surfaces: the reason a worker
+ * exited on boot is one line away in its own log, and every report of this so
+ * far has been an operator going to find it by hand.
+ */
+function lifecycleActionFailure(
+  action: WorkerLifecycleAction,
+  state: WorkerServiceState,
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): OperationError {
+  const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+  const paths = workerServicePaths(options.platform, options.homeDir);
+  const message = `olympus worker ${action} completed but status is ${state}.`;
+  return new OperationError(
+    'config_error',
+    logLine ? `${message} The worker's last log line was: ${logLine}` : message,
+    `Read the worker log at ${paths.errorLogPath} and ${paths.logPath}, then run olympus worker status and follow its recovery action.`,
+  );
 }
 
 /**

@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
-import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import {
+  createSovereigntyEngine,
+  loadSovereigntyPreset,
+  writeSovereigntyConfigFile,
+} from '../src/core/sovereignty.ts';
 import { buildSourceIngestionLedgerSnapshot } from '../src/workers/source-ingestion-ledger.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { ContentExtractionThroughputSignal } from '../src/core/ingestion-throughput.ts';
@@ -765,6 +769,65 @@ describe('runDoctor', () => {
     expect(prerequisites.detail).toContain('venice.api_key');
     expect(prerequisites.detail).not.toContain('127.0.0.1:8000/v1');
     expect(prerequisites.hint).toContain('olympus connect venice --api-key-stdin');
+  });
+
+  test('reads the sovereignty policy setup wrote at the default path, without an explicit config path', async () => {
+    // Nothing sets config.sovereignty.policy or configPath by default, so
+    // gating on them meant setup wrote ~/.olympus/sovereignty.json and doctor
+    // then reported no posture: the prerequisite check went green by skipping
+    // an unmet Gemini key, and argus_model_pool told the operator to run the
+    // setup they had just run (clean-install rehearsal, 2026-09-05).
+    const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-sovereignty-default-'));
+    try {
+      const policyPath = writeSovereigntyConfigFile({
+        config: loadSovereigntyPreset('no-sensitive'),
+        path: join(home, '.olympus', 'sovereignty.json'),
+      });
+      expect(policyPath).toBe(join(home, '.olympus', 'sovereignty.json'));
+
+      const missingKey = await runDoctor(doctorDeps({
+        config: defaultConfig(),
+        delphi: healthyDelphi(),
+        env: { HOME: home },
+        secretStore: memorySecretStore({}),
+      }));
+      const prerequisites = checkByName(missingKey.checks, 'sovereignty_prerequisites');
+      expect(prerequisites.ok).toBe(false);
+      expect(prerequisites.detail).toContain('GEMINI_API_KEY');
+
+      // And the pool check reports the posture's real lane state instead of
+      // sending the operator back to setup.
+      const modelPool = checkByName(missingKey.checks, 'argus_model_pool');
+      expect(modelPool.detail).not.toContain('no sovereignty posture configured yet');
+      expect(modelPool.detail).toContain('no local model lane');
+
+      const withKey = await runDoctor(doctorDeps({
+        config: defaultConfig(),
+        delphi: healthyDelphi(),
+        env: { HOME: home, GEMINI_API_KEY: 'gemini-test-key' },
+        secretStore: memorySecretStore({}),
+      }));
+      expect(checkByName(withKey.checks, 'sovereignty_prerequisites').ok).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('skips the sovereignty checks only when there is genuinely no policy file to read', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-doctor-sovereignty-absent-'));
+    try {
+      const result = await runDoctor(doctorDeps({
+        config: defaultConfig(),
+        delphi: healthyDelphi(),
+        env: { HOME: home },
+      }));
+      expect(checkByName(result.checks, 'sovereignty_prerequisites').detail)
+        .toContain('no sovereignty policy is configured');
+      expect(checkByName(result.checks, 'argus_model_pool').detail)
+        .toContain('no sovereignty posture configured yet');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('passes sovereignty prerequisite check when no-sensitive API key is present', async () => {

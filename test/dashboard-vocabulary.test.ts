@@ -549,7 +549,7 @@ describe('sub-line grammar', () => {
   test('a first ingest leads with the phase and carries the ETA that exists', () => {
     const source = card({
       connection: { state: 'syncing', label: 'syncing' },
-      freshness: { hours: undefined, label: 'Waiting for first check' },
+      freshness: { hours: undefined, label: 'Waiting for the first sync' },
       coverage: { indexed_items: 4_812, content_ready_items: 400 },
       ingestion_health: { coverage_percent: 8.3 },
       queue_health: { label: 'Working now', waiting: 200, active: 4 },

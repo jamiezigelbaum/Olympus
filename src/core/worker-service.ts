@@ -483,10 +483,14 @@ function boundedServiceDetail(result: WorkerServiceExecResult): string {
 
 function defaultWorkerServiceExec(command: string, args: string[]): WorkerServiceExecResult {
   const result = spawnSync(command, args, { encoding: 'utf8' });
+  // spawnSync hands back null streams when the binary is not there at all, and
+  // every reader of this result treats stdout/stderr as strings. A service
+  // manager that is simply absent has to read as "no answer", not as a crash
+  // inside the state classifier.
   return {
     status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? (result.error ? `${command}: ${result.error.message}` : ''),
   };
 }
 

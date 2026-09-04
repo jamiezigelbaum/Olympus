@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -73,12 +73,15 @@ describe('sensitivity map schema', () => {
         proc.exited,
       ]);
       if (code !== 0) throw new Error(stderr || stdout);
+      // Counts, ids, and the file's own custody — never a category's contents.
       expect(JSON.parse(stdout)).toEqual({
         ok: true,
         path,
         schemaVersion: 1,
         categories: 1,
         categoryIds: ['therapy'],
+        permissions: '0600',
+        permissionsTightened: true,
       });
     });
   }, 30_000);
@@ -90,6 +93,24 @@ describe('sensitivity map schema', () => {
         path,
         categoryIds: ['therapy'],
       });
+    });
+  });
+
+  test('validation leaves the map owner-only and says when it had to tighten it', () => {
+    // Nothing in Olympus writes this file — the install guide has the owner's
+    // agent write it, which lands it at the process umask (0644 on a clean
+    // macOS install, 2026-09-05 rehearsal). It lists what the owner considers
+    // sensitive and what it looks like.
+    return withTempMap(validMap(), ({ path }) => {
+      chmodSync(path, 0o644);
+      const tightened = validateSensitivityMapFile({ path });
+      expect(tightened).toMatchObject({ ok: true, permissions: '0600', permissionsTightened: true });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+
+      // Already owner-only: reported, and nothing changed.
+      const already = validateSensitivityMapFile({ path });
+      expect(already.permissions).toBe('0600');
+      expect(already.permissionsTightened).toBeUndefined();
     });
   });
 

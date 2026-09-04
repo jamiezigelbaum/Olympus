@@ -52,7 +52,10 @@
  * costs the reader the corpus-wide view. The flagged remainder survives as the
  * fallback for a corpus that has never been observed settling.
  */
-import type { DashboardSourceCard } from '../source-dashboard.ts';
+import {
+  DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
+  type DashboardSourceCard,
+} from '../source-dashboard.ts';
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import {
   dashboardDuration,
@@ -235,7 +238,7 @@ type BarePhase = Omit<DashboardPhase, 'state' | 'state_words'>;
  */
 export function dashboardHasSettledPass(source: DashboardSourceCard): boolean {
   if (source.connection.state === 'waiting_for_first_sync') return false;
-  if (source.freshness.label === 'Waiting for first check') return false;
+  if (source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL) return false;
   // `synced` is the connection state the view model writes once this source has
   // been through a sync — the same evidence the header's own word is built on.
   // Without it a card reading "synced 41 minutes ago" would have drawn an

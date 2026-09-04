@@ -202,7 +202,12 @@ describe('dashboard-level control gate', () => {
     // Where it comes from now lives behind the disclosure, and says both ways
     // of getting it: the agent prompt and the command that prints it.
     expect(html).toContain(escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT));
-    expect(html).toContain('olympus dashboard token');
+    // `olympus` is not on PATH on a fresh install, so neither line may say a
+    // bare command: both name the plugin's own bin and where rootDir comes from.
+    expect(html).toContain('&lt;rootDir&gt;/bin/olympus dashboard token');
+    expect(html).toContain('openclaw plugins inspect olympus --json');
+    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).toContain('<rootDir>/bin/olympus dashboard token');
+    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).toContain('openclaw plugins inspect olympus --json');
     expect(html).toContain('data-control-session-kind="unlock"');
     // The field is addressed by its data attribute and carries NO name, so a
     // scriptless native submit sends no token anywhere; the form's own POST to
