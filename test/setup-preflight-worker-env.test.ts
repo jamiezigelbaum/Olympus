@@ -83,6 +83,74 @@ describe('preflight over the managed worker environment', () => {
     expect(unmet.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
   });
 
+  test('a lane gate set in worker.env is the gate doctor reports on', async () => {
+    await withWorkerEnv(async (envPath) => {
+      // The lane gates live in worker.env beside the credentials, for the same
+      // reason: that file is the worker's whole environment. Reading only
+      // process.env, doctor called a lane the running worker has enabled
+      // "absent for default-off lane".
+      const config = defaultConfig();
+      config.email.enabled = true;
+      config.worker.scheduler.enabled = true;
+      const registry = {
+        version: 1 as const,
+        handles: [{
+          handle: 'gmail.personal',
+          provider: 'gmail' as const,
+          accountRole: 'personal',
+          trustDomain: 'internal' as const,
+          allowedCapabilities: ['gmail.email.sync'],
+          scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+          connectedAt: '2026-09-04T11:00:00.000Z',
+        }],
+      };
+      const fetchImpl = (async (input: string | URL | Request): Promise<Response> => {
+        const path = new URL(String(input)).pathname;
+        const body = path === '/v1/source/scheduler/status'
+          ? {
+            kind: 'source_scheduler_status',
+            enabled: true,
+            running: true,
+            selected_source_ids: [],
+            missing_selected_source_ids: [],
+            sources: [],
+          }
+          : { kind: 'source_index_status', corpora: [] };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as unknown as typeof fetch;
+
+      const laneGateProblem = async () => {
+        const result = await runDoctor({
+          config,
+          delphi: healthyDelphi(),
+          env: {},
+          secretStore: EMPTY_STORE,
+          workerEnvPath: envPath,
+          handleRegistry: registry,
+          fetchImpl,
+        });
+        return result.checks.find((check) => check.name === 'source_scheduler_status')!.detail;
+      };
+
+      // The gate is nowhere, so the lane really is off and doctor says so.
+      expect(await laneGateProblem())
+        .toContain('OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED absent for default-off lane');
+
+      writeFileSync(
+        envPath,
+        ['PATH=/usr/bin', 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED=true', ''].join('\n'),
+        { mode: 0o600 },
+      );
+
+      // The operator has switched it on where the worker reads it.
+      expect(await laneGateProblem())
+        .not.toContain('OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED absent');
+    });
+  });
+
   test('doctor stops asking for a key the operator has already stored', async () => {
     await withWorkerEnv(async (envPath) => {
       const config = defaultConfig();

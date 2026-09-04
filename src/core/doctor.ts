@@ -10,7 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DelphiClient } from './delphi.ts';
-import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
+import {
+  environmentWithWorkerSetupEnv,
+  withWorkerAuthHeader,
+  workerAuthTokenFromConfig,
+} from './worker-auth.ts';
 import {
   loadSovereigntyEngine,
   type SovereigntyEngine,
@@ -86,7 +90,22 @@ const INGESTION_STUCK_ERROR_HOURS = 72;
 const INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 const CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
 
-export async function runDoctor(deps: DoctorDeps): Promise<DoctorResult> {
+export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
+  // Every check below reads the environment the worker actually runs with, not
+  // just this process's. The lane gates and the credential keys both live in
+  // worker.env -- `olympus connect gemini` writes one there -- so a doctor
+  // reading only process.env reports settings the running worker has as
+  // missing. Only merged when the caller handed in an environment at all: a
+  // caller that passed none is not asking about any install.
+  const deps: DoctorDeps = input.env === undefined
+    ? input
+    : {
+      ...input,
+      env: environmentWithWorkerSetupEnv({
+        env: input.env,
+        ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
+      }),
+    };
   const checks = [
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
