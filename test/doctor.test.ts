@@ -1405,6 +1405,39 @@ describe('runDoctor', () => {
     expect(scheduler.detail).not.toContain('google_drive.personal connected');
   });
 
+  test('an empty configured allowlist is no contract, so a runtime-adopted lane is not drift', async () => {
+    // The fresh install: the scheduler is enabled with no allowlist, and the
+    // dashboard connect flow builds gmail.email at runtime. The worker always
+    // sends selected_source_ids, so keying the contract off its presence made
+    // every adopted lane "unexpected" -- and with doctor's non-zero exit that
+    // left doctor permanently red from the first connect onwards.
+    const config = enabledEmailConfig();
+    config.worker.scheduler.enabled = true;
+    config.worker.scheduler.sourceIds = [];
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [{ corpus_id: 'internal.email' }],
+      },
+      '/v1/source/scheduler/status': {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: '2026-09-04T12:00:00.000Z',
+        selected_source_ids: ['gmail.email'],
+        missing_selected_source_ids: [],
+        sources: [{ source_id: 'gmail.email', corpus_id: 'internal.email', tasks: [] }],
+      },
+    });
+
+    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
+
+    const scheduler = checkByName(result.checks, 'source_scheduler_status');
+    expect(scheduler.detail).not.toContain('worker selected unexpected scheduler source');
+    expect(scheduler.ok).toBe(true);
+  });
+
   test('source_ingestion_health reports stuck-work warning and error thresholds', async () => {
     const warningStatus = statusWithIngestionLedger({
       now: new Date('2026-07-09T12:00:00.000Z'),

@@ -729,8 +729,14 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids)
     ? status.selected_source_ids.filter((value): value is string => typeof value === 'string')
     : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids)
-    || deps.config.worker.scheduler.sourceIds.length > 0;
+  // An EMPTY configured allowlist is no contract at all -- it is the fresh
+  // install's "no operator restriction", and the worker then reports every lane
+  // it constructed as selected. The worker always sends the array, so keying
+  // off its presence made each runtime-adopted lane a problem
+  // ("worker selected unexpected scheduler source gmail.email") and, with
+  // doctor's non-zero exit, left doctor permanently red from the first connect.
+  // Only a configured allowlist is something the worker can disagree with.
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);

@@ -131,20 +131,29 @@ export type SourceSchedulerConstructionReason =
  * matched the allowlist size exactly while the lane was dead, and the status
  * surface reported only the admitted id it never saw. Both readings were true
  * and neither was the fact.
+ *
+ * An EMPTY allowlist is the fresh install's "no operator restriction", not a
+ * selection of nothing. Comparing constructions against it printed every live
+ * lane under `constructed_not_selected` beside `selected=0` — a receipt crying
+ * wolf over the ordinary state of a machine whose sources were connected
+ * through the dashboard. With no allowlist, selected IS constructed, and the
+ * receipt says which rule it is reporting under.
  */
 export function sourceSchedulerConstructionLogLines(input: {
   decisions: readonly SourceSchedulerConstructionDecision[];
   selectedSourceIds: readonly string[];
 }): string[] {
-  const selected = new Set(input.selectedSourceIds);
   const constructed = input.decisions.filter((decision) => decision.outcome === 'constructed');
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
+  const unrestricted = input.selectedSourceIds.length === 0;
+  const selected = unrestricted ? constructedIds : new Set(input.selectedSourceIds);
   const selectedNotConstructed = [...selected].filter((sourceId) => !constructedIds.has(sourceId));
   const constructedNotSelected = [...constructedIds].filter((sourceId) => !selected.has(sourceId));
   const summary = [
     `[source-scheduler] constructed=${constructed.length}`,
     `skipped=${input.decisions.length - constructed.length}`,
     `selected=${selected.size}`,
+    ...(unrestricted ? ['selection=no_allowlist_all_constructed_selected'] : []),
     ...(selectedNotConstructed.length > 0
       ? [`selected_not_constructed=${selectedNotConstructed.join(',')}`]
       : []),
