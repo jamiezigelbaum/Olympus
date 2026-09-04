@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { OperationError } from '../src/core/operation-error.ts';
 import {
+  EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL,
+  GogcliEmailConnectorStub,
   createEmailSourceWorker,
   type EmailSourceConnector,
 } from '../src/workers/email-source/index.ts';
@@ -43,6 +45,21 @@ describe('canonical source worker', () => {
       raw_email_exposed: false,
     });
     expect(JSON.stringify(body)).not.toContain('message_body');
+  });
+
+  test('says no account is connected, not that an internal component is unwired', async () => {
+    // worker status leaked "gogcli is not wired yet. Configure the Gateway-side
+    // connector before enabling email answers." on a clean install: an internal
+    // component and a Gateway the reader does not have (clean-install
+    // rehearsal, 2026-09-05).
+    const worker = createEmailSourceWorker({ connector: new GogcliEmailConnectorStub() });
+    for (const url of ['http://worker.test/v1/health', 'http://worker.test/v1/health?deep=true']) {
+      const body = await (await worker.fetch(new Request(url))).json() as Record<string, unknown>;
+      expect(body.configured).toBe(false);
+      expect(body.detail).toBe(EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL);
+      expect(JSON.stringify(body)).not.toContain('gogcli is not wired');
+      expect(JSON.stringify(body)).not.toContain('Gateway-side');
+    }
   });
 
   test('routes every answer through the source-neutral answer handler', async () => {
