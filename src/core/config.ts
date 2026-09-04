@@ -951,13 +951,14 @@ function validateConfig(config: OlympusConfig): void {
     }
   }
   assertBoolean(config.worker.scheduler.enabled, 'worker.scheduler.enabled');
+  // An enabled scheduler with an empty allowlist is valid and idle. `olympus
+  // setup` installs the worker BEFORE any source is connected, so demanding a
+  // non-empty allowlist at that point made every fresh install fail to boot:
+  // the only honest allowlist on a machine with no connected sources is the
+  // empty one. Empty means "no operator restriction" — the worker constructs a
+  // lane only for a source that actually has a connected handle, and the
+  // dashboard connect flow rebuilds the scheduler's sources at runtime.
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
-  if (config.worker.scheduler.enabled && config.worker.scheduler.sourceIds.length === 0) {
-    throw new OperationError(
-      'config_error',
-      'worker.scheduler.sourceIds must contain at least one source when the scheduler is enabled.',
-    );
-  }
   assertPositiveNumber(config.worker.scheduler.tickSeconds, 'worker.scheduler.tickSeconds');
   assertPositiveNumber(config.worker.scheduler.syncIntervalSeconds, 'worker.scheduler.syncIntervalSeconds');
   assertPositiveNumber(config.worker.scheduler.freshnessThresholdHours, 'worker.scheduler.freshnessThresholdHours');

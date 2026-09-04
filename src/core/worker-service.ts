@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -151,6 +151,69 @@ export function runWorkerServiceAction(
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+/** How much of a worker log tail is read when explaining a failed activation. */
+const WORKER_LOG_TAIL_BYTES = 64 * 1024;
+/** A log line is an explanation, not a transcript: keep it to one screen. */
+const WORKER_LOG_LINE_MAX_CHARS = 300;
+
+/**
+ * The last line the worker itself wrote, for a lifecycle failure to quote.
+ *
+ * A worker that exits immediately leaves the service manager reporting only
+ * "inactive", which is true and useless: the reason is in the worker's own
+ * stderr. Standard error is read first because a boot refusal lands there;
+ * stdout is the fallback for a worker that refused before its error stream
+ * carried anything.
+ */
+export function workerServiceFailureLogLine(
+  options: { platform?: WorkerServicePlatform; homeDir?: string } = {},
+): string | undefined {
+  let paths: ReturnType<typeof workerServicePaths>;
+  try {
+    paths = workerServicePaths(
+      normalizePlatform(options.platform ?? osPlatform()),
+      validatedAbsolutePath(options.homeDir ?? homedir(), 'home directory'),
+    );
+  } catch {
+    return undefined;
+  }
+  return lastLogLine(paths.errorLogPath) ?? lastLogLine(paths.logPath);
+}
+
+function lastLogLine(path: string): string | undefined {
+  let text: string;
+  try {
+    const size = statSync(path).size;
+    if (size === 0) return undefined;
+    const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = openSync(path, 'r');
+    try {
+      readSync(handle, buffer, 0, length, size - length);
+    } finally {
+      closeSync(handle);
+    }
+    text = buffer.toString('utf8');
+  } catch {
+    return undefined;
+  }
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const line = lines.at(-1);
+  if (!line) return undefined;
+  return redactWorkerLogLine(line).slice(0, WORKER_LOG_LINE_MAX_CHARS);
+}
+
+/**
+ * Logs are written under a scrubbing discipline, but this line is about to be
+ * reprinted into a command's own output, so anything token-shaped is dropped
+ * here too rather than trusted to have been scrubbed upstream.
+ */
+function redactWorkerLogLine(line: string): string {
+  return line
+    .replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, '$1$2[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]');
 }
 
 export function inspectWorkerService(

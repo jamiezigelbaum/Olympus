@@ -294,7 +294,7 @@ describe('source worker scheduler', () => {
     });
   });
 
-  test('factory scheduler is fail-closed without a source allowlist and filters refreshed sources', () => {
+  test('factory scheduler runs unrestricted on an empty allowlist and filters refreshed sources', () => {
     const x = source('x.bookmarks', 'continuous', 30_000, undefined, [task('x.head', async () => ({ status: 'idle' }))]);
     const gmail = source('gmail.email', 'continuous', 60_000, undefined, [task('gmail.sync', async () => ({ status: 'idle' }))]);
     expect(sourceSchedulerSourceIdsFromEnv({})).toEqual([]);
@@ -308,10 +308,45 @@ describe('source worker scheduler', () => {
       [SOURCE_SCHEDULER_SOURCE_IDS_ENV]: 'domain_library.agent_library',
     })).toThrow('sourceIds entries must be one of');
 
-    const closedConfig = schedulerConfig();
-    closedConfig.worker.scheduler.sourceIds = [];
+    // A fresh install enables the scheduler before any source is connected, so
+    // the configured allowlist is necessarily empty there. Empty means "no
+    // operator restriction": every constructed lane runs, and a machine with
+    // nothing connected constructs none, so the scheduler simply idles.
+    const emptyConfig = schedulerConfig();
+    emptyConfig.worker.scheduler.sourceIds = [];
+    const emptyStore = new LocalSourceSchedulerStateStore(':memory:');
+    const unrestricted = createSourceSchedulerFromConfig({
+      config: emptyConfig,
+      sources: [x, gmail],
+      stateStore: emptyStore,
+    });
+    expect(unrestricted.status().sources.map((entry) => entry.source_id)).toEqual(['x.bookmarks', 'gmail.email']);
+
+    const idle = createSourceSchedulerFromConfig({
+      config: emptyConfig,
+      sources: [],
+      stateStore: emptyStore,
+    });
+    expect(idle.status()).toMatchObject({ enabled: true, sources: [], missing_selected_source_ids: [] });
+    idle.start();
+    expect(idle.status().running).toBe(true);
+    // The lane the dashboard connect flow adds after boot is admitted, which
+    // an empty allowlist read as fail-closed would have filtered out forever.
+    idle.updateSources([gmail]);
+    expect(idle.status().sources.map((entry) => entry.source_id)).toEqual(['gmail.email']);
+    idle.stop();
+
+    // The class keeps its own contract: an explicit empty list is fail-closed.
     const closedStore = new LocalSourceSchedulerStateStore(':memory:');
-    const closed = createSourceSchedulerFromConfig({ config: closedConfig, sources: [x, gmail], stateStore: closedStore });
+    const closed = new SourceScheduler({
+      enabled: true,
+      tickMs: 1_000,
+      errorBackoffMs: 5_000,
+      maxTransientRetries: 1,
+      allowedSourceIds: [],
+      sources: [x, gmail],
+      stateStore: closedStore,
+    });
     expect(closed.status().sources).toEqual([]);
 
     const selectedStore = new LocalSourceSchedulerStateStore(':memory:');
@@ -334,6 +369,7 @@ describe('source worker scheduler', () => {
       sources: [],
     });
     closedStore.close();
+    emptyStore.close();
     selectedStore.close();
   });
 

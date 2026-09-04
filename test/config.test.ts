@@ -14,11 +14,19 @@ describe('config', () => {
     expect(() => parseBoolean('garbage', 'TEST_FLAG')).toThrow('TEST_FLAG must be true or false');
   });
 
-  test('requires a non-empty, valid source allowlist when the worker scheduler is enabled', () => {
-    expect(() => loadConfig({
+  test('accepts an enabled worker scheduler with no selected sources and still rejects invalid ids', () => {
+    // olympus setup installs the worker BEFORE the first source is connected,
+    // so an enabled scheduler with an empty allowlist is the normal state of a
+    // fresh install. Refusing it here made every fresh install fail to boot.
+    const fresh = loadConfig({
       OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
       OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
-    })).toThrow('worker.scheduler.sourceIds must contain at least one source');
+    });
+    expect(fresh.worker.scheduler.enabled).toBe(true);
+    expect(fresh.worker.scheduler.sourceIds).toEqual([]);
+    expect(configFromPluginConfig({
+      worker: { scheduler: { enabled: true, sourceIds: [] } },
+    }).worker.scheduler.sourceIds).toEqual([]);
     expect(() => loadConfig({
       OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
       OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',

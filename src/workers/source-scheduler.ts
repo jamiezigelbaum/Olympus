@@ -981,7 +981,16 @@ export function createSourceSchedulerFromConfig(input: {
     errorBackoffMs: input.config.worker.scheduler.errorBackoffSeconds * 1_000,
     maxTransientRetries: input.config.worker.scheduler.maxTransientRetries,
     sources: input.sources,
-    allowedSourceIds: input.config.worker.scheduler.sourceIds,
+    // An empty configured allowlist is "no operator restriction", not
+    // "fail closed on everything". A fresh install enables the scheduler
+    // before any source is connected, so it necessarily starts empty; passing
+    // the empty list straight through would leave the scheduler permanently
+    // filtering out every lane the connect flow later builds. The class keeps
+    // its own contract: undefined is unrestricted, an explicit empty list is
+    // fail-closed, and only this config bridge maps empty to unrestricted.
+    ...(input.config.worker.scheduler.sourceIds.length > 0
+      ? { allowedSourceIds: input.config.worker.scheduler.sourceIds }
+      : {}),
     ...(input.afterTick ? { afterTick: input.afterTick } : {}),
     ...(input.config.worker.scheduler.enabled
       ? { stateStore: input.stateStore ?? new LocalSourceSchedulerStateStore() }

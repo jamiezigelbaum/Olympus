@@ -2524,6 +2524,15 @@ export async function main(): Promise<void> {
       `In-process source scheduler enabled for ${schedulerSources.length} constructed source(s); `
       + `${olympusConfig.worker.scheduler.sourceIds.length} selected.`,
     );
+    if (schedulerSources.length === 0) {
+      // The state a fresh install boots into. Without this line the only
+      // evidence was "constructed=0", which reads like a failure rather than
+      // the correct idle state before the first source is connected.
+      console.log(
+        '[source-scheduler] idle: no source is connected yet; '
+        + 'the scheduler is running and will adopt each source as you connect it in the dashboard.',
+      );
+    }
   }
   console.log(describeSovereigntyPolicy(sovereigntyEngine));
   console.log(
