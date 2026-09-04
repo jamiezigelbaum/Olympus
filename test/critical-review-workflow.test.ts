@@ -72,6 +72,19 @@ describe('critical-review publisher workflow', () => {
     expect(workflow).toContain("state: critical && !receipt ? 'pending' : 'success'");
   });
 
+  test('the publisher classifies exchange changes from the protected policy', () => {
+    const start = workflow.indexOf('function isCriticalPath(');
+    const end = workflow.indexOf('function receiptSha(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const classify = new Function(`${workflow.slice(start, end)}; return isCriticalPath;`)();
+    const riskConfig = JSON.parse(readFileSync(join(ROOT, 'config/change-risk.json'), 'utf8'));
+    for (const path of ['exchange/src/google.ts', 'exchange/src/redirect-allowlist.ts', 'exchange/wrangler.toml']) {
+      expect(classify(path, riskConfig)).toBe(true);
+    }
+    expect(classify('README.md', riskConfig)).toBe(false);
+  });
+
   test('keeps actions immutable and provides an idempotent all-open-PR backfill', () => {
     expect(workflow).toMatch(/actions\/github-script@[0-9a-f]{40}/);
     expect(workflow).not.toMatch(/uses: [^\n]+@(v|main\b)/);

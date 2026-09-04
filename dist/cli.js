@@ -8438,6 +8438,47 @@ function fuseRankedCandidateLanes(options) {
 function reciprocalRank(rank, k = DEFAULT_RRF_K) {
   return 1 / (k + rank);
 }
+function applyPerCorpusResultBudget(ranked, budget) {
+  if (budget <= 0)
+    return { hits: [], degradations: [] };
+  if (ranked.length <= budget) {
+    return { hits: ranked.map((candidate) => candidate.item), degradations: [] };
+  }
+  const byCorpus = new Map;
+  for (const candidate of ranked) {
+    const bucket = byCorpus.get(candidate.item.corpusId);
+    if (bucket)
+      bucket.push(candidate);
+    else
+      byCorpus.set(candidate.item.corpusId, [candidate]);
+  }
+  const seated = new Set;
+  for (let round = 0;seated.size < budget; round += 1) {
+    let seatedThisRound = false;
+    for (const bucket of byCorpus.values()) {
+      const candidate = bucket[round];
+      if (!candidate)
+        continue;
+      seated.add(candidate.id);
+      seatedThisRound = true;
+      if (seated.size >= budget)
+        break;
+    }
+    if (!seatedThisRound)
+      break;
+  }
+  const hits = ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item);
+  const representedCorpora = new Set(hits.map((hit) => hit.corpusId));
+  return {
+    hits,
+    degradations: [...byCorpus.keys()].filter((corpusId) => !representedCorpora.has(corpusId)).map((corpusId) => ({
+      laneName: corpusId,
+      laneType: "keyword",
+      reason: "lane_budget_cut",
+      occurrences: 1
+    }))
+  };
+}
 function mergeRetrievalDegradations(...lists) {
   const merged = new Map;
   for (const list of lists) {
@@ -16250,32 +16291,18 @@ async function routeSourceIndexSearch(options) {
     });
   }
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index]));
-  const fused = applyPerCorpusResultBudget(fuseRankedCandidateLanes({
+  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
     limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
   }), request.maxResults);
-  if (request.maxResults > 0) {
-    for (const lane of lanes) {
-      if (lane.items.length === 0)
-        continue;
-      if (fused.some((hit) => hit.corpusId === lane.name))
-        continue;
-      degradations.push({
-        laneName: lane.name,
-        laneType: "keyword",
-        reason: "lane_budget_cut",
-        occurrences: 1
-      });
-    }
-  }
   const result = {
     hits: fused,
     searchedCorpora,
     skippedCorpora,
     laneAudits,
-    degradations: mergeRetrievalDegradations(degradations),
+    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
     latencyMs: Date.now() - startedAt,
     rawExposed: false
@@ -16308,36 +16335,6 @@ function bestLaneRank(candidate) {
 }
 function laneIndex(laneOrder, corpusId) {
   return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
-}
-function applyPerCorpusResultBudget(ranked, budget) {
-  if (budget <= 0)
-    return [];
-  if (ranked.length <= budget)
-    return ranked.map((candidate) => candidate.item);
-  const byCorpus = new Map;
-  for (const candidate of ranked) {
-    const bucket = byCorpus.get(candidate.item.corpusId);
-    if (bucket)
-      bucket.push(candidate);
-    else
-      byCorpus.set(candidate.item.corpusId, [candidate]);
-  }
-  const seated = new Set;
-  for (let round = 0;seated.size < budget; round += 1) {
-    let seatedThisRound = false;
-    for (const bucket of byCorpus.values()) {
-      const candidate = bucket[round];
-      if (!candidate)
-        continue;
-      seated.add(candidate.id);
-      seatedThisRound = true;
-      if (seated.size >= budget)
-        break;
-    }
-    if (!seatedThisRound)
-      break;
-  }
-  return ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item);
 }
 function semanticLaneDegradation(corpusId, state, response) {
   if (state.health === "degraded") {
@@ -16784,18 +16781,19 @@ async function runRoutedSearches(input) {
     runs.push(await runRoutedSearch(input, query, runs.length + 1));
   }
   const queries = [literalQuery, ...expansions];
-  const fused = fuseRankedCandidateLanes({
+  const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: queries[index], items: run.hits })),
     getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    limit: input.maxResults,
+    limit: runs.reduce((total, run) => total + run.hits.length, 0),
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
-  }).map((candidate) => candidate.item);
+  });
+  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, input.maxResults);
   return {
     hits: fused,
     searchedCorpora: literalRun.searchedCorpora,
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
-    degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations))
+    degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations)
   };
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -34126,18 +34124,22 @@ var init_operation_exposure = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
+import { existsSync as existsSync16 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
+  const inputEnv = options.env ?? process.env;
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync16(workerSetupEnvPath(options));
+  const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
   for (const [profileId, profile] of Object.entries(options.config.modelProfiles)) {
     if (profile.secretRef) {
-      const prerequisite = await secretRefPrerequisite(profileId, profile, env, secretStore);
+      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, secretStore);
       if (prerequisite && !seen.has(prerequisite.id)) {
         seen.add(prerequisite.id);
         unmet.push(prerequisite);
@@ -38783,7 +38785,7 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync17, mkdirSync as mkdirSync18 } from "node:fs";
+import { existsSync as existsSync18, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir26 } from "node:os";
 import { dirname as dirname21, join as join29 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
@@ -38989,7 +38991,7 @@ async function collectLocalSourceIngestionLedger(options = {}) {
   ]);
   const exclusionSources = [];
   for (const store of localConnectorStores(env)) {
-    if (!existsSync17(store.dbPath))
+    if (!existsSync18(store.dbPath))
       continue;
     const gated = store.family === "file";
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
@@ -39736,7 +39738,7 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync18, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync19, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname22, join as join30 } from "node:path";
 async function runDoctor(input) {
   const inputEnv = input.env;
@@ -39794,7 +39796,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync18(configPath))
+  if (configPath === undefined || !existsSync19(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -40536,7 +40538,7 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync18(path))
+    if (!existsSync19(path))
       return;
     const parsed = JSON.parse(readFileSync19(path, "utf8"));
     const record = asRecord9(parsed);
@@ -40772,7 +40774,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync18(join30(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join30(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -42651,11 +42653,11 @@ var init_version = __esm(() => {
 
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync11, mkdirSync as mkdirSync21 } from "node:fs";
-import { homedir as homedir28 } from "node:os";
+import { homedir as homedir29 } from "node:os";
 import { dirname as dirname25, join as join35 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir28(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir29(), ".local", "share");
   return join35(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
 }
 
@@ -58515,14 +58517,14 @@ var init_drive_extraction_source = __esm(() => {
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync12, mkdirSync as mkdirSync22 } from "node:fs";
 import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
-import { homedir as homedir29 } from "node:os";
+import { homedir as homedir30 } from "node:os";
 import { dirname as dirname26, join as join36 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join36(homedir29(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join36(homedir30(), ".local", "share");
   return join36(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
@@ -62875,7 +62877,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync22,
+  existsSync as existsSync23,
   mkdirSync as mkdirSync23,
   readFileSync as readFileSync24,
   renameSync as renameSync7,
@@ -62883,9 +62885,9 @@ import {
   writeFileSync as writeFileSync9
 } from "node:fs";
 import { randomUUID as randomUUID15 } from "node:crypto";
-import { homedir as homedir30 } from "node:os";
+import { homedir as homedir31 } from "node:os";
 import { dirname as dirname27, isAbsolute as isAbsolute6, join as join40 } from "node:path";
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir30()) {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir31()) {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
   const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join40(homeDir, ".cache");
   return join40(cacheRoot, "olympus", "venice-model-catalog-v1.json");
@@ -63050,7 +63052,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path) {
-  if (!existsSync22(path))
+  if (!existsSync23(path))
     return;
   let payload;
   try {
@@ -63585,7 +63587,7 @@ import {
   stat as stat4,
   unlink as unlink2
 } from "node:fs/promises";
-import { homedir as homedir31 } from "node:os";
+import { homedir as homedir32 } from "node:os";
 import { dirname as dirname28, join as join41 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
   const audit = result.audit;
@@ -63744,7 +63746,7 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join41(homedir31(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join41(homedir32(), ".local", "share");
   return join41(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
@@ -68300,14 +68302,14 @@ var init_http = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { homedir as homedir32 } from "node:os";
+import { homedir as homedir33 } from "node:os";
 import { mkdir as mkdir4, open as open4, readFile as readFile8 } from "node:fs/promises";
 import { dirname as dirname29, join as join42 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join42(homedir32(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join42(homedir33(), ".local", "share");
   return join42(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function readEmbeddingLedger(path) {
@@ -68661,12 +68663,12 @@ var init_embedding_ledger2 = __esm(() => {
 // src/workers/dashboard/embedding-runtime.ts
 import { mkdirSync as mkdirSync24, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname30, join as join43 } from "node:path";
-import { homedir as homedir33 } from "node:os";
+import { homedir as homedir34 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join43(env.HOME?.trim() || homedir33(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join43(env.HOME?.trim() || homedir34(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
@@ -69583,7 +69585,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync13, copyFileSync, existsSync as existsSync23, lstatSync as lstatSync14, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
+import { chmodSync as chmodSync13, copyFileSync, existsSync as existsSync24, lstatSync as lstatSync14, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
 import { dirname as dirname31 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -69639,7 +69641,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync23(path)) {
+  if (!existsSync24(path)) {
     return {
       path,
       present: false,
@@ -69688,7 +69690,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync23(path)) {
+  if (existsSync24(path)) {
     const stat5 = lstatSync14(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -70465,7 +70467,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 // src/workers/email-source/index.ts
 import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync28, statSync as statSync9 } from "node:fs";
-import { homedir as homedir34 } from "node:os";
+import { homedir as homedir35 } from "node:os";
 import { join as join45, resolve as resolve7 } from "node:path";
 
 class GogcliEmailConnectorStub {
@@ -73210,7 +73212,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync28(join45(homedir34(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync28(join45(homedir35(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -73918,13 +73920,13 @@ var init_analyst_anthropic = __esm(() => {
 });
 
 // src/core/analyst-openclaw-infer.ts
-import { existsSync as existsSync24 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 function resolveOpenClawCommand() {
   const found = Bun.which(DEFAULT_COMMAND);
   if (found)
     return found;
   for (const candidate of ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw", `${process.env.HOME ?? ""}/.openclaw/bin/openclaw`]) {
-    if (candidate && existsSync24(candidate))
+    if (candidate && existsSync25(candidate))
       return candidate;
   }
   return DEFAULT_COMMAND;
@@ -75699,7 +75701,7 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync25 } from "node:fs";
+import { existsSync as existsSync26 } from "node:fs";
 import { isAbsolute as isAbsolute7 } from "node:path";
 function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && options.provider.backend !== "local") {
@@ -75911,7 +75913,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync25(store.dbPath))
+        if (!existsSync26(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -78322,7 +78324,7 @@ init_version();
 init_atomic_file();
 import { createHash as createHash26 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync21, lstatSync as lstatSync13, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
 import { dirname as dirname24, isAbsolute as isAbsolute5, join as join34 } from "node:path";
 
@@ -78334,7 +78336,7 @@ import { spawnSync as spawnSync4 } from "node:child_process";
 import {
   chmodSync as chmodSync10,
   closeSync as closeSync6,
-  existsSync as existsSync19,
+  existsSync as existsSync20,
   fsyncSync as fsyncSync4,
   lstatSync as lstatSync11,
   mkdtempSync,
@@ -78397,7 +78399,7 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync19(workingDirectory)) {
+      if (existsSync20(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
         if (versionTreeDigest(workingDirectory) === expectedDigest) {
@@ -78409,13 +78411,13 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync19(staging))
+      if (existsSync20(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync19(staging))
+      if (options.dryRun && existsSync20(staging))
         rmSync6(staging, { recursive: true, force: true });
     }
   } finally {
@@ -78628,7 +78630,7 @@ function hashVersionTree(root, relativeRoot, digest) {
 }
 function publishVersionTree(staging, workingDirectory, versionsDir) {
   let replacedPath;
-  if (existsSync19(workingDirectory)) {
+  if (existsSync20(workingDirectory)) {
     replacedPath = join32(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
     renameSync6(workingDirectory, replacedPath);
     syncDirectorySync(versionsDir);
@@ -78637,13 +78639,13 @@ function publishVersionTree(staging, workingDirectory, versionsDir) {
     renameSync6(staging, workingDirectory);
     syncDirectorySync(versionsDir);
   } catch (error) {
-    if (replacedPath && existsSync19(replacedPath) && !existsSync19(workingDirectory)) {
+    if (replacedPath && existsSync20(replacedPath) && !existsSync20(workingDirectory)) {
       renameSync6(replacedPath, workingDirectory);
       syncDirectorySync(versionsDir);
     }
     throw error;
   }
-  if (replacedPath && existsSync19(replacedPath)) {
+  if (replacedPath && existsSync20(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectorySync(versionsDir);
   }
@@ -78662,7 +78664,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID13 } from "node:crypto";
-import { existsSync as existsSync20, linkSync, lstatSync as lstatSync12, readFileSync as readFileSync22 } from "node:fs";
+import { existsSync as existsSync21, linkSync, lstatSync as lstatSync12, readFileSync as readFileSync22 } from "node:fs";
 import { join as join33 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join33(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -78692,7 +78694,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
-      if (existsSync20(candidate))
+      if (existsSync21(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
@@ -78705,7 +78707,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         }
         removeFileDurablySync(lockPath);
         const staleCandidate = join33(dir, `mutation-owner-${current.nonce}.tmp`);
-        if (existsSync20(staleCandidate))
+        if (existsSync21(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -78963,7 +78965,14 @@ function installManagedWorkerFiles(options = {}) {
 }
 function activateManagedWorkerFiles(install, effective) {
   try {
+    const before = effective.platform === "linux" ? inspectWorkerService(serviceActionOptions(effective)) : undefined;
+    if (before?.state === "unknown") {
+      throw new OperationError("config_error", `Could not determine the existing Olympus worker state before setup activation: ${before.detail}.`);
+    }
     runWorkerServiceAction("install", serviceActionOptions(effective));
+    if (before?.state === "active") {
+      runWorkerServiceAction("restart", serviceActionOptions(effective));
+    }
     const service = settleWorkerServiceState(effective, ["active"]);
     if (service.state === "active")
       return { install, service, activation: "started" };
@@ -79135,7 +79144,7 @@ function readTransaction(options) {
   const homeDir = validateHomeDir(options.homeDir ?? homedir27());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync21(paths.transaction))
+  if (!existsSync22(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value;
@@ -79165,14 +79174,14 @@ function clearTransaction(options) {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir27()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir27()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.transaction]) {
-    if (!existsSync21(path))
+    if (!existsSync22(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync21(path)) {
+  if (!existsSync22(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
@@ -79180,7 +79189,7 @@ function readManagedFileSnapshot(path) {
 }
 function writeSnapshotBackup(path, text) {
   if (text === undefined) {
-    if (existsSync21(path)) {
+    if (existsSync22(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -79190,7 +79199,7 @@ function writeSnapshotBackup(path, text) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync21(path)) {
+    if (existsSync22(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
@@ -79270,7 +79279,7 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync21(envPath))
+  if (!existsSync22(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
   const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync23(envPath, "utf8"))?.[1];
@@ -79559,9 +79568,11 @@ init_sensitivity_map();
 // src/core/setup.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
+import { homedir as homedir28 } from "node:os";
 init_operation_error();
 init_sovereignty();
 init_setup_preflight();
+init_worker_auth();
 var VENICE_PITCH_TEXT = [
   "Secure source answers follow the selected preset: local-first tries your local lane before Venice; private-cloud-only uses Venice without a local-model requirement.",
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
@@ -79645,8 +79656,7 @@ async function runSetupWizard(options) {
     config: presetConfig,
     ...options.env ? { env: options.env } : {},
     ...options.secretStore ? { secretStore: options.secretStore } : {},
-    ...options.homeDir ? { homeDir: options.homeDir } : {},
-    ...options.envPath ? { workerEnvPath: options.envPath } : {}
+    workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir28() })
   });
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
@@ -79681,7 +79691,7 @@ async function runSetupWizard(options) {
     });
   }
   return {
-    ok: true,
+    ok: managedWorker.activation !== "failed",
     mode: "non_interactive",
     dependencyCheck: dependencyCheck2,
     venicePitch: {
@@ -79701,7 +79711,8 @@ async function runSetupWizard(options) {
       authTokenRef: "worker.env:OLYMPUS_WORKER_AUTH_TOKEN",
       install: managedWorker.install,
       state: workerState,
-      next: workerState === "active" ? "The managed worker is running; open the dashboard with olympus dashboard." : workerState === "not_started" ? "Dry run: rerun without --dry-run to write and start the managed worker." : "Run olympus worker install, then olympus worker status.",
+      activation: managedWorker.activation,
+      next: managedWorker.activation === "failed" && workerState === "active" ? "The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status." : workerState === "active" ? "The managed worker is running; open the dashboard with olympus dashboard." : workerState === "not_started" ? "Dry run: rerun without --dry-run to write and start the managed worker." : "Run olympus worker install, then olympus worker status.",
       ...managedWorker.activation_detail ? { activation_detail: managedWorker.activation_detail } : {}
     },
     connections,
@@ -79890,6 +79901,8 @@ async function main2() {
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
       console.log(JSON.stringify(result, null, 2));
+      if (!result.ok)
+        process.exitCode = 1;
       if (result.unmet_prerequisites.length > 0) {
         console.error("Unmet preset prerequisites:");
         for (const item of result.unmet_prerequisites) {

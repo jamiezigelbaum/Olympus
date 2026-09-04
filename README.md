@@ -107,21 +107,21 @@ exhausted policy chain refuses rather than silently downgrading.
 (`>=22.22.3 <23`, `>=24.15.0 <25`, or `>=25.9.0` — its installer refuses any
 other), plus [Bun](https://bun.sh) `1.2+`. macOS or Linux.
 
-Let your agent do the install. Paste this into any agent with a terminal
-(OpenClaw, Claude Code, Codex), with `<owner>/<repo>` replaced by the Olympus
-repository you were given:
+The pilot uses the exact qualified `olympus-0.4.0.tgz` supplied by the
+maintainer, together with its SHA-256 and byte count. Let your agent do the
+install. Give it those files and paste this into any agent with a terminal
+(OpenClaw, Claude Code, Codex):
 
-> Install this plugin: `openclaw plugins install git:<owner>/<repo> --accept-capabilities`
-> If OpenClaw rejects `--accept-capabilities` as an unknown option (it is
-> OpenClaw 2026.7.1), run the same command again without that flag.
-> Then read INSTALL_FOR_AGENTS.md inside the installed plugin folder and
-> follow it step by step — it is the install guide, not reference material.
+> Verify the supplied Olympus tarball against its SHA-256 and byte count.
+> Read `package/INSTALL_FOR_AGENTS.md` from that archive and follow it step by
+> step, including the existing-install check before installing. Use those exact
+> package bytes and record their identity in the install report.
 
-The repository is the install source during the pilot.
 `openclaw plugins install clawhub:olympus` becomes the one-line public path
 once Olympus is published to ClawHub, which happens **after** the pilot. The
-`npm-pack:` tarball path is the maintainer's release-proof mechanism, not a
-pilot instruction — see [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md).
+pilot and release qualification both use the managed `npm-pack:` path — see
+[docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md). A Git checkout or rebuilt package
+does not qualify the supplied candidate.
 
 `--accept-capabilities` is required by OpenClaw `2026.8.1+`: an agent-driven
 install is non-TTY, and without the flag the host exits 1 asking for capability
@@ -133,25 +133,23 @@ data as a sensitivity map, asks for your privacy posture, connects your keys
 without logging them, and verifies the install end to end. About ten minutes
 plus OAuth clicks.
 
-Prefer to drive it yourself? The same flow, by hand:
+Prefer to drive it yourself? Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)**,
+starting with the archive identity and existing-install checks. Its install
+command for a clean machine is:
 
 ```bash
-openclaw plugins install git:<owner>/<repo> --accept-capabilities
-# ^ on OpenClaw 2026.7.1 the flag is unknown: re-run without it
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
+# On OpenClaw 2026.7.1, omit both flags for a clean install.
+# On newer hosts, --force also overwrites an existing plugin: check first.
 openclaw plugins enable olympus
-olympus setup --preset private-cloud-only --cloud-lane subscription --yes
-olympus worker install
-olympus worker status
-olympus connect google --client-id <google-oauth-client-id>
-printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
-openclaw config validate
-openclaw doctor --lint
-openclaw gateway restart
-olympus dashboard
+OLYMPUS_ROOT="$(openclaw plugins inspect olympus --json | jq -r .plugin.rootDir)"
+OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
+"$OLYMPUS_BIN" doctor
 ```
 
-Full walkthrough with what to expect at each step:
-**[docs/QUICKSTART.md](docs/QUICKSTART.md)** — about ten minutes.
+Continue the quickstart to describe your data, choose a privacy posture,
+connect credentials, and verify a cited answer. The CLI lives inside the
+managed plugin; use the resolved executable rather than assuming it is on PATH.
 
 ## Supported sources
 

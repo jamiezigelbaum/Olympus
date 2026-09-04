@@ -161,6 +161,56 @@ export function reciprocalRank(rank: number, k = DEFAULT_RRF_K): number {
 }
 
 /**
+ * Seat each matching corpus once before taking second hits, preserving fused
+ * rank order. Apply this at every budget boundary, including query expansion:
+ * an earlier allocation cannot account for corpora lost by a later fusion.
+ */
+export function applyPerCorpusResultBudget<T extends { corpusId: string }>(
+  ranked: readonly FusedRankedCandidate<T>[],
+  budget: number,
+): { hits: T[]; degradations: RetrievalDegradation[] } {
+  // Asking for no candidates is a scoping decision, not retrieval loss.
+  if (budget <= 0) return { hits: [], degradations: [] };
+  if (ranked.length <= budget) {
+    return { hits: ranked.map((candidate) => candidate.item), degradations: [] };
+  }
+
+  const byCorpus = new Map<string, FusedRankedCandidate<T>[]>();
+  for (const candidate of ranked) {
+    const bucket = byCorpus.get(candidate.item.corpusId);
+    if (bucket) bucket.push(candidate);
+    else byCorpus.set(candidate.item.corpusId, [candidate]);
+  }
+
+  const seated = new Set<SourceIndexCandidateId>();
+  for (let round = 0; seated.size < budget; round += 1) {
+    let seatedThisRound = false;
+    for (const bucket of byCorpus.values()) {
+      const candidate = bucket[round];
+      if (!candidate) continue;
+      seated.add(candidate.id);
+      seatedThisRound = true;
+      if (seated.size >= budget) break;
+    }
+    if (!seatedThisRound) break;
+  }
+
+  const hits = ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item);
+  const representedCorpora = new Set(hits.map((hit) => hit.corpusId));
+  return {
+    hits,
+    degradations: [...byCorpus.keys()]
+      .filter((corpusId) => !representedCorpora.has(corpusId))
+      .map((corpusId) => ({
+        laneName: corpusId,
+        laneType: 'keyword',
+        reason: 'lane_budget_cut',
+        occurrences: 1,
+      })),
+  };
+}
+
+/**
  * Fold degradation markers from several retrieval runs into one list.
  *
  * A unified answer can run the fan-out more than once — a keyword attempt then

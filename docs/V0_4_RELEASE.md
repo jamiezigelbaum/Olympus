@@ -374,8 +374,13 @@ that clean-install real-provider or pilot qualification has passed.
 - Before ClawHub publication, give testers one access-controlled download of
   that exact `.tgz`, together with its SHA-256 and byte count. They install it
   through the documented managed
-  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz`
-  command; no tester builds a package or installs from a source checkout.
+  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
+  command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
+  hosts `--force` also overwrites an existing plugin, so the install guide's
+  existing-install checks still apply. No tester builds a package or installs
+  from a source checkout. README, Quickstart, and the agent install guide use
+  this same path and require the artifact digest and byte count in the install
+  report so feedback can be tied to the qualified candidate.
 - Before inviting testers, internally prove the same packaged product on clean
   Apple Silicon macOS and x86_64 Ubuntu LTS installations. On both operating
   systems, every declared source must complete install, onboarding, configured
@@ -471,7 +476,7 @@ backend, and Hermes-specific ops tooling.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Every source passes clean-install proof on macOS and Linux; fluid beta testing exercises the normal journey; product blockers are fixed; the exact qualified artifact is published and install-proven |
+| 4. Pilot and release | pending | Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. These repository fixes require a newly qualified candidate; real-provider and pilot receipts are still pending. Every source must pass clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,

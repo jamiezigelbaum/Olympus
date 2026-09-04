@@ -4,7 +4,8 @@ From zero to asking your own data questions, in about ten minutes.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
-and access to the Olympus repository. macOS or Linux.
+and the maintainer's qualified Olympus tarball, SHA-256, and byte count. macOS
+or Linux.
 
 OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
 `>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
@@ -47,11 +48,23 @@ in step 2. That choice is the heart of Olympus.
 
 ## 1. Install the plugin
 
-The pilot installs from the Olympus repository. Replace `<owner>/<repo>` with
-the repository you were given:
+The pilot installs the exact qualified tarball supplied by the maintainer.
+Before installing, compare its SHA-256 and byte count with the supplied
+receipt; stop on a mismatch or a missing receipt. Do not build a replacement
+or substitute a Git checkout. Record that identity with your install results.
 
 ```bash
-openclaw plugins install git:<owner>/<repo> --accept-capabilities --force
+shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
+wc -c < /absolute/path/to/olympus-0.4.0.tgz
+```
+
+Check for an existing installation with `openclaw plugins inspect olympus
+--json` and the residue checks in [INSTALL_FOR_AGENTS.md](../INSTALL_FOR_AGENTS.md).
+If Olympus is already installed or has saved state, follow that guide's
+existing-install procedure before continuing. On a clean machine:
+
+```bash
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
@@ -67,32 +80,36 @@ still required — it is what loads the plugin against your finished config.
 Both flags are required on OpenClaw `2026.8.1+`. `--accept-capabilities`
 supplies the capability consent a non-TTY install cannot be prompted for;
 without it the command exits 1. `--force` confirms a non-ClawHub install
-source, which a `git:` install is; without it the command refuses with
+source, which a `npm-pack:` install is; without it the command refuses with
 `Install cancelled; rerun with --force after reviewing the source.` On those
 versions `--force` also means "overwrite an existing plugin", so on a machine
 that already has olympus installed, be sure that is what you want.
 
 On `2026.7.1`, omit both: `--accept-capabilities` does not exist there, and
 `--force` exists but means only "overwrite an existing plugin" — which is not
-what a clean install wants. The clone runs with terminal prompts disabled, so
-git credentials for a private repository must already work.
+what a clean install wants.
 
 The install command prints only `Installed plugin: olympus`, and `openclaw
 plugins list` truncates the path in its table. To find where the plugin landed
-— the git clone uses a URL-hash directory name — read
+— managed storage uses an internal directory name — read
 `openclaw plugins inspect olympus --json` and take `plugin.rootDir`. The
-standalone CLI is `bin/olympus` inside it.
+standalone CLI is `bin/olympus` inside it. Define this shell function for the
+remaining commands in this guide:
 
-Two other install sources exist and are **not** the pilot path:
+```bash
+OLYMPUS_ROOT="$(openclaw plugins inspect olympus --json | jq -r .plugin.rootDir)"
+OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
+olympus() { "$OLYMPUS_BIN" "$@"; }
+```
 
-- `openclaw plugins install clawhub:olympus --accept-capabilities` — the
-  one-line public path, available only after Olympus is published to ClawHub,
-  which happens after the pilot.
-- `openclaw plugins install npm-pack:/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
-  — the maintainer's release-proof mechanism. It installs the exact qualified
-  candidate through OpenClaw's managed npm project, which is what proves the
-  installed dependency shape; a raw archive path is not that proof. ClawHub
-  later receives those same bytes without rebuilding the package.
+If `jq` is unavailable, read `plugin.rootDir` from the JSON and set
+`OLYMPUS_BIN` to that directory's `bin/olympus`. No PATH installation is assumed.
+
+The `npm-pack:` prefix creates OpenClaw's managed npm project and proves the
+installed dependency shape; a raw archive path is not equivalent. After the
+pilot, ClawHub receives those same bytes without rebuilding the package and
+`openclaw plugins install clawhub:olympus --accept-capabilities` becomes the
+public install path.
 
 ## 2. Run setup
 
@@ -195,6 +212,12 @@ The worker is the private engine that syncs, indexes, and answers. Step 2
 registers it AND starts it, reporting `worker.state`, `worker.next`, and —
 only if the start did not take — `worker.activation_detail`. So this is a
 check, not a second install:
+
+Setup exits nonzero with `ok: false` and `worker.activation: failed` if it
+cannot apply the configuration. When changing an existing privacy preset,
+an old process may still report `active`; that alone does not prove the new
+policy took effect. Follow `worker.next` and confirm activation before using
+the newly selected posture.
 
 ```bash
 olympus worker status

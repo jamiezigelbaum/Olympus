@@ -24,7 +24,11 @@ import {
   assertEvidenceCandidateModelEligible,
   SourceModelPolicyDeniedError,
 } from './source-model-policy.ts';
-import { fuseRankedCandidateLanes, mergeRetrievalDegradations } from './source-index/retrieval.ts';
+import {
+  applyPerCorpusResultBudget,
+  fuseRankedCandidateLanes,
+  mergeRetrievalDegradations,
+} from './source-index/retrieval.ts';
 import {
   routeSourceIndexSearch,
   type SourceIndexRoutedSearchHit,
@@ -489,10 +493,12 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
   }
 
   const queries = [literalQuery, ...expansions];
-  const fused = fuseRankedCandidateLanes({
+  const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: queries[index]!, items: run.hits })),
     getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    limit: input.maxResults,
+    // Rank the whole bounded union before allocating seats by corpus. Taking
+    // the cut here could discard a corpus before the shared budget sees it.
+    limit: runs.reduce((total, run) => total + run.hits.length, 0),
     // Scale-free, and deliberately so. Adapter `score` is adapter-local — a
     // negated bm25 rank in one corpus, a sub-lane RRF sum in another — and RRF
     // exists precisely so those are never compared. Comparing them here decided
@@ -500,7 +506,8 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // corpus family from the analyst's evidence with nothing in coverage to
     // record it.
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
-  }).map((candidate) => candidate.item);
+  });
+  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, input.maxResults);
 
   return {
     hits: fused,
@@ -512,7 +519,7 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     // keeping only literalRun's skips hid every such loss.
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
-    degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations)),
+    degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
   };
 }
 

@@ -429,7 +429,19 @@ function activateManagedWorkerFiles(
   effective: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
 ): ManagedWorkerFilesResult {
   try {
+    // Setup also writes sovereignty.json, which is read only at worker boot.
+    // Linux enable --now leaves an active process running with its old policy.
+    // Refuse an unknown state rather than assuming no restart is needed.
+    const before = effective.platform === 'linux'
+      ? inspectWorkerService(serviceActionOptions(effective))
+      : undefined;
+    if (before?.state === 'unknown') {
+      throw new OperationError('config_error', `Could not determine the existing Olympus worker state before setup activation: ${before.detail}.`);
+    }
     runWorkerServiceAction('install', serviceActionOptions(effective));
+    if (before?.state === 'active') {
+      runWorkerServiceAction('restart', serviceActionOptions(effective));
+    }
     const service = settleWorkerServiceState(effective, ['active']);
     if (service.state === 'active') return { install, service, activation: 'started' };
     return {

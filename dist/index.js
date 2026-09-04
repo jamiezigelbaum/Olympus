@@ -5596,7 +5596,7 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { dirname as dirname6, join as join4 } from "node:path";
 function defaultHandleRegistryPath() {
@@ -5606,7 +5606,7 @@ function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
 }
 function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync5(path)) {
+  if (!existsSync6(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
   const parsed = JSON.parse(readFileSync6(path, "utf8"));
@@ -5647,7 +5647,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, prese
   }, null, 2));
 }
 function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -5677,7 +5677,7 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
   });
 }
 function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -6090,7 +6090,7 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync as chmodSync2, existsSync as existsSync7, lstatSync as lstatSync2, readFileSync as readFileSync8 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname8, join as join6 } from "node:path";
 function defaultSensitivityMapPath() {
@@ -6102,7 +6102,7 @@ function resolveSensitivityMapPath(options = {}) {
 }
 function loadSensitivityMap(options = {}) {
   const path = resolveSensitivityMapPath(options);
-  if (!existsSync7(path)) {
+  if (!existsSync8(path)) {
     if (options.allowMissing)
       return;
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
@@ -12346,24 +12346,28 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname10, join as join9 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
 init_secret_store();
+import { existsSync as existsSync5 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
+  const inputEnv = options.env ?? process.env;
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync5(workerSetupEnvPath(options));
+  const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
   for (const [profileId, profile] of Object.entries(options.config.modelProfiles)) {
     if (profile.secretRef) {
-      const prerequisite = await secretRefPrerequisite(profileId, profile, env, secretStore);
+      const prerequisite = await secretRefPrerequisite(profileId, profile, credentialEnv, secretStore);
       if (prerequisite && !seen.has(prerequisite.id)) {
         seen.add(prerequisite.id);
         unmet.push(prerequisite);
@@ -12626,7 +12630,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync8(configPath))
+  if (configPath === undefined || !existsSync9(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -13368,7 +13372,7 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync8(path))
+    if (!existsSync9(path))
       return;
     const parsed = JSON.parse(readFileSync9(path, "utf8"));
     const record = asRecord13(parsed);
@@ -13604,7 +13608,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync8(join9(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join9(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -15445,7 +15449,7 @@ function optionalAttachmentType(value) {
 init_public_surface();
 
 // src/private-extension-contract.ts
-import { existsSync as existsSync9, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync10 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { basename, dirname as dirname11, join as join10 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15556,7 +15560,7 @@ function resolveSiblingManifestPath(baseDir, fileExists) {
 var requireFromThisModule = createRequire2(import.meta.url);
 function loadPrivateExtensions(options = {}) {
   const baseDir = options.baseDir ?? dirname11(fileURLToPath(import.meta.url));
-  const fileExists = options.fileExists ?? existsSync9;
+  const fileExists = options.fileExists ?? existsSync10;
   const loadModule = options.loadModule ?? requireFromThisModule;
   const readFile3 = options.readFile ?? ((path) => readFileSync10(path, "utf8"));
   const sourceCheckout = isSourceCheckoutLayout(baseDir);

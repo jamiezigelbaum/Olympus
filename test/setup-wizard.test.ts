@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -10,6 +10,7 @@ import {
   runSetupDependencyCheck,
   runSetupWizard,
 } from '../src/core/setup.ts';
+import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 import {
   installWorkerService,
@@ -22,7 +23,7 @@ describe('olympus setup wizard', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-test-'));
     const sovereigntyPath = join(dir, 'sovereignty.json');
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
         yes: true,
         sovereigntyPath,
@@ -68,7 +69,7 @@ describe('olympus setup wizard', () => {
     const subscriptionPath = join(dir, 'subscription.json');
     const apiKeyPath = join(dir, 'api-key.json');
     try {
-      await runSetupWizard({
+      await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath: subscriptionPath,
@@ -79,7 +80,7 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'subscription-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      await runSetupWizard({
+      await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         cloudLane: 'api-key',
@@ -114,7 +115,7 @@ describe('olympus setup wizard', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-deps-test-'));
     const sovereigntyPath = join(dir, 'sovereignty.json');
     try {
-      await expect(runSetupWizard({
+      await expect(runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath,
@@ -154,10 +155,10 @@ describe('olympus setup wizard', () => {
     expect(bun?.repairHint).toContain('Bun 1.2+');
   });
 
-  test('preflights no-sensitive missing and present GEMINI_API_KEY prerequisites', async () => {
+  test('preflights no-sensitive credentials from the worker environment, not shell exports', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-cloud-test-'));
     try {
-      const missing = await runSetupWizard({
+      const missing = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
         yes: true,
         sovereigntyPath: join(dir, 'missing.json'),
@@ -175,7 +176,7 @@ describe('olympus setup wizard', () => {
         remedy: 'printf \'%s\' "$KEY" | olympus connect gemini --api-key-stdin',
       }]);
 
-      const present = await runSetupWizard({
+      const present = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
         yes: true,
         sovereigntyPath: join(dir, 'present.json'),
@@ -185,7 +186,8 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'present-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      expect(present.unmet_prerequisites).toEqual([]);
+      expect(present.unmet_prerequisites.map((item) => item.id)).toEqual(['env:GEMINI_API_KEY']);
+      expect(readFileSync(present.worker.install.env_path, 'utf8')).not.toContain('GEMINI_API_KEY=');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -194,7 +196,7 @@ describe('olympus setup wizard', () => {
   test('preflights private-cloud-only store secret and Gemini without local server expectations', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-private-test-'));
     try {
-      const missing = await runSetupWizard({
+      const missing = await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath: join(dir, 'missing.json'),
@@ -213,7 +215,7 @@ describe('olympus setup wizard', () => {
         .toContain('olympus connect venice --api-key-stdin');
       expect(missing.unmet_prerequisites.map((item) => item.kind)).not.toContain('local_model_server');
 
-      const withSecrets = await runSetupWizard({
+      const withSecrets = await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath: join(dir, 'present.json'),
@@ -224,7 +226,7 @@ describe('olympus setup wizard', () => {
         tokenGenerator: () => 'present-token',
         dependencyCheck: healthyDependencyCheck,
       });
-      expect(withSecrets.unmet_prerequisites).toEqual([]);
+      expect(withSecrets.unmet_prerequisites.map((item) => item.id)).toEqual(['env:GEMINI_API_KEY']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -233,7 +235,7 @@ describe('olympus setup wizard', () => {
   test('preflights local-first Venice, Gemini, and local model server expectations', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-local-test-'));
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'local-first',
         yes: true,
         sovereigntyPath: join(dir, 'sovereignty.json'),
@@ -257,7 +259,7 @@ describe('olympus setup wizard', () => {
   test('preflights local-only Gemini and local model servers without Venice', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-preflight-local-only-test-'));
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'local-only',
         yes: true,
         sovereigntyPath: join(dir, 'sovereignty.json'),
@@ -282,7 +284,7 @@ describe('olympus setup wizard', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-connect-loop-test-'));
     const connected: string[] = [];
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath: join(dir, 'sovereignty.json'),
@@ -311,7 +313,7 @@ describe('olympus setup wizard', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-activation-'));
     const manager = linuxManager();
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
         yes: true,
         sovereigntyPath: join(dir, 'sovereignty.json'),
@@ -348,7 +350,7 @@ describe('olympus setup wizard', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-activation-refused-'));
     const paths = workerServicePaths('linux', dir);
     try {
-      const result = await runSetupWizard({
+      const result = await runIsolatedSetupWizard({
         preset: 'no-sensitive',
         yes: true,
         sovereigntyPath: join(dir, 'sovereignty.json'),
@@ -364,6 +366,8 @@ describe('olympus setup wizard', () => {
       // not start them must not take them away with it.
       expect(existsSync(paths.unitPath)).toBe(true);
       expect(readFileSync(paths.envPath, 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=refused-token');
+      expect(result.ok).toBe(false);
+      expect(result.worker.activation).toBe('failed');
       expect(result.worker.state).not.toBe('active');
       expect(result.worker.next).toBe('Run olympus worker install, then olympus worker status.');
       expect(result.worker.activation_detail).toBeString();
@@ -371,6 +375,73 @@ describe('olympus setup wizard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test('changing a privacy preset restarts an active Linux worker before reporting it applied', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-policy-restart-'));
+    const policyPath = join(dir, 'sovereignty.json');
+    const manager = linuxManager();
+    let livePolicy: ReturnType<typeof loadSovereigntyEngine> | undefined;
+    const exec: WorkerServiceExec = (command, args) => {
+      const result = manager.exec(command, args);
+      // Model systemd accurately: enable --now boots only an inactive unit;
+      // an active worker retains the engine it loaded until a restart.
+      if ((!livePolicy && args.includes('enable')) || args.includes('restart')) {
+        livePolicy = loadSovereigntyEngine({ configPath: policyPath, env: {} });
+      }
+      return result;
+    };
+    const common = {
+      yes: true, sovereigntyPath: policyPath, platform: 'linux' as const,
+      homeDir: dir, workingDirectory: dir, exec, dependencyCheck: healthyDependencyCheck,
+      env: {}, secretStore: memorySecretStore({}),
+    };
+    try {
+      await runIsolatedSetupWizard({ ...common, preset: 'private-cloud-only' });
+      expect(livePolicy!.resolveAnalystPool({ trustDomain: 'secure_local' }).members.map((member) => member.id))
+        .toEqual(['venice-private']);
+      expect(manager.calls).not.toContain('systemctl --user restart olympus-worker.service');
+      manager.calls.length = 0;
+
+      const result = await runIsolatedSetupWizard({ ...common, preset: 'no-sensitive', force: true });
+      expect(result.ok).toBe(true);
+      expect(result.worker).toMatchObject({ state: 'active', activation: 'started' });
+      expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+      expect(() => livePolicy!.resolveAnalystPool({ trustDomain: 'secure_local' })).toThrow('disabled');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed policy restart is not masked by the old worker remaining active', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-policy-restart-failure-'));
+    const policyPath = join(dir, 'sovereignty.json');
+    const manager = linuxManager();
+    const common = {
+      yes: true, sovereigntyPath: policyPath, platform: 'linux' as const,
+      homeDir: dir, workingDirectory: dir, dependencyCheck: healthyDependencyCheck,
+      env: {}, secretStore: memorySecretStore({}),
+    };
+    try {
+      await runIsolatedSetupWizard({ ...common, preset: 'private-cloud-only', exec: manager.exec });
+      const result = await runIsolatedSetupWizard({
+        ...common, preset: 'no-sensitive', force: true,
+        exec: (command, args) => args.includes('restart')
+          ? { status: 1, stdout: '', stderr: 'restart refused' }
+          : manager.exec(command, args),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.worker).toMatchObject({ state: 'active', activation: 'failed' });
+      expect(result.worker.activation_detail).toContain('olympus worker restart failed');
+      expect(result.worker.next).toContain('new security preset is not confirmed active');
+      expect(result.worker.next).toContain('olympus worker restart');
+      expect(result.worker.next).not.toContain('open the dashboard');
+      // Keep the requested policy and installed files for the explicit retry.
+      expect(JSON.parse(readFileSync(policyPath, 'utf8')).routes.secure_local.mode).toBe('disabled');
+      expect(existsSync(result.worker.install.unit_path)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test('setup mutates the managed worker files under the lifecycle lock and transaction', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-lifecycle-custody-'));
@@ -381,7 +452,7 @@ describe('olympus setup wizard', () => {
       mkdirSync(lockedHome, { recursive: true, mode: 0o700 });
       const lock = acquireLifecycleMutationLock(lockedHome, 'upgrade');
       try {
-        await expect(runSetupWizard({
+        await expect(runIsolatedSetupWizard({
           preset: 'private-cloud-only',
           yes: true,
           sovereigntyPath: join(dir, 'locked.json'),
@@ -406,7 +477,7 @@ describe('olympus setup wizard', () => {
       seedInterruptedInstall(interruptedHome);
       const manager = linuxManager();
 
-      const recovered = await runSetupWizard({
+      const recovered = await runIsolatedSetupWizard({
         preset: 'private-cloud-only',
         yes: true,
         sovereigntyPath: join(dir, 'interrupted.json'),
@@ -428,10 +499,17 @@ describe('olympus setup wizard', () => {
     }
   }, 30_000);
 
-  test('CLI supports --preset/--yes non-interactive CI mode without printing the generated token', async () => {
+  test.each([true, false])('CLI reports activation success %s without printing the generated token', async (activationSucceeds) => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-cli-test-'));
     const sovereigntyPath = join(dir, 'sovereignty.json');
     try {
+      const fakeBin = join(dir, 'bin');
+      mkdirSync(fakeBin);
+      const systemctl = join(fakeBin, 'systemctl');
+      writeFileSync(systemctl, activationSucceeds
+        ? '#!/bin/sh\nprintf "active\\n"\nexit 0\n'
+        : '#!/bin/sh\nprintf "manager refused" >&2\nexit 1\n');
+      chmodSync(systemctl, 0o700);
       const proc = Bun.spawn([
         process.execPath,
         'src/cli.ts',
@@ -449,7 +527,7 @@ describe('olympus setup wizard', () => {
         '/usr/local/bin/olympus',
       ], {
         cwd: process.cwd(),
-        env: { PATH: process.env.PATH ?? '' },
+        env: { HOME: dir, PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -458,11 +536,11 @@ describe('olympus setup wizard', () => {
         new Response(proc.stderr).text(),
         proc.exited,
       ]);
-      if (code !== 0) throw new Error(stderr || stdout);
+      expect(code).toBe(activationSucceeds ? 0 : 1);
 
       const output = JSON.parse(stdout);
       expect(output).toMatchObject({
-        ok: true,
+        ok: activationSucceeds,
         preset: 'private-cloud-only',
         secureTierDecision: 'private_cloud_only',
         cloudLane: 'subscription',
@@ -478,6 +556,10 @@ describe('olympus setup wizard', () => {
     }
   }, 30_000);
 });
+
+function runIsolatedSetupWizard(options: Parameters<typeof runSetupWizard>[0]) {
+  return runSetupWizard({ exec: linuxManager().exec, ...options });
+}
 
 function healthyDependencyCheck() {
   return runSetupDependencyCheck({
@@ -518,7 +600,7 @@ function seedInterruptedInstall(home: string): void {
 }
 
 function linuxManager() {
-  let state: 'active' | 'inactive' = 'active';
+  let state: 'active' | 'inactive' = 'inactive';
   const calls: string[] = [];
   const exec: WorkerServiceExec = (command, args) => {
     const call = [command, ...args].join(' ');
