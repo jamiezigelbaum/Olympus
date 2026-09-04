@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import {
   SOURCE_TRUST_DOMAINS,
@@ -98,7 +98,7 @@ export function loadSensitivityMap(options: SensitivityMapLoadOptions = {}): Sen
   const path = resolveSensitivityMapPath(options);
   if (!existsSync(path)) {
     if (options.allowMissing) return undefined;
-    throw new OperationError('config_error', `Sensitivity map not found at ${path}.`);
+    throw new OperationError('config_error', `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
     return parseSensitivityMap(JSON.parse(readFileSync(path, 'utf8')) as unknown, path);
@@ -111,7 +111,7 @@ export function loadSensitivityMap(options: SensitivityMapLoadOptions = {}): Sen
 export function validateSensitivityMapFile(options: SensitivityMapLoadOptions = {}): SensitivityMapValidationResult {
   const path = resolveSensitivityMapPath(options);
   const map = loadSensitivityMap({ ...options, path });
-  if (!map) throw new OperationError('config_error', `Sensitivity map not found at ${path}.`);
+  if (!map) throw new OperationError('config_error', `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   return {
     ok: true,
     path,
@@ -119,6 +119,15 @@ export function validateSensitivityMapFile(options: SensitivityMapLoadOptions = 
     categories: map.categories.length,
     categoryIds: map.categories.map((category) => category.id),
   };
+}
+
+/**
+ * The map is written by hand (or by the owner's agent) into the private policy
+ * directory olympus setup creates. Naming the directory turns "not found" from
+ * a dead end into an instruction.
+ */
+function sensitivityMapRemedy(path: string): string {
+  return `Write the map to ${path}. Run olympus setup first if ${dirname(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 
 export function parseSensitivityMap(rawMap: unknown, label = 'sensitivity map'): SensitivityMap {
