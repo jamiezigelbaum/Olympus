@@ -34,6 +34,7 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { DashboardActionInput } from './components.ts';
 import {
   DASHBOARD_PHASE_LABELS,
+  dashboardFirstSyncClock,
   dashboardHasRunBefore,
   dashboardSourceProgress,
   type DashboardPhaseId,
@@ -494,9 +495,12 @@ function idleEvidenceHours(source: DashboardSourceCard, now: Date): number | und
  */
 function firstSyncIdleHours(source: DashboardSourceCard, now: Date): number | undefined {
   if (dashboardHasRunBefore(source)) return undefined;
-  const connectedAt = Date.parse(source.connection.connected_at ?? '');
-  if (!Number.isFinite(connectedAt) || connectedAt > now.getTime()) return undefined;
-  return (now.getTime() - connectedAt) / 3_600_000;
+  // The same clock the rows age off -- the credential grant, else the moment
+  // this dashboard first recorded the corpus. Reading only the grant time left
+  // a source with no broker handle unable to ever reach this banner.
+  const since = dashboardFirstSyncClock(source, now);
+  if (since === undefined) return undefined;
+  return (now.getTime() - since) / 3_600_000;
 }
 
 /** The lane's own refresh window where it declares one; a day where it does not. */

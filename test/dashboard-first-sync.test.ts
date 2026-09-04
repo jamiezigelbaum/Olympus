@@ -137,6 +137,35 @@ describe('a source that has never run', () => {
     expect(dashboardSourceProgress(future, { now: NOW }).phases[0]!.state).toBe('stalled');
   });
 
+  test('a paired source that never runs eventually reaches the banner too', () => {
+    // The banner ages off the same clock the rows do. Reading only the
+    // credential grant time, a source with no broker handle could never get
+    // here however long its pairing had been dead.
+    const paired = justConnectedCard({
+      label: 'Telegram',
+      source_id: 'telegram.messages',
+      provider: 'telegram',
+      family: 'chat',
+      connection: {
+        state: 'waiting_for_first_sync',
+        label: 'connected, waiting for first sync',
+        action: { kind: 'none' },
+        handles: [],
+      },
+      movement: { first_seen_at: NOW.toISOString() },
+    });
+
+    const setupPath = '/dashboard/setup';
+    // Inside the grace window the page still says nothing.
+    expect(dashboardAttentionBanner(paired, { now: new Date(NOW.getTime() + 3_600_000), setupPath }))
+      .toBeUndefined();
+
+    const wellPast = new Date(NOW.getTime() + 25 * 3_600_000);
+    const banner = dashboardAttentionBanner(paired, { now: wellPast, setupPath });
+    expect(banner?.kind).toBe('lane_stuck');
+    expect(banner?.sentence).toContain('the first sync has not run yet');
+  });
+
   test('a first run of any kind ends the window, whatever the clock says', () => {
     const wellPast = new Date(NOW.getTime() + 30 * GRACE_MS);
     const ran = justConnectedCard({

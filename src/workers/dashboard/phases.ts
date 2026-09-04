@@ -281,13 +281,17 @@ export function dashboardHasRunBefore(source: DashboardSourceCard): boolean {
  */
 export function dashboardAwaitingFirstSync(source: DashboardSourceCard, now: Date): boolean {
   if (dashboardHasRunBefore(source)) return false;
-  const since = firstSyncClock(source, now);
+  const since = dashboardFirstSyncClock(source, now);
   if (since === undefined) return false;
   return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3_600_000;
 }
 
-/** The moment the first-sync window runs from, or undefined when nothing dates it. */
-function firstSyncClock(source: DashboardSourceCard, now: Date): number | undefined {
+/**
+ * The moment the first-sync window runs from, or undefined when nothing dates
+ * it. Exported so the attention banner ages a never-run source off the same
+ * clock the rows do, rather than off a second, differently-blind one.
+ */
+export function dashboardFirstSyncClock(source: DashboardSourceCard, now: Date): number | undefined {
   for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
     const at = Date.parse(candidate ?? '');
     // A timestamp in the future is no evidence of anything, and is exactly the
