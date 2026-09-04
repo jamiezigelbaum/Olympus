@@ -71,7 +71,7 @@ describe('olympus connect gemini', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
 
   test('a value that could forge a second worker.env assignment is refused', () => {

@@ -198,6 +198,11 @@ describe('operations', () => {
     const profiles: unknown[] = [];
     const config = defaultConfig();
     config.sourceIndex.enabled = false;
+    // Both worker-facing lanes deliberately off, so this asserts the walk's
+    // shape without reaching a worker over the network. The email lane is on by
+    // default now: an install whose worker is not running is a red doctor, and
+    // that behaviour is covered in doctor.test.ts.
+    config.email.enabled = false;
     const ctx: OperationContext = {
       config,
       delphi: {

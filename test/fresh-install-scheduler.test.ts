@@ -63,7 +63,7 @@ describe('fresh install worker scheduler', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
 
   test('a worker that exits on boot reports its own last log line, not just "inactive"', () => {
@@ -101,7 +101,7 @@ describe('fresh install worker scheduler', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
 
   test('a token-shaped fragment in the worker log is redacted before it is quoted back', () => {

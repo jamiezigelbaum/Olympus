@@ -43,7 +43,7 @@ describe('olympus setup private policy directory', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 });
 
 function healthyDependencyCheck() {
