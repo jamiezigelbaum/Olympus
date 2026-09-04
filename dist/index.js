@@ -9999,6 +9999,22 @@ function readWorkerSetupEnv(options = {}) {
     return;
   }
 }
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join2(options.homeDir ?? optionalToken(env.HOME) ?? homedir2(), ".config", "olympus", "worker.env");
@@ -10031,10 +10047,36 @@ function parseWorkerSetupEnv(text) {
 }
 function unquoteEnvValue(value) {
   const trimmed = value.trim();
+  if (trimmed.startsWith("'")) {
+    const joined = joinSingleQuotedWord(trimmed);
+    if (joined !== undefined)
+      return joined;
+  }
   if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+function joinSingleQuotedWord(text) {
+  let out = "";
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "'") {
+      const end = text.indexOf("'", index + 1);
+      if (end === -1)
+        return;
+      out += text.slice(index + 1, end);
+      index = end + 1;
+      continue;
+    }
+    if (text[index] === "\\" && text[index + 1] === "'") {
+      out += "'";
+      index += 2;
+      continue;
+    }
+    return;
+  }
+  return out;
 }
 
 // src/core/email.ts
@@ -12161,7 +12203,11 @@ init_sovereignty();
 // src/core/setup-preflight.ts
 init_secret_store();
 async function setupPreflight(options) {
-  const env = options.env ?? process.env;
+  const env = environmentWithWorkerSetupEnv({
+    ...options.env ? { env: options.env } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
+  });
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
@@ -12566,7 +12612,8 @@ async function sovereigntyPrerequisiteCheck(deps) {
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
-    ...deps.secretStore ? { secretStore: deps.secretStore } : {}
+    ...deps.secretStore ? { secretStore: deps.secretStore } : {},
+    ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
   if (unmet.length === 0) {
     return {
@@ -12930,7 +12977,7 @@ async function sourceSchedulerStatusCheck(deps) {
     problems.push("scheduler is not running");
   const sources = Array.isArray(status.sources) ? status.sources : [];
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids) ? status.selected_source_ids.filter((value) => typeof value === "string") : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids) || deps.config.worker.scheduler.sourceIds.length > 0;
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);

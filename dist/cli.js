@@ -30234,6 +30234,22 @@ function readWorkerSetupEnv(options = {}) {
     return;
   }
 }
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join22(options.homeDir ?? optionalToken2(env.HOME) ?? homedir19(), ".config", "olympus", "worker.env");
@@ -30266,10 +30282,36 @@ function parseWorkerSetupEnv(text) {
 }
 function unquoteEnvValue(value) {
   const trimmed2 = value.trim();
+  if (trimmed2.startsWith("'")) {
+    const joined = joinSingleQuotedWord(trimmed2);
+    if (joined !== undefined)
+      return joined;
+  }
   if (trimmed2.startsWith('"') && trimmed2.endsWith('"') || trimmed2.startsWith("'") && trimmed2.endsWith("'")) {
     return trimmed2.slice(1, -1);
   }
   return trimmed2;
+}
+function joinSingleQuotedWord(text) {
+  let out = "";
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "'") {
+      const end = text.indexOf("'", index + 1);
+      if (end === -1)
+        return;
+      out += text.slice(index + 1, end);
+      index = end + 1;
+      continue;
+    }
+    if (text[index] === "\\" && text[index + 1] === "'") {
+      out += "'";
+      index += 2;
+      continue;
+    }
+    return;
+  }
+  return out;
 }
 var init_worker_auth = () => {};
 
@@ -30770,8 +30812,8 @@ function writeManagedWorkerEnvSecret(input) {
   if (!value) {
     throw new OperationError("invalid_params", `${input.key} must not be empty.`);
   }
-  if (/[\0\r\n]/.test(value)) {
-    throw new OperationError("invalid_params", `${input.key} must not contain line breaks or NUL bytes.`);
+  if (/\p{Cc}/u.test(value)) {
+    throw new OperationError("invalid_params", `${input.key} must not contain control characters.`);
   }
   const platform2 = normalizePlatform(input.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(input.homeDir ?? homedir20(), "home directory");
@@ -30782,9 +30824,24 @@ function writeManagedWorkerEnvSecret(input) {
   }
   assertManagedRegularFile(envPath, "worker environment");
   const current = readFileSync14(envPath, "utf8");
-  const assignment = `${input.key}=${value}`;
-  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`, "m");
-  const next = pattern.test(current) ? current.replace(pattern, assignment) : `${current.replace(/\n?$/, `
+  const assignment = `${input.key}=${shellSingleQuote(value)}`;
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
+  const lines = current.split(`
+`);
+  let replaced = false;
+  const kept = [];
+  for (const line of lines) {
+    if (!pattern.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    if (replaced)
+      continue;
+    kept.push(assignment);
+    replaced = true;
+  }
+  const next = replaced ? kept.join(`
+`) : `${current.replace(/\n?$/, `
 `)}${assignment}
 `;
   let wrote = false;
@@ -30797,6 +30854,9 @@ function writeManagedWorkerEnvSecret(input) {
     wrote = true;
   }
   return { ok: true, path: envPath, key: input.key, wrote };
+}
+function shellSingleQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 function normalizePlatform(value) {
   if (value === "darwin" || value === "linux")
@@ -34061,7 +34121,11 @@ var init_operation_exposure = __esm(() => {
 
 // src/core/setup-preflight.ts
 async function setupPreflight(options) {
-  const env = options.env ?? process.env;
+  const env = environmentWithWorkerSetupEnv({
+    ...options.env ? { env: options.env } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
+  });
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
@@ -34150,6 +34214,7 @@ function storeSecretRemedy(key) {
 }
 var init_setup_preflight = __esm(() => {
   init_secret_store();
+  init_worker_auth();
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
@@ -36082,11 +36147,18 @@ function dashboardHasRunBefore(source) {
 function dashboardAwaitingFirstSync(source, now) {
   if (dashboardHasRunBefore(source))
     return false;
-  const connectedAt = Date.parse(source.connection.connected_at ?? "");
-  if (Number.isFinite(connectedAt) && connectedAt <= now.getTime()) {
-    return now.getTime() - connectedAt <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3600000;
+  const since = firstSyncClock(source, now);
+  if (since === undefined)
+    return false;
+  return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3600000;
+}
+function firstSyncClock(source, now) {
+  for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
+    const at = Date.parse(candidate ?? "");
+    if (Number.isFinite(at) && at <= now.getTime())
+      return at;
   }
-  return !source.freshness.stale;
+  return;
 }
 function dashboardPhaseComplete(phase) {
   const measure = phase.measure;
@@ -36748,6 +36820,7 @@ class SqliteSourceDashboardHistory {
         last_value INTEGER NOT NULL,
         rose_at TEXT,
         seen_at TEXT,
+        first_seen_at TEXT,
         settled_value INTEGER,
         settled_at TEXT,
         PRIMARY KEY (corpus_id, counter)
@@ -36774,9 +36847,11 @@ class SqliteSourceDashboardHistory {
       }
     };
     addMovementColumn("seen_at", "TEXT");
+    addMovementColumn("first_seen_at", "TEXT");
     addMovementColumn("settled_value", "INTEGER");
     addMovementColumn("settled_at", "TEXT");
     this.db.run("UPDATE source_dashboard_movement SET seen_at = COALESCE(rose_at, ?) WHERE seen_at IS NULL", [new Date().toISOString()]);
+    this.db.run("UPDATE source_dashboard_movement SET first_seen_at = COALESCE(rose_at, seen_at, ?) WHERE first_seen_at IS NULL", [new Date().toISOString()]);
   }
   record(samples) {
     if (samples.length === 0)
@@ -36856,7 +36931,7 @@ class SqliteSourceDashboardHistory {
   }
   movementFor(sample, _now) {
     const rows = this.db.query(`
-      SELECT counter, rose_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
+      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
     `).all(sample.corpus_id);
     const at = (counter) => {
       const value = rows.find((row) => row.counter === counter)?.rose_at;
@@ -36871,7 +36946,10 @@ class SqliteSourceDashboardHistory {
     const embeddingAt = at("embedded_files");
     const extractionSettled = settled("content_ready_items");
     const embeddingSettled = settled("embedded_files");
+    const firstSeenTimes = rows.map((row) => row.first_seen_at).filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value))).map((value) => Date.parse(value));
+    const firstSeenAt = firstSeenTimes.length > 0 ? new Date(Math.min(...firstSeenTimes)).toISOString() : undefined;
     const movement = {
+      ...firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt },
       ...metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt },
       ...extractionAt === undefined ? {} : { extraction_at: extractionAt },
       ...embeddingAt === undefined ? {} : { embedding_at: embeddingAt },
@@ -36892,8 +36970,10 @@ class SqliteSourceDashboardHistory {
       const parity = phaseAtParity(sample, counter, value);
       if (parity) {
         this.db.run(`
-          INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, settled_value, settled_at)
-          VALUES (?, ?, ?, NULL, ?, ?, ?)
+          INSERT INTO source_dashboard_movement (
+            corpus_id, counter, last_value, rose_at, seen_at, first_seen_at, settled_value, settled_at
+          )
+          VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
           ON CONFLICT (corpus_id, counter) DO UPDATE SET
             last_value = excluded.last_value,
             rose_at = CASE WHEN excluded.last_value > source_dashboard_movement.last_value
@@ -36901,14 +36981,15 @@ class SqliteSourceDashboardHistory {
             seen_at = excluded.seen_at,
             settled_value = excluded.settled_value,
             settled_at = excluded.settled_at
-        `, [sample.corpus_id, counter, value, sample.sampled_at, value, sample.sampled_at]);
+        `, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at, value, sample.sampled_at]);
         continue;
       }
       const row = this.db.query(`
         SELECT last_value, settled_value FROM source_dashboard_movement WHERE corpus_id = ? AND counter = ?
       `).get(sample.corpus_id, counter);
       if (!row) {
-        this.db.run("INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at) VALUES (?, ?, ?, NULL, ?)", [sample.corpus_id, counter, value, sample.sampled_at]);
+        this.db.run(`INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, first_seen_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at]);
         continue;
       }
       const keepsBaseline = row.settled_value === null || value >= row.settled_value;
@@ -36949,7 +37030,9 @@ function buildSourceDashboardViewModel(options) {
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined)
       return card;
-    return { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
+    return withSyncAnswer;
   });
   const unassignedCorpora = unassignedCorporaFrom(options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
   const samples = cards.map((card) => ({
@@ -37157,7 +37240,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "initial_sync",
       condition: connection.state === "syncing" ? "usable" : "blocked",
-      next_action: connection.state === "syncing" ? "Keep the worker running while the first sync and extraction queues finish." : `Start Sync now for ${card.label}; a service restart is not required.`,
+      next_action: connection.state === "syncing" ? "Keep the worker running while the first sync and extraction queues finish." : card.sync_now_available === false ? `Keep the worker running; this worker has no Sync now for ${card.label}, so it syncs on its own schedule.` : `Start Sync now for ${card.label}; a service restart is not required.`,
       dependencies
     };
   }
@@ -38257,7 +38340,7 @@ function onboarding(summary, sourceCards, folderPicker) {
       { id: "dependencies", label: "Dependency check", state: cleared(dependenciesProven), next_action: "Choose a source below, run Olympus doctor, and repair only that source’s declared dependency." },
       { id: "credential_or_pairing", label: "Credential or pairing", state: cleared(connected), next_action: "Connect one account or finish the local pairing instructions below." },
       { id: "scope", label: "Scope", state: cleared(scopeReady), next_action: folderPicker.available ? "Open scope rules to author and preview what Olympus may read." : "Confirm the contextual provider scope shown on the source card." },
-      { id: "initial_sync", label: "Initial sync", state: cleared(firstSync), next_action: "Start Sync now and keep the worker running; do not restart for setup changes." },
+      { id: "initial_sync", label: "Initial sync", state: cleared(firstSync), next_action: initialSyncAdvice(configuredCards) },
       { id: "source_health", label: "Usable, degraded, or blocked", state: cleared(sourceHealthy), next_action: "Follow the source card’s named next action until coverage and gaps are truthful." },
       { id: "cited_answer_readiness", label: "Cited-answer readiness", state: cleared(answerReady), next_action: "Ask a question and verify claim-level citations plus any stated gaps." }
     ]),
@@ -38267,6 +38350,11 @@ function onboarding(summary, sourceCards, folderPicker) {
       suggestion: answerReady ? "Your assistant can now answer a question using the ready sources." : "This unlocks as soon as one connected source has answer-ready text."
     }
   };
+}
+function initialSyncAdvice(configuredCards) {
+  const answered = configuredCards.filter((card) => card.sync_now_available !== undefined);
+  const anySyncable = answered.length === 0 || answered.some((card) => card.sync_now_available === true);
+  return anySyncable ? "Start Sync now and keep the worker running; do not restart for setup changes." : "Keep the worker running; this worker has no Sync now, so connected sources sync on their own schedule.";
 }
 function withActiveStep(steps) {
   const lastCleared = steps.reduce((last, step, index) => step.state === "complete" ? index : last, -1);
@@ -39801,7 +39889,8 @@ async function sovereigntyPrerequisiteCheck(deps) {
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
-    ...deps.secretStore ? { secretStore: deps.secretStore } : {}
+    ...deps.secretStore ? { secretStore: deps.secretStore } : {},
+    ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
   if (unmet.length === 0) {
     return {
@@ -40165,7 +40254,7 @@ async function sourceSchedulerStatusCheck(deps) {
     problems.push("scheduler is not running");
   const sources = Array.isArray(status.sources) ? status.sources : [];
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids) ? status.selected_source_ids.filter((value) => typeof value === "string") : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids) || deps.config.worker.scheduler.sourceIds.length > 0;
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);
@@ -64155,14 +64244,18 @@ a { color: var(--link); }
 .sect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 0 0 8px; }
 .sect.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
-/* The text column gets a floor, and the row may wrap. A bare flex:1 gave the
+.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.attncard.plain { background: var(--panel); border-color: var(--line2); }
+.attncard .grow { flex: 1; }
+/* The source page's ONE banner, and only it. A bare flex:1 gave the
    description a zero basis, so a banner carrying Sync now, its status text and
    an agent-prompt button squeezed a whole paragraph into a ~30-character column
    while the controls kept their intrinsic width (owner, 2026-09-04). With a
-   basis the text keeps its width and the controls drop to their own row. */
-.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; }
-.attncard.plain { background: var(--panel); border-color: var(--line2); }
-.attncard .grow { flex: 1 1 320px; min-width: 0; }
+   basis the text keeps its width and the controls drop to their own row.
+   Scoped to .banner: the list rows and the whole-row links are a different
+   shape, and the mobile block below still owns what they do at 375px. */
+.attncard.banner { flex-wrap: wrap; }
+.attncard.banner .grow { flex: 1 1 320px; min-width: 0; }
 .attncard .name { font-weight: 600; }
 .attncard .why { color: var(--t3); font-size: 12.5px; }
 /* A warning row that carries no control is itself the link to the detail page,
@@ -74087,15 +74180,17 @@ var init_credential_degradation = __esm(() => {
 // src/workers/source-scheduler.ts
 import { createHash as createHash34 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
-  const selected = new Set(input.selectedSourceIds);
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
+  const unrestricted = input.selectedSourceIds.length === 0;
+  const selected = unrestricted ? constructedIds : new Set(input.selectedSourceIds);
   const selectedNotConstructed = [...selected].filter((sourceId) => !constructedIds.has(sourceId));
   const constructedNotSelected = [...constructedIds].filter((sourceId) => !selected.has(sourceId));
   const summary = [
     `[source-scheduler] constructed=${constructed.length}`,
     `skipped=${input.decisions.length - constructed.length}`,
     `selected=${selected.size}`,
+    ...unrestricted ? ["selection=no_allowlist_all_constructed_selected"] : [],
     ...selectedNotConstructed.length > 0 ? [`selected_not_constructed=${selectedNotConstructed.join(",")}`] : [],
     ...constructedNotSelected.length > 0 ? [`constructed_not_selected=${constructedNotSelected.join(",")}`] : []
   ].join(" ");
@@ -79410,7 +79505,9 @@ async function runSetupWizard(options) {
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
     ...options.env ? { env: options.env } : {},
-    ...options.secretStore ? { secretStore: options.secretStore } : {}
+    ...options.secretStore ? { secretStore: options.secretStore } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.envPath ? { workerEnvPath: options.envPath } : {}
   });
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
