@@ -710,6 +710,21 @@ export function writeManagedWorkerEnvSecret(input: {
   if (/\p{Cc}/u.test(value)) {
     throw new OperationError('invalid_params', `${input.key} must not contain control characters.`);
   }
+  // The one character the two managed sourcing paths cannot be made to agree
+  // on. Quoting makes a value inert, but a value carrying its OWN quote can
+  // only be written as shell close-escape-reopen, and systemd's
+  // EnvironmentFile parser does not implement that concatenation: the same
+  // bytes would reach a Linux worker as a different string from the one
+  // /bin/sh and every Olympus reader see. A secret whose value depends on the
+  // platform is worse than a refused paste, so it is refused here and the
+  // reader stays a plain strip.
+  if (value.includes("'")) {
+    throw new OperationError(
+      'invalid_params',
+      `${input.key} value must not contain a single quote.`,
+      'A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.',
+    );
+  }
   const platform = normalizePlatform(input.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(input.homeDir ?? homedir(), 'home directory');
   const envPath = input.envPath ?? workerServicePaths(platform, homeDir).envPath;
@@ -763,14 +778,17 @@ export function writeManagedWorkerEnvSecret(input: {
 }
 
 /**
- * POSIX single-quoting, the form both managed sourcing paths understand.
+ * Plain single-quoting: the one form BOTH managed sourcing paths read the same
+ * way -- the launchd unit's `set -a; . <env>` shell sourcing and systemd's
+ * `EnvironmentFile=` parser.
  *
- * Everything between single quotes is literal to the shell, and an embedded
- * quote is closed, escaped and reopened -- `'\''` -- which is the only way to
- * put one inside a single-quoted word. `unquoteEnvValue` reads this shape back.
+ * Everything between the quotes is literal, so nothing in the value is
+ * expanded. There is no escaping to do here because a value containing a
+ * single quote is refused before this is reached: the only way to embed one is
+ * shell close-escape-reopen, which systemd does not implement.
  */
 function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return `'${value}'`;
 }
 
 function normalizePlatform(value: string): WorkerServicePlatform {

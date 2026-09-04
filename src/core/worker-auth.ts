@@ -148,23 +148,20 @@ function parseWorkerSetupEnv(text: string): Record<string, string> {
 /**
  * Strip the surrounding quotes a worker.env value may carry.
  *
- * Both managed sourcing paths accept them — systemd's `EnvironmentFile=` parser
- * and the launchd unit's `set -a; . <env>` shell sourcing — so every reader of
- * that file must unquote the same way the running worker sees it.
+ * A PLAINLY single- or double-quoted value is the one shape both managed
+ * sourcing paths agree on — systemd's `EnvironmentFile=` parser and the launchd
+ * unit's `set -a; . <env>` shell sourcing — so every reader of that file
+ * unquotes the same way the running worker sees it, and this stays a strip.
  *
- * Olympus WRITES single-quoted values (see writeManagedWorkerEnvSecret), so a
- * value carrying its own quote arrives in the POSIX close-escape-reopen form
- * `'a'\''b'`. Read as a plain strip that is `a'\''b`, which is not the secret
- * the worker holds — so this reads the concatenation the shell reads. Anything
- * that is not that shape falls back to the plain strip, because a hand-written
- * worker.env predates this and must keep meaning what it always meant.
+ * There is deliberately no close-escape-reopen handling here. That form
+ * (`'a'\''b'`) is shell concatenation, and systemd's parser does not implement
+ * it: the same bytes would reach a Linux worker as `a''b'` while /bin/sh and
+ * this reader saw `a'b`, so the value the worker holds would depend on the
+ * platform. Rather than pick a side, `writeManagedWorkerEnvSecret` refuses a
+ * single quote in a managed value outright, so the form never gets written.
  */
 export function unquoteEnvValue(value: string): string {
   const trimmed = value.trim();
-  if (trimmed.startsWith("'")) {
-    const joined = joinSingleQuotedWord(trimmed);
-    if (joined !== undefined) return joined;
-  }
   if (
     (trimmed.startsWith('"') && trimmed.endsWith('"'))
     || (trimmed.startsWith("'") && trimmed.endsWith("'"))
@@ -172,30 +169,4 @@ export function unquoteEnvValue(value: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-
-/**
- * One shell word built only from single-quoted runs and escaped quotes, or
- * undefined when the text is anything else. Undefined is the honest answer for
- * a shape this cannot read: guessing would rewrite somebody's secret.
- */
-function joinSingleQuotedWord(text: string): string | undefined {
-  let out = '';
-  let index = 0;
-  while (index < text.length) {
-    if (text[index] === "'") {
-      const end = text.indexOf("'", index + 1);
-      if (end === -1) return undefined;
-      out += text.slice(index + 1, end);
-      index = end + 1;
-      continue;
-    }
-    if (text[index] === '\\' && text[index + 1] === "'") {
-      out += "'";
-      index += 2;
-      continue;
-    }
-    return undefined;
-  }
-  return out;
 }

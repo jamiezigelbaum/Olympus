@@ -897,17 +897,17 @@ describe('domain expert bearer scope', () => {
 
 describe('worker.env value quoting', () => {
   test('round-trips every shape Olympus writes, and leaves older shapes alone', () => {
-    // The writer emits POSIX single-quoted values, so this reader has to speak
-    // the same dialect the shell that sources the file speaks -- including the
-    // close-escape-reopen form an embedded quote takes.
-    const shellSingleQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    // The writer emits PLAINLY single-quoted values -- the one form both the
+    // launchd shell and systemd's EnvironmentFile parser read the same way --
+    // so this reader is a strip, and a value that would need any other form is
+    // refused before it is written (see worker-env-secret.test.ts).
+    const shellSingleQuote = (value: string) => `'${value}'`;
     for (const value of [
       'plain-key',
       'x$(touch /tmp/pwned)',
-      "key-with-'-inside",
-      "it's a 'test'",
       'has spaces',
-      "'",
+      '$HOME`id`',
+      'gemini-Ab12_-key.value~x',
     ]) {
       expect(unquoteEnvValue(shellSingleQuote(value))).toBe(value);
     }

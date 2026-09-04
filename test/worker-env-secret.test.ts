@@ -43,18 +43,33 @@ describe('writing a secret into the managed worker environment', () => {
     });
   }, 30_000);
 
-  test('a value carrying its own quote survives the shell and the reader alike', () => {
+  test('a value carrying its own quote is refused, because the two parsers disagree', () => {
     withEnvFile((_dir, envPath) => {
-      const quoted = "key-with-'-inside";
-      writeManagedWorkerEnvSecret({ key: KEY, value: quoted, envPath });
+      // Embedding a quote needs shell close-escape-reopen, and systemd's
+      // EnvironmentFile parser does not implement that concatenation -- the
+      // same bytes would reach a Linux worker as a different string from the
+      // one /bin/sh reads. Refused at write time rather than stored as a
+      // secret whose value depends on the platform.
+      const before = readFileSync(envPath, 'utf8');
+      expect(() => writeManagedWorkerEnvSecret({ key: KEY, value: "key-with-'-inside", envPath }))
+        .toThrow('must not contain a single quote');
+      expect(readFileSync(envPath, 'utf8')).toBe(before);
+    });
+  });
 
-      expect(sourceValue(envPath).stdout).toBe(quoted);
+  test('what is written is read back identically by the shell and by Olympus', () => {
+    withEnvFile((_dir, envPath) => {
+      const key = 'gemini-Ab12_-key.value~x';
+      writeManagedWorkerEnvSecret({ key: KEY, value: key, envPath });
 
-      // Every Olympus reader of this file must see what the worker sees.
+      expect(sourceValue(envPath).stdout).toBe(key);
       const line = readFileSync(envPath, 'utf8')
         .split('\n')
         .find((entry) => entry.startsWith(`${KEY}=`))!;
-      expect(unquoteEnvValue(line.slice(`${KEY}=`.length))).toBe(quoted);
+      // Plainly single-quoted: the one form the launchd shell and systemd's
+      // EnvironmentFile parser read the same way.
+      expect(line).toBe(`${KEY}='${key}'`);
+      expect(unquoteEnvValue(line.slice(`${KEY}=`.length))).toBe(key);
     });
   }, 30_000);
 
