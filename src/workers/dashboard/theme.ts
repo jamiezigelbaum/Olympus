@@ -95,9 +95,14 @@ a { color: var(--link); }
 .sect { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); margin: 0 0 8px; }
 .sect.attn { color: var(--warn); }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
-.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+/* The text column gets a floor, and the row may wrap. A bare flex:1 gave the
+   description a zero basis, so a banner carrying Sync now, its status text and
+   an agent-prompt button squeezed a whole paragraph into a ~30-character column
+   while the controls kept their intrinsic width (owner, 2026-09-04). With a
+   basis the text keeps its width and the controls drop to their own row. */
+.attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap; }
 .attncard.plain { background: var(--panel); border-color: var(--line2); }
-.attncard .grow { flex: 1; }
+.attncard .grow { flex: 1 1 320px; min-width: 0; }
 .attncard .name { font-weight: 600; }
 .attncard .why { color: var(--t3); font-size: 12.5px; }
 /* A warning row that carries no control is itself the link to the detail page,

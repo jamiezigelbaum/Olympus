@@ -168,6 +168,16 @@ describe('dashboard stylesheet', () => {
     }
   });
 
+  test("gives an attention banner's description a width floor and lets the controls wrap below it", () => {
+    // The banner paragraph was squeezed into a ~30-character column beside the
+    // Sync now button, its status text and the agent-prompt control (owner,
+    // 2026-09-04): the text column had a zero flex basis while the controls
+    // kept their intrinsic width.
+    expect(DASHBOARD_THEME_CSS).toContain('.attncard .grow { flex: 1 1 320px; min-width: 0; }');
+    const row = DASHBOARD_THEME_CSS.split('\n').find((line) => line.startsWith('.attncard {'));
+    expect(row).toContain('flex-wrap: wrap');
+  });
+
   test('is balanced, so an inlined <style> cannot swallow the page', () => {
     const opens = [...DASHBOARD_THEME_CSS].filter((character) => character === '{').length;
     const closes = [...DASHBOARD_THEME_CSS].filter((character) => character === '}').length;
