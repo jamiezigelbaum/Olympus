@@ -22,6 +22,7 @@ import {
   reloadLinuxWorkerServiceManager,
   resetFailedLinuxWorkerService,
   runWorkerServiceAction,
+  workerServiceFailureLogLine,
   workerServicePaths,
   type WorkerServiceExec,
   type WorkerServiceInstallOptions,
@@ -315,12 +316,18 @@ function installOrUpgradeLifecycle(
     updateTransactionPhase(effective, 'qualifying');
     const firstService = inspectWorkerService(serviceActionOptions(effective));
     if (firstService.state !== 'active') {
-      throw new OperationError('config_error', `Lifecycle activation reported success but worker status is ${firstService.state}.`);
+      throw activationFailure(
+        `Lifecycle activation reported success but worker status is ${firstService.state}.`,
+        effective,
+      );
     }
     waitForActivationSettle(effective.activationSettleMs);
     const service = inspectWorkerService(serviceActionOptions(effective));
     if (service.state !== 'active') {
-      throw new OperationError('config_error', `Lifecycle activation did not remain active through qualification (status ${service.state}).`);
+      throw activationFailure(
+        `Lifecycle activation did not remain active through qualification (status ${service.state}).`,
+        effective,
+      );
     }
     const readiness = readinessPort === undefined ? undefined : qualifyWorkerReadiness(effective, readinessPort);
     markTransactionCommitReady(effective);
@@ -836,6 +843,24 @@ function serviceInstallOptions(options: WorkerLifecycleOptions, dryRun: boolean)
     ...(options.schedulerEnabled !== undefined ? { schedulerEnabled: options.schedulerEnabled } : {}),
     dryRun,
   };
+}
+
+/**
+ * A worker that exits on boot leaves the service manager saying only
+ * "inactive". The reason is one line away, in the worker's own log, and every
+ * report of this failure so far has been an operator going to find it by hand.
+ */
+function activationFailure(
+  message: string,
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): OperationError {
+  const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+  const paths = workerServicePaths(options.platform, options.homeDir);
+  return new OperationError(
+    'config_error',
+    logLine ? `${message} The worker's last log line was: ${logLine}` : message,
+    `Read the worker log at ${paths.errorLogPath} and ${paths.logPath}, fix the reported cause, then run olympus worker install again.`,
+  );
 }
 
 function serviceActionOptions(options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string }): {

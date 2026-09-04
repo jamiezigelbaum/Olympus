@@ -75,6 +75,36 @@ export function readWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}): 
   }
 }
 
+/**
+ * The environment a managed Olympus install actually runs with: the process
+ * environment layered over the values in worker.env.
+ *
+ * The supervised worker's environment comes from that file, and commands like
+ * `olympus connect gemini` write credentials into it — so a check that reads
+ * only `process.env` reports a key as missing immediately after the operator
+ * stored it, and names the command they just ran as the fix. The file is the
+ * lower layer: an environment variable set explicitly for this process still
+ * wins, and an empty one does not mask an installed value.
+ *
+ * Located only from a path, a home, or a HOME in the environment handed in.
+ * Falling back to the process owner's home would make a caller that passed a
+ * scoped environment silently read an install it never asked about.
+ */
+export function environmentWithWorkerSetupEnv(
+  options: WorkerAuthTokenLookupOptions = {},
+): Record<string, string | undefined> {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim()) return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv) return env;
+  const merged: Record<string, string | undefined> = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== '') merged[key] = value;
+    else if (!(key in setupEnv)) merged[key] = value;
+  }
+  return merged;
+}
+
 export function workerSetupEnvPath(options: WorkerAuthTokenLookupOptions = {}): string {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join(
@@ -118,9 +148,17 @@ function parseWorkerSetupEnv(text: string): Record<string, string> {
 /**
  * Strip the surrounding quotes a worker.env value may carry.
  *
- * Both managed sourcing paths accept them — systemd's `EnvironmentFile=` parser
- * and the launchd unit's `set -a; . <env>` shell sourcing — so every reader of
- * that file must unquote the same way the running worker sees it.
+ * A PLAINLY single- or double-quoted value is the one shape both managed
+ * sourcing paths agree on — systemd's `EnvironmentFile=` parser and the launchd
+ * unit's `set -a; . <env>` shell sourcing — so every reader of that file
+ * unquotes the same way the running worker sees it, and this stays a strip.
+ *
+ * There is deliberately no close-escape-reopen handling here. That form
+ * (`'a'\''b'`) is shell concatenation, and systemd's parser does not implement
+ * it: the same bytes would reach a Linux worker as `a''b'` while /bin/sh and
+ * this reader saw `a'b`, so the value the worker holds would depend on the
+ * platform. Rather than pick a side, `writeManagedWorkerEnvSecret` refuses a
+ * single quote in a managed value outright, so the form never gets written.
  */
 export function unquoteEnvValue(value: string): string {
   const trimmed = value.trim();

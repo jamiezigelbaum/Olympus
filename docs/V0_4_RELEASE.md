@@ -429,6 +429,7 @@ runtime nor private deployment machinery.
 - The OpenClaw assistant continues to use Olympus tools such as `source_answer`; it does not receive unrestricted raw private-source access.
 - Every eligible item is either available to retrieval or represented by a specific, user-visible coverage reason.
 - Background sync starts and resumes automatically after initial configuration. Manual ingestion commands are diagnostic/operator tools, not part of the user journey.
+- The private source worker lane is on by default (`email.enabled`). Every preset installs the worker, so an install with no worker running reports it as unreachable rather than as deliberately disabled. Set `OLYMPUS_EMAIL_ENABLED=false` to opt out.
 
 ## Release checks
 

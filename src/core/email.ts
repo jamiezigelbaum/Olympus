@@ -736,7 +736,7 @@ export class EmailClient {
         configured: false,
         base_url: this.config.email.baseUrl,
         raw_email_exposed: false,
-        detail: 'Email lane is disabled. Configure a private email source worker before use.',
+        detail: 'Email lane is disabled. Run olympus setup, then olympus worker install, to bring up the private source worker.',
       };
     }
 
@@ -765,7 +765,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Email lane is disabled.',
-        'Configure a private email source worker that owns OAuth and message fetch, then uses an approved local/private model lane for reasoning.',
+        'Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.',
       );
     }
 
@@ -955,7 +955,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using routed source answers.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using routed source answers.',
       );
     }
 
@@ -1008,7 +1008,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index status.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index status.',
       );
     }
 
@@ -1064,7 +1064,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index sync.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index sync.',
       );
     }
 
@@ -1105,7 +1105,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before recovering X bookmark content.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before recovering X bookmark content.',
       );
     }
 
@@ -1138,7 +1138,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index search.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.',
       );
     }
 
@@ -1194,7 +1194,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source export.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.',
       );
     }
 
@@ -1231,7 +1231,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source transcription.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source transcription.',
       );
     }
 
@@ -1267,7 +1267,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using on-demand media ingestion.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using on-demand media ingestion.',
       );
     }
 
@@ -1305,7 +1305,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index promotion candidates.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.',
       );
     }
 
@@ -1341,7 +1341,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index promotion proposals.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.',
       );
     }
 
@@ -1380,7 +1380,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index promotion proposal listing.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.',
       );
     }
 
@@ -1416,7 +1416,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index promotion proposal details.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.',
       );
     }
 
@@ -1449,7 +1449,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before using source-index promotion decisions.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.',
       );
     }
 
@@ -1526,7 +1526,7 @@ export class EmailClient {
       throw new OperationError(
         'email_not_configured',
         'Private source worker is disabled.',
-        'Enable the Gateway-side private source worker before managing durable watches.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before managing durable watches.',
       );
     }
   }

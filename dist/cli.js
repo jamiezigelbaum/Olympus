@@ -356,7 +356,8 @@ var init_public_surface = __esm(() => {
     "telegram",
     "whatsapp",
     "venice",
-    "readwise"
+    "readwise",
+    "gemini"
   ];
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
@@ -388,6 +389,7 @@ var init_public_surface = __esm(() => {
     "connect whatsapp",
     "connect venice",
     "connect readwise",
+    "connect gemini",
     "connect status",
     "dashboard",
     "source answer",
@@ -3127,9 +3129,6 @@ function validateConfig(config) {
   }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
-  if (config.worker.scheduler.enabled && config.worker.scheduler.sourceIds.length === 0) {
-    throw new OperationError("config_error", "worker.scheduler.sourceIds must contain at least one source when the scheduler is enabled.");
-  }
   assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
   assertPositiveNumber(config.worker.scheduler.syncIntervalSeconds, "worker.scheduler.syncIntervalSeconds");
   assertPositiveNumber(config.worker.scheduler.freshnessThresholdHours, "worker.scheduler.freshnessThresholdHours");
@@ -3407,7 +3406,7 @@ var init_config = __esm(() => {
       }
     },
     email: {
-      enabled: false,
+      enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
       requestTimeoutSeconds: 180,
       localPacketsDevEnabled: false,
@@ -7592,7 +7591,7 @@ var init_dropbox2 = __esm(() => {
 // src/core/sensitivity-map.ts
 import { existsSync as existsSync7, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join8 } from "node:path";
+import { dirname as dirname6, join as join8 } from "node:path";
 function defaultSensitivityMapPath() {
   return join8(homedir6(), ".olympus", "sensitivity-map.json");
 }
@@ -7605,7 +7604,7 @@ function loadSensitivityMap(options = {}) {
   if (!existsSync7(path)) {
     if (options.allowMissing)
       return;
-    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`);
+    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
     return parseSensitivityMap(JSON.parse(readFileSync7(path, "utf8")), path);
@@ -7619,7 +7618,7 @@ function validateSensitivityMapFile(options = {}) {
   const path = resolveSensitivityMapPath(options);
   const map = loadSensitivityMap({ ...options, path });
   if (!map)
-    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`);
+    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   return {
     ok: true,
     path,
@@ -7627,6 +7626,9 @@ function validateSensitivityMapFile(options = {}) {
     categories: map.categories.length,
     categoryIds: map.categories.map((category) => category.id)
   };
+}
+function sensitivityMapRemedy(path) {
+  return `Write the map to ${path}. Run olympus setup first if ${dirname6(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
   const root = asRecord4(rawMap);
@@ -9336,7 +9338,7 @@ function closeSqliteStore(db, options = {}) {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
 import { lstatSync as lstatSync2, mkdirSync as mkdirSync5, statSync as statSync2 } from "node:fs";
-import { dirname as dirname6 } from "node:path";
+import { dirname as dirname7 } from "node:path";
 import { Database } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -11490,7 +11492,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync5(dirname6(this.dbPath), { recursive: true });
+        mkdirSync5(dirname7(this.dbPath), { recursive: true });
       }
       this.db = new Database(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
@@ -17014,9 +17016,9 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname7, join as join9 } from "node:path";
+import { dirname as dirname8, join as join9 } from "node:path";
 function defaultSovereigntyConfigPath() {
   return join9(homedir7(), ".olympus", "sovereignty.json");
 }
@@ -17247,7 +17249,9 @@ function writeSovereigntyConfigFile(input) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
-  mkdirSync6(dirname7(path), { recursive: true });
+  const directory = dirname8(path);
+  mkdirSync6(directory, { recursive: true, mode: 448 });
+  chmodSync(directory, 448);
   writeFileSync3(path, `${JSON.stringify(config, null, 2)}
 `, { mode: 384 });
   return path;
@@ -19117,13 +19121,13 @@ var init_classification = __esm(() => {
 
 // src/workers/google-connectors/request-budget.ts
 import {
-  chmodSync,
+  chmodSync as chmodSync2,
   existsSync as existsSync9,
   mkdirSync as mkdirSync7,
   readFileSync as readFileSync9,
   renameSync as renameSync2
 } from "node:fs";
-import { dirname as dirname8 } from "node:path";
+import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
@@ -19208,7 +19212,7 @@ function requestBudgetLedgerPath(statePath) {
   return statePath.endsWith(".sqlite") ? statePath : `${statePath}.sqlite`;
 }
 function initializeRequestBudgetLedger(ledgerPath, provider, now) {
-  mkdirSync7(dirname8(ledgerPath), { recursive: true, mode: 448 });
+  mkdirSync7(dirname9(ledgerPath), { recursive: true, mode: 448 });
   runBudgetLedgerOperation(ledgerPath, provider, now, () => withLedger(ledgerPath, (db) => {
     db.exec(`
         CREATE TABLE IF NOT EXISTS ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
@@ -19360,7 +19364,7 @@ function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
       if (existsSync9(path))
-        chmodSync(path, 384);
+        chmodSync2(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
@@ -22227,7 +22231,7 @@ var init_corpus_adapter3 = __esm(() => {
 import { createHash as createHash13 } from "node:crypto";
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync11 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname9, join as join15 } from "node:path";
+import { dirname as dirname10, join as join15 } from "node:path";
 
 class ReadwiseDailyRequestBudget {
   utcDay = "";
@@ -22323,7 +22327,7 @@ function readReadwiseRequestBudgetState(statePath) {
   return { utcDay: parsed.utcDay, requests: parsed.requests };
 }
 function writeReadwiseRequestBudgetState(statePath, state) {
-  mkdirSync8(dirname9(statePath), { recursive: true, mode: 448 });
+  mkdirSync8(dirname10(statePath), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(statePath, `${JSON.stringify({ version: READWISE_REQUEST_BUDGET_STATE_VERSION, ...state })}
 `);
 }
@@ -23647,9 +23651,9 @@ var init_connector3 = __esm(() => {
 
 // src/workers/x-bookmarks/live-control.ts
 import { createHash as createHash16, randomUUID as randomUUID6 } from "node:crypto";
-import { chmodSync as chmodSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9 } from "node:fs";
+import { chmodSync as chmodSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname10, join as join17 } from "node:path";
+import { dirname as dirname11, join as join17 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -23745,10 +23749,10 @@ class LocalXBookmarksApiUsageStore {
   constructor(dbPath = defaultXBookmarksApiUsageDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
-      mkdirSync9(dirname10(dbPath), { recursive: true, mode: 448 });
+      mkdirSync9(dirname11(dbPath), { recursive: true, mode: 448 });
     this.db = new Database3(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync2(dbPath, 384);
+      chmodSync3(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, X_BOOKMARKS_API_USAGE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, xBookmarksApiUsageMigrations());
@@ -24584,9 +24588,9 @@ var init_live_control2 = __esm(() => {
 
 // src/workers/x-bookmarks/reconcile-state.ts
 import { createHash as createHash17, randomUUID as randomUUID7 } from "node:crypto";
-import { chmodSync as chmodSync3, mkdirSync as mkdirSync10 } from "node:fs";
+import { chmodSync as chmodSync4, mkdirSync as mkdirSync10 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { dirname as dirname11, join as join18 } from "node:path";
+import { dirname as dirname12, join as join18 } from "node:path";
 import { Database as Database4 } from "bun:sqlite";
 function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH?.trim();
@@ -24606,10 +24610,10 @@ class LocalXBookmarksReconcileStateStore {
   constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
-      mkdirSync10(dirname11(dbPath), { recursive: true, mode: 448 });
+      mkdirSync10(dirname12(dbPath), { recursive: true, mode: 448 });
     this.db = new Database4(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync3(dbPath, 384);
+      chmodSync4(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, xBookmarksReconcileStateMigrations());
@@ -27883,7 +27887,7 @@ var init_api_connector = __esm(() => {
 // src/workers/x-bookmarks/window-diagnostic.ts
 import { createHash as createHash19, randomUUID as randomUUID8 } from "node:crypto";
 import {
-  chmodSync as chmodSync4,
+  chmodSync as chmodSync5,
   existsSync as existsSync11,
   mkdirSync as mkdirSync11,
   renameSync as renameSync3,
@@ -27891,7 +27895,7 @@ import {
   unlinkSync as unlinkSync2,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { dirname as dirname12 } from "node:path";
+import { dirname as dirname13 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -28124,14 +28128,14 @@ function writePrivateReport(pathValue, contents) {
   const reportPath = pathValue.trim();
   if (!reportPath)
     throw new TypeError("X bookmark diagnostic report path is required.");
-  const parent = dirname12(reportPath);
+  const parent = dirname13(reportPath);
   mkdirSync11(parent, { recursive: true, mode: 448 });
   const temporaryPath = `${reportPath}.tmp-${randomUUID8()}`;
   try {
     writeFileSync4(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
-    chmodSync4(temporaryPath, 384);
+    chmodSync5(temporaryPath, 384);
     renameSync3(temporaryPath, reportPath);
-    chmodSync4(reportPath, 384);
+    chmodSync5(reportPath, 384);
     if ((statSync3(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
@@ -28531,7 +28535,7 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 import { createHash as createHash20, randomUUID as randomUUID9 } from "node:crypto";
 import {
-  chmodSync as chmodSync5,
+  chmodSync as chmodSync6,
   renameSync as renameSync4,
   rmSync as rmSync2,
   writeFileSync as writeFileSync5
@@ -28829,9 +28833,9 @@ function writeReceipt(pathValue, receipt) {
       flag: "wx",
       mode: 384
     });
-    chmodSync5(temporary, 384);
+    chmodSync6(temporary, 384);
     renameSync4(temporary, path);
-    chmodSync5(path, 384);
+    chmodSync6(path, 384);
     return receipt;
   } catch (error) {
     rmSync2(temporary, { force: true });
@@ -29863,7 +29867,7 @@ var init_whatsapp = __esm(() => {
 // src/core/pairing-session-paths.ts
 import { lstatSync as lstatSync5, realpathSync, rmSync as rmSync3 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
-import { basename as basename2, dirname as dirname13, join as join21, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
+import { basename as basename2, dirname as dirname14, join as join21, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
 function resolveHomeDir(context) {
   return context.homeDir?.trim() || homedir18();
 }
@@ -29895,7 +29899,7 @@ function telegramSessionBase(value) {
 }
 function whatsappStateDirFromValue(value) {
   const trimmed2 = value.trim();
-  return basename2(trimmed2) === "session.db" ? dirname13(trimmed2) : trimmed2;
+  return basename2(trimmed2) === "session.db" ? dirname14(trimmed2) : trimmed2;
 }
 function telegramSessionBasePath(context = {}) {
   const env = context.env ?? {};
@@ -29991,9 +29995,9 @@ function validatePairingPath(path, roots, canonicalRoots) {
   }
   let parentRealPath;
   try {
-    parentRealPath = realpathSync(dirname13(absolute));
+    parentRealPath = realpathSync(dirname14(absolute));
   } catch {
-    return { refusal: { reason: "inspection_failed", path: absolute, component: dirname13(absolute) } };
+    return { refusal: { reason: "inspection_failed", path: absolute, component: dirname14(absolute) } };
   }
   if (!isInsideCanonicalRoot(parentRealPath, canonicalRoots)) {
     return { refusal: { reason: "outside_root", path: absolute, component: parentRealPath } };
@@ -30013,12 +30017,12 @@ function removePlannedPairingSessionFile(target) {
   }
   let parentRealPath;
   try {
-    parentRealPath = realpathSync(dirname13(target.path));
+    parentRealPath = realpathSync(dirname14(target.path));
   } catch (error) {
-    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: dirname13(target.path) }, `Pairing artifact's parent directory could not be resolved before removal: ${error.message}`);
+    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: dirname14(target.path) }, `Pairing artifact's parent directory could not be resolved before removal: ${error.message}`);
   }
   if (parentRealPath !== target.parentRealPath) {
-    throw new PairingSessionPathError({ reason: "symlink_component", path: target.path, component: dirname13(target.path) }, `Pairing artifact's parent directory changed between validation and removal: ${target.path}`);
+    throw new PairingSessionPathError({ reason: "symlink_component", path: target.path, component: dirname14(target.path) }, `Pairing artifact's parent directory changed between validation and removal: ${target.path}`);
   }
   rmSync3(target.path, { force: true });
   return "removed";
@@ -30230,6 +30234,22 @@ function readWorkerSetupEnv(options = {}) {
     return;
   }
 }
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join22(options.homeDir ?? optionalToken2(env.HOME) ?? homedir19(), ".config", "olympus", "worker.env");
@@ -30268,6 +30288,700 @@ function unquoteEnvValue(value) {
   return trimmed2;
 }
 var init_worker_auth = () => {};
+
+// src/core/worker-service.ts
+import { chmodSync as chmodSync7, closeSync as closeSync3, existsSync as existsSync13, lstatSync as lstatSync6, mkdirSync as mkdirSync12, openSync as openSync3, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
+import { homedir as homedir20, platform as osPlatform } from "node:os";
+import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join23, relative as relative4, sep as sep4 } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+function installWorkerService(options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const envPath = options.envPath ?? paths.envPath;
+  validateManagedPath(envPath, "worker environment");
+  const unit = platform2 === "darwin" ? renderLaunchdWorkerUnit({ ...options, envPath, paths }) : renderSystemdWorkerUnit({ ...options, envPath, paths });
+  let wroteUnit = false;
+  let wroteEnv = false;
+  if (!options.dryRun) {
+    ensurePrivateRootDirectorySync(homeDir);
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    assertManagedParentSafety(homeDir, paths.logPath, "worker log");
+    if (pathIsWithin(homeDir, envPath))
+      assertManagedParentSafety(homeDir, envPath, "worker environment");
+    ensurePrivateDirectoryTreeSync(homeDir, dirname15(paths.unitPath));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname15(paths.logPath));
+    if (pathIsWithin(homeDir, envPath))
+      ensurePrivateDirectoryTreeSync(homeDir, dirname15(envPath));
+    else
+      mkdirSync12(dirname15(envPath), { recursive: true });
+    wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, "worker unit");
+    wroteEnv = reconcileWorkerEnv(envPath, options);
+  }
+  return {
+    ok: true,
+    platform: platform2,
+    unit_path: paths.unitPath,
+    env_path: envPath,
+    log_path: paths.logPath,
+    error_log_path: paths.errorLogPath,
+    wrote_unit: wroteUnit,
+    wrote_env: wroteEnv,
+    unit,
+    commands: {
+      install: workerServiceCommand(platform2, "install", paths.unitPath),
+      status: workerServiceCommand(platform2, "status", paths.unitPath),
+      start: workerServiceCommand(platform2, "start", paths.unitPath),
+      stop: workerServiceCommand(platform2, "stop", paths.unitPath),
+      restart: workerServiceCommand(platform2, "restart", paths.unitPath),
+      uninstall: platform2 === "darwin" ? workerServiceCommand(platform2, "stop", paths.unitPath) : ["systemctl", "--user", "disable", "--now", "olympus-worker.service"]
+    }
+  };
+}
+function runWorkerServiceAction(action, options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const exec = options.exec ?? defaultWorkerServiceExec;
+  if (platform2 === "darwin" && action === "install") {
+    return runDarwinWorkerServiceInstall(paths, exec);
+  }
+  if (platform2 === "linux" && action === "install") {
+    return runLinuxWorkerServiceInstall(paths, exec);
+  }
+  if (platform2 === "darwin" && (action === "start" || action === "restart")) {
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    return runDarwinWorkerServiceActivation(action, paths, exec);
+  }
+  if (platform2 === "darwin" && action === "stop") {
+    return runDarwinWorkerServiceStop(paths, exec);
+  }
+  if (action === "uninstall") {
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    return platform2 === "darwin" ? runDarwinWorkerServiceUninstall(paths, exec) : runLinuxWorkerServiceUninstall(paths, exec);
+  }
+  const command = workerServiceCommand(platform2, action, paths.unitPath);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError(action, result);
+  }
+  return {
+    ok: true,
+    command,
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
+}
+function workerServiceFailureLogLine(options = {}) {
+  let paths;
+  try {
+    paths = workerServicePaths(normalizePlatform(options.platform ?? osPlatform()), validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory"));
+  } catch {
+    return;
+  }
+  return lastLogLine(paths.errorLogPath) ?? lastLogLine(paths.logPath);
+}
+function lastLogLine(path) {
+  let text;
+  try {
+    const size = statSync6(path).size;
+    if (size === 0)
+      return;
+    const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = openSync3(path, "r");
+    try {
+      readSync(handle, buffer, 0, length, size - length);
+    } finally {
+      closeSync3(handle);
+    }
+    text = buffer.toString("utf8");
+  } catch {
+    return;
+  }
+  const lines = text.split(/\r?\n/).map((line2) => line2.trim()).filter(Boolean);
+  const line = lines.at(-1);
+  if (!line)
+    return;
+  return redactWorkerLogLine(line).slice(0, WORKER_LOG_LINE_MAX_CHARS);
+}
+function redactWorkerLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function inspectWorkerService(options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const envPath = options.envPath ?? paths.envPath;
+  const command = workerServiceCommand(platform2, "status", paths.unitPath);
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  const unitPresent = isManagedRegularFile(paths.unitPath);
+  const unitPathPresent = existsSync13(paths.unitPath);
+  const envPathPresent = existsSync13(envPath);
+  const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
+  const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
+  const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform2, result, unitPresent);
+  return {
+    platform: platform2,
+    state,
+    unit_present: unitPresent,
+    env_present: isManagedRegularFile(envPath),
+    command,
+    exit_code: result.status,
+    detail: nonRegularDetail ?? boundedServiceDetail(result)
+  };
+}
+function runDarwinWorkerServiceInstall(paths, exec) {
+  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
+  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const installCommand = workerServiceCommand("darwin", "install", paths.unitPath);
+  const status = runWorkerServiceCommand(statusCommand, exec);
+  const outputs = [];
+  if (status.status === 0) {
+    outputs.push(status);
+    const stopped = runWorkerServiceCommand(stopCommand, exec);
+    outputs.push(stopped);
+    if (stopped.status !== 0) {
+      throwWorkerServiceActionError("install", stopped, "failed to unload the existing macOS worker service before reinstalling");
+    }
+  }
+  const installed = runWorkerServiceCommand(installCommand, exec);
+  outputs.push(installed);
+  if (installed.status !== 0) {
+    throwWorkerServiceActionError("install", installed);
+  }
+  return {
+    ok: true,
+    command: installCommand,
+    stdout: outputs.map((result) => result.stdout).join(""),
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runLinuxWorkerServiceInstall(paths, exec) {
+  const installCommand = workerServiceCommand("linux", "install", paths.unitPath);
+  const reloaded = reloadLinuxWorkerServiceManager({ exec });
+  const installed = runWorkerServiceCommand(installCommand, exec);
+  if (installed.status !== 0) {
+    throwWorkerServiceActionError("install", installed);
+  }
+  return {
+    ok: true,
+    command: installCommand,
+    stdout: `${reloaded.stdout}${installed.stdout}`,
+    stderr: `${reloaded.stderr}${installed.stderr}`
+  };
+}
+function reloadLinuxWorkerServiceManager(options = {}) {
+  const command = ["systemctl", "--user", "daemon-reload"];
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError("install", result, "failed to reload the user systemd manager after changing the worker unit");
+  }
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function resetFailedLinuxWorkerService(options = {}) {
+  const command = ["systemctl", "--user", "reset-failed", "olympus-worker.service"];
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError("stop", result, "failed to clear the latched systemd failure for the managed worker unit");
+  }
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceActivation(action, paths, exec) {
+  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
+  const unloaded = status.status === 3 || status.status === 113;
+  if (!unloaded && status.status !== 0)
+    throwWorkerServiceActionError(action, status);
+  if (unloaded && !isManagedRegularFile(paths.unitPath)) {
+    throwWorkerServiceActionError(action, status, "the managed macOS worker unit is not installed");
+  }
+  const command = unloaded ? workerServiceCommand("darwin", "install", paths.unitPath) : workerServiceCommand("darwin", action, paths.unitPath);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0)
+    throwWorkerServiceActionError(action, result);
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceStop(paths, exec) {
+  const command = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
+  if (status.status === 3 || status.status === 113) {
+    return { ok: true, command, stdout: "", stderr: status.stderr };
+  }
+  if (status.status !== 0)
+    throwWorkerServiceActionError("stop", status);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0)
+    throwWorkerServiceActionError("stop", result);
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceUninstall(paths, exec) {
+  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
+  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const status = runWorkerServiceCommand(statusCommand, exec);
+  const outputs = [status];
+  if (status.status === 0) {
+    const stopped = runWorkerServiceCommand(stopCommand, exec);
+    outputs.push(stopped);
+    if (stopped.status !== 0)
+      throwWorkerServiceActionError("uninstall", stopped);
+  } else if (status.status !== 3 && status.status !== 113 && isManagedRegularFile(paths.unitPath)) {
+    throwWorkerServiceActionError("uninstall", status, "could not determine whether the macOS worker service was loaded");
+  }
+  const removed = removeManagedFile(paths.unitPath, "worker unit");
+  return {
+    ok: true,
+    command: stopCommand,
+    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
+` : `worker unit already absent
+`}`,
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runLinuxWorkerServiceUninstall(paths, exec) {
+  const disableCommand = ["systemctl", "--user", "disable", "--now", "olympus-worker.service"];
+  const reloadCommand = ["systemctl", "--user", "daemon-reload"];
+  const outputs = [];
+  const unitPresent = isManagedRegularFile(paths.unitPath);
+  const status = runWorkerServiceCommand(workerServiceCommand("linux", "status", paths.unitPath), exec);
+  if (unitPresent || classifyWorkerServiceState("linux", status, unitPresent) === "active") {
+    const disabled = runWorkerServiceCommand(disableCommand, exec);
+    outputs.push(disabled);
+    if (disabled.status !== 0)
+      throwWorkerServiceActionError("uninstall", disabled);
+  }
+  const removed = removeManagedFile(paths.unitPath, "worker unit");
+  const reloaded = runWorkerServiceCommand(reloadCommand, exec);
+  outputs.push(reloaded);
+  if (reloaded.status !== 0)
+    throwWorkerServiceActionError("uninstall", reloaded);
+  return {
+    ok: true,
+    command: disableCommand,
+    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
+` : `worker unit already absent
+`}`,
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runWorkerServiceCommand(command, exec) {
+  const [cmd, ...args] = command;
+  return exec(cmd, args);
+}
+function throwWorkerServiceActionError(action, result, detail) {
+  throw new OperationError("config_error", `olympus worker ${action} failed with exit code ${result.status ?? "unknown"}.`, detail ?? (result.stderr.trim() || result.stdout.trim() || undefined));
+}
+function classifyWorkerServiceState(platform2, result, unitPresent) {
+  const output = `${result.stdout}
+${result.stderr}`.trim().toLowerCase();
+  if (platform2 === "linux") {
+    const status = result.stdout.trim().toLowerCase();
+    if (result.status === 0 && status === "active")
+      return "active";
+    if (status === "inactive")
+      return unitPresent ? "inactive" : "missing";
+    if (status === "failed")
+      return "failed";
+    if (!unitPresent && (result.status === 3 || result.status === 4))
+      return "missing";
+    return "unknown";
+  }
+  if (result.status === 0) {
+    if (/\bstate\s*=\s*running\b/.test(output))
+      return "active";
+    const lastExit = output.match(/\blast exit code\s*=\s*(-?\d+)\b/);
+    if (lastExit && Number(lastExit[1]) !== 0)
+      return "failed";
+    return "inactive";
+  }
+  if ((result.status === 3 || result.status === 113) && !unitPresent)
+    return "missing";
+  if (result.status === 3 || result.status === 113)
+    return "inactive";
+  return "unknown";
+}
+function boundedServiceDetail(result) {
+  const text = (result.stderr.trim() || result.stdout.trim() || `exit ${result.status ?? "unknown"}`).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  return text.slice(0, 240);
+}
+function defaultWorkerServiceExec(command, args) {
+  const result = spawnSync2(command, args, { encoding: "utf8" });
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
+}
+function workerServicePaths(platform2, homeDir) {
+  homeDir = validatedAbsolutePath(homeDir, "home directory");
+  if (platform2 === "darwin") {
+    const logDir = join23(homeDir, "Library", "Logs", "Olympus");
+    return {
+      label: "com.openclaw.olympus.worker",
+      unitPath: join23(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join23(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join23(logDir, "worker.log"),
+      errorLogPath: join23(logDir, "worker.err")
+    };
+  }
+  const stateDir = join23(homeDir, ".local", "state", "olympus", "worker");
+  return {
+    label: "olympus-worker",
+    unitPath: join23(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join23(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join23(stateDir, "worker.log"),
+    errorLogPath: join23(stateDir, "worker.err")
+  };
+}
+function renderLaunchdWorkerUnit(input) {
+  const command = workerServiceExecCommand(input);
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${input.paths.label}</string>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(workingDirectory)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>${escapeXml(launchdEnvSourcingExec(input.envPath, command))}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(input.paths.logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(input.paths.errorLogPath)}</string>
+</dict>
+</plist>
+`;
+}
+function renderSystemdWorkerUnit(input) {
+  const command = workerServiceExecCommand(input);
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  return `[Unit]
+Description=Olympus source worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${workingDirectory}
+EnvironmentFile=-${input.envPath}
+ExecStart=${command.map(systemdExecArg).join(" ")}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:${input.paths.logPath}
+StandardError=append:${input.paths.errorLogPath}
+
+[Install]
+WantedBy=default.target
+`;
+}
+function workerServiceCommand(platform2, action, unitPath) {
+  if (platform2 === "darwin") {
+    const uid = process.getuid?.() ?? 501;
+    const guiTarget = `gui/${uid}`;
+    const target = `${guiTarget}/com.openclaw.olympus.worker`;
+    if (action === "install")
+      return ["launchctl", "bootstrap", guiTarget, unitPath];
+    if (action === "status")
+      return ["launchctl", "print", target];
+    if (action === "start")
+      return ["launchctl", "kickstart", target];
+    if (action === "restart")
+      return ["launchctl", "kickstart", "-k", target];
+    return ["launchctl", "bootout", target];
+  }
+  if (action === "install")
+    return ["systemctl", "--user", "enable", "--now", "olympus-worker.service"];
+  if (action === "status")
+    return ["systemctl", "--user", "is-active", "olympus-worker.service"];
+  return ["systemctl", "--user", action, "olympus-worker.service"];
+}
+function defaultWorkerEnv(options) {
+  const trimmedAuthToken = options.authToken?.trim();
+  const authToken = isWorkerAuthTokenPlaceholder(trimmedAuthToken) ? undefined : trimmedAuthToken;
+  const bunBin = resolveBunBin(options);
+  return [
+    "# Olympus source worker environment.",
+    `PATH=${defaultWorkerPath(bunBin)}`,
+    `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
+    `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? "true" : "false"}`,
+    "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true",
+    authToken ? `OLYMPUS_WORKER_AUTH_TOKEN=${authToken}` : "# OLYMPUS_WORKER_AUTH_TOKEN=replace-with-generated-token",
+    ""
+  ].join(`
+`);
+}
+function launchdEnvSourcingExec(envPath, command) {
+  const source = `set -a; [ -f ${shellQuote(envPath)} ] && . ${shellQuote(envPath)}; set +a;`;
+  return `${source} exec ${command.map(shellQuote).join(" ")}`;
+}
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+function workerServiceExecCommand(options) {
+  const bunBin = resolveBunBin(options);
+  return [bunBin, defaultOlympusCliJs(options), "__worker-service-run"];
+}
+function nextWorkerEnvAuthToken(text, authToken) {
+  const token = authToken?.trim();
+  if (!token || isWorkerAuthTokenPlaceholder(token))
+    return text;
+  const existing = text.match(/^OLYMPUS_WORKER_AUTH_TOKEN=(.+)$/m)?.[1];
+  if (existing && !isWorkerAuthTokenPlaceholder(existing))
+    return text;
+  return /^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m.test(text) ? text.replace(/^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m, `OLYMPUS_WORKER_AUTH_TOKEN=${token}`) : `${text.replace(/\n?$/, `
+`)}OLYMPUS_WORKER_AUTH_TOKEN=${token}
+`;
+}
+function nextWorkerEnvPath(text, options) {
+  const bunBin = resolveBunBin(options);
+  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
+  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`) : `${text.replace(/\n?$/, `
+`)}PATH=${desiredPath}
+`;
+}
+function reconcileWorkerEnv(envPath, options) {
+  mkdirSync12(dirname15(envPath), { recursive: true });
+  if (!existsSync13(envPath)) {
+    writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
+    return true;
+  }
+  assertManagedRegularFile(envPath, "worker environment");
+  const current = readFileSync14(envPath, "utf8");
+  let next = nextWorkerEnvAuthToken(current, options.authToken);
+  next = nextWorkerEnvPath(next, options);
+  if (!/^OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=/m.test(next)) {
+    next = `${next.replace(/\n?$/, `
+`)}OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
+`;
+  }
+  const mode = statSync6(envPath).mode & 511;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    return true;
+  }
+  if (mode !== 384) {
+    chmodSync7(envPath, 384);
+    return true;
+  }
+  return false;
+}
+function writeManagedWorkerEnvSecret(input) {
+  if (!MANAGED_WORKER_ENV_SECRET_KEYS.includes(input.key)) {
+    throw new OperationError("invalid_params", `${input.key} is not a managed worker environment key.`);
+  }
+  const value = input.value.trim();
+  if (!value) {
+    throw new OperationError("invalid_params", `${input.key} must not be empty.`);
+  }
+  if (/\p{Cc}/u.test(value)) {
+    throw new OperationError("invalid_params", `${input.key} must not contain control characters.`);
+  }
+  if (value.includes("'")) {
+    throw new OperationError("invalid_params", `${input.key} value must not contain a single quote.`, "A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.");
+  }
+  const platform2 = normalizePlatform(input.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(input.homeDir ?? homedir20(), "home directory");
+  const envPath = input.envPath ?? workerServicePaths(platform2, homeDir).envPath;
+  validateManagedPath(envPath, "worker environment");
+  if (!existsSync13(envPath)) {
+    throw new OperationError("config_error", `No Olympus worker environment exists at ${envPath}.`, "Run olympus setup --preset <preset> --yes first; it creates the worker environment this key is stored in.");
+  }
+  assertManagedRegularFile(envPath, "worker environment");
+  const current = readFileSync14(envPath, "utf8");
+  const assignment = `${input.key}=${shellSingleQuote(value)}`;
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
+  const lines = current.split(`
+`);
+  let replaced = false;
+  const kept = [];
+  for (const line of lines) {
+    if (!pattern.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    if (replaced)
+      continue;
+    kept.push(assignment);
+    replaced = true;
+  }
+  const next = replaced ? kept.join(`
+`) : `${current.replace(/\n?$/, `
+`)}${assignment}
+`;
+  let wrote = false;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    wrote = true;
+  }
+  if ((statSync6(envPath).mode & 511) !== 384) {
+    chmodSync7(envPath, 384);
+    wrote = true;
+  }
+  return { ok: true, path: envPath, key: input.key, wrote };
+}
+function shellSingleQuote(value) {
+  return `'${value}'`;
+}
+function normalizePlatform(value) {
+  if (value === "darwin" || value === "linux")
+    return value;
+  throw new OperationError("invalid_params", "olympus worker install supports macOS launchd and Linux user-systemd.");
+}
+function resolveBunBin(options) {
+  if (options.bunBin)
+    return validateBunBin(validatedAbsolutePath(options.bunBin, "Bun executable"));
+  const runtimePath = process.execPath;
+  if (runtimePath && isAbsolute2(runtimePath) && isBunExecutableName(runtimePath)) {
+    return validateBunBin(runtimePath);
+  }
+  const bunWhich = typeof Bun !== "undefined" ? Bun.which("bun") : null;
+  if (!bunWhich || !isAbsolute2(bunWhich)) {
+    throw new OperationError("config_error", "Could not resolve an absolute Bun executable path for the worker service.");
+  }
+  return validateBunBin(bunWhich);
+}
+function validateBunBin(bunBin) {
+  if (!isBunExecutableName(bunBin)) {
+    throw new OperationError("config_error", `Could not validate the resolved Bun executable path: ${bunBin}`);
+  }
+  try {
+    if (!statSync6(bunBin).isFile()) {
+      throw new OperationError("config_error", `Resolved Bun path is not a file: ${bunBin}`);
+    }
+  } catch (error) {
+    if (error instanceof OperationError)
+      throw error;
+    throw new OperationError("config_error", `Resolved Bun executable does not exist: ${bunBin}`);
+  }
+  return bunBin;
+}
+function isBunExecutableName(path) {
+  const base = basename3(path).toLowerCase();
+  return base === "bun" || base === "bun.exe";
+}
+function validatedAbsolutePath(value, label) {
+  const trimmed2 = value.trim();
+  if (trimmed2 && isAbsolute2(trimmed2) && !/[\0\r\n]/.test(trimmed2))
+    return trimmed2;
+  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
+}
+function defaultOlympusCliJs(options) {
+  if (options.workingDirectory) {
+    return join23(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
+  }
+  const invoked = process.argv[1]?.trim();
+  if (invoked && !invoked.startsWith("-") && basename3(invoked) === "cli.js") {
+    return isAbsolute2(invoked) ? invoked : join23(process.cwd(), invoked);
+  }
+  return join23(process.cwd(), "dist", "cli.js");
+}
+function defaultWorkerPath(bunBin, existingPath) {
+  const entries = [
+    dirname15(bunBin),
+    ...existingPath ? existingPath.split(":") : [],
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ].map((entry) => entry.trim()).filter(Boolean);
+  return Array.from(new Set(entries)).join(":");
+}
+function systemdExecArg(value) {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value))
+    return value;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+}
+function escapeXml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function validateManagedPath(path, label) {
+  validatedAbsolutePath(path, label);
+}
+function pathIsWithin(root, path) {
+  const suffix = relative4(root, path);
+  return suffix === "" || !isAbsolute2(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep4}`);
+}
+function assertManagedParentSafety(homeDir, path, label) {
+  try {
+    assertManagedPathParentsSync(homeDir, path, label);
+  } catch (error) {
+    throw new OperationError("config_error", `Refusing unsafe managed ${label} parent path: ${path}`, error instanceof Error ? error.message : undefined);
+  }
+}
+function managedParentSafetyDetail(homeDir, unitPath, envPath) {
+  try {
+    assertManagedPathParentsSync(homeDir, unitPath, "worker unit");
+    if (pathIsWithin(homeDir, envPath)) {
+      assertManagedPathParentsSync(homeDir, envPath, "worker environment");
+    }
+    return;
+  } catch {
+    return "managed worker path has an unsafe parent directory component";
+  }
+}
+function isManagedRegularFile(path) {
+  try {
+    return lstatSync6(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function assertManagedRegularFile(path, label) {
+  let stats;
+  try {
+    stats = lstatSync6(path);
+  } catch {
+    throw new OperationError("config_error", `Could not inspect the managed ${label} path: ${path}`);
+  }
+  if (!stats.isFile()) {
+    throw new OperationError("config_error", `Refusing a non-regular managed ${label} path: ${path}`);
+  }
+}
+function writeManagedFileAtomicIfChanged(path, text, label) {
+  validateManagedPath(path, label);
+  if (existsSync13(path)) {
+    assertManagedRegularFile(path, label);
+    if (readFileSync14(path, "utf8") === text) {
+      if ((statSync6(path).mode & 511) !== 384) {
+        chmodSync7(path, 384);
+        return true;
+      }
+      return false;
+    }
+  }
+  writePrivateFileAtomicSync(path, text);
+  return true;
+}
+function removeManagedFile(path, label) {
+  validateManagedPath(path, label);
+  if (!existsSync13(path))
+    return false;
+  assertManagedRegularFile(path, label);
+  return removeFileDurablySync(path);
+}
+var WORKER_LOG_TAIL_BYTES, WORKER_LOG_LINE_MAX_CHARS = 300, MANAGED_WORKER_ENV_SECRET_KEYS;
+var init_worker_service = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
+  MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"];
+});
 
 // src/core/delphi.ts
 class DelphiClient {
@@ -30529,13 +31243,13 @@ var init_email_policy = __esm(() => {
 // src/core/source-watch.ts
 import { createHash as createHash23, randomUUID as randomUUID11 } from "node:crypto";
 import {
-  chmodSync as chmodSync7,
+  chmodSync as chmodSync8,
   existsSync as existsSync15,
   lstatSync as lstatSync8,
   mkdirSync as mkdirSync14
 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
-import { dirname as dirname16, isAbsolute as isAbsolute3, join as join25 } from "node:path";
+import { dirname as dirname17, isAbsolute as isAbsolute3, join as join25 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -30595,7 +31309,7 @@ class LocalSourceWatchStore {
     hardenPrivateDatabasePath(dbPath);
     this.db = new Database6(dbPath, { create: true });
     try {
-      chmodSync7(dbPath, 384);
+      chmodSync8(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
       refuseUnversionedOwnedSchema(this.db);
       assertSqliteSchemaCanOpen(this.db, SOURCE_WATCH_STORE_ID, SOURCE_WATCH_SCHEMA_VERSION);
@@ -31262,7 +31976,7 @@ function hardenPrivateDatabasePath(dbPath) {
   if (!isAbsolute3(dbPath)) {
     throw new TypeError("Source watch database path must be absolute.");
   }
-  const leafDir = dirname16(dbPath);
+  const leafDir = dirname17(dbPath);
   const forbiddenLeafDirs = new Set([
     "/",
     "/tmp",
@@ -31279,7 +31993,7 @@ function hardenPrivateDatabasePath(dbPath) {
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
-  chmodSync7(leafDir, 448);
+  chmodSync8(leafDir, 448);
   if (existsSync15(dbPath)) {
     const dbStat = lstatSync8(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
@@ -31767,7 +32481,7 @@ class EmailClient {
         configured: false,
         base_url: this.config.email.baseUrl,
         raw_email_exposed: false,
-        detail: "Email lane is disabled. Configure a private email source worker before use."
+        detail: "Email lane is disabled. Run olympus setup, then olympus worker install, to bring up the private source worker."
       };
     }
     const startedAt = performance.now();
@@ -31790,7 +32504,7 @@ class EmailClient {
   }
   async answer(options) {
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker that owns OAuth and message fetch, then uses an approved local/private model lane for reasoning.");
+      throw new OperationError("email_not_configured", "Email lane is disabled.", "Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/answer`, {
       method: "POST",
@@ -31918,7 +32632,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using routed source answers.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using routed source answers.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: "POST",
@@ -31959,7 +32673,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source index status is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index status.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index status.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/status`, {
       method: "POST",
@@ -32001,7 +32715,7 @@ class EmailClient {
       throw new OperationError("source_index_admin_required", "Source-index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded source-index proof run.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index sync.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index sync.");
     }
     const corpusId = canonicalSourceCorpusId(options.corpusId);
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/sync`, {
@@ -32033,7 +32747,7 @@ class EmailClient {
   }
   async xBookmarksContentRecovery(options = {}) {
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before recovering X bookmark content.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before recovering X bookmark content.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/x-bookmarks/content/recover`, {
       method: "POST",
@@ -32052,7 +32766,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index search.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
     const corpusId = canonicalSourceCorpusId(options.corpusId);
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
@@ -32096,7 +32810,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source export requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source export.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/export`, {
       method: "POST",
@@ -32121,7 +32835,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source transcription requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source transcription.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source transcription.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/transcribe`, {
       method: "POST",
@@ -32145,7 +32859,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "On-demand media ingestion requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using on-demand media ingestion.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using on-demand media ingestion.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/on-demand-media`, {
       method: "POST",
@@ -32169,7 +32883,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion candidates require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion candidates.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-candidates`, {
       method: "POST",
@@ -32191,7 +32905,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposals require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposals.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals`, {
       method: "POST",
@@ -32216,7 +32930,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal listing requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposal listing.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/list`, {
       method: "POST",
@@ -32238,7 +32952,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal details require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposal details.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/get`, {
       method: "POST",
@@ -32257,7 +32971,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion decisions require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion decisions.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-decisions`, {
       method: "POST",
@@ -32318,7 +33032,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source watches are disabled.", "Enable sourceIndex.enabled before creating or managing durable watches.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before managing durable watches.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before managing durable watches.");
     }
   }
 }
@@ -33384,7 +34098,11 @@ var init_operation_exposure = __esm(() => {
 
 // src/core/setup-preflight.ts
 async function setupPreflight(options) {
-  const env = options.env ?? process.env;
+  const env = environmentWithWorkerSetupEnv({
+    ...options.env ? { env: options.env } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
+  });
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
@@ -33422,7 +34140,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
       profileId,
       label: `${displayKey} environment variable`,
       detail: `Profile ${profileId} needs ${displayKey} for ${profile.provider}.`,
-      remedy: `export ${displayKey}=...`
+      remedy: envSecretRemedy(displayKey)
     };
   }
   const value = secretStore.getSync ? secretStore.getSync(ref.key) : await secretStore.get(ref.key);
@@ -33436,6 +34154,12 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
     detail: `Profile ${profileId} needs ${ref.key} in the Olympus secret store.`,
     remedy: storeSecretRemedy(ref.key)
   };
+}
+function envSecretRemedy(displayKey) {
+  if (displayKey === "GEMINI_API_KEY") {
+    return `printf '%s' "$KEY" | olympus connect gemini --api-key-stdin`;
+  }
+  return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
 function isLocalLoopbackProfile(profile) {
   if (profile.provider !== "local-openai-compatible" || !profile.baseUrl)
@@ -33467,10 +34191,11 @@ function storeSecretRemedy(key) {
 }
 var init_setup_preflight = __esm(() => {
   init_secret_store();
+  init_worker_auth();
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync4, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync4, readFileSync as readFileSync16 } from "node:fs";
+import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -33497,7 +34222,7 @@ function readRecordText(path) {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
   let fd;
   try {
-    fd = openSync4(path, flags);
+    fd = openSync5(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -33515,7 +34240,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync4(fd);
+      closeSync5(fd);
     } catch {}
   }
 }
@@ -33730,7 +34455,7 @@ import { createHash as createHash24, randomBytes as randomBytes3 } from "node:cr
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir23 } from "node:os";
-import { dirname as dirname17, join as join26 } from "node:path";
+import { dirname as dirname18, join as join26 } from "node:path";
 import { stdin as processStdin } from "node:process";
 async function connectOAuthSource(options) {
   const pending = await startOAuthSourceConnection(options);
@@ -34206,6 +34931,51 @@ async function connectPublicApiKeySource(options) {
     return { ok: true, source: "readwise", handles: [handle], registryPath, secretRefs: [`store:${secretKey}`] };
   });
 }
+async function connectGeminiApiKey(options) {
+  const key = options.apiKey.trim();
+  if (!key)
+    throw new Error("API key is required.");
+  if (options.validate !== false) {
+    await validateGeminiApiKey({
+      apiKey: key,
+      fetchImpl: options.fetch ?? fetch,
+      ...options.geminiModelsUrl ? { geminiModelsUrl: options.geminiModelsUrl } : {},
+      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
+    });
+  }
+  const stored = writeManagedWorkerEnvSecret({
+    key: "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+    value: key,
+    ...options.platform ? { platform: options.platform } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.envPath ? { envPath: options.envPath } : {}
+  });
+  return {
+    ok: true,
+    source: "gemini",
+    handles: [],
+    secretRefs: [`env:${stored.key}`],
+    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`
+  };
+}
+async function validateGeminiApiKey(options) {
+  const url = options.geminiModelsUrl ?? process.env.OLYMPUS_CONNECT_GEMINI_MODELS_URL ?? "https://generativelanguage.googleapis.com/v1beta/models";
+  let response;
+  try {
+    response = await fetchWithTimeout(options.fetchImpl, url, {
+      method: "GET",
+      headers: { "x-goog-api-key": options.apiKey, Accept: "application/json" }
+    }, options.timeoutMs);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.");
+    }
+    throw new Error("Could not validate the Gemini API key. No credentials were stored; try again when the Gemini API is reachable.");
+  }
+  if (!response.ok) {
+    throw new Error("Gemini rejected the API key. Paste a current Gemini API key from https://aistudio.google.com/apikey and try again.");
+  }
+}
 async function validatePublicApiKeySource(options) {
   if (options.source === "readwise") {
     const url2 = options.readwiseAuthUrl ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL ?? "https://readwise.io/api/v2/auth/";
@@ -34631,7 +35401,7 @@ function detachedOAuthStatePath(options) {
   return join26(options.stateDir ?? defaultDetachedOAuthStateDir(), `${safeStatePathSegment(options.source)}.${safeStatePathSegment(safeAccountRole(options.accountRole ?? "personal"))}.json`);
 }
 function writeDetachedOAuthState(path, state) {
-  mkdirSync15(dirname17(path), { recursive: true, mode: 448 });
+  mkdirSync15(dirname18(path), { recursive: true, mode: 448 });
   writePrivateJson(path, sanitizeDetachedOAuthState(state));
 }
 function readDetachedOAuthState(path) {
@@ -34748,7 +35518,7 @@ function sanitizeDetachedOAuthState(input) {
   return state;
 }
 function writePrivateJson(path, value) {
-  mkdirSync15(dirname17(path), { recursive: true, mode: 448 });
+  mkdirSync15(dirname18(path), { recursive: true, mode: 448 });
   writeFileSync6(path, `${JSON.stringify(value, null, 2)}
 `, { mode: 384 });
 }
@@ -34805,6 +35575,7 @@ function retryableErrorDisposition(error, now) {
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
   init_secret_store();
+  init_worker_service();
   init_http_timeout();
   init_oauth_relay();
   init_publisher_oauth_client();
@@ -35339,6 +36110,33 @@ function dashboardHasSettledPass(source) {
     return true;
   return Number.isFinite(Date.parse(source.last_sync_at ?? ""));
 }
+function dashboardHasRunBefore(source) {
+  if (source.last_run !== undefined)
+    return true;
+  if (Number.isFinite(Date.parse(source.last_sync_at ?? "")))
+    return true;
+  if (source.connection.state === "synced" || source.connection.state === "syncing")
+    return true;
+  if (source.coverage.indexed_items > 0 || source.coverage.content_ready_items > 0)
+    return true;
+  return source.schedule?.last_attempt_at !== undefined;
+}
+function dashboardAwaitingFirstSync(source, now) {
+  if (dashboardHasRunBefore(source))
+    return false;
+  const since = dashboardFirstSyncClock(source, now);
+  if (since === undefined)
+    return false;
+  return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3600000;
+}
+function dashboardFirstSyncClock(source, now) {
+  for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
+    const at = Date.parse(candidate ?? "");
+    if (Number.isFinite(at) && at <= now.getTime())
+      return at;
+  }
+  return;
+}
 function dashboardPhaseComplete(phase) {
   const measure = phase.measure;
   if (measure.kind === "ratio")
@@ -35440,6 +36238,9 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
   if (due !== undefined) {
     return { ...phase, state: "waiting", state_words: `Waiting · next sync in ${due}` };
   }
+  if (dashboardAwaitingFirstSync(source, now)) {
+    return { ...phase, state: "waiting", state_words: "Waiting for the first sync" };
+  }
   return { ...phase, state: "stalled", state_words: `Stalled · ${stillnessWords(source, phase.id)}` };
 }
 function movementFor(source, id) {
@@ -35498,6 +36299,8 @@ function stillnessWords(source, id) {
   if (id === "metadata_sync" && schedule && schedule.consecutive_failures > 0) {
     return `last ${schedule.consecutive_failures === 1 ? "sync" : `${schedule.consecutive_failures} syncs`} failed`;
   }
+  if (!dashboardHasRunBefore(source))
+    return "the first sync has not run yet";
   return "no movement seen";
 }
 function ratioPhase(id, unit, rawDone, rawTotal, settledPass, settledBaseline) {
@@ -35563,7 +36366,7 @@ function percentOf(done, total) {
     return 100;
   return Math.max(0, Math.min(100, Math.round(done / total * 1000) / 10));
 }
-var DASHBOARD_PHASE_LABELS, DELTA_OVERSTATE_SHARE = 0.005, DASHBOARD_PHASE_STALL_HOURS = 1;
+var DASHBOARD_PHASE_LABELS, DELTA_OVERSTATE_SHARE = 0.005, DASHBOARD_PHASE_STALL_HOURS = 1, DASHBOARD_FIRST_SYNC_GRACE_HOURS;
 var init_phases = __esm(() => {
   init_vocabulary();
   DASHBOARD_PHASE_LABELS = {
@@ -35571,12 +36374,13 @@ var init_phases = __esm(() => {
     extraction: "Extraction",
     embedding: "Embedding"
   };
+  DASHBOARD_FIRST_SYNC_GRACE_HOURS = DASHBOARD_PHASE_STALL_HOURS;
 });
 
 // src/workers/credential-health.ts
 import { mkdirSync as mkdirSync16, readFileSync as readFileSync18 } from "node:fs";
 import { homedir as homedir24, uptime } from "node:os";
-import { dirname as dirname18, join as join27 } from "node:path";
+import { dirname as dirname19, join as join27 } from "node:path";
 function defaultCredentialHealthReportPath() {
   return join27(homedir24(), ".local", "state", "olympus", "credential-health", "current.json");
 }
@@ -35940,7 +36744,7 @@ var init_status = __esm(() => {
 // src/workers/source-dashboard.ts
 import { mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
-import { dirname as dirname19, join as join28 } from "node:path";
+import { dirname as dirname20, join as join28 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
 function dashboardGuidedSessionAgentPrompt(source) {
   if (source === "telegram") {
@@ -35969,7 +36773,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync17(dirname19(dbPath), { recursive: true });
+      mkdirSync17(dirname20(dbPath), { recursive: true });
     this.db = new Database7(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -35993,6 +36797,7 @@ class SqliteSourceDashboardHistory {
         last_value INTEGER NOT NULL,
         rose_at TEXT,
         seen_at TEXT,
+        first_seen_at TEXT,
         settled_value INTEGER,
         settled_at TEXT,
         PRIMARY KEY (corpus_id, counter)
@@ -36019,9 +36824,11 @@ class SqliteSourceDashboardHistory {
       }
     };
     addMovementColumn("seen_at", "TEXT");
+    addMovementColumn("first_seen_at", "TEXT");
     addMovementColumn("settled_value", "INTEGER");
     addMovementColumn("settled_at", "TEXT");
     this.db.run("UPDATE source_dashboard_movement SET seen_at = COALESCE(rose_at, ?) WHERE seen_at IS NULL", [new Date().toISOString()]);
+    this.db.run("UPDATE source_dashboard_movement SET first_seen_at = COALESCE(rose_at, seen_at, ?) WHERE first_seen_at IS NULL", [new Date().toISOString()]);
   }
   record(samples) {
     if (samples.length === 0)
@@ -36101,7 +36908,7 @@ class SqliteSourceDashboardHistory {
   }
   movementFor(sample, _now) {
     const rows = this.db.query(`
-      SELECT counter, rose_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
+      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
     `).all(sample.corpus_id);
     const at = (counter) => {
       const value = rows.find((row) => row.counter === counter)?.rose_at;
@@ -36116,7 +36923,10 @@ class SqliteSourceDashboardHistory {
     const embeddingAt = at("embedded_files");
     const extractionSettled = settled("content_ready_items");
     const embeddingSettled = settled("embedded_files");
+    const firstSeenTimes = rows.map((row) => row.first_seen_at).filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value))).map((value) => Date.parse(value));
+    const firstSeenAt = firstSeenTimes.length > 0 ? new Date(Math.min(...firstSeenTimes)).toISOString() : undefined;
     const movement = {
+      ...firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt },
       ...metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt },
       ...extractionAt === undefined ? {} : { extraction_at: extractionAt },
       ...embeddingAt === undefined ? {} : { embedding_at: embeddingAt },
@@ -36137,8 +36947,10 @@ class SqliteSourceDashboardHistory {
       const parity = phaseAtParity(sample, counter, value);
       if (parity) {
         this.db.run(`
-          INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, settled_value, settled_at)
-          VALUES (?, ?, ?, NULL, ?, ?, ?)
+          INSERT INTO source_dashboard_movement (
+            corpus_id, counter, last_value, rose_at, seen_at, first_seen_at, settled_value, settled_at
+          )
+          VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
           ON CONFLICT (corpus_id, counter) DO UPDATE SET
             last_value = excluded.last_value,
             rose_at = CASE WHEN excluded.last_value > source_dashboard_movement.last_value
@@ -36146,14 +36958,15 @@ class SqliteSourceDashboardHistory {
             seen_at = excluded.seen_at,
             settled_value = excluded.settled_value,
             settled_at = excluded.settled_at
-        `, [sample.corpus_id, counter, value, sample.sampled_at, value, sample.sampled_at]);
+        `, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at, value, sample.sampled_at]);
         continue;
       }
       const row = this.db.query(`
         SELECT last_value, settled_value FROM source_dashboard_movement WHERE corpus_id = ? AND counter = ?
       `).get(sample.corpus_id, counter);
       if (!row) {
-        this.db.run("INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at) VALUES (?, ?, ?, NULL, ?)", [sample.corpus_id, counter, value, sample.sampled_at]);
+        this.db.run(`INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, first_seen_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at]);
         continue;
       }
       const keepsBaseline = row.settled_value === null || value >= row.settled_value;
@@ -36190,7 +37003,13 @@ function buildSourceDashboardViewModel(options) {
     const corpora = options.sourceIndexStatus.corpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    return sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id));
+    const card = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id));
+    const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
+    if (options.syncNowAvailable === undefined || syncSource === undefined)
+      return card;
+    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
+    return withSyncAnswer;
   });
   const unassignedCorpora = unassignedCorporaFrom(options.sourceIndexStatus.corpora.filter((corpus) => !claimedCorpusIds.has(corpus.corpus_id)), schedulerByCorpus, now);
   const samples = cards.map((card) => ({
@@ -36398,7 +37217,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "initial_sync",
       condition: connection.state === "syncing" ? "usable" : "blocked",
-      next_action: connection.state === "syncing" ? "Keep the worker running while the first sync and extraction queues finish." : `Start Sync now for ${card.label}; a service restart is not required.`,
+      next_action: connection.state === "syncing" ? "Keep the worker running while the first sync and extraction queues finish." : card.sync_now_available === false ? `Keep the worker running; this worker has no Sync now for ${card.label}, so it syncs on its own schedule.` : `Start Sync now for ${card.label}; a service restart is not required.`,
       dependencies
     };
   }
@@ -36725,6 +37544,8 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
   const sessionEvidence = definition.connect_action.kind === "guided_session" ? sessionConnectionEvidence(coverage, freshness) : undefined;
   const connected = definition.connect_action.kind === "api_key" ? apiKeyAvailability[definition.connect_action.source] === true || activeHandles.length > 0 : sessionEvidence !== undefined ? sessionEvidence !== "none" || activeHandles.length > 0 : activeHandles.length > 0;
   const handleIds = handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b));
+  const connectedAtMs = activeHandles.map((handle) => Date.parse(handle.connectedAt)).filter((value) => Number.isFinite(value) && value <= now.getTime());
+  const connectedAt = connectedAtMs.length > 0 ? { connected_at: new Date(Math.max(...connectedAtMs)).toISOString() } : {};
   if (unpaired !== undefined) {
     const label = unpaired.state === "unpair_state_unreadable" ? "unpair state unreadable" : unpaired.state === "unpair_incomplete" ? "Unpair incomplete — manual cleanup required" : "unpaired";
     return {
@@ -36763,19 +37584,25 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
   if (!connected && !reauthRequired)
     return { state: "not_connected", label: notConnectedLabel, action, handles: handleIds };
   if (queue.active > 0 || queue.waiting > 0 || syncRunning) {
-    return { state: "syncing", label: "syncing", action, handles: handleIds };
+    return { state: "syncing", label: "syncing", action, handles: handleIds, ...connectedAt };
   }
   if (sessionEvidence === "unconfirmed") {
-    return { state: "connected", label: "connected · live session not checked", action, handles: handleIds };
+    return { state: "connected", label: "connected · live session not checked", action, handles: handleIds, ...connectedAt };
   }
   if (definition.answer_capable_without_sync) {
-    return { state: "connected", label: "connected", action, handles: handleIds };
+    return { state: "connected", label: "connected", action, handles: handleIds, ...connectedAt };
   }
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
-    return { state: "waiting_for_first_sync", label: "connected, waiting for first sync", action, handles: handleIds };
+    return {
+      state: "waiting_for_first_sync",
+      label: "connected, waiting for first sync",
+      action,
+      handles: handleIds,
+      ...connectedAt
+    };
   }
   const syncedAt = syncedRelativeLabel(freshness);
-  return { state: "synced", label: syncedAt ? `synced ${syncedAt}` : "synced", action, handles: handleIds };
+  return { state: "synced", label: syncedAt ? `synced ${syncedAt}` : "synced", action, handles: handleIds, ...connectedAt };
 }
 function sessionConnectionEvidence(coverage, freshness) {
   const hours = freshness.hours;
@@ -37490,7 +38317,7 @@ function onboarding(summary, sourceCards, folderPicker) {
       { id: "dependencies", label: "Dependency check", state: cleared(dependenciesProven), next_action: "Choose a source below, run Olympus doctor, and repair only that source’s declared dependency." },
       { id: "credential_or_pairing", label: "Credential or pairing", state: cleared(connected), next_action: "Connect one account or finish the local pairing instructions below." },
       { id: "scope", label: "Scope", state: cleared(scopeReady), next_action: folderPicker.available ? "Open scope rules to author and preview what Olympus may read." : "Confirm the contextual provider scope shown on the source card." },
-      { id: "initial_sync", label: "Initial sync", state: cleared(firstSync), next_action: "Start Sync now and keep the worker running; do not restart for setup changes." },
+      { id: "initial_sync", label: "Initial sync", state: cleared(firstSync), next_action: initialSyncAdvice(configuredCards) },
       { id: "source_health", label: "Usable, degraded, or blocked", state: cleared(sourceHealthy), next_action: "Follow the source card’s named next action until coverage and gaps are truthful." },
       { id: "cited_answer_readiness", label: "Cited-answer readiness", state: cleared(answerReady), next_action: "Ask a question and verify claim-level citations plus any stated gaps." }
     ]),
@@ -37500,6 +38327,11 @@ function onboarding(summary, sourceCards, folderPicker) {
       suggestion: answerReady ? "Your assistant can now answer a question using the ready sources." : "This unlocks as soon as one connected source has answer-ready text."
     }
   };
+}
+function initialSyncAdvice(configuredCards) {
+  const answered = configuredCards.filter((card) => card.sync_now_available !== undefined);
+  const anySyncable = answered.length === 0 || answered.some((card) => card.sync_now_available === true);
+  return anySyncable ? "Start Sync now and keep the worker running; do not restart for setup changes." : "Keep the worker running; this worker has no Sync now, so connected sources sync on their own schedule.";
 }
 function withActiveStep(steps) {
   const lastCleared = steps.reduce((last, step, index) => step.state === "complete" ? index : last, -1);
@@ -37889,7 +38721,7 @@ __export(exports_source_ingestion_ledger, {
 });
 import { existsSync as existsSync17, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir26 } from "node:os";
-import { dirname as dirname20, join as join29 } from "node:path";
+import { dirname as dirname21, join as join29 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -37947,7 +38779,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync18(dirname20(dbPath), { recursive: true });
+      mkdirSync18(dirname21(dbPath), { recursive: true });
     this.db = new Database8(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -38841,8 +39673,15 @@ var init_source_ingestion_ledger = __esm(() => {
 // src/core/doctor.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync18, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname21, join as join30 } from "node:path";
-async function runDoctor(deps) {
+import { dirname as dirname22, join as join30 } from "node:path";
+async function runDoctor(input) {
+  const deps = input.env === undefined ? input : {
+    ...input,
+    env: environmentWithWorkerSetupEnv({
+      env: input.env,
+      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+    })
+  };
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
@@ -39034,7 +39873,8 @@ async function sovereigntyPrerequisiteCheck(deps) {
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
-    ...deps.secretStore ? { secretStore: deps.secretStore } : {}
+    ...deps.secretStore ? { secretStore: deps.secretStore } : {},
+    ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
   if (unmet.length === 0) {
     return {
@@ -39398,7 +40238,7 @@ async function sourceSchedulerStatusCheck(deps) {
     problems.push("scheduler is not running");
   const sources = Array.isArray(status.sources) ? status.sources : [];
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids) ? status.selected_source_ids.filter((value) => typeof value === "string") : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids) || deps.config.worker.scheduler.sourceIds.length > 0;
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);
@@ -39591,7 +40431,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join30(dirname21(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join30(dirname22(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -39635,7 +40475,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync19(dirname21(path), { recursive: true });
+  mkdirSync19(dirname22(path), { recursive: true });
   writeFileSync7(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -41716,19 +42556,19 @@ var init_operations = __esm(() => {
 
 // src/version.ts
 import { readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname22, join as join31 } from "node:path";
+import { dirname as dirname23, join as join31 } from "node:path";
 import { fileURLToPath } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname22(dirname22(fileURLToPath(import.meta.url)));
+  repoRoot = dirname23(dirname23(fileURLToPath(import.meta.url)));
   manifest = JSON.parse(readFileSync20(join31(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
 
 // src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync9, mkdirSync as mkdirSync21 } from "node:fs";
+import { chmodSync as chmodSync10, mkdirSync as mkdirSync21 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
-import { dirname as dirname24, join as join35 } from "node:path";
+import { dirname as dirname25, join as join35 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir28(), ".local", "share");
@@ -41741,11 +42581,11 @@ class LocalSourceSchedulerStateStore {
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
-      mkdirSync21(dirname24(dbPath), { recursive: true, mode: 448 });
+      mkdirSync21(dirname25(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database9(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync9(dbPath, 384);
+      chmodSync10(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
@@ -57589,10 +58429,10 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync10, mkdirSync as mkdirSync22 } from "node:fs";
+import { chmodSync as chmodSync11, mkdirSync as mkdirSync22 } from "node:fs";
 import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
 import { homedir as homedir29 } from "node:os";
-import { dirname as dirname25, join as join36 } from "node:path";
+import { dirname as dirname26, join as join36 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
@@ -57612,11 +58452,11 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync22(dirname25(dbPath), { recursive: true, mode: 448 });
+      mkdirSync22(dirname26(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database10(dbPath, { readonly: true }) : new Database10(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync10(dbPath, 384);
+      chmodSync11(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -61960,7 +62800,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID15 } from "node:crypto";
 import { homedir as homedir30 } from "node:os";
-import { dirname as dirname26, isAbsolute as isAbsolute6, join as join40 } from "node:path";
+import { dirname as dirname27, isAbsolute as isAbsolute6, join as join40 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir30()) {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
   const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join40(homeDir, ".cache");
@@ -62158,7 +62998,7 @@ function readCatalogCache(path) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID15()}.tmp`;
   try {
-    mkdirSync23(dirname26(path), { recursive: true, mode: 448 });
+    mkdirSync23(dirname27(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync9(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -62662,7 +63502,7 @@ import {
   unlink as unlink2
 } from "node:fs/promises";
 import { homedir as homedir31 } from "node:os";
-import { dirname as dirname27, join as join41 } from "node:path";
+import { dirname as dirname28, join as join41 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
   const audit = result.audit;
   const skipped = audit.skipped_corpora.map((skip) => ({
@@ -62767,7 +63607,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir3(dirname27(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname28(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -63391,6 +64231,15 @@ a { color: var(--link); }
 .attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
 .attncard.plain { background: var(--panel); border-color: var(--line2); }
 .attncard .grow { flex: 1; }
+/* The source page's ONE banner, and only it. A bare flex:1 gave the
+   description a zero basis, so a banner carrying Sync now, its status text and
+   an agent-prompt button squeezed a whole paragraph into a ~30-character column
+   while the controls kept their intrinsic width (owner, 2026-09-04). With a
+   basis the text keeps its width and the controls drop to their own row.
+   Scoped to .banner: the list rows and the whole-row links are a different
+   shape, and the mobile block below still owns what they do at 375px. */
+.attncard.banner { flex-wrap: wrap; }
+.attncard.banner .grow { flex: 1 1 320px; min-width: 0; }
 .attncard .name { font-weight: 600; }
 .attncard .why { color: var(--t3); font-size: 12.5px; }
 /* A warning row that carries no control is itself the link to the detail page,
@@ -65648,8 +66497,11 @@ function terminalExtractionBanner(source, options) {
 function laneStuckBanner(source, now, options) {
   if (!hasOpenWork(source))
     return;
-  const idleHours = idleEvidenceHours(source);
-  if (!switchedOff(source)) {
+  const stalledPhases = stoppedLanes(source, now);
+  if (stalledPhases.length === 0)
+    return;
+  const idleHours = idleEvidenceHours(source, now);
+  if (!switchedOff(source, stalledPhases)) {
     if (idleHours === undefined)
       return;
     if (idleHours <= graceHours(source))
@@ -65657,23 +66509,39 @@ function laneStuckBanner(source, now, options) {
     if (isSelfHealing(source, now))
       return;
   }
-  const condition = governingCondition(source);
+  const condition = governingCondition(source, stalledPhases);
+  const laneName = stalledPhases.length === 1 ? `${DASHBOARD_PHASE_LABELS[stalledPhases[0]].toLowerCase()} lane` : "lane";
   const stillness = idleHours === undefined ? "has stopped moving" : `has not moved for ${dashboardDuration(idleHours * 3600)}`;
   const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === source.source_id);
-  const syncSource = definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
+  const syncSource = source.sync_now_available === false ? undefined : definition?.connect_action.kind === "oauth" || definition?.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
   const action = syncSource === undefined ? undefined : options.readOnly === true ? { label: "Sync now", kind: "link", href: `${options.setupPath}#dashboard-controls`, hint: "unlock controls in Setup" } : { label: "Sync now", kind: "sync_now", source: syncSource, primary: true };
   return {
     kind: "lane_stuck",
-    sentence: `${source.label} still has work to do and its lane ${stillness}. Last condition on the lane:` + ` ${condition}. Try a sync now; if it still does not move, ask your agent to look at the lane.`,
+    sentence: `${source.label} still has work to do and its ${laneName} ${stillness}. Last condition on the lane:` + ` ${condition}.${action === undefined ? "" : " Try a sync now;"}` + `${action === undefined ? " Ask" : " if it still does not move, ask"} your agent to look at the lane.`,
     ...action === undefined ? {} : { action },
-    agent_prompt: `Olympus says the ${source.label} lane still has work to do and ${stillness}` + ` (last condition: ${condition}). Please check why the ${source.label} ingestion lane is not` + " moving — the worker logs and the scheduler state for this source — and fix it using" + " supported Olympus commands. Do not ask me to edit files, configuration, or code."
+    agent_prompt: `Olympus says the ${source.label} ${laneName} still has work to do and ${stillness}` + ` (last condition: ${condition}). Please check why the ${source.label} ingestion lane is not` + " moving — the worker logs and the scheduler state for this source — and fix it using" + " supported Olympus commands. Do not ask me to edit files, configuration, or code."
   };
 }
-function switchedOff(source) {
+function stoppedLanes(source, now) {
+  const phases = dashboardSourceProgress(source, { now }).phases;
+  const stopped = new Set(phases.filter((phase) => phase.state === "stalled").map((phase) => phase.id));
   const drain = source.ingestion_health.drain_state;
-  if (drain === "held" || drain === "disabled")
+  const extraction = phases.find((phase) => phase.id === "extraction");
+  if ((drain === "held" || drain === "disabled") && extraction?.state !== "done" && source.coverage.indexed_items > 0) {
+    stopped.add("extraction");
+  }
+  const embedding = phases.find((phase) => phase.id === "embedding");
+  if (source.embedding_lane_state === "embedding_lane_disabled" && embedding?.state !== "done" && (source.embedding_backlog?.missing_chunks ?? 0) > 0) {
+    stopped.add("embedding");
+  }
+  return phases.map((phase) => phase.id).filter((id) => stopped.has(id));
+}
+function switchedOff(source, stalledPhases) {
+  const stalled = new Set(stalledPhases);
+  const drain = source.ingestion_health.drain_state;
+  if (stalled.has("extraction") && (drain === "held" || drain === "disabled"))
     return true;
-  return source.embedding_lane_state === "embedding_lane_disabled";
+  return stalled.has("embedding") && source.embedding_lane_state === "embedding_lane_disabled";
 }
 function hasOpenWork(source) {
   if (source.ingestion_health.stuck_count > 0)
@@ -65681,15 +66549,24 @@ function hasOpenWork(source) {
   const progress = dashboardSourceProgress(source);
   return progress.phases.length > 0 && !progress.settled;
 }
-function idleEvidenceHours(source) {
+function idleEvidenceHours(source, now) {
   const candidates = [
     source.freshness.stale ? source.freshness.hours : undefined,
     source.ingestion_health.last_drain_activity_hours,
-    source.ingestion_health.oldest_stuck_age_hours
+    source.ingestion_health.oldest_stuck_age_hours,
+    firstSyncIdleHours(source, now)
   ].filter((value) => typeof value === "number" && Number.isFinite(value) && value >= 0);
   if (candidates.length === 0)
     return;
   return Math.max(...candidates);
+}
+function firstSyncIdleHours(source, now) {
+  if (dashboardHasRunBefore(source))
+    return;
+  const since = dashboardFirstSyncClock(source, now);
+  if (since === undefined)
+    return;
+  return (now.getTime() - since) / 3600000;
 }
 function graceHours(source) {
   const threshold = source.freshness.threshold_hours;
@@ -65705,11 +66582,13 @@ function isSelfHealing(source, now) {
   const aheadHours = (nextAt - now.getTime()) / 3600000;
   return aheadHours <= graceHours(source);
 }
-function governingCondition(source) {
+function governingCondition(source, stalledPhases) {
+  const stalled = new Set(stalledPhases);
   const drain = source.ingestion_health.drain_state;
-  if (drain === "held" || drain === "disabled")
+  if (stalled.has("extraction") && (drain === "held" || drain === "disabled")) {
     return DASHBOARD_DRAIN_CONSEQUENCES[drain];
-  if (source.embedding_lane_state === "embedding_lane_disabled") {
+  }
+  if (stalled.has("embedding") && source.embedding_lane_state === "embedding_lane_disabled") {
     return "the embedding lane is switched off, so no new chunks are being embedded";
   }
   const schedule = source.schedule;
@@ -65719,6 +66598,9 @@ function governingCondition(source) {
   const errorKind = schedule && schedule.consecutive_failures > 0 ? schedule.last_error_kind : undefined;
   if (errorKind)
     return DASHBOARD_GUARD_CONSEQUENCES[errorKind] ?? errorKind;
+  if (stalled.has("metadata_sync") && !dashboardHasRunBefore(source)) {
+    return "the first sync has not run yet";
+  }
   return "nothing has reported a reason";
 }
 var TERMINAL_EXTRACTION_REVIEW_KEY = "extraction_failed", DEFAULT_GRACE_HOURS = 24, HEALTHY_CONNECTION_STATES, DASHBOARD_GUARD_CONSEQUENCES, DASHBOARD_DRAIN_CONSEQUENCES;
@@ -67335,7 +68217,7 @@ var init_http = __esm(() => {
 // src/workers/embedding-ledger.ts
 import { homedir as homedir32 } from "node:os";
 import { mkdir as mkdir4, open as open4, readFile as readFile8 } from "node:fs/promises";
-import { dirname as dirname28, join as join42 } from "node:path";
+import { dirname as dirname29, join as join42 } from "node:path";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
@@ -67693,7 +68575,7 @@ var init_embedding_ledger2 = __esm(() => {
 
 // src/workers/dashboard/embedding-runtime.ts
 import { mkdirSync as mkdirSync24, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname29, join as join43 } from "node:path";
+import { dirname as dirname30, join as join43 } from "node:path";
 import { homedir as homedir33 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
@@ -67740,7 +68622,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync8(path, { force: true });
     return;
   }
-  mkdirSync24(dirname29(path), { recursive: true });
+  mkdirSync24(dirname30(path), { recursive: true });
   writeFileSync10(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -68616,8 +69498,8 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync11, copyFileSync, existsSync as existsSync23, lstatSync as lstatSync13, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
-import { dirname as dirname30 } from "node:path";
+import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync23, lstatSync as lstatSync13, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
+import { dirname as dirname31 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const sources = options.sources.map((source) => {
@@ -68728,9 +69610,9 @@ function writeSourceIngestionExclusionsFile(options) {
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync11(backupPath, 384);
+    chmodSync12(backupPath, 384);
   } else {
-    mkdirSync25(dirname30(path), { recursive: true });
+    mkdirSync25(dirname31(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -69513,8 +70395,12 @@ class GogcliEmailConnectorStub {
     };
   }
 }
-function dashboardSourceSyncNotSupportedError(source) {
-  return new EmailSourceWorkerError(501, "source_sync_not_supported", `Private source worker does not support Sync now for ${source}.`);
+function dashboardSourceSyncNotSupportedError(source, reason = "no_lane") {
+  const label = dashboardConnectSourceLabel(source);
+  return reason === "scheduler_disabled" ? new EmailSourceWorkerError(501, "source_sync_not_supported", `Sync now cannot run for ${label}: the background scheduler is switched off on this worker, so no source can be synced.`, "Re-run olympus setup, or restore OLYMPUS_WORKER_SCHEDULER_ENABLED=true, then run olympus worker restart.") : new EmailSourceWorkerError(501, "source_sync_not_supported", `Sync now cannot run for ${label}: this worker has no sync lane for it, so ${label} only updates on its own schedule.`, "Check olympus doctor and the worker log for why this lane was not built.");
+}
+function dashboardConnectSourceLabel(source) {
+  return DASHBOARD_SUPPORTED_SOURCES.find((definition) => (definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key") && definition.connect_action.source === source)?.label ?? source;
 }
 function createEmailSourceWorker(options = {}) {
   const connector = options.connector ?? new GogcliEmailConnectorStub;
@@ -69816,6 +70702,7 @@ function createEmailSourceWorker(options = {}) {
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
             ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
+            syncNowAvailable: dashboardSourceSyncAvailable,
             ...sensitivityMap ? { sensitivityMap } : {}
           });
           assertNoRawEmailFields(view);
@@ -70759,7 +71646,7 @@ function createEmailSourceWorker(options = {}) {
     if (sourceDashboard?.triggerSourceSync) {
       return sourceDashboard.triggerSourceSync(request);
     }
-    throw dashboardSourceSyncNotSupportedError(request.source);
+    throw dashboardSourceSyncNotSupportedError(request.source, sourceScheduler === undefined ? "scheduler_disabled" : "no_lane");
   }
   async function refreshDashboardSchedulerSources() {
     if (!sourceScheduler || !sourceDashboard?.refreshSchedulerSources)
@@ -70807,22 +71694,28 @@ function createEmailSourceWorker(options = {}) {
       console.warn(`Olympus post-connect first sync did not start for ${request.source}: ${scrubSourceWorkerLogMessage(error2 instanceof Error ? error2.message : error2)}`);
     }
   }
+  function dashboardSyncHookServes(source) {
+    if (sourceDashboard?.triggerSourceSync === undefined)
+      return false;
+    const served = sourceDashboard.triggerSourceSyncSources;
+    return served === undefined || served.includes(source);
+  }
   function dashboardSourceSyncAvailable(source) {
     if (source === "gmail") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "gmail.email" || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true || sourceDashboard?.triggerSourceSync !== undefined;
+      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "gmail.email" || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     if (source === "google-drive") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "google_drive.docs" || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true || sourceDashboard?.triggerSourceSync !== undefined;
+      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "google_drive.docs" || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     if (source === "readwise")
-      return readwiseConnectorStoreSync !== undefined || sourceDashboard?.triggerSourceSync !== undefined;
+      return readwiseConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
     if (source === "x")
-      return xBookmarksConnectorStoreSync !== undefined || sourceDashboard?.triggerSourceSync !== undefined;
+      return xBookmarksConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
     if (source === "dropbox") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "dropbox.files" || candidate.corpus_id === DROPBOX_FILES_CORPUS_ID) === true || sourceDashboard?.triggerSourceSync !== undefined;
+      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "dropbox.files" || candidate.corpus_id === DROPBOX_FILES_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     return false;
   }
@@ -73271,15 +74164,17 @@ var init_credential_degradation = __esm(() => {
 // src/workers/source-scheduler.ts
 import { createHash as createHash34 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
-  const selected = new Set(input.selectedSourceIds);
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
+  const unrestricted = input.selectedSourceIds.length === 0;
+  const selected = unrestricted ? constructedIds : new Set(input.selectedSourceIds);
   const selectedNotConstructed = [...selected].filter((sourceId) => !constructedIds.has(sourceId));
   const constructedNotSelected = [...constructedIds].filter((sourceId) => !selected.has(sourceId));
   const summary = [
     `[source-scheduler] constructed=${constructed.length}`,
     `skipped=${input.decisions.length - constructed.length}`,
     `selected=${selected.size}`,
+    ...unrestricted ? ["selection=no_allowlist_all_constructed_selected"] : [],
     ...selectedNotConstructed.length > 0 ? [`selected_not_constructed=${selectedNotConstructed.join(",")}`] : [],
     ...constructedNotSelected.length > 0 ? [`constructed_not_selected=${constructedNotSelected.join(",")}`] : []
   ].join(" ");
@@ -73812,7 +74707,7 @@ function createSourceSchedulerFromConfig(input) {
     errorBackoffMs: input.config.worker.scheduler.errorBackoffSeconds * 1000,
     maxTransientRetries: input.config.worker.scheduler.maxTransientRetries,
     sources: input.sources,
-    allowedSourceIds: input.config.worker.scheduler.sourceIds,
+    ...input.config.worker.scheduler.sourceIds.length > 0 ? { allowedSourceIds: input.config.worker.scheduler.sourceIds } : {},
     ...input.afterTick ? { afterTick: input.afterTick } : {},
     ...input.config.worker.scheduler.enabled ? { stateStore: input.stateStore ?? new LocalSourceSchedulerStateStore } : {}
   });
@@ -76021,6 +76916,7 @@ async function main() {
         ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
         enforceConnectedSourceReads: true,
         refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env)).sources,
+        triggerSourceSyncSources: ["dropbox"],
         triggerSourceSync: async (request) => {
           if (request.source !== "dropbox") {
             throw dashboardSourceSyncNotSupportedError(request.source);
@@ -76100,6 +76996,9 @@ async function main() {
       console.log(line);
     }
     console.log(`In-process source scheduler enabled for ${schedulerSources.length} constructed source(s); ` + `${olympusConfig.worker.scheduler.sourceIds.length} selected.`);
+    if (schedulerSources.length === 0) {
+      console.log("[source-scheduler] idle: no source is connected yet; " + "the scheduler is running and will adopt each source as you connect it in the dashboard.");
+    }
   }
   console.log(describeSovereigntyPolicy(sovereigntyEngine));
   console.log(connector ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, "OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER") ? " and retrieval planning" : ""}.` : "Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.");
@@ -76589,15 +77488,16 @@ init_whatsapp();
 init_sovereignty();
 init_pairing_session_paths();
 init_public_source_capabilities();
+init_worker_service();
 import { createHash as createHash22, randomUUID as randomUUID10 } from "node:crypto";
 import {
-  closeSync as closeSync3,
+  closeSync as closeSync4,
   existsSync as existsSync14,
   fsyncSync as fsyncSync3,
   lstatSync as lstatSync7,
   mkdirSync as mkdirSync13,
-  openSync as openSync3,
-  readSync,
+  openSync as openSync4,
+  readSync as readSync2,
   readdirSync as readdirSync3,
   readFileSync as readFileSync15,
   renameSync as renameSync5,
@@ -76605,606 +77505,8 @@ import {
   statSync as statSync7
 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
-import { basename as basename4, dirname as dirname15, join as join24, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname16, join as join24, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
-
-// src/core/worker-service.ts
-init_atomic_file();
-init_operation_error();
-init_worker_auth();
-import { chmodSync as chmodSync6, existsSync as existsSync13, lstatSync as lstatSync6, mkdirSync as mkdirSync12, readFileSync as readFileSync14, statSync as statSync6 } from "node:fs";
-import { homedir as homedir20, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname14, isAbsolute as isAbsolute2, join as join23, relative as relative4, sep as sep4 } from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
-function installWorkerService(options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const envPath = options.envPath ?? paths.envPath;
-  validateManagedPath(envPath, "worker environment");
-  const unit = platform2 === "darwin" ? renderLaunchdWorkerUnit({ ...options, envPath, paths }) : renderSystemdWorkerUnit({ ...options, envPath, paths });
-  let wroteUnit = false;
-  let wroteEnv = false;
-  if (!options.dryRun) {
-    ensurePrivateRootDirectorySync(homeDir);
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    assertManagedParentSafety(homeDir, paths.logPath, "worker log");
-    if (pathIsWithin(homeDir, envPath))
-      assertManagedParentSafety(homeDir, envPath, "worker environment");
-    ensurePrivateDirectoryTreeSync(homeDir, dirname14(paths.unitPath));
-    ensurePrivateDirectoryTreeSync(homeDir, dirname14(paths.logPath));
-    if (pathIsWithin(homeDir, envPath))
-      ensurePrivateDirectoryTreeSync(homeDir, dirname14(envPath));
-    else
-      mkdirSync12(dirname14(envPath), { recursive: true });
-    wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, "worker unit");
-    wroteEnv = reconcileWorkerEnv(envPath, options);
-  }
-  return {
-    ok: true,
-    platform: platform2,
-    unit_path: paths.unitPath,
-    env_path: envPath,
-    log_path: paths.logPath,
-    error_log_path: paths.errorLogPath,
-    wrote_unit: wroteUnit,
-    wrote_env: wroteEnv,
-    unit,
-    commands: {
-      install: workerServiceCommand(platform2, "install", paths.unitPath),
-      status: workerServiceCommand(platform2, "status", paths.unitPath),
-      start: workerServiceCommand(platform2, "start", paths.unitPath),
-      stop: workerServiceCommand(platform2, "stop", paths.unitPath),
-      restart: workerServiceCommand(platform2, "restart", paths.unitPath),
-      uninstall: platform2 === "darwin" ? workerServiceCommand(platform2, "stop", paths.unitPath) : ["systemctl", "--user", "disable", "--now", "olympus-worker.service"]
-    }
-  };
-}
-function runWorkerServiceAction(action, options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const exec = options.exec ?? defaultWorkerServiceExec;
-  if (platform2 === "darwin" && action === "install") {
-    return runDarwinWorkerServiceInstall(paths, exec);
-  }
-  if (platform2 === "linux" && action === "install") {
-    return runLinuxWorkerServiceInstall(paths, exec);
-  }
-  if (platform2 === "darwin" && (action === "start" || action === "restart")) {
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    return runDarwinWorkerServiceActivation(action, paths, exec);
-  }
-  if (platform2 === "darwin" && action === "stop") {
-    return runDarwinWorkerServiceStop(paths, exec);
-  }
-  if (action === "uninstall") {
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    return platform2 === "darwin" ? runDarwinWorkerServiceUninstall(paths, exec) : runLinuxWorkerServiceUninstall(paths, exec);
-  }
-  const command = workerServiceCommand(platform2, action, paths.unitPath);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError(action, result);
-  }
-  return {
-    ok: true,
-    command,
-    stdout: result.stdout,
-    stderr: result.stderr
-  };
-}
-function inspectWorkerService(options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const envPath = options.envPath ?? paths.envPath;
-  const command = workerServiceCommand(platform2, "status", paths.unitPath);
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  const unitPresent = isManagedRegularFile(paths.unitPath);
-  const unitPathPresent = existsSync13(paths.unitPath);
-  const envPathPresent = existsSync13(envPath);
-  const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
-  const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
-  const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform2, result, unitPresent);
-  return {
-    platform: platform2,
-    state,
-    unit_present: unitPresent,
-    env_present: isManagedRegularFile(envPath),
-    command,
-    exit_code: result.status,
-    detail: nonRegularDetail ?? boundedServiceDetail(result)
-  };
-}
-function runDarwinWorkerServiceInstall(paths, exec) {
-  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
-  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const installCommand = workerServiceCommand("darwin", "install", paths.unitPath);
-  const status = runWorkerServiceCommand(statusCommand, exec);
-  const outputs = [];
-  if (status.status === 0) {
-    outputs.push(status);
-    const stopped = runWorkerServiceCommand(stopCommand, exec);
-    outputs.push(stopped);
-    if (stopped.status !== 0) {
-      throwWorkerServiceActionError("install", stopped, "failed to unload the existing macOS worker service before reinstalling");
-    }
-  }
-  const installed = runWorkerServiceCommand(installCommand, exec);
-  outputs.push(installed);
-  if (installed.status !== 0) {
-    throwWorkerServiceActionError("install", installed);
-  }
-  return {
-    ok: true,
-    command: installCommand,
-    stdout: outputs.map((result) => result.stdout).join(""),
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runLinuxWorkerServiceInstall(paths, exec) {
-  const installCommand = workerServiceCommand("linux", "install", paths.unitPath);
-  const reloaded = reloadLinuxWorkerServiceManager({ exec });
-  const installed = runWorkerServiceCommand(installCommand, exec);
-  if (installed.status !== 0) {
-    throwWorkerServiceActionError("install", installed);
-  }
-  return {
-    ok: true,
-    command: installCommand,
-    stdout: `${reloaded.stdout}${installed.stdout}`,
-    stderr: `${reloaded.stderr}${installed.stderr}`
-  };
-}
-function reloadLinuxWorkerServiceManager(options = {}) {
-  const command = ["systemctl", "--user", "daemon-reload"];
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError("install", result, "failed to reload the user systemd manager after changing the worker unit");
-  }
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function resetFailedLinuxWorkerService(options = {}) {
-  const command = ["systemctl", "--user", "reset-failed", "olympus-worker.service"];
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError("stop", result, "failed to clear the latched systemd failure for the managed worker unit");
-  }
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceActivation(action, paths, exec) {
-  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
-  const unloaded = status.status === 3 || status.status === 113;
-  if (!unloaded && status.status !== 0)
-    throwWorkerServiceActionError(action, status);
-  if (unloaded && !isManagedRegularFile(paths.unitPath)) {
-    throwWorkerServiceActionError(action, status, "the managed macOS worker unit is not installed");
-  }
-  const command = unloaded ? workerServiceCommand("darwin", "install", paths.unitPath) : workerServiceCommand("darwin", action, paths.unitPath);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0)
-    throwWorkerServiceActionError(action, result);
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceStop(paths, exec) {
-  const command = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
-  if (status.status === 3 || status.status === 113) {
-    return { ok: true, command, stdout: "", stderr: status.stderr };
-  }
-  if (status.status !== 0)
-    throwWorkerServiceActionError("stop", status);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0)
-    throwWorkerServiceActionError("stop", result);
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceUninstall(paths, exec) {
-  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
-  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const status = runWorkerServiceCommand(statusCommand, exec);
-  const outputs = [status];
-  if (status.status === 0) {
-    const stopped = runWorkerServiceCommand(stopCommand, exec);
-    outputs.push(stopped);
-    if (stopped.status !== 0)
-      throwWorkerServiceActionError("uninstall", stopped);
-  } else if (status.status !== 3 && status.status !== 113 && isManagedRegularFile(paths.unitPath)) {
-    throwWorkerServiceActionError("uninstall", status, "could not determine whether the macOS worker service was loaded");
-  }
-  const removed = removeManagedFile(paths.unitPath, "worker unit");
-  return {
-    ok: true,
-    command: stopCommand,
-    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
-` : `worker unit already absent
-`}`,
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runLinuxWorkerServiceUninstall(paths, exec) {
-  const disableCommand = ["systemctl", "--user", "disable", "--now", "olympus-worker.service"];
-  const reloadCommand = ["systemctl", "--user", "daemon-reload"];
-  const outputs = [];
-  const unitPresent = isManagedRegularFile(paths.unitPath);
-  const status = runWorkerServiceCommand(workerServiceCommand("linux", "status", paths.unitPath), exec);
-  if (unitPresent || classifyWorkerServiceState("linux", status, unitPresent) === "active") {
-    const disabled = runWorkerServiceCommand(disableCommand, exec);
-    outputs.push(disabled);
-    if (disabled.status !== 0)
-      throwWorkerServiceActionError("uninstall", disabled);
-  }
-  const removed = removeManagedFile(paths.unitPath, "worker unit");
-  const reloaded = runWorkerServiceCommand(reloadCommand, exec);
-  outputs.push(reloaded);
-  if (reloaded.status !== 0)
-    throwWorkerServiceActionError("uninstall", reloaded);
-  return {
-    ok: true,
-    command: disableCommand,
-    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
-` : `worker unit already absent
-`}`,
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runWorkerServiceCommand(command, exec) {
-  const [cmd, ...args] = command;
-  return exec(cmd, args);
-}
-function throwWorkerServiceActionError(action, result, detail) {
-  throw new OperationError("config_error", `olympus worker ${action} failed with exit code ${result.status ?? "unknown"}.`, detail ?? (result.stderr.trim() || result.stdout.trim() || undefined));
-}
-function classifyWorkerServiceState(platform2, result, unitPresent) {
-  const output = `${result.stdout}
-${result.stderr}`.trim().toLowerCase();
-  if (platform2 === "linux") {
-    const status = result.stdout.trim().toLowerCase();
-    if (result.status === 0 && status === "active")
-      return "active";
-    if (status === "inactive")
-      return unitPresent ? "inactive" : "missing";
-    if (status === "failed")
-      return "failed";
-    if (!unitPresent && (result.status === 3 || result.status === 4))
-      return "missing";
-    return "unknown";
-  }
-  if (result.status === 0) {
-    if (/\bstate\s*=\s*running\b/.test(output))
-      return "active";
-    const lastExit = output.match(/\blast exit code\s*=\s*(-?\d+)\b/);
-    if (lastExit && Number(lastExit[1]) !== 0)
-      return "failed";
-    return "inactive";
-  }
-  if ((result.status === 3 || result.status === 113) && !unitPresent)
-    return "missing";
-  if (result.status === 3 || result.status === 113)
-    return "inactive";
-  return "unknown";
-}
-function boundedServiceDetail(result) {
-  const text = (result.stderr.trim() || result.stdout.trim() || `exit ${result.status ?? "unknown"}`).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  return text.slice(0, 240);
-}
-function defaultWorkerServiceExec(command, args) {
-  const result = spawnSync2(command, args, { encoding: "utf8" });
-  return {
-    status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr
-  };
-}
-function workerServicePaths(platform2, homeDir) {
-  homeDir = validatedAbsolutePath(homeDir, "home directory");
-  if (platform2 === "darwin") {
-    const logDir = join23(homeDir, "Library", "Logs", "Olympus");
-    return {
-      label: "com.openclaw.olympus.worker",
-      unitPath: join23(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join23(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join23(logDir, "worker.log"),
-      errorLogPath: join23(logDir, "worker.err")
-    };
-  }
-  const stateDir = join23(homeDir, ".local", "state", "olympus", "worker");
-  return {
-    label: "olympus-worker",
-    unitPath: join23(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join23(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join23(stateDir, "worker.log"),
-    errorLogPath: join23(stateDir, "worker.err")
-  };
-}
-function renderLaunchdWorkerUnit(input) {
-  const command = workerServiceExecCommand(input);
-  const workingDirectory = input.workingDirectory ?? process.cwd();
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${input.paths.label}</string>
-  <key>WorkingDirectory</key>
-  <string>${escapeXml(workingDirectory)}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>${escapeXml(launchdEnvSourcingExec(input.envPath, command))}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-  <key>ThrottleInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>${escapeXml(input.paths.logPath)}</string>
-  <key>StandardErrorPath</key>
-  <string>${escapeXml(input.paths.errorLogPath)}</string>
-</dict>
-</plist>
-`;
-}
-function renderSystemdWorkerUnit(input) {
-  const command = workerServiceExecCommand(input);
-  const workingDirectory = input.workingDirectory ?? process.cwd();
-  return `[Unit]
-Description=Olympus source worker
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${workingDirectory}
-EnvironmentFile=-${input.envPath}
-ExecStart=${command.map(systemdExecArg).join(" ")}
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:${input.paths.logPath}
-StandardError=append:${input.paths.errorLogPath}
-
-[Install]
-WantedBy=default.target
-`;
-}
-function workerServiceCommand(platform2, action, unitPath) {
-  if (platform2 === "darwin") {
-    const uid = process.getuid?.() ?? 501;
-    const guiTarget = `gui/${uid}`;
-    const target = `${guiTarget}/com.openclaw.olympus.worker`;
-    if (action === "install")
-      return ["launchctl", "bootstrap", guiTarget, unitPath];
-    if (action === "status")
-      return ["launchctl", "print", target];
-    if (action === "start")
-      return ["launchctl", "kickstart", target];
-    if (action === "restart")
-      return ["launchctl", "kickstart", "-k", target];
-    return ["launchctl", "bootout", target];
-  }
-  if (action === "install")
-    return ["systemctl", "--user", "enable", "--now", "olympus-worker.service"];
-  if (action === "status")
-    return ["systemctl", "--user", "is-active", "olympus-worker.service"];
-  return ["systemctl", "--user", action, "olympus-worker.service"];
-}
-function defaultWorkerEnv(options) {
-  const trimmedAuthToken = options.authToken?.trim();
-  const authToken = isWorkerAuthTokenPlaceholder(trimmedAuthToken) ? undefined : trimmedAuthToken;
-  const bunBin = resolveBunBin(options);
-  return [
-    "# Olympus source worker environment.",
-    `PATH=${defaultWorkerPath(bunBin)}`,
-    `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
-    `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? "true" : "false"}`,
-    "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true",
-    authToken ? `OLYMPUS_WORKER_AUTH_TOKEN=${authToken}` : "# OLYMPUS_WORKER_AUTH_TOKEN=replace-with-generated-token",
-    ""
-  ].join(`
-`);
-}
-function launchdEnvSourcingExec(envPath, command) {
-  const source = `set -a; [ -f ${shellQuote(envPath)} ] && . ${shellQuote(envPath)}; set +a;`;
-  return `${source} exec ${command.map(shellQuote).join(" ")}`;
-}
-function shellQuote(value) {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-function workerServiceExecCommand(options) {
-  const bunBin = resolveBunBin(options);
-  return [bunBin, defaultOlympusCliJs(options), "__worker-service-run"];
-}
-function nextWorkerEnvAuthToken(text, authToken) {
-  const token = authToken?.trim();
-  if (!token || isWorkerAuthTokenPlaceholder(token))
-    return text;
-  const existing = text.match(/^OLYMPUS_WORKER_AUTH_TOKEN=(.+)$/m)?.[1];
-  if (existing && !isWorkerAuthTokenPlaceholder(existing))
-    return text;
-  return /^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m.test(text) ? text.replace(/^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m, `OLYMPUS_WORKER_AUTH_TOKEN=${token}`) : `${text.replace(/\n?$/, `
-`)}OLYMPUS_WORKER_AUTH_TOKEN=${token}
-`;
-}
-function nextWorkerEnvPath(text, options) {
-  const bunBin = resolveBunBin(options);
-  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
-  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`) : `${text.replace(/\n?$/, `
-`)}PATH=${desiredPath}
-`;
-}
-function reconcileWorkerEnv(envPath, options) {
-  mkdirSync12(dirname14(envPath), { recursive: true });
-  if (!existsSync13(envPath)) {
-    writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
-    return true;
-  }
-  assertManagedRegularFile(envPath, "worker environment");
-  const current = readFileSync14(envPath, "utf8");
-  let next = nextWorkerEnvAuthToken(current, options.authToken);
-  next = nextWorkerEnvPath(next, options);
-  if (!/^OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=/m.test(next)) {
-    next = `${next.replace(/\n?$/, `
-`)}OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
-`;
-  }
-  const mode = statSync6(envPath).mode & 511;
-  if (next !== current) {
-    writePrivateFileAtomicSync(envPath, next);
-    return true;
-  }
-  if (mode !== 384) {
-    chmodSync6(envPath, 384);
-    return true;
-  }
-  return false;
-}
-function normalizePlatform(value) {
-  if (value === "darwin" || value === "linux")
-    return value;
-  throw new OperationError("invalid_params", "olympus worker install supports macOS launchd and Linux user-systemd.");
-}
-function resolveBunBin(options) {
-  if (options.bunBin)
-    return validateBunBin(validatedAbsolutePath(options.bunBin, "Bun executable"));
-  const runtimePath = process.execPath;
-  if (runtimePath && isAbsolute2(runtimePath) && isBunExecutableName(runtimePath)) {
-    return validateBunBin(runtimePath);
-  }
-  const bunWhich = typeof Bun !== "undefined" ? Bun.which("bun") : null;
-  if (!bunWhich || !isAbsolute2(bunWhich)) {
-    throw new OperationError("config_error", "Could not resolve an absolute Bun executable path for the worker service.");
-  }
-  return validateBunBin(bunWhich);
-}
-function validateBunBin(bunBin) {
-  if (!isBunExecutableName(bunBin)) {
-    throw new OperationError("config_error", `Could not validate the resolved Bun executable path: ${bunBin}`);
-  }
-  try {
-    if (!statSync6(bunBin).isFile()) {
-      throw new OperationError("config_error", `Resolved Bun path is not a file: ${bunBin}`);
-    }
-  } catch (error) {
-    if (error instanceof OperationError)
-      throw error;
-    throw new OperationError("config_error", `Resolved Bun executable does not exist: ${bunBin}`);
-  }
-  return bunBin;
-}
-function isBunExecutableName(path) {
-  const base = basename3(path).toLowerCase();
-  return base === "bun" || base === "bun.exe";
-}
-function validatedAbsolutePath(value, label) {
-  const trimmed2 = value.trim();
-  if (trimmed2 && isAbsolute2(trimmed2) && !/[\0\r\n]/.test(trimmed2))
-    return trimmed2;
-  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
-}
-function defaultOlympusCliJs(options) {
-  if (options.workingDirectory) {
-    return join23(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
-  }
-  const invoked = process.argv[1]?.trim();
-  if (invoked && !invoked.startsWith("-") && basename3(invoked) === "cli.js") {
-    return isAbsolute2(invoked) ? invoked : join23(process.cwd(), invoked);
-  }
-  return join23(process.cwd(), "dist", "cli.js");
-}
-function defaultWorkerPath(bunBin, existingPath) {
-  const entries = [
-    dirname14(bunBin),
-    ...existingPath ? existingPath.split(":") : [],
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin"
-  ].map((entry) => entry.trim()).filter(Boolean);
-  return Array.from(new Set(entries)).join(":");
-}
-function systemdExecArg(value) {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value))
-    return value;
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
-}
-function escapeXml(value) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
-function validateManagedPath(path, label) {
-  validatedAbsolutePath(path, label);
-}
-function pathIsWithin(root, path) {
-  const suffix = relative4(root, path);
-  return suffix === "" || !isAbsolute2(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep4}`);
-}
-function assertManagedParentSafety(homeDir, path, label) {
-  try {
-    assertManagedPathParentsSync(homeDir, path, label);
-  } catch (error) {
-    throw new OperationError("config_error", `Refusing unsafe managed ${label} parent path: ${path}`, error instanceof Error ? error.message : undefined);
-  }
-}
-function managedParentSafetyDetail(homeDir, unitPath, envPath) {
-  try {
-    assertManagedPathParentsSync(homeDir, unitPath, "worker unit");
-    if (pathIsWithin(homeDir, envPath)) {
-      assertManagedPathParentsSync(homeDir, envPath, "worker environment");
-    }
-    return;
-  } catch {
-    return "managed worker path has an unsafe parent directory component";
-  }
-}
-function isManagedRegularFile(path) {
-  try {
-    return lstatSync6(path).isFile();
-  } catch {
-    return false;
-  }
-}
-function assertManagedRegularFile(path, label) {
-  let stats;
-  try {
-    stats = lstatSync6(path);
-  } catch {
-    throw new OperationError("config_error", `Could not inspect the managed ${label} path: ${path}`);
-  }
-  if (!stats.isFile()) {
-    throw new OperationError("config_error", `Refusing a non-regular managed ${label} path: ${path}`);
-  }
-}
-function writeManagedFileAtomicIfChanged(path, text, label) {
-  validateManagedPath(path, label);
-  if (existsSync13(path)) {
-    assertManagedRegularFile(path, label);
-    if (readFileSync14(path, "utf8") === text) {
-      if ((statSync6(path).mode & 511) !== 384) {
-        chmodSync6(path, 384);
-        return true;
-      }
-      return false;
-    }
-  }
-  writePrivateFileAtomicSync(path, text);
-  return true;
-}
-function removeManagedFile(path, label) {
-  validateManagedPath(path, label);
-  if (!existsSync13(path))
-    return false;
-  assertManagedRegularFile(path, label);
-  return removeFileDurablySync(path);
-}
-
-// src/data-lifecycle.ts
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
 var DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
@@ -77617,7 +77919,7 @@ function exportSqliteStore(options) {
       rmSync4(staging, { force: true });
       throw error;
     }
-    syncDirectorySync2(dirname15(destination));
+    syncDirectorySync2(dirname16(destination));
     files.push(destination);
     artifacts.push({
       ...fileArtifact(exportRoot, destination, sourceId, role),
@@ -77686,17 +77988,17 @@ function fileArtifact(exportRoot, path, sourceId, role) {
 }
 function sha256File(path) {
   const hash = createHash22("sha256");
-  const descriptor = openSync3(path, "r");
+  const descriptor = openSync4(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
     for (;; ) {
-      const bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+      const bytesRead = readSync2(descriptor, buffer, 0, buffer.length, null);
       if (bytesRead === 0)
         break;
       hash.update(buffer.subarray(0, bytesRead));
     }
   } finally {
-    closeSync3(descriptor);
+    closeSync4(descriptor);
   }
   return hash.digest("hex");
 }
@@ -77726,17 +78028,17 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
     return false;
   }
   const parsed = JSON.parse(readFileSync15(source, "utf8"));
-  mkdirSync13(dirname15(destination), { recursive: true });
+  mkdirSync13(dirname16(destination), { recursive: true });
   writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
   files.push(destination);
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current = dirname15(resolve5(destination));
+  let current = dirname16(resolve5(destination));
   for (;; ) {
     if (existsSync14(current))
       return current;
-    const parent = dirname15(current);
+    const parent = dirname16(current);
     if (parent === current)
       return current;
     current = parent;
@@ -77749,29 +78051,29 @@ function makeDurableDirectory(path, boundary) {
     syncDirectorySync2(current);
     if (current === boundary)
       return;
-    const parent = dirname15(current);
+    const parent = dirname16(current);
     if (parent === current)
       return;
     current = parent;
   }
 }
 function syncFileSync(path) {
-  const descriptor = openSync3(path, "r");
+  const descriptor = openSync4(path, "r");
   try {
     fsyncSync3(descriptor);
   } finally {
-    closeSync3(descriptor);
+    closeSync4(descriptor);
   }
 }
 function syncDirectorySync2(path) {
-  const descriptor = openSync3(path, "r");
+  const descriptor = openSync4(path, "r");
   try {
     fsyncSync3(descriptor);
   } catch (error) {
     if (!isUnsupportedDirectorySyncError(error))
       throw error;
   } finally {
-    closeSync3(descriptor);
+    closeSync4(descriptor);
   }
 }
 function sanitizeForExport(value) {
@@ -77937,7 +78239,7 @@ import { createHash as createHash26 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync21, lstatSync as lstatSync12, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
-import { dirname as dirname23, isAbsolute as isAbsolute5, join as join34 } from "node:path";
+import { dirname as dirname24, isAbsolute as isAbsolute5, join as join34 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -77945,13 +78247,13 @@ init_operation_error();
 import { createHash as createHash25, randomUUID as randomUUID12 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import {
-  chmodSync as chmodSync8,
-  closeSync as closeSync5,
+  chmodSync as chmodSync9,
+  closeSync as closeSync6,
   existsSync as existsSync19,
   fsyncSync as fsyncSync4,
   lstatSync as lstatSync10,
   mkdtempSync,
-  openSync as openSync5,
+  openSync as openSync6,
   readFileSync as readFileSync21,
   readdirSync as readdirSync4,
   renameSync as renameSync6,
@@ -77973,12 +78275,12 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactSha256 = createHash25("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join32(tmpdir2(), ".olympus-artifact-snapshot-"));
   const artifactPath = join32(snapshotDir, "artifact.tgz");
-  const descriptor = openSync5(artifactPath, "wx", 384);
+  const descriptor = openSync6(artifactPath, "wx", 384);
   try {
     writeFileSync8(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
-    closeSync5(descriptor);
+    closeSync6(descriptor);
   }
   syncDirectorySync(snapshotDir);
   try {
@@ -78191,12 +78493,12 @@ function makeVersionTreeReadOnly(root) {
     const path = join32(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
-      chmodSync8(path, 365);
+      chmodSync9(path, 365);
     } else {
-      chmodSync8(path, 292);
+      chmodSync9(path, 292);
     }
   }
-  chmodSync8(root, 365);
+  chmodSync9(root, 365);
   if (!statSync8(root).isDirectory())
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
 }
@@ -78207,11 +78509,11 @@ function syncVersionTree(root) {
       syncVersionTree(path);
       continue;
     }
-    const descriptor = openSync5(path, "r");
+    const descriptor = openSync6(path, "r");
     try {
       fsyncSync4(descriptor);
     } finally {
-      closeSync5(descriptor);
+      closeSync6(descriptor);
     }
   }
   syncDirectorySync(root);
@@ -78262,7 +78564,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir) {
   }
 }
 function removeStagingTree(root) {
-  chmodSync8(root, 448);
+  chmodSync9(root, 448);
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
     if (entry.isDirectory())
       removeStagingTree(join32(root, entry.name));
@@ -78363,6 +78665,7 @@ function isAlreadyExists(error) {
 init_operation_error();
 init_public_source_capabilities();
 init_worker_auth();
+init_worker_service();
 var OLYMPUS_LIFECYCLE_SCHEMA_VERSION = 1;
 function runWorkerLifecycle(action, options = {}) {
   const platform2 = normalizeLifecyclePlatform(options.platform ?? osPlatform2());
@@ -78514,12 +78817,12 @@ function installOrUpgradeLifecycle(action, options) {
     updateTransactionPhase(effective, "qualifying");
     const firstService = inspectWorkerService(serviceActionOptions(effective));
     if (firstService.state !== "active") {
-      throw new OperationError("config_error", `Lifecycle activation reported success but worker status is ${firstService.state}.`);
+      throw activationFailure(`Lifecycle activation reported success but worker status is ${firstService.state}.`, effective);
     }
     waitForActivationSettle(effective.activationSettleMs);
     const service = inspectWorkerService(serviceActionOptions(effective));
     if (service.state !== "active") {
-      throw new OperationError("config_error", `Lifecycle activation did not remain active through qualification (status ${service.state}).`);
+      throw activationFailure(`Lifecycle activation did not remain active through qualification (status ${service.state}).`, effective);
     }
     const readiness = readinessPort === undefined ? undefined : qualifyWorkerReadiness(effective, readinessPort);
     markTransactionCommitReady(effective);
@@ -78780,9 +79083,9 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
-    ensurePrivateDirectoryTreeSync(homeDir, dirname23(path));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname24(path));
   else
-    mkdirSync20(dirname23(path), { recursive: true });
+    mkdirSync20(dirname24(path), { recursive: true });
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
@@ -78894,6 +79197,11 @@ function serviceInstallOptions(options, dryRun) {
     ...options.schedulerEnabled !== undefined ? { schedulerEnabled: options.schedulerEnabled } : {},
     dryRun
   };
+}
+function activationFailure(message, options) {
+  const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+  const paths = workerServicePaths(options.platform, options.homeDir);
+  return new OperationError("config_error", logLine ? `${message} The worker's last log line was: ${logLine}` : message, `Read the worker log at ${paths.errorLogPath} and ${paths.logPath}, fix the reported cause, then run olympus worker install again.`);
 }
 function serviceActionOptions(options) {
   return {
@@ -79181,7 +79489,9 @@ async function runSetupWizard(options) {
   const unmetPrerequisites = await setupPreflight({
     config: presetConfig,
     ...options.env ? { env: options.env } : {},
-    ...options.secretStore ? { secretStore: options.secretStore } : {}
+    ...options.secretStore ? { secretStore: options.secretStore } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.envPath ? { workerEnvPath: options.envPath } : {}
   });
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
@@ -79657,6 +79967,11 @@ async function main2() {
     }
     const result = await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
+    if (operation.name === "olympus_doctor" && isFailedDoctorResult(result)) {
+      for (const line of doctorFailureSummary(result))
+        console.error(line);
+      process.exit(1);
+    }
   } catch (error2) {
     if (error2 instanceof OperationError) {
       console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -79666,6 +79981,22 @@ async function main2() {
     }
     throw error2;
   }
+}
+function isFailedDoctorResult(result) {
+  if (!result || typeof result !== "object")
+    return false;
+  const candidate = result;
+  return candidate.ok === false && Array.isArray(candidate.checks);
+}
+function doctorFailureSummary(result) {
+  const failed = result.checks.filter((check) => check.ok !== true);
+  const passed = result.checks.length - failed.length;
+  const names = failed.map((check) => typeof check.name === "string" ? check.name : "unnamed_check");
+  return [
+    `olympus doctor: ${passed} of ${result.checks.length} checks passed, ${failed.length} failed.`,
+    `Failed: ${names.join(", ") || "none named"}`,
+    "Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint."
+  ];
 }
 function parseArgs(operation, args) {
   const params = {};
@@ -80119,6 +80450,7 @@ function printHelp() {
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect telegram|whatsapp --session-path <path>");
   console.log("  olympus connect venice|readwise --api-key-stdin");
+  console.log("  olympus connect gemini --api-key-stdin");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
   console.log("  olympus data export --output <dir> [--source <id>]");
   console.log("  olympus data verify --input <dir>");
@@ -80147,6 +80479,7 @@ var PUBLIC_LEAF_USAGE = {
   "connect whatsapp": "olympus connect whatsapp --session-path <path>",
   "connect venice": "olympus connect venice --api-key-stdin",
   "connect readwise": "olympus connect readwise --api-key-stdin",
+  "connect gemini": "olympus connect gemini --api-key-stdin",
   "connect status": "olympus connect status [google|gmail|google-drive|dropbox]",
   dashboard: "olympus dashboard",
   "data export": "olympus data export --output <dir> [--source <id>]",
@@ -80209,7 +80542,8 @@ var COMMAND_GROUP_HELP = {
     "  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]",
     "  olympus connect dropbox --client-id <id>",
     "  olympus connect telegram|whatsapp --session-path <path>",
-    "  olympus connect venice|readwise --api-key-stdin"
+    "  olympus connect venice|readwise --api-key-stdin",
+    "  olympus connect gemini --api-key-stdin"
   ],
   data: [
     "Usage: olympus data <command>",
@@ -80477,6 +80811,7 @@ async function runWorkerForeground() {
 async function readWorkerHttpState() {
   const config2 = loadConfig();
   const baseUrl = config2.email.baseUrl;
+  const workerRoot = baseUrl.replace(/\/v1\/?$/, "");
   const authToken = workerAuthTokenFromConfig(config2);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: "GET" });
@@ -80499,7 +80834,7 @@ async function readWorkerHttpState() {
     }
     if (authToken) {
       try {
-        output2.source_dashboard = await fetchJson(`${baseUrl}/dashboard.json`, withWorkerAuthHeader({ method: "GET" }, authToken));
+        output2.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: "GET" }, authToken));
       } catch (error2) {
         output2.source_dashboard = { reachable: false, error: cliErrorDetail(error2) };
       }
@@ -80820,6 +81155,7 @@ async function runConnect(args) {
         "olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
         "olympus connect telegram|whatsapp --session-path <path> [--session-ready]",
         "olympus connect venice|readwise --api-key-stdin",
+        "olympus connect gemini --api-key-stdin",
         "olympus connect status [google|gmail|google-drive|dropbox]"
       ]
     };
@@ -80921,6 +81257,12 @@ async function runConnect(args) {
       secretStore,
       sessionReady: options.sessionReady
     });
+  }
+  if (source === "gemini") {
+    if (!options.apiKeyStdin) {
+      throw new OperationError("invalid_params", "--api-key-stdin is required so API keys are not exposed in shell history.");
+    }
+    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
   }
   if (source === "venice" || source === "readwise") {
     if (!options.apiKeyStdin) {
@@ -81162,7 +81504,7 @@ function runDashboardCommand() {
   return {
     url,
     opened,
-    ...dashboardToken ? { auth: "dashboard_query_token_used_for_browser_open" } : { hint: "No worker auth token found; if the worker enforces one, run olympus setup first." }
+    hint: dashboardToken ? "If the dashboard asks you to unlock it, run olympus dashboard token and paste that value." : "No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value."
   };
 }
 if (__require.main == __require.module) {
@@ -81206,5 +81548,6 @@ export {
   parseArgs,
   lifecycleRecoverySignalsFromWorkerHttpState,
   isV04PublicCliInvocation,
-  formatCliFatalError
+  formatCliFatalError,
+  doctorFailureSummary
 };

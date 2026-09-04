@@ -1645,7 +1645,35 @@ describe('multi-source source dashboard', () => {
     const gmailBody = await gmail.json();
     expect(gmail.status).toBe(501);
     expect(gmailBody.error.code).toBe('source_sync_not_supported');
-    expect(gmailBody.error.message).toContain('gmail');
+    // The card's own name for the source, not its connect id, and a reason:
+    // "does not support Sync now for google-drive" read as a missing feature.
+    expect(gmailBody.error.message).toBe(
+      'Sync now cannot run for Gmail: this worker has no sync lane for it, so Gmail only updates on its own schedule.',
+    );
+  });
+
+  test('a worker with the scheduler switched off says so, rather than naming the source as unsupported', async () => {
+    const worker = createEmailSourceWorker({
+      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine() },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+
+    const response = await fetch(new Request('http://worker.test/dashboard/sync-now', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer dashboard-secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ source: 'google-drive' }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(501);
+    expect(body.error.code).toBe('source_sync_not_supported');
+    expect(body.error.message).toBe(
+      'Sync now cannot run for Google Drive: the background scheduler is switched off on this worker, so no source can be synced.',
+    );
+    expect(body.error.suggestion).toContain('olympus worker restart');
   });
 
   test('Sync now answers 501 rather than 500 when the worker has no dispatch path at all', async () => {
@@ -3806,8 +3834,24 @@ describe('per-phase movement history', () => {
 
       // Nothing has been seen lower, so no counter has a movement time: an
       // absent time is "no movement seen", a different sentence from "moved
-      // at the start of the window".
-      expect(history.movementFor(sample, new Date('2026-07-02T12:00:00.000Z'))).toBeUndefined();
+      // at the start of the window". What the first observation DOES record is
+      // when this dashboard first saw the corpus, which is the only clock a
+      // source with no credential grant has for its first-sync window.
+      const movement = history.movementFor(sample, new Date('2026-07-02T12:00:00.000Z'));
+      expect(movement).toEqual({ first_seen_at: '2026-07-02T12:00:00.000Z' });
+      expect(movement?.metadata_sync_at).toBeUndefined();
+      expect(movement?.extraction_at).toBeUndefined();
+      expect(movement?.embedding_at).toBeUndefined();
+
+      // And it is never rewritten: a later sample cannot make the source look
+      // younger than the moment it was first recorded.
+      history.record([at('2026-07-02T13:00:00.000Z', {
+        indexed_items: 140,
+        content_ready_items: 90,
+        embedded_files: 40,
+      })]);
+      expect(history.movementFor(sample, new Date('2026-07-02T13:00:00.000Z'))?.first_seen_at)
+        .toBe('2026-07-02T12:00:00.000Z');
     } finally {
       history.close();
     }

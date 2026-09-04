@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stdin as processStdin } from 'node:process';
 import { createDefaultSecretStore, isSafeSecretKey, normalizeSecretRef, type SecretStore } from './secret-store.ts';
+import { writeManagedWorkerEnvSecret, type WorkerServicePlatform } from './worker-service.ts';
 import {
   fetchBoundedText,
   fetchWithTimeout,
@@ -56,6 +57,7 @@ export type ConnectSource =
   | 'whatsapp'
   | 'venice'
   | 'readwise'
+  | 'gemini'
   | 'notion';
 
 export interface ConnectOAuthOptions {
@@ -844,6 +846,80 @@ export async function connectPublicApiKeySource(options: {
     }, registryPath);
     return { ok: true, source: 'readwise', handles: [handle], registryPath, secretRefs: [`store:${secretKey}`] };
   });
+}
+
+/**
+ * Store the Gemini API key where the supervised worker will actually read it.
+ *
+ * Every preset needs this key for source-index embeddings, and before this
+ * command there was no way to supply it: the worker reads it from ITS process
+ * environment, which the service manager loads from worker.env, so an `export`
+ * in the operator's shell reaches nothing, and the install guide forbids
+ * editing worker.env by hand. The key is validated before it is stored so a
+ * mistyped paste fails here rather than as a degraded embedding lane later.
+ */
+export async function connectGeminiApiKey(options: {
+  apiKey: string;
+  platform?: WorkerServicePlatform;
+  homeDir?: string;
+  envPath?: string;
+  fetch?: OAuthFetch;
+  geminiModelsUrl?: string;
+  validationTimeoutMs?: number;
+  validate?: boolean;
+}): Promise<ConnectResult> {
+  const key = options.apiKey.trim();
+  if (!key) throw new Error('API key is required.');
+  if (options.validate !== false) {
+    await validateGeminiApiKey({
+      apiKey: key,
+      fetchImpl: options.fetch ?? fetch,
+      ...(options.geminiModelsUrl ? { geminiModelsUrl: options.geminiModelsUrl } : {}),
+      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS,
+    });
+  }
+  const stored = writeManagedWorkerEnvSecret({
+    key: 'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
+    value: key,
+    ...(options.platform ? { platform: options.platform } : {}),
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.envPath ? { envPath: options.envPath } : {}),
+  });
+  return {
+    ok: true,
+    source: 'gemini',
+    handles: [],
+    secretRefs: [`env:${stored.key}`],
+    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`,
+  };
+}
+
+async function validateGeminiApiKey(options: {
+  apiKey: string;
+  fetchImpl: OAuthFetch;
+  geminiModelsUrl?: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const url = options.geminiModelsUrl
+    ?? process.env.OLYMPUS_CONNECT_GEMINI_MODELS_URL
+    ?? 'https://generativelanguage.googleapis.com/v1beta/models';
+  let response: Response;
+  try {
+    // Header, never a query parameter: a key in the URL lands in every proxy
+    // and access log between here and Google.
+    response = await fetchWithTimeout(options.fetchImpl, url, {
+      method: 'GET',
+      headers: { 'x-goog-api-key': options.apiKey, Accept: 'application/json' },
+    }, options.timeoutMs);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error('Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.');
+    }
+    throw new Error('Could not validate the Gemini API key. No credentials were stored; try again when the Gemini API is reachable.');
+  }
+  if (!response.ok) {
+    throw new Error('Gemini rejected the API key. Paste a current Gemini API key from https://aistudio.google.com/apikey and try again.');
+  }
 }
 
 async function validatePublicApiKeySource(options: {

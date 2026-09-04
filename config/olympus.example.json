@@ -48,7 +48,7 @@
     }
   },
   "email": {
-    "enabled": false,
+    "enabled": true,
     "baseUrl": "http://127.0.0.1:8010/v1",
     "requestTimeoutSeconds": 180
   },

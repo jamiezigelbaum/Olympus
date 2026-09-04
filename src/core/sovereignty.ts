@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
@@ -458,7 +458,14 @@ export function writeSovereigntyConfigFile(input: {
     );
   }
   const config = validateSovereigntyConfig(input.config);
-  mkdirSync(dirname(path), { recursive: true });
+  // ~/.olympus is the owner's private policy directory: sovereignty.json and
+  // the sensitivity map the install guide has an agent write next to it. It
+  // must exist after setup, and at 0700 -- created with the process umask it
+  // was world-readable, which is the wrong custody for the directory that
+  // holds a sensitivity map.
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   return path;
 }

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -151,6 +151,69 @@ export function runWorkerServiceAction(
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+/** How much of a worker log tail is read when explaining a failed activation. */
+const WORKER_LOG_TAIL_BYTES = 64 * 1024;
+/** A log line is an explanation, not a transcript: keep it to one screen. */
+const WORKER_LOG_LINE_MAX_CHARS = 300;
+
+/**
+ * The last line the worker itself wrote, for a lifecycle failure to quote.
+ *
+ * A worker that exits immediately leaves the service manager reporting only
+ * "inactive", which is true and useless: the reason is in the worker's own
+ * stderr. Standard error is read first because a boot refusal lands there;
+ * stdout is the fallback for a worker that refused before its error stream
+ * carried anything.
+ */
+export function workerServiceFailureLogLine(
+  options: { platform?: WorkerServicePlatform; homeDir?: string } = {},
+): string | undefined {
+  let paths: ReturnType<typeof workerServicePaths>;
+  try {
+    paths = workerServicePaths(
+      normalizePlatform(options.platform ?? osPlatform()),
+      validatedAbsolutePath(options.homeDir ?? homedir(), 'home directory'),
+    );
+  } catch {
+    return undefined;
+  }
+  return lastLogLine(paths.errorLogPath) ?? lastLogLine(paths.logPath);
+}
+
+function lastLogLine(path: string): string | undefined {
+  let text: string;
+  try {
+    const size = statSync(path).size;
+    if (size === 0) return undefined;
+    const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = openSync(path, 'r');
+    try {
+      readSync(handle, buffer, 0, length, size - length);
+    } finally {
+      closeSync(handle);
+    }
+    text = buffer.toString('utf8');
+  } catch {
+    return undefined;
+  }
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const line = lines.at(-1);
+  if (!line) return undefined;
+  return redactWorkerLogLine(line).slice(0, WORKER_LOG_LINE_MAX_CHARS);
+}
+
+/**
+ * Logs are written under a scrubbing discipline, but this line is about to be
+ * reprinted into a command's own output, so anything token-shaped is dropped
+ * here too rather than trusted to have been scrubbed upstream.
+ */
+function redactWorkerLogLine(line: string): string {
+  return line
+    .replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, '$1$2[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]');
 }
 
 export function inspectWorkerService(
@@ -607,6 +670,125 @@ function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOption
     return true;
   }
   return false;
+}
+
+/**
+ * The environment names a connect command may write into the installed worker
+ * environment. worker.env is the worker's whole environment and the install
+ * guide forbids editing it by hand, so the set of keys a command may put there
+ * is a positive list — not "whatever the caller passes".
+ */
+export const MANAGED_WORKER_ENV_SECRET_KEYS = ['OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY'] as const;
+export type ManagedWorkerEnvSecretKey = typeof MANAGED_WORKER_ENV_SECRET_KEYS[number];
+
+/**
+ * Store one API key in the installed worker environment.
+ *
+ * The supervised worker reads this key from ITS process environment, which
+ * launchd/systemd load from worker.env, so an `export` in the operator's shell
+ * never reaches it. This is the only supported way to put such a key where the
+ * worker will actually find it.
+ */
+export function writeManagedWorkerEnvSecret(input: {
+  key: ManagedWorkerEnvSecretKey;
+  value: string;
+  platform?: WorkerServicePlatform;
+  homeDir?: string;
+  envPath?: string;
+}): { ok: true; path: string; key: ManagedWorkerEnvSecretKey; wrote: boolean } {
+  if (!(MANAGED_WORKER_ENV_SECRET_KEYS as readonly string[]).includes(input.key)) {
+    throw new OperationError('invalid_params', `${input.key} is not a managed worker environment key.`);
+  }
+  const value = input.value.trim();
+  if (!value) {
+    throw new OperationError('invalid_params', `${input.key} must not be empty.`);
+  }
+  // A newline would forge a second assignment in worker.env, and no control
+  // byte belongs in an API key. Quoting below makes the value inert to the
+  // shell that sources the file; this keeps it inert to the FILE FORMAT, which
+  // quoting cannot do.
+  if (/\p{Cc}/u.test(value)) {
+    throw new OperationError('invalid_params', `${input.key} must not contain control characters.`);
+  }
+  // The one character the two managed sourcing paths cannot be made to agree
+  // on. Quoting makes a value inert, but a value carrying its OWN quote can
+  // only be written as shell close-escape-reopen, and systemd's
+  // EnvironmentFile parser does not implement that concatenation: the same
+  // bytes would reach a Linux worker as a different string from the one
+  // /bin/sh and every Olympus reader see. A secret whose value depends on the
+  // platform is worse than a refused paste, so it is refused here and the
+  // reader stays a plain strip.
+  if (value.includes("'")) {
+    throw new OperationError(
+      'invalid_params',
+      `${input.key} value must not contain a single quote.`,
+      'A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.',
+    );
+  }
+  const platform = normalizePlatform(input.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(input.homeDir ?? homedir(), 'home directory');
+  const envPath = input.envPath ?? workerServicePaths(platform, homeDir).envPath;
+  validateManagedPath(envPath, 'worker environment');
+  if (!existsSync(envPath)) {
+    throw new OperationError(
+      'config_error',
+      `No Olympus worker environment exists at ${envPath}.`,
+      'Run olympus setup --preset <preset> --yes first; it creates the worker environment this key is stored in.',
+    );
+  }
+  assertManagedRegularFile(envPath, 'worker environment');
+  const current = readFileSync(envPath, 'utf8');
+  // Single-quoted, always. The launchd unit sources this file with
+  // `set -a; . worker.env`, so an unquoted value is shell source text: a key
+  // pasted as `x$(touch /tmp/pwned)` ran that command at every worker boot.
+  // Inside single quotes the shell expands nothing at all.
+  const assignment = `${input.key}=${shellSingleQuote(value)}`;
+  // Horizontal whitespace only: `\s` would let a bare `#` line swallow the
+  // newline after it and take the assignment below with it.
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
+  const lines = current.split('\n');
+  let replaced = false;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (!pattern.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    // The FIRST assignment keeps its position; any later duplicate is dropped.
+    // The shell that sources this file takes the last assignment, so leaving a
+    // stale duplicate below the one we just wrote would hand the worker the
+    // value this call was replacing.
+    if (replaced) continue;
+    kept.push(assignment);
+    replaced = true;
+  }
+  const next = replaced
+    ? kept.join('\n')
+    : `${current.replace(/\n?$/, '\n')}${assignment}\n`;
+  let wrote = false;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    wrote = true;
+  }
+  if ((statSync(envPath).mode & 0o777) !== 0o600) {
+    chmodSync(envPath, 0o600);
+    wrote = true;
+  }
+  return { ok: true, path: envPath, key: input.key, wrote };
+}
+
+/**
+ * Plain single-quoting: the one form BOTH managed sourcing paths read the same
+ * way -- the launchd unit's `set -a; . <env>` shell sourcing and systemd's
+ * `EnvironmentFile=` parser.
+ *
+ * Everything between the quotes is literal, so nothing in the value is
+ * expanded. There is no escaping to do here because a value containing a
+ * single quote is refused before this is reached: the only way to embed one is
+ * shell close-escape-reopen, which systemd does not implement.
+ */
+function shellSingleQuote(value: string): string {
+  return `'${value}'`;
 }
 
 function normalizePlatform(value: string): WorkerServicePlatform {

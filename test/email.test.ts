@@ -296,7 +296,11 @@ describe('EmailClient', () => {
   });
 
   test('reports disabled email lane without reaching the network', async () => {
+    // Disabling is now an explicit choice rather than the default, so the test
+    // states it: the lane is on by default because every preset installs the
+    // worker.
     const config = defaultConfig();
+    config.email.enabled = false;
     const client = new EmailClient(
       config,
       new DirectHttpEmailTransport(async () => {

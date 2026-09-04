@@ -572,7 +572,9 @@ describe('CLI tool surface', () => {
     const binDir = join(dir, 'bin');
     const home = join(dir, 'home');
     const workerToken = 'worker-status-token';
+    const dashboardJsonRequests: string[] = [];
     const server = createServer((request, response) => {
+      if (request.url?.endsWith('/dashboard.json')) dashboardJsonRequests.push(request.url);
       if (request.url === '/v1/health') {
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify({
@@ -601,7 +603,11 @@ describe('CLI tool surface', () => {
         }));
         return;
       }
-      if (request.url === '/v1/dashboard.json') {
+      // The worker serves the dashboard JSON at its ROOT, beside /dashboard.
+      // The old fixture answered /v1/dashboard.json, which is the 404 the real
+      // worker returns and the reason worker status reported an unreachable
+      // dashboard on every healthy install.
+      if (request.url === '/dashboard.json') {
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify({
           kind: 'source_dashboard',
@@ -679,6 +685,7 @@ describe('CLI tool surface', () => {
         },
         source_dashboard: { kind: 'source_dashboard' },
       });
+      expect(dashboardJsonRequests).toEqual(['/dashboard.json']);
       expect(onlineOutput.recovery).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: 'oauth_pending', source_id: 'gmail.email', restart_required: false }),
         expect.objectContaining({ kind: 'pairing_pending', source_id: 'telegram.messages', restart_required: false }),
@@ -754,11 +761,14 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toMatchObject({
+      expect(output).toEqual({
         url: 'http://127.0.0.1:8010/dashboard',
         opened: true,
-        auth: 'dashboard_query_token_used_for_browser_open',
+        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
       });
+      // The URL and whether it opened, and nothing else: no token and no
+      // token-shaped field in output that gets pasted into issues.
+      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
       expect(openedUrl).not.toContain(workerToken);
@@ -797,8 +807,9 @@ describe('CLI tool surface', () => {
       expect(output).toMatchObject({
         url: 'http://127.0.0.1:8010/dashboard',
         opened: true,
-        auth: 'dashboard_query_token_used_for_browser_open',
+        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
       });
+      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
       expect(openedUrl).not.toContain(workerToken);

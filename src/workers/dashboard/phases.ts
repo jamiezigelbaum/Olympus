@@ -189,6 +189,21 @@ const DELTA_OVERSTATE_SHARE = 0.005;
  */
 export const DASHBOARD_PHASE_STALL_HOURS = 1;
 
+/**
+ * How long after a source is connected its rows may still say "waiting for the
+ * first sync" rather than "stalled".
+ *
+ * A source connected two minutes ago has had nothing to move yet, so measured
+ * stillness says nothing about it: `movedAt` is NaN because no counter has ever
+ * risen, no lane reports live because none has run, and with the scheduler off
+ * there is no next-sync time either. Every one of those is the absence of
+ * evidence, and the row fell through all three to `Stalled · no movement seen`
+ * on a source the owner had just connected (2026-09-04). The same window the
+ * stall check uses: a lane that has not started an hour after connecting is
+ * genuinely not starting, and then the row says so and names the reason.
+ */
+export const DASHBOARD_FIRST_SYNC_GRACE_HOURS = DASHBOARD_PHASE_STALL_HOURS;
+
 /** The three bars for one source, their states, and whether anything is left. */
 export function dashboardSourceProgress(
   source: DashboardSourceCard,
@@ -228,6 +243,62 @@ export function dashboardHasSettledPass(source: DashboardSourceCard): boolean {
   if (source.connection.state === 'synced') return true;
   if (source.last_run?.status === 'completed') return true;
   return Number.isFinite(Date.parse(source.last_sync_at ?? ''));
+}
+
+/**
+ * True when nothing has ever run for this source.
+ *
+ * Every clause is positive evidence that a run happened, so the answer is
+ * "never" only when no evidence of any kind exists. `last_run` and
+ * `last_sync_at` are the ledger's record, `synced`/`syncing` are the states the
+ * view model only reaches from sync evidence, a non-zero item count cannot have
+ * appeared without a run, and a scheduler attempt is a run that started even if
+ * it failed.
+ */
+export function dashboardHasRunBefore(source: DashboardSourceCard): boolean {
+  if (source.last_run !== undefined) return true;
+  if (Number.isFinite(Date.parse(source.last_sync_at ?? ''))) return true;
+  if (source.connection.state === 'synced' || source.connection.state === 'syncing') return true;
+  if (source.coverage.indexed_items > 0 || source.coverage.content_ready_items > 0) return true;
+  return source.schedule?.last_attempt_at !== undefined;
+}
+
+/**
+ * True when this source has never run and is still inside its first-sync
+ * window, so its empty rows are waiting rather than stalled.
+ *
+ * ALWAYS bounded by a real timestamp. The credential's grant time is the first
+ * choice; a source with no broker handle — Telegram and WhatsApp pair as
+ * sessions and own no credential grant — falls back to the moment this
+ * dashboard first recorded the corpus at all, which its movement ledger keeps
+ * and never rewrites.
+ *
+ * The card's own `freshness.stale` is NOT a fallback: the view model hard-codes
+ * `stale: false` on the never-checked branch, so a source that has never run
+ * can never become stale, and reading the window off it meant a dead pairing
+ * announcing "waiting for the first sync" a year later. With no clock at all
+ * the window is over — an unmeasurable wait cannot be called young.
+ */
+export function dashboardAwaitingFirstSync(source: DashboardSourceCard, now: Date): boolean {
+  if (dashboardHasRunBefore(source)) return false;
+  const since = dashboardFirstSyncClock(source, now);
+  if (since === undefined) return false;
+  return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3_600_000;
+}
+
+/**
+ * The moment the first-sync window runs from, or undefined when nothing dates
+ * it. Exported so the attention banner ages a never-run source off the same
+ * clock the rows do, rather than off a second, differently-blind one.
+ */
+export function dashboardFirstSyncClock(source: DashboardSourceCard, now: Date): number | undefined {
+  for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
+    const at = Date.parse(candidate ?? '');
+    // A timestamp in the future is no evidence of anything, and is exactly the
+    // one an unbounded "waiting" would want: it is ignored, not clamped.
+    if (Number.isFinite(at) && at <= now.getTime()) return at;
+  }
+  return undefined;
 }
 
 /** A phase with nothing left to do. An indeterminate phase never qualifies. */
@@ -444,6 +515,12 @@ function withState(
   if (due !== undefined) {
     return { ...phase, state: 'waiting', state_words: `Waiting · next sync in ${due}` };
   }
+  // Nothing above found evidence, and for a source that has never run that is
+  // the expected answer rather than a finding. Stillness is only meaningful
+  // once there has been something to be still about.
+  if (dashboardAwaitingFirstSync(source, now)) {
+    return { ...phase, state: 'waiting', state_words: 'Waiting for the first sync' };
+  }
   return { ...phase, state: 'stalled', state_words: `Stalled · ${stillnessWords(source, phase.id)}` };
 }
 
@@ -511,6 +588,9 @@ function stillnessWords(source: DashboardSourceCard, id: DashboardPhaseId): stri
   if (id === 'metadata_sync' && schedule && schedule.consecutive_failures > 0) {
     return `last ${schedule.consecutive_failures === 1 ? 'sync' : `${schedule.consecutive_failures} syncs`} failed`;
   }
+  // "No movement seen" over a source that has never run reads as a lane that
+  // stopped. Nothing stopped: nothing started.
+  if (!dashboardHasRunBefore(source)) return 'the first sync has not run yet';
   return 'no movement seen';
 }
 

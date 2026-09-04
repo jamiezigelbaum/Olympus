@@ -14,6 +14,7 @@ import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
+  unquoteEnvValue,
   workerAuthTokenFromConfig,
 } from '../src/core/worker-auth.ts';
 import { createCastorWorkspaceWorker } from '../src/workers/castor-workspace/index.ts';
@@ -891,5 +892,32 @@ describe('domain expert bearer scope', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('worker.env value quoting', () => {
+  test('round-trips every shape Olympus writes, and leaves older shapes alone', () => {
+    // The writer emits PLAINLY single-quoted values -- the one form both the
+    // launchd shell and systemd's EnvironmentFile parser read the same way --
+    // so this reader is a strip, and a value that would need any other form is
+    // refused before it is written (see worker-env-secret.test.ts).
+    const shellSingleQuote = (value: string) => `'${value}'`;
+    for (const value of [
+      'plain-key',
+      'x$(touch /tmp/pwned)',
+      'has spaces',
+      '$HOME`id`',
+      'gemini-Ab12_-key.value~x',
+    ]) {
+      expect(unquoteEnvValue(shellSingleQuote(value))).toBe(value);
+    }
+
+    // Shapes that predate the quoting must keep meaning exactly what they meant.
+    expect(unquoteEnvValue('bare-value')).toBe('bare-value');
+    expect(unquoteEnvValue('  padded  ')).toBe('padded');
+    expect(unquoteEnvValue('"double"')).toBe('double');
+    expect(unquoteEnvValue("'single'")).toBe('single');
+    expect(unquoteEnvValue("'abc'def'")).toBe("abc'def");
+    expect(unquoteEnvValue("'unterminated")).toBe("'unterminated");
   });
 });

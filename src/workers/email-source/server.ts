@@ -2421,6 +2421,10 @@ export async function main(): Promise<void> {
             refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(
               activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env),
             ).sources,
+            // The hook below is the Dropbox lane and nothing else; every other
+            // source reaches it only to be refused. Saying so keeps a Sync now
+            // button off the cards it could only 501 for.
+            triggerSourceSyncSources: ['dropbox'],
             triggerSourceSync: async (request) => {
               // This hook is the Dropbox lane only. Every other source reaches
               // it after its own dispatch paths declined, so the honest answer
@@ -2524,6 +2528,15 @@ export async function main(): Promise<void> {
       `In-process source scheduler enabled for ${schedulerSources.length} constructed source(s); `
       + `${olympusConfig.worker.scheduler.sourceIds.length} selected.`,
     );
+    if (schedulerSources.length === 0) {
+      // The state a fresh install boots into. Without this line the only
+      // evidence was "constructed=0", which reads like a failure rather than
+      // the correct idle state before the first source is connected.
+      console.log(
+        '[source-scheduler] idle: no source is connected yet; '
+        + 'the scheduler is running and will adopt each source as you connect it in the dashboard.',
+      );
+    }
   }
   console.log(describeSovereigntyPolicy(sovereigntyEngine));
   console.log(

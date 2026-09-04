@@ -2386,9 +2386,6 @@ function validateConfig(config) {
   }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
-  if (config.worker.scheduler.enabled && config.worker.scheduler.sourceIds.length === 0) {
-    throw new OperationError("config_error", "worker.scheduler.sourceIds must contain at least one source when the scheduler is enabled.");
-  }
   assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
   assertPositiveNumber(config.worker.scheduler.syncIntervalSeconds, "worker.scheduler.syncIntervalSeconds");
   assertPositiveNumber(config.worker.scheduler.freshnessThresholdHours, "worker.scheduler.freshnessThresholdHours");
@@ -2663,7 +2660,7 @@ var init_config = __esm(() => {
       }
     },
     email: {
-      enabled: false,
+      enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
       requestTimeoutSeconds: 180,
       localPacketsDevEnabled: false,
@@ -3042,7 +3039,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname4, join as join3 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -5920,7 +5917,7 @@ var init_ingest_filter = __esm(() => {
 // src/core/sensitivity-map.ts
 import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join6 } from "node:path";
+import { dirname as dirname8, join as join6 } from "node:path";
 function defaultSensitivityMapPath() {
   return join6(homedir6(), ".olympus", "sensitivity-map.json");
 }
@@ -5933,7 +5930,7 @@ function loadSensitivityMap(options = {}) {
   if (!existsSync6(path)) {
     if (options.allowMissing)
       return;
-    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`);
+    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
     return parseSensitivityMap(JSON.parse(readFileSync7(path, "utf8")), path);
@@ -5942,6 +5939,9 @@ function loadSensitivityMap(options = {}) {
       return;
     throw error;
   }
+}
+function sensitivityMapRemedy(path) {
+  return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
   const root = asRecord10(rawMap);
@@ -9019,7 +9019,7 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join8 } from "node:path";
+import { dirname as dirname9, join as join8 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join8(homedir7(), ".local", "share");
   return join8(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
@@ -9999,6 +9999,22 @@ function readWorkerSetupEnv(options = {}) {
     return;
   }
 }
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
   return options.workerEnvPath ?? join2(options.homeDir ?? optionalToken(env.HOME) ?? homedir2(), ".config", "olympus", "worker.env");
@@ -10060,7 +10076,7 @@ class EmailClient {
         configured: false,
         base_url: this.config.email.baseUrl,
         raw_email_exposed: false,
-        detail: "Email lane is disabled. Configure a private email source worker before use."
+        detail: "Email lane is disabled. Run olympus setup, then olympus worker install, to bring up the private source worker."
       };
     }
     const startedAt = performance.now();
@@ -10083,7 +10099,7 @@ class EmailClient {
   }
   async answer(options) {
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker that owns OAuth and message fetch, then uses an approved local/private model lane for reasoning.");
+      throw new OperationError("email_not_configured", "Email lane is disabled.", "Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/answer`, {
       method: "POST",
@@ -10211,7 +10227,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using routed source answers.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using routed source answers.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer`, {
       method: "POST",
@@ -10252,7 +10268,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source index status is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index status.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index status.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/status`, {
       method: "POST",
@@ -10294,7 +10310,7 @@ class EmailClient {
       throw new OperationError("source_index_admin_required", "Source-index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded source-index proof run.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index sync.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index sync.");
     }
     const corpusId = canonicalSourceCorpusId(options.corpusId);
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/sync`, {
@@ -10326,7 +10342,7 @@ class EmailClient {
   }
   async xBookmarksContentRecovery(options = {}) {
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before recovering X bookmark content.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before recovering X bookmark content.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/x-bookmarks/content/recover`, {
       method: "POST",
@@ -10345,7 +10361,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index search.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
     const corpusId = canonicalSourceCorpusId(options.corpusId);
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
@@ -10389,7 +10405,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source export requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source export.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/export`, {
       method: "POST",
@@ -10414,7 +10430,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source transcription requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source transcription.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source transcription.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/transcribe`, {
       method: "POST",
@@ -10438,7 +10454,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "On-demand media ingestion requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using on-demand media ingestion.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using on-demand media ingestion.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/on-demand-media`, {
       method: "POST",
@@ -10462,7 +10478,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion candidates require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion candidates.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-candidates`, {
       method: "POST",
@@ -10484,7 +10500,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposals require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposals.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals`, {
       method: "POST",
@@ -10509,7 +10525,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal listing requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposal listing.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/list`, {
       method: "POST",
@@ -10531,7 +10547,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal details require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion proposal details.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/get`, {
       method: "POST",
@@ -10550,7 +10566,7 @@ class EmailClient {
       throw new OperationError("source_index_answer_dev_required", "Source-index promotion decisions require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before using source-index promotion decisions.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.");
     }
     const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-decisions`, {
       method: "POST",
@@ -10611,7 +10627,7 @@ class EmailClient {
       throw new OperationError("source_index_not_enabled", "Source watches are disabled.", "Enable sourceIndex.enabled before creating or managing durable watches.");
     }
     if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Enable the Gateway-side private source worker before managing durable watches.");
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before managing durable watches.");
     }
   }
 }
@@ -12155,13 +12171,17 @@ function constantTimeStringEqual(actual, expected) {
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname9, join as join9 } from "node:path";
+import { dirname as dirname10, join as join9 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
 init_secret_store();
 async function setupPreflight(options) {
-  const env = options.env ?? process.env;
+  const env = environmentWithWorkerSetupEnv({
+    ...options.env ? { env: options.env } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
+  });
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
   const seen = new Set;
@@ -12199,7 +12219,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
       profileId,
       label: `${displayKey} environment variable`,
       detail: `Profile ${profileId} needs ${displayKey} for ${profile.provider}.`,
-      remedy: `export ${displayKey}=...`
+      remedy: envSecretRemedy(displayKey)
     };
   }
   const value = secretStore.getSync ? secretStore.getSync(ref.key) : await secretStore.get(ref.key);
@@ -12213,6 +12233,12 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
     detail: `Profile ${profileId} needs ${ref.key} in the Olympus secret store.`,
     remedy: storeSecretRemedy(ref.key)
   };
+}
+function envSecretRemedy(displayKey) {
+  if (displayKey === "GEMINI_API_KEY") {
+    return `printf '%s' "$KEY" | olympus connect gemini --api-key-stdin`;
+  }
+  return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
 function isLocalLoopbackProfile(profile) {
   if (profile.provider !== "local-openai-compatible" || !profile.baseUrl)
@@ -12251,6 +12277,13 @@ import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, rmSync as rmSyn
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join5 } from "node:path";
 init_secret_store();
+
+// src/core/worker-service.ts
+init_atomic_file();
+init_operation_error();
+var WORKER_LOG_TAIL_BYTES = 64 * 1024;
+
+// src/core/connect.ts
 init_http_timeout();
 init_oauth_relay();
 init_publisher_oauth_client();
@@ -12361,7 +12394,14 @@ var INGESTION_STUCK_WARNING_HOURS = 24;
 var INGESTION_STUCK_ERROR_HOURS = 72;
 var INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 var CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
-async function runDoctor(deps) {
+async function runDoctor(input) {
+  const deps = input.env === undefined ? input : {
+    ...input,
+    env: environmentWithWorkerSetupEnv({
+      env: input.env,
+      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+    })
+  };
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
@@ -12553,7 +12593,8 @@ async function sovereigntyPrerequisiteCheck(deps) {
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
-    ...deps.secretStore ? { secretStore: deps.secretStore } : {}
+    ...deps.secretStore ? { secretStore: deps.secretStore } : {},
+    ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
   if (unmet.length === 0) {
     return {
@@ -12917,7 +12958,7 @@ async function sourceSchedulerStatusCheck(deps) {
     problems.push("scheduler is not running");
   const sources = Array.isArray(status.sources) ? status.sources : [];
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids) ? status.selected_source_ids.filter((value) => typeof value === "string") : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids) || deps.config.worker.scheduler.sourceIds.length > 0;
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);
@@ -13110,7 +13151,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join9(dirname9(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join9(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -13154,7 +13195,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync7(dirname9(path), { recursive: true });
+  mkdirSync7(dirname10(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -15210,7 +15251,7 @@ init_public_surface();
 // src/private-extension-contract.ts
 import { existsSync as existsSync8, readFileSync as readFileSync9 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
-import { basename, dirname as dirname10, join as join10 } from "node:path";
+import { basename, dirname as dirname11, join as join10 } from "node:path";
 import { fileURLToPath } from "node:url";
 var OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION = 1;
 var PRIVATE_EXTENSION_MODULE_BASENAMES = [
@@ -15318,7 +15359,7 @@ function resolveSiblingManifestPath(baseDir, fileExists) {
 }
 var requireFromThisModule = createRequire2(import.meta.url);
 function loadPrivateExtensions(options = {}) {
-  const baseDir = options.baseDir ?? dirname10(fileURLToPath(import.meta.url));
+  const baseDir = options.baseDir ?? dirname11(fileURLToPath(import.meta.url));
   const fileExists = options.fileExists ?? existsSync8;
   const loadModule = options.loadModule ?? requireFromThisModule;
   const readFile3 = options.readFile ?? ((path) => readFileSync9(path, "utf8"));

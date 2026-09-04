@@ -10,7 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DelphiClient } from './delphi.ts';
-import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
+import {
+  environmentWithWorkerSetupEnv,
+  withWorkerAuthHeader,
+  workerAuthTokenFromConfig,
+} from './worker-auth.ts';
 import {
   loadSovereigntyEngine,
   type SovereigntyEngine,
@@ -58,6 +62,12 @@ export interface DoctorDeps {
   oauthStateDir?: string;
   oauthPidAlive?: (pid: number) => boolean;
   ingestionHealthStatePath?: string;
+  /**
+   * The managed worker environment whose stored credentials count as present.
+   * Defaults to the one `env`'s HOME points at; named explicitly so a test
+   * never reads the developer's own install.
+   */
+  workerEnvPath?: string;
 }
 
 export interface DoctorResult {
@@ -80,7 +90,22 @@ const INGESTION_STUCK_ERROR_HOURS = 72;
 const INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 const CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
 
-export async function runDoctor(deps: DoctorDeps): Promise<DoctorResult> {
+export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
+  // Every check below reads the environment the worker actually runs with, not
+  // just this process's. The lane gates and the credential keys both live in
+  // worker.env -- `olympus connect gemini` writes one there -- so a doctor
+  // reading only process.env reports settings the running worker has as
+  // missing. Only merged when the caller handed in an environment at all: a
+  // caller that passed none is not asking about any install.
+  const deps: DoctorDeps = input.env === undefined
+    ? input
+    : {
+      ...input,
+      env: environmentWithWorkerSetupEnv({
+        env: input.env,
+        ...(input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}),
+      }),
+    };
   const checks = [
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
@@ -329,6 +354,7 @@ async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorChe
     config: engine.config,
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.secretStore ? { secretStore: deps.secretStore } : {}),
+    ...(deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}),
   })).filter((item) => item.kind !== 'local_model_server');
   if (unmet.length === 0) {
     return {
@@ -729,8 +755,14 @@ async function sourceSchedulerStatusCheck(deps: DoctorDeps): Promise<DoctorCheck
   const reportedSelectedSourceIds = Array.isArray(status.selected_source_ids)
     ? status.selected_source_ids.filter((value): value is string => typeof value === 'string')
     : [];
-  const selectionContractActive = Array.isArray(status.selected_source_ids)
-    || deps.config.worker.scheduler.sourceIds.length > 0;
+  // An EMPTY configured allowlist is no contract at all -- it is the fresh
+  // install's "no operator restriction", and the worker then reports every lane
+  // it constructed as selected. The worker always sends the array, so keying
+  // off its presence made each runtime-adopted lane a problem
+  // ("worker selected unexpected scheduler source gmail.email") and, with
+  // doctor's non-zero exit, left doctor permanently red from the first connect.
+  // Only a configured allowlist is something the worker can disagree with.
+  const selectionContractActive = deps.config.worker.scheduler.sourceIds.length > 0;
   const configuredSelectedSourceIds = new Set(deps.config.worker.scheduler.sourceIds);
   if (selectionContractActive) {
     const reported = new Set(reportedSelectedSourceIds);

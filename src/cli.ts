@@ -26,6 +26,7 @@ import {
 } from './core/lifecycle.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import {
+  connectGeminiApiKey,
   connectPublicApiKeySource,
   connectOAuthSourceDetached,
   connectGuidedSession,
@@ -451,6 +452,13 @@ async function main(): Promise<void> {
     }
     const result = await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
+    // A health walk that reports ok:false and exits 0 cannot be looped on:
+    // "run it until it goes green" needs an exit code and a line a human can
+    // read without a JSON parser. The JSON on stdout is unchanged.
+    if (operation.name === 'olympus_doctor' && isFailedDoctorResult(result)) {
+      for (const line of doctorFailureSummary(result)) console.error(line);
+      process.exit(1);
+    }
   } catch (error) {
     if (error instanceof OperationError) {
       console.error(`Error [${error.code}]: ${error.message}`);
@@ -459,6 +467,30 @@ async function main(): Promise<void> {
     }
     throw error;
   }
+}
+
+interface DoctorSummaryShape {
+  ok: boolean;
+  checks: Array<{ name?: unknown; ok?: unknown; detail?: unknown; hint?: unknown }>;
+}
+
+function isFailedDoctorResult(result: unknown): result is DoctorSummaryShape {
+  if (!result || typeof result !== 'object') return false;
+  const candidate = result as { ok?: unknown; checks?: unknown };
+  return candidate.ok === false && Array.isArray(candidate.checks);
+}
+
+/** Counts and check names only: the same content-free discipline doctor keeps. */
+export function doctorFailureSummary(result: DoctorSummaryShape): string[] {
+  const failed = result.checks.filter((check) => check.ok !== true);
+  const passed = result.checks.length - failed.length;
+  const names = failed
+    .map((check) => (typeof check.name === 'string' ? check.name : 'unnamed_check'));
+  return [
+    `olympus doctor: ${passed} of ${result.checks.length} checks passed, ${failed.length} failed.`,
+    `Failed: ${names.join(', ') || 'none named'}`,
+    'Fix the failed checks and run olympus doctor again; the JSON above carries each check\'s detail and hint.',
+  ];
 }
 
 export function parseArgs(operation: Operation, args: string[]): Record<string, unknown> {
@@ -985,6 +1017,7 @@ function printHelp(): void {
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --session-path <path>');
   console.log('  olympus connect venice|readwise --api-key-stdin');
+  console.log('  olympus connect gemini --api-key-stdin');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
@@ -1014,6 +1047,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
   'connect venice': 'olympus connect venice --api-key-stdin',
   'connect readwise': 'olympus connect readwise --api-key-stdin',
+  'connect gemini': 'olympus connect gemini --api-key-stdin',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
   dashboard: 'olympus dashboard',
   'data export': 'olympus data export --output <dir> [--source <id>]',
@@ -1077,6 +1111,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connect dropbox --client-id <id>',
     '  olympus connect telegram|whatsapp --session-path <path>',
     '  olympus connect venice|readwise --api-key-stdin',
+    '  olympus connect gemini --api-key-stdin',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1417,6 +1452,7 @@ async function runWorkerForeground(): Promise<void> {
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const config = loadConfig();
   const baseUrl = config.email.baseUrl;
+  const workerRoot = baseUrl.replace(/\/v1\/?$/, '');
   const authToken = workerAuthTokenFromConfig(config);
   try {
     const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
@@ -1439,7 +1475,11 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     }
     if (authToken) {
       try {
-        output.source_dashboard = await fetchJson(`${baseUrl}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        // /dashboard.json is served at the worker ROOT, beside /dashboard --
+        // not under the /v1 API base. Probing `${baseUrl}/dashboard.json`
+        // asked for /v1/dashboard.json and reported the resulting 404 as a
+        // broken dashboard on every healthy install.
+        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
       } catch (error) {
         output.source_dashboard = { reachable: false, error: cliErrorDetail(error) };
       }
@@ -1807,6 +1847,7 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
         'olympus connect venice|readwise --api-key-stdin',
+        'olympus connect gemini --api-key-stdin',
         'olympus connect status [google|gmail|google-drive|dropbox]',
       ],
     };
@@ -1914,6 +1955,12 @@ async function runConnect(args: string[]): Promise<unknown> {
       secretStore,
       sessionReady: options.sessionReady,
     });
+  }
+  if (source === 'gemini') {
+    if (!options.apiKeyStdin) {
+      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    }
+    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
   }
   if (source === 'venice' || source === 'readwise') {
     if (!options.apiKeyStdin) {
@@ -2191,7 +2238,7 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-function runDashboardCommand(): { url: string; opened: boolean; hint?: string } {
+function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
   const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
   const token = workerAuthTokenFromConfig(config);
@@ -2206,10 +2253,15 @@ function runDashboardCommand(): { url: string; opened: boolean; hint?: string } 
   } catch {
     opened = false;
   }
+  // The URL and whether the browser opened, and nothing else. No token and no
+  // token-shaped field: this output is pasted into issues and chat logs, and
+  // the one place a token is handed over is the command that exists to do it.
   return {
     url,
     opened,
-    ...(dashboardToken ? { auth: 'dashboard_query_token_used_for_browser_open' } : { hint: 'No worker auth token found; if the worker enforces one, run olympus setup first.' }),
+    hint: dashboardToken
+      ? 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.'
+      : 'No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value.',
   };
 }
 

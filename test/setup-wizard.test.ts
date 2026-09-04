@@ -169,7 +169,9 @@ describe('olympus setup wizard', () => {
       expect(missing.unmet_prerequisites).toMatchObject([{
         id: 'env:GEMINI_API_KEY',
         kind: 'env_secret',
-        remedy: 'export GEMINI_API_KEY=...',
+        // An export in the operator's shell never reaches the launchd worker,
+        // so the remedy names the command that writes the key into worker.env.
+        remedy: 'printf \'%s\' "$KEY" | olympus connect gemini --api-key-stdin',
       }]);
 
       const present = await runSetupWizard({
@@ -400,7 +402,8 @@ describe('olympus setup wizard', () => {
         cloudLane: 'subscription',
       });
       expect(stderr).toContain('Unmet preset prerequisites:');
-      expect(stderr).toContain('export GEMINI_API_KEY=...');
+      expect(stderr).toContain('olympus connect gemini --api-key-stdin');
+      expect(stderr).not.toContain('export GEMINI_API_KEY=');
       expect(stderr).toContain('olympus connect venice --api-key-stdin');
       expect(stdout).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN=');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=');

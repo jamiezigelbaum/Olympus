@@ -242,6 +242,16 @@ export interface DashboardPhaseMovement {
   extraction_settled_value?: number;
   /** The same baseline for the embedding counter. Recorded only while extraction is also complete. */
   embedding_settled_value?: number;
+  /**
+   * The first time this dashboard ever recorded a sample for this corpus, and
+   * never rewritten afterwards.
+   *
+   * The only durable clock a source with no broker handle has. Telegram and
+   * WhatsApp pair as sessions and own no credential grant, so their card
+   * carries no `connected_at`; without this, "has never run" had no age and a
+   * dead pairing could read "waiting for the first sync" indefinitely.
+   */
+  first_seen_at?: string;
 }
 
 export interface DashboardEmbeddingBacklog {
@@ -649,6 +659,15 @@ export interface DashboardSourceCard {
     label: string;
     action: DashboardSourceAction;
     handles: string[];
+    /**
+     * When the credential this card connects through was granted, from the
+     * handle registry. The clock a phase needs to tell "connected a minute ago
+     * and the first sync has not started" from "connected and never syncing":
+     * without it a source that has never run reads as stalled the instant it is
+     * connected. Absent for a family that owns no broker handle (the paired
+     * chat sources) and for a card that is not connected at all.
+     */
+    connected_at?: string;
     /** Present only for a locally connected broker-backed v0.4 source. */
     disconnect?: DashboardDisconnectAction;
     /** Present only for a paired-session source that currently reads paired. */
@@ -730,6 +749,14 @@ export interface DashboardSourceCard {
    * declaration and hidden work is the one outcome this must not produce.
    */
   content_arrives_extracted?: boolean;
+  /**
+   * False when this worker cannot run Sync now for this source, so nothing on
+   * the page offers the control or advises pressing it.
+   *
+   * Absent means the caller declared nothing, which keeps the control offered:
+   * a hand-written fixture and an older payload must not lose a button.
+   */
+  sync_now_available?: boolean;
 }
 
 export interface DashboardSourceSetupStatus {
@@ -965,6 +992,17 @@ export interface SourceDashboardBuildOptions {
    * rather than one that 501s.
    */
   ingestionDispositionsAvailable?: boolean;
+  /**
+   * Whether this worker can actually run Sync now for a given source.
+   *
+   * Declared by the caller that owns the dispatch chain, for the same reason
+   * `ingestionDispositionsAvailable` is: the view model cannot see whether a
+   * scheduler lane or a host sync hook exists, and a card that advertises the
+   * control anyway sends the reader to a 501 (owner, 2026-09-04: "Private
+   * source worker does not support Sync now for google-drive"). Absent means
+   * unknown, and unknown keeps today's behaviour of offering the control.
+   */
+  syncNowAvailable?: (source: DashboardConnectSource) => boolean;
   /**
    * The owner's sensitivity map, already loaded and parsed by the caller.
    *
@@ -1437,6 +1475,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         last_value INTEGER NOT NULL,
         rose_at TEXT,
         seen_at TEXT,
+        first_seen_at TEXT,
         settled_value INTEGER,
         settled_at TEXT,
         PRIMARY KEY (corpus_id, counter)
@@ -1472,10 +1511,18 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
       }
     };
     addMovementColumn('seen_at', 'TEXT');
+    addMovementColumn('first_seen_at', 'TEXT');
     addMovementColumn('settled_value', 'INTEGER');
     addMovementColumn('settled_at', 'TEXT');
     this.db.run(
       'UPDATE source_dashboard_movement SET seen_at = COALESCE(rose_at, ?) WHERE seen_at IS NULL',
+      [new Date().toISOString()],
+    );
+    // A row written before this column existed has been observed at least once
+    // already, so the oldest moment it can honestly claim is the oldest one it
+    // still holds. Backfilled once; `first_seen_at` is never written again.
+    this.db.run(
+      'UPDATE source_dashboard_movement SET first_seen_at = COALESCE(rose_at, seen_at, ?) WHERE first_seen_at IS NULL',
       [new Date().toISOString()],
     );
   }
@@ -1600,8 +1647,13 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
    */
   movementFor(sample: SourceDashboardHistorySample, _now: Date): DashboardPhaseMovement | undefined {
     const rows = this.db.query(`
-      SELECT counter, rose_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
-    `).all(sample.corpus_id) as Array<{ counter: string; rose_at: string | null; settled_value: number | null }>;
+      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
+    `).all(sample.corpus_id) as Array<{
+      counter: string;
+      rose_at: string | null;
+      first_seen_at: string | null;
+      settled_value: number | null;
+    }>;
     const at = (counter: string): string | undefined => {
       const value = rows.find((row) => row.counter === counter)?.rose_at;
       return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
@@ -1615,7 +1667,17 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
     const embeddingAt = at('embedded_files');
     const extractionSettled = settled('content_ready_items');
     const embeddingSettled = settled('embedded_files');
+    // The oldest first-observation across this corpus's counters: the earliest
+    // moment the dashboard can prove it was looking at this source at all.
+    const firstSeenTimes = rows
+      .map((row) => row.first_seen_at)
+      .filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)))
+      .map((value) => Date.parse(value));
+    const firstSeenAt = firstSeenTimes.length > 0
+      ? new Date(Math.min(...firstSeenTimes)).toISOString()
+      : undefined;
     const movement: DashboardPhaseMovement = {
+      ...(firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt }),
       ...(metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt }),
       ...(extractionAt === undefined ? {} : { extraction_at: extractionAt }),
       ...(embeddingAt === undefined ? {} : { embedding_at: embeddingAt }),
@@ -1645,8 +1707,10 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         // than the first — two batches in a row each get their own
         // denominator instead of being summed into one.
         this.db.run(`
-          INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, settled_value, settled_at)
-          VALUES (?, ?, ?, NULL, ?, ?, ?)
+          INSERT INTO source_dashboard_movement (
+            corpus_id, counter, last_value, rose_at, seen_at, first_seen_at, settled_value, settled_at
+          )
+          VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
           ON CONFLICT (corpus_id, counter) DO UPDATE SET
             last_value = excluded.last_value,
             rose_at = CASE WHEN excluded.last_value > source_dashboard_movement.last_value
@@ -1654,7 +1718,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
             seen_at = excluded.seen_at,
             settled_value = excluded.settled_value,
             settled_at = excluded.settled_at
-        `, [sample.corpus_id, counter, value, sample.sampled_at, value, sample.sampled_at]);
+        `, [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at, value, sample.sampled_at]);
         continue;
       }
       const row = this.db.query(`
@@ -1664,8 +1728,9 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
         // First observation: the value is known, the rise is not, and a corpus
         // whose history starts here has settled nothing to measure against.
         this.db.run(
-          'INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at) VALUES (?, ?, ?, NULL, ?)',
-          [sample.corpus_id, counter, value, sample.sampled_at],
+          `INSERT INTO source_dashboard_movement (corpus_id, counter, last_value, rose_at, seen_at, first_seen_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`,
+          [sample.corpus_id, counter, value, sample.sampled_at, sample.sampled_at],
         );
         continue;
       }
@@ -1726,7 +1791,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     const corpora = options.sourceIndexStatus.corpora
       .filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora) claimedCorpusIds.add(corpus.corpus_id);
-    return sourceCardFromDefinition(
+    const card = sourceCardFromDefinition(
       definition,
       corpora,
       schedulerByCorpus,
@@ -1747,6 +1812,17 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
     );
+    // Stamped after the card is built rather than threaded through it: this is
+    // a fact about the worker's dispatch chain, not about the source.
+    const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
+      ? definition.connect_action.source
+      : undefined;
+    if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
+    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    // The readiness ladder's initial-sync advice names Sync now, so it is
+    // rebuilt once the card knows whether this worker can run it.
+    withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
+    return withSyncAnswer;
   });
   // Anything no card claimed is still the owner's data in the local store. It
   // is surfaced and counted rather than dropped: a corpus vanishing from this
@@ -2104,7 +2180,10 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       condition: connection.state === 'syncing' ? 'usable' : 'blocked',
       next_action: connection.state === 'syncing'
         ? 'Keep the worker running while the first sync and extraction queues finish.'
-        : `Start Sync now for ${card.label}; a service restart is not required.`,
+        // Naming a control this worker cannot run sends the reader to a 501.
+        : card.sync_now_available === false
+          ? `Keep the worker running; this worker has no Sync now for ${card.label}, so it syncs on its own schedule.`
+          : `Start Sync now for ${card.label}; a service restart is not required.`,
       dependencies,
     };
   }
@@ -2700,6 +2779,17 @@ function connectionStateFromDefinition(
       ? sessionEvidence !== 'none' || activeHandles.length > 0
       : activeHandles.length > 0;
   const handleIds = handles.map((handle) => handle.handle).sort((a, b) => a.localeCompare(b));
+  // The most recent active grant: a reconnect restarts the first-sync clock,
+  // and an older sibling handle must not hold it back. A timestamp that does
+  // not parse, or that is in the future, is no evidence of anything and is
+  // dropped rather than trusted -- the same rule the reconnect-vs-probe
+  // comparison above already applies to this field.
+  const connectedAtMs = activeHandles
+    .map((handle) => Date.parse(handle.connectedAt))
+    .filter((value) => Number.isFinite(value) && value <= now.getTime());
+  const connectedAt = connectedAtMs.length > 0
+    ? { connected_at: new Date(Math.max(...connectedAtMs)).toISOString() }
+    : {};
   if (unpaired !== undefined) {
     // The one connection fact on this card that is known rather than inferred.
     // An Unpair changes nothing the session evidence above reads — the items
@@ -2776,22 +2866,28 @@ function connectionStateFromDefinition(
   }
   if (!connected && !reauthRequired) return { state: 'not_connected', label: notConnectedLabel, action, handles: handleIds };
   if (queue.active > 0 || queue.waiting > 0 || syncRunning) {
-    return { state: 'syncing', label: 'syncing', action, handles: handleIds };
+    return { state: 'syncing', label: 'syncing', action, handles: handleIds, ...connectedAt };
   }
   // A past sync proves a session existed; nothing readable here proves it still
   // does. Saying so is the honest middle between the false pairing alarm and a
   // confident "synced" over a timestamp outside this source's own window.
   if (sessionEvidence === 'unconfirmed') {
-    return { state: 'connected', label: 'connected · live session not checked', action, handles: handleIds };
+    return { state: 'connected', label: 'connected · live session not checked', action, handles: handleIds, ...connectedAt };
   }
   if (definition.answer_capable_without_sync) {
-    return { state: 'connected', label: 'connected', action, handles: handleIds };
+    return { state: 'connected', label: 'connected', action, handles: handleIds, ...connectedAt };
   }
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
-    return { state: 'waiting_for_first_sync', label: 'connected, waiting for first sync', action, handles: handleIds };
+    return {
+      state: 'waiting_for_first_sync',
+      label: 'connected, waiting for first sync',
+      action,
+      handles: handleIds,
+      ...connectedAt,
+    };
   }
   const syncedAt = syncedRelativeLabel(freshness);
-  return { state: 'synced', label: syncedAt ? `synced ${syncedAt}` : 'synced', action, handles: handleIds };
+  return { state: 'synced', label: syncedAt ? `synced ${syncedAt}` : 'synced', action, handles: handleIds, ...connectedAt };
 }
 
 /**
@@ -4000,7 +4096,7 @@ function onboarding(
       { id: 'dependencies', label: 'Dependency check', state: cleared(dependenciesProven), next_action: 'Choose a source below, run Olympus doctor, and repair only that source’s declared dependency.' },
       { id: 'credential_or_pairing', label: 'Credential or pairing', state: cleared(connected), next_action: 'Connect one account or finish the local pairing instructions below.' },
       { id: 'scope', label: 'Scope', state: cleared(scopeReady), next_action: folderPicker.available ? 'Open scope rules to author and preview what Olympus may read.' : 'Confirm the contextual provider scope shown on the source card.' },
-      { id: 'initial_sync', label: 'Initial sync', state: cleared(firstSync), next_action: 'Start Sync now and keep the worker running; do not restart for setup changes.' },
+      { id: 'initial_sync', label: 'Initial sync', state: cleared(firstSync), next_action: initialSyncAdvice(configuredCards) },
       { id: 'source_health', label: 'Usable, degraded, or blocked', state: cleared(sourceHealthy), next_action: 'Follow the source card’s named next action until coverage and gaps are truthful.' },
       { id: 'cited_answer_readiness', label: 'Cited-answer readiness', state: cleared(answerReady), next_action: 'Ask a question and verify claim-level citations plus any stated gaps.' },
     ]),
@@ -4012,6 +4108,22 @@ function onboarding(
         : 'This unlocks as soon as one connected source has answer-ready text.',
     },
   };
+}
+
+/**
+ * What the initial-sync step tells the reader to do.
+ *
+ * Sync now is only advice where some connected source can actually run it. On a
+ * worker with no scheduler and no host hook, every press answers 501, and the
+ * ladder was sending the reader at a button that could only refuse.
+ */
+function initialSyncAdvice(configuredCards: readonly DashboardSourceCard[]): string {
+  const answered = configuredCards.filter((card) => card.sync_now_available !== undefined);
+  const anySyncable = answered.length === 0
+    || answered.some((card) => card.sync_now_available === true);
+  return anySyncable
+    ? 'Start Sync now and keep the worker running; do not restart for setup changes.'
+    : 'Keep the worker running; this worker has no Sync now, so connected sources sync on their own schedule.';
 }
 
 /**

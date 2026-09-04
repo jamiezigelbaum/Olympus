@@ -246,6 +246,41 @@ describe('scheduler construction boot receipt', () => {
 
     expect(lines.at(-1)).toBe('[source-scheduler] constructed=7 skipped=0 selected=7');
   });
+
+  test('reports no allowlist as every construction selected, not as drift', () => {
+    // A fresh install enables the scheduler with no allowlist, and the lanes
+    // arrive as the owner connects them through the dashboard. Compared against
+    // an empty set, each live lane printed under `constructed_not_selected`
+    // beside `selected=0` -- a receipt crying wolf about the ordinary state.
+    const lines = sourceSchedulerConstructionLogLines({
+      decisions: [
+        { sourceId: SCHEDULER_SOURCE_IDS.gmail, outcome: 'constructed', reason: 'lane_ready' },
+        { sourceId: SCHEDULER_SOURCE_IDS.googleDrive, outcome: 'skipped', reason: 'no_handle' },
+      ],
+      selectedSourceIds: [],
+    });
+
+    expect(lines.at(-1)).toBe(
+      '[source-scheduler] constructed=1 skipped=1 selected=1'
+      + ' selection=no_allowlist_all_constructed_selected',
+    );
+    expect(lines.join('\n')).not.toContain('constructed_not_selected');
+    expect(lines.join('\n')).not.toContain('selected_not_constructed');
+  });
+
+  test('a worker with no allowlist and nothing connected reports zero of both', () => {
+    const lines = sourceSchedulerConstructionLogLines({
+      decisions: [
+        { sourceId: SCHEDULER_SOURCE_IDS.gmail, outcome: 'skipped', reason: 'no_handle' },
+      ],
+      selectedSourceIds: [],
+    });
+
+    expect(lines.at(-1)).toBe(
+      '[source-scheduler] constructed=0 skipped=1 selected=0'
+      + ' selection=no_allowlist_all_constructed_selected',
+    );
+  });
 });
 
 function schedulerConfig(): OlympusConfig {

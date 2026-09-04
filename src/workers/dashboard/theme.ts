@@ -98,6 +98,15 @@ a { color: var(--link); }
 .attncard { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 9px; padding: 12px 15px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
 .attncard.plain { background: var(--panel); border-color: var(--line2); }
 .attncard .grow { flex: 1; }
+/* The source page's ONE banner, and only it. A bare flex:1 gave the
+   description a zero basis, so a banner carrying Sync now, its status text and
+   an agent-prompt button squeezed a whole paragraph into a ~30-character column
+   while the controls kept their intrinsic width (owner, 2026-09-04). With a
+   basis the text keeps its width and the controls drop to their own row.
+   Scoped to .banner: the list rows and the whole-row links are a different
+   shape, and the mobile block below still owns what they do at 375px. */
+.attncard.banner { flex-wrap: wrap; }
+.attncard.banner .grow { flex: 1 1 320px; min-width: 0; }
 .attncard .name { font-weight: 600; }
 .attncard .why { color: var(--t3); font-size: 12.5px; }
 /* A warning row that carries no control is itself the link to the detail page,

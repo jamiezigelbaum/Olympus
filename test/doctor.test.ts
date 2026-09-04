@@ -522,8 +522,11 @@ describe('runDoctor', () => {
       },
     });
 
+    // The email lane is on by default now, so "disabled" is stated here.
+    const disabledEmailConfig = defaultConfig();
+    disabledEmailConfig.email.enabled = false;
     const result = await runDoctor(doctorDeps({
-      config: defaultConfig(),
+      config: disabledEmailConfig,
       delphi: healthyDelphi(),
       fetchImpl,
     }));
@@ -544,6 +547,7 @@ describe('runDoctor', () => {
   test('skips worker checks as ok when the email worker and source index are disabled', async () => {
     const { fetchImpl, requestedPaths } = fakeWorkerFetch({});
     const config = defaultConfig();
+    config.email.enabled = false;
     config.sourceIndex.enabled = false;
 
     const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
@@ -1399,6 +1403,43 @@ describe('runDoctor', () => {
     expect(scheduler.detail).toContain('selected scheduler source x.bookmarks is not active');
     expect(scheduler.detail).not.toContain('gmail.personal connected');
     expect(scheduler.detail).not.toContain('google_drive.personal connected');
+  });
+
+  // A fresh install enables the scheduler with no configured allowlist, then
+  // adopts its first source at runtime through the dashboard. The worker
+  // always reports selected_source_ids (the adopted set when unrestricted), so
+  // keying the contract off its presence made every adopted source read as
+  // "unexpected" -- and with doctor's non-zero exit that left doctor
+  // permanently red on a correctly working install from the first connect on.
+  test('accepts runtime-adopted sources when no scheduler allowlist is configured', async () => {
+    const config = enabledEmailConfig();
+    config.worker.scheduler.enabled = true;
+    config.worker.scheduler.sourceIds = [];
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [{ corpus_id: 'internal.email' }],
+      },
+      '/v1/source/scheduler/status': {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: '2026-09-04T12:00:00.000Z',
+        selected_source_ids: ['gmail.email'],
+        missing_selected_source_ids: [],
+        sources: [{ source_id: 'gmail.email', corpus_id: 'internal.email', tasks: [] }],
+      },
+    });
+    const result = await runDoctor(doctorDeps({
+      config,
+      delphi: healthyDelphi(),
+      fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('gmail')] },
+    }));
+    const scheduler = checkByName(result.checks, 'source_scheduler_status');
+    expect(scheduler.ok).toBe(true);
+    expect(scheduler.detail).not.toContain('unexpected scheduler source');
   });
 
   test('source_ingestion_health reports stuck-work warning and error thresholds', async () => {

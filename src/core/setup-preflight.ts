@@ -1,4 +1,5 @@
 import { createDefaultSecretStore, normalizeSecretRef, type SecretStore } from './secret-store.ts';
+import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import type { SovereigntyConfig, SovereigntyModelProfile } from './sovereignty.ts';
 
 export type SetupPrerequisiteKind = 'env_secret' | 'store_secret' | 'local_model_server';
@@ -16,10 +17,21 @@ export interface SetupPreflightOptions {
   config: SovereigntyConfig;
   env?: Record<string, string | undefined>;
   secretStore?: Pick<SecretStore, 'get' | 'getSync'>;
+  /** The install whose worker.env holds the keys, when it is not $HOME's. */
+  homeDir?: string;
+  workerEnvPath?: string;
 }
 
 export async function setupPreflight(options: SetupPreflightOptions): Promise<SetupPrerequisite[]> {
-  const env = options.env ?? process.env;
+  // The managed worker.env counts as present. `olympus connect gemini` stores
+  // the key there because that is where the supervised worker reads it from,
+  // so a preflight reading only process.env reported the key missing straight
+  // after the operator stored it -- and named the command they had just run.
+  const env = environmentWithWorkerSetupEnv({
+    ...(options.env ? { env: options.env } : {}),
+    ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
+  });
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet: SetupPrerequisite[] = [];
   const seen = new Set<string>();
@@ -63,7 +75,7 @@ async function secretRefPrerequisite(
       profileId,
       label: `${displayKey} environment variable`,
       detail: `Profile ${profileId} needs ${displayKey} for ${profile.provider}.`,
-      remedy: `export ${displayKey}=...`,
+      remedy: envSecretRemedy(displayKey),
     };
   }
 
@@ -79,6 +91,19 @@ async function secretRefPrerequisite(
     detail: `Profile ${profileId} needs ${ref.key} in the Olympus secret store.`,
     remedy: storeSecretRemedy(ref.key),
   };
+}
+
+/**
+ * The supervised worker reads its environment from worker.env, loaded by
+ * launchd/systemd — an `export` in the operator's shell never reaches it, so a
+ * remedy that says `export ...` is a remedy that cannot work. Name the command
+ * that puts the key where the worker will find it.
+ */
+function envSecretRemedy(displayKey: string): string {
+  if (displayKey === 'GEMINI_API_KEY') {
+    return 'printf \'%s\' "$KEY" | olympus connect gemini --api-key-stdin';
+  }
+  return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
 
 function isLocalLoopbackProfile(profile: SovereigntyModelProfile): boolean {
