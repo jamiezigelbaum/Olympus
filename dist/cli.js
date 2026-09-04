@@ -2840,6 +2840,17 @@ function loadConfig(env = process.env) {
     const raw = JSON.parse(readFileSync5(configPath, "utf8"));
     mergeConfig(config, raw);
   }
+  applyEnvironmentOverrides(config, env);
+  validateConfig(config);
+  return config;
+}
+function configWithEnvironmentOverrides(config, env) {
+  const next = structuredClone(config);
+  applyEnvironmentOverrides(next, env);
+  validateConfig(next);
+  return next;
+}
+function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
     config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
   }
@@ -2986,8 +2997,6 @@ function loadConfig(env = process.env) {
   if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
     config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
   }
-  validateConfig(config);
-  return config;
 }
 function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
@@ -7589,7 +7598,7 @@ var init_dropbox2 = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { existsSync as existsSync7, readFileSync as readFileSync7 } from "node:fs";
+import { chmodSync, existsSync as existsSync7, lstatSync as lstatSync2, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname6, join as join8 } from "node:path";
 function defaultSensitivityMapPath() {
@@ -7619,13 +7628,32 @@ function validateSensitivityMapFile(options = {}) {
   const map = loadSensitivityMap({ ...options, path });
   if (!map)
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
+  const custody = tightenSensitivityMapPermissions(path);
   return {
     ok: true,
     path,
     schemaVersion: map.schemaVersion,
     categories: map.categories.length,
-    categoryIds: map.categories.map((category) => category.id)
+    categoryIds: map.categories.map((category) => category.id),
+    ...custody
   };
+}
+function tightenSensitivityMapPermissions(path) {
+  try {
+    const stat2 = lstatSync2(path);
+    if (!stat2.isFile())
+      return {};
+    const mode = stat2.mode & 511;
+    if ((mode & 63) === 0)
+      return { permissions: formatFileMode(mode) };
+    chmodSync(path, 384);
+    return { permissions: "0600", permissionsTightened: true };
+  } catch {
+    return {};
+  }
+}
+function formatFileMode(mode) {
+  return `0${(mode & 511).toString(8).padStart(3, "0")}`;
 }
 function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname6(path)} does not exist yet; it creates that directory with owner-only permissions.`;
@@ -9337,7 +9365,7 @@ function closeSqliteStore(db, options = {}) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
-import { lstatSync as lstatSync2, mkdirSync as mkdirSync5, statSync as statSync2 } from "node:fs";
+import { lstatSync as lstatSync3, mkdirSync as mkdirSync5, statSync as statSync2 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
 import { Database } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -11487,7 +11515,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync2(this.dbPath);
+        const stat2 = lstatSync3(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
@@ -17016,7 +17044,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { dirname as dirname8, join as join9 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -17251,9 +17279,10 @@ function writeSovereigntyConfigFile(input) {
   const config = validateSovereigntyConfig(input.config);
   const directory = dirname8(path);
   mkdirSync6(directory, { recursive: true, mode: 448 });
-  chmodSync(directory, 448);
+  chmodSync2(directory, 448);
   writeFileSync3(path, `${JSON.stringify(config, null, 2)}
 `, { mode: 384 });
+  chmodSync2(path, 384);
   return path;
 }
 function loadSovereigntyPreset(name) {
@@ -19121,7 +19150,7 @@ var init_classification = __esm(() => {
 
 // src/workers/google-connectors/request-budget.ts
 import {
-  chmodSync as chmodSync2,
+  chmodSync as chmodSync3,
   existsSync as existsSync9,
   mkdirSync as mkdirSync7,
   readFileSync as readFileSync9,
@@ -19364,7 +19393,7 @@ function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
       if (existsSync9(path))
-        chmodSync2(path, 384);
+        chmodSync3(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
@@ -21399,7 +21428,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
 import { createHash as createHash12 } from "node:crypto";
-import { existsSync as existsSync10, lstatSync as lstatSync3, readFileSync as readFileSync10, readdirSync } from "node:fs";
+import { existsSync as existsSync10, lstatSync as lstatSync4, readFileSync as readFileSync10, readdirSync } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join14 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -21500,7 +21529,7 @@ function readTelegramCaptureSpool(options) {
       if (admitThrough && name > admitThrough.file)
         break;
       const path = join14(options.spoolDir, name);
-      const stat2 = lstatSync3(path);
+      const stat2 = lstatSync4(path);
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
@@ -21578,7 +21607,7 @@ function mostRestrictiveTrust(observed, ...others) {
 function assertTelegramCaptureSpoolDirectory(spoolDir) {
   if (!existsSync10(spoolDir))
     throw new Error("Telegram capture spool directory does not exist.");
-  const dir = lstatSync3(spoolDir);
+  const dir = lstatSync4(spoolDir);
   if (!dir.isDirectory() || dir.isSymbolicLink()) {
     throw new Error("Telegram capture spool requires a real directory.");
   }
@@ -23651,7 +23680,7 @@ var init_connector3 = __esm(() => {
 
 // src/workers/x-bookmarks/live-control.ts
 import { createHash as createHash16, randomUUID as randomUUID6 } from "node:crypto";
-import { chmodSync as chmodSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync9 } from "node:fs";
+import { chmodSync as chmodSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname11, join as join17 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
@@ -23752,7 +23781,7 @@ class LocalXBookmarksApiUsageStore {
       mkdirSync9(dirname11(dbPath), { recursive: true, mode: 448 });
     this.db = new Database3(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync3(dbPath, 384);
+      chmodSync4(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, X_BOOKMARKS_API_USAGE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, xBookmarksApiUsageMigrations());
@@ -24588,7 +24617,7 @@ var init_live_control2 = __esm(() => {
 
 // src/workers/x-bookmarks/reconcile-state.ts
 import { createHash as createHash17, randomUUID as randomUUID7 } from "node:crypto";
-import { chmodSync as chmodSync4, mkdirSync as mkdirSync10 } from "node:fs";
+import { chmodSync as chmodSync5, mkdirSync as mkdirSync10 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { dirname as dirname12, join as join18 } from "node:path";
 import { Database as Database4 } from "bun:sqlite";
@@ -24613,7 +24642,7 @@ class LocalXBookmarksReconcileStateStore {
       mkdirSync10(dirname12(dbPath), { recursive: true, mode: 448 });
     this.db = new Database4(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync4(dbPath, 384);
+      chmodSync5(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, xBookmarksReconcileStateMigrations());
@@ -27887,7 +27916,7 @@ var init_api_connector = __esm(() => {
 // src/workers/x-bookmarks/window-diagnostic.ts
 import { createHash as createHash19, randomUUID as randomUUID8 } from "node:crypto";
 import {
-  chmodSync as chmodSync5,
+  chmodSync as chmodSync6,
   existsSync as existsSync11,
   mkdirSync as mkdirSync11,
   renameSync as renameSync3,
@@ -28133,9 +28162,9 @@ function writePrivateReport(pathValue, contents) {
   const temporaryPath = `${reportPath}.tmp-${randomUUID8()}`;
   try {
     writeFileSync4(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
-    chmodSync5(temporaryPath, 384);
+    chmodSync6(temporaryPath, 384);
     renameSync3(temporaryPath, reportPath);
-    chmodSync5(reportPath, 384);
+    chmodSync6(reportPath, 384);
     if ((statSync3(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
@@ -28535,7 +28564,7 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 import { createHash as createHash20, randomUUID as randomUUID9 } from "node:crypto";
 import {
-  chmodSync as chmodSync6,
+  chmodSync as chmodSync7,
   renameSync as renameSync4,
   rmSync as rmSync2,
   writeFileSync as writeFileSync5
@@ -28833,9 +28862,9 @@ function writeReceipt(pathValue, receipt) {
       flag: "wx",
       mode: 384
     });
-    chmodSync6(temporary, 384);
+    chmodSync7(temporary, 384);
     renameSync4(temporary, path);
-    chmodSync6(path, 384);
+    chmodSync7(path, 384);
     return receipt;
   } catch (error) {
     rmSync2(temporary, { force: true });
@@ -29865,7 +29894,7 @@ var init_whatsapp = __esm(() => {
 });
 
 // src/core/pairing-session-paths.ts
-import { lstatSync as lstatSync5, realpathSync, rmSync as rmSync3 } from "node:fs";
+import { lstatSync as lstatSync6, realpathSync, rmSync as rmSync3 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { basename as basename2, dirname as dirname14, join as join21, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
 function resolveHomeDir(context) {
@@ -29951,7 +29980,7 @@ function canonicalOlympusDataRoots(roots) {
   for (const root of roots) {
     try {
       const real = realpathSync(root);
-      if (lstatSync5(real).isDirectory())
+      if (lstatSync6(real).isDirectory())
         canonical.push(real);
     } catch {}
   }
@@ -30029,7 +30058,7 @@ function removePlannedPairingSessionFile(target) {
 }
 function inspectPath(path) {
   try {
-    return { kind: "stat", stat: lstatSync5(path) };
+    return { kind: "stat", stat: lstatSync6(path) };
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -30290,7 +30319,7 @@ function unquoteEnvValue(value) {
 var init_worker_auth = () => {};
 
 // src/core/worker-service.ts
-import { chmodSync as chmodSync7, closeSync as closeSync3, existsSync as existsSync13, lstatSync as lstatSync6, mkdirSync as mkdirSync12, openSync as openSync3, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync3, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync12, openSync as openSync3, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
 import { homedir as homedir20, platform as osPlatform } from "node:os";
 import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join23, relative as relative4, sep as sep4 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -30607,8 +30636,8 @@ function defaultWorkerServiceExec(command, args) {
   const result = spawnSync2(command, args, { encoding: "utf8" });
   return {
     status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? (result.error ? `${command}: ${result.error.message}` : "")
   };
 }
 function workerServicePaths(platform2, homeDir) {
@@ -30773,7 +30802,7 @@ function reconcileWorkerEnv(envPath, options) {
     return true;
   }
   if (mode !== 384) {
-    chmodSync7(envPath, 384);
+    chmodSync8(envPath, 384);
     return true;
   }
   return false;
@@ -30827,7 +30856,7 @@ function writeManagedWorkerEnvSecret(input) {
     wrote = true;
   }
   if ((statSync6(envPath).mode & 511) !== 384) {
-    chmodSync7(envPath, 384);
+    chmodSync8(envPath, 384);
     wrote = true;
   }
   return { ok: true, path: envPath, key: input.key, wrote };
@@ -30936,7 +30965,7 @@ function managedParentSafetyDetail(homeDir, unitPath, envPath) {
 }
 function isManagedRegularFile(path) {
   try {
-    return lstatSync6(path).isFile();
+    return lstatSync7(path).isFile();
   } catch {
     return false;
   }
@@ -30944,7 +30973,7 @@ function isManagedRegularFile(path) {
 function assertManagedRegularFile(path, label) {
   let stats;
   try {
-    stats = lstatSync6(path);
+    stats = lstatSync7(path);
   } catch {
     throw new OperationError("config_error", `Could not inspect the managed ${label} path: ${path}`);
   }
@@ -30958,7 +30987,7 @@ function writeManagedFileAtomicIfChanged(path, text, label) {
     assertManagedRegularFile(path, label);
     if (readFileSync14(path, "utf8") === text) {
       if ((statSync6(path).mode & 511) !== 384) {
-        chmodSync7(path, 384);
+        chmodSync8(path, 384);
         return true;
       }
       return false;
@@ -31243,9 +31272,9 @@ var init_email_policy = __esm(() => {
 // src/core/source-watch.ts
 import { createHash as createHash23, randomUUID as randomUUID11 } from "node:crypto";
 import {
-  chmodSync as chmodSync8,
+  chmodSync as chmodSync9,
   existsSync as existsSync15,
-  lstatSync as lstatSync8,
+  lstatSync as lstatSync9,
   mkdirSync as mkdirSync14
 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
@@ -31309,7 +31338,7 @@ class LocalSourceWatchStore {
     hardenPrivateDatabasePath(dbPath);
     this.db = new Database6(dbPath, { create: true });
     try {
-      chmodSync8(dbPath, 384);
+      chmodSync9(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
       refuseUnversionedOwnedSchema(this.db);
       assertSqliteSchemaCanOpen(this.db, SOURCE_WATCH_STORE_ID, SOURCE_WATCH_SCHEMA_VERSION);
@@ -31989,13 +32018,13 @@ function hardenPrivateDatabasePath(dbPath) {
     throw new Error("Source watch database must live inside a dedicated private leaf directory.");
   }
   mkdirSync14(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync8(leafDir);
+  const dirStat = lstatSync9(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
-  chmodSync8(leafDir, 448);
+  chmodSync9(leafDir, 448);
   if (existsSync15(dbPath)) {
-    const dbStat = lstatSync8(dbPath);
+    const dbStat = lstatSync9(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
     }
@@ -34195,14 +34224,14 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
+import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync10, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
 function inspectRecordNode(path) {
   let stat3;
   try {
-    stat3 = lstatSync9(path);
+    stat3 = lstatSync10(path);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -34374,7 +34403,7 @@ function clearUnpairedSource(sourceId, registryPath) {
 }
 function artifactPresence(path) {
   try {
-    lstatSync9(path);
+    lstatSync10(path);
     return "present";
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
@@ -35970,7 +35999,7 @@ function dashboardOperatorPaused(source) {
 }
 function workingLine(source) {
   const parts = [];
-  const firstIngest = source.freshness.label === "Waiting for first check" ? "first ingest" : undefined;
+  const firstIngest = source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "first ingest" : undefined;
   const readyWhileUpdating = source.answer_readiness.state === "ready" && source.coverage.indexed_items > 0 && (source.connection.state === "syncing" || source.queue_health.active > 0 || source.queue_health.waiting > 0);
   const summary = dashboardWorkingSummary(source);
   if (readyWhileUpdating) {
@@ -36045,6 +36074,7 @@ function plural(count, word) {
 }
 var DASHBOARD_STATUS_ORDER, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy";
 var init_vocabulary = __esm(() => {
+  init_source_dashboard();
   init_answer_ready_coverage();
   init_scheduler_markers();
   DASHBOARD_STATUS_ORDER = [
@@ -36102,7 +36132,7 @@ function dashboardSourceProgress(source, options = {}) {
 function dashboardHasSettledPass(source) {
   if (source.connection.state === "waiting_for_first_sync")
     return false;
-  if (source.freshness.label === "Waiting for first check")
+  if (source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL)
     return false;
   if (source.connection.state === "synced")
     return true;
@@ -36368,6 +36398,7 @@ function percentOf(done, total) {
 }
 var DASHBOARD_PHASE_LABELS, DELTA_OVERSTATE_SHARE = 0.005, DASHBOARD_PHASE_STALL_HOURS = 1, DASHBOARD_FIRST_SYNC_GRACE_HOURS;
 var init_phases = __esm(() => {
+  init_source_dashboard();
   init_vocabulary();
   DASHBOARD_PHASE_LABELS = {
     metadata_sync: "Metadata sync",
@@ -37007,7 +37038,10 @@ function buildSourceDashboardViewModel(options) {
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined)
       return card;
-    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    const withSyncAnswer = {
+      ...card,
+      sync_now_available: card.configured && options.syncNowAvailable(syncSource)
+    };
     withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
     return withSyncAnswer;
   });
@@ -37125,8 +37159,10 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...!pairedSession && baseConnection.handles.length > 0 ? { disconnect: dashboardDisconnectAction(definition.source_id, definition.label) } : {},
     ...unpairable ? { unpair: dashboardUnpairAction(definition.source_id, definition.label) } : {}
   };
+  const trustDomain = cardTrustDomain(definition, corpora);
   const configured = connection.state === "connected" || connection.state === "waiting_for_first_sync" || connection.state === "syncing" || connection.state === "synced";
-  const answerReadiness = connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
+  const notConnected = !configured && connection.state !== "reauth_required";
+  const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
   const lastRun = lastRunFromCorpora(corpora);
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
@@ -37138,7 +37174,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     label: definition.label,
     provider: definition.provider,
     family: definition.family,
-    trust_domain: definition.trust_domain,
+    trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id),
     configured,
     freshness,
@@ -37151,7 +37187,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     } : {},
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
     ingestion_health: ingestionHealth,
-    tier_composition: aggregateTierComposition(corpusCards, definition, coverage),
+    tier_composition: aggregateTierComposition(corpusCards, trustDomain, coverage),
     queue_health: queue,
     answer_readiness: answerReadiness,
     connection,
@@ -37181,11 +37217,12 @@ function dashboardSourceSetupStatus(card) {
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
   const dependenciesReady = synced;
-  const dependencies = (card.capabilities?.dependencies ?? []).map((dependency) => ({
+  const embeddingLaneApplies = card.embedding_lane_state !== "embedding_lane_disabled" && card.embedding_required !== false;
+  const dependencies = (card.capabilities?.dependencies ?? []).filter((dependency) => dependency.id !== "local_embedding_lane" || embeddingLaneApplies).map((dependency) => ({
     id: dependency.id,
     label: dependency.label,
     status: dependenciesReady ? "ready" : "check_required",
-    next_action: dependenciesReady ? "No action needed; a completed source read proves this dependency path." : `Run Olympus doctor and repair ${dependency.label} before relying on the first sync.`
+    next_action: dependenciesReady ? "No action needed; a completed source read proves this dependency path." : "Checked after the first sync."
   }));
   if (connection.state === "not_connected" || connection.state === "needs_setup") {
     const action = connection.action;
@@ -37496,13 +37533,20 @@ function aggregateFreshness(cards, schedulers, corpora, definition, now) {
   if (cards.some((card) => card.coverage.indexed_items > 0)) {
     return { label: "Last check time not recorded", stale };
   }
-  return { label: "Waiting for first check", stale };
+  return { label: DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, stale };
 }
-function aggregateTierComposition(cards, definition, coverage) {
+function cardTrustDomain(definition, corpora) {
+  const primary = corpora.find((corpus) => corpus.corpus_id === definition.primary_corpus_id);
+  if (primary?.trust_domain)
+    return primary.trust_domain;
+  const prefix = definition.primary_corpus_id.split(".")[0];
+  return prefix !== undefined && SOURCE_TRUST_DOMAINS.includes(prefix) ? prefix : definition.trust_domain;
+}
+function aggregateTierComposition(cards, trustDomainWhenEmpty, coverage) {
   if (cards.length === 0) {
     return [{
-      trust_domain: definition.trust_domain,
-      label: trustDomainLabel(definition.trust_domain),
+      trust_domain: trustDomainWhenEmpty,
+      label: trustDomainLabel(trustDomainWhenEmpty),
       indexed_items: coverage.indexed_items,
       content_ready_items: coverage.content_ready_items
     }];
@@ -37639,7 +37683,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
         label,
         publisher_client: true,
         ...redirectFields,
-        instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
+        instructions: publisherOAuthSetupInstructions(definition.label, label, oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl)),
         ...pending ? { pending_attempt: true } : {}
       };
     }
@@ -37684,6 +37728,22 @@ function guidedSessionLabel(connected, reauthRequired, sessionEvidence) {
   if (!connected || reauthRequired)
     return "Pairing required";
   return sessionEvidence === "unconfirmed" ? "Session state not surfaced" : "Session ready";
+}
+function publisherOAuthSetupInstructions(sourceLabel, actionLabel, byo) {
+  return {
+    plain_intro: publisherConnectIntro(sourceLabel),
+    agent_prompt: `Connect ${sourceLabel} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
+    provider_console_url: byo.provider_console_url,
+    ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
+    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_steps: [],
+    secret_shown_once: false,
+    fields: [],
+    advanced_byo: byo
+  };
+}
+function publisherConnectIntro(sourceLabel) {
+  return `Olympus connects ${sourceLabel} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
 }
 function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   const clientIdField = {
@@ -38144,7 +38204,10 @@ function freshnessFrom(corpus, scheduler) {
   if (completedAt) {
     return { label: "Recently checked", stale: false };
   }
-  return { label: corpus.configured ? "Waiting for first check" : "Not connected yet", stale: false };
+  return {
+    label: corpus.configured ? DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL : "Not connected yet",
+    stale: false
+  };
 }
 function parkExplainsStaleness(freshness) {
   const hours = freshness.hours;
@@ -38468,11 +38531,12 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
+  init_types();
   init_scheduler_markers();
   init_answer_ready_coverage();
   init_vocabulary();
@@ -39675,13 +39739,8 @@ import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync18, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname22, join as join30 } from "node:path";
 async function runDoctor(input) {
-  const deps = input.env === undefined ? input : {
-    ...input,
-    env: environmentWithWorkerSetupEnv({
-      env: input.env,
-      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
-    })
-  };
+  const inputEnv = input.env;
+  const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
@@ -39715,6 +39774,40 @@ async function sourceCapabilityCatalogCheck(deps) {
     detail: `Public source catalog declares ${V0_4_PUBLIC_SOURCE_CAPABILITIES.length} sources; ${connected.length} connected. Source-conditioned dependencies for connected sources: ${dependencyLabels.join(", ") || "none until a source is connected"}.`
   };
 }
+function doctorDepsWithLayeredEnvironment(input, inputEnv) {
+  const env = environmentWithWorkerSetupEnv({
+    env: inputEnv,
+    ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+  });
+  let config = input.config;
+  try {
+    config = configWithEnvironmentOverrides(input.config, env);
+  } catch {
+    config = input.config;
+  }
+  return { ...input, env, config };
+}
+function doctorSovereigntyEngine(deps) {
+  if (deps.sovereigntyEngine)
+    return deps.sovereigntyEngine;
+  const inline = deps.config.sovereignty?.policy;
+  if (inline !== undefined)
+    return loadSovereigntyEngine({ inlineConfig: inline });
+  const configPath = doctorSovereigntyConfigPath(deps);
+  if (configPath === undefined || !existsSync18(configPath))
+    return;
+  return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
+}
+function doctorSovereigntyConfigPath(deps) {
+  const env = deps.env ?? process.env;
+  const explicit = deps.config.sovereignty?.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
+  if (explicit)
+    return explicit;
+  if (deps.env === undefined)
+    return defaultSovereigntyConfigPath();
+  const home = deps.env.HOME?.trim();
+  return home ? join30(home, ".olympus", "sovereignty.json") : undefined;
+}
 async function safeCheck(name, run) {
   try {
     return await run();
@@ -39729,8 +39822,8 @@ async function safeCheck(name, run) {
 async function argusProfileCheck(deps, profile) {
   const name = "argus_model_pool";
   const profileConfig = deps.config.argus.modelProfiles[profile];
-  const hasSovereigntyPolicy = Boolean(deps.sovereigntyEngine || deps.config.sovereignty?.policy || deps.config.sovereignty?.configPath);
-  if (!hasSovereigntyPolicy) {
+  const sovereigntyEngine = doctorSovereigntyEngine(deps);
+  if (!sovereigntyEngine) {
     return {
       name,
       ok: true,
@@ -39738,10 +39831,7 @@ async function argusProfileCheck(deps, profile) {
     };
   }
   {
-    const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-      ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-      ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-    });
+    const engine = sovereigntyEngine;
     const profiles = Object.values(engine.config.modelProfiles);
     const hasLocalLane = profiles.some((p) => p.provider === "local-openai-compatible");
     if (!hasLocalLane) {
@@ -39812,17 +39902,14 @@ async function dependencyCheck(deps) {
   };
 }
 async function sovereigntyModelLaneCheck(deps) {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: "sovereignty_model_lanes",
       ok: true,
-      detail: "Skipped: no explicit sovereignty policy is configured for lane probing."
+      detail: "Skipped: no sovereignty policy is configured for lane probing."
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-    ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-  });
   const fetchImpl = deps.fetchImpl ?? fetch;
   const profiles = Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === "local-openai-compatible" && profile.baseUrl);
   if (profiles.length === 0) {
@@ -39859,17 +39946,14 @@ async function sovereigntyModelLaneCheck(deps) {
   };
 }
 async function sovereigntyPrerequisiteCheck(deps) {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: "sovereignty_prerequisites",
       ok: true,
-      detail: "Skipped: no explicit sovereignty policy is configured for prerequisite checks."
+      detail: "Skipped: no sovereignty policy is configured for prerequisite checks."
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-    ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-  });
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
@@ -42566,7 +42650,7 @@ var init_version = __esm(() => {
 });
 
 // src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync10, mkdirSync as mkdirSync21 } from "node:fs";
+import { chmodSync as chmodSync11, mkdirSync as mkdirSync21 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
 import { dirname as dirname25, join as join35 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
@@ -42585,7 +42669,7 @@ class LocalSourceSchedulerStateStore {
     }
     this.db = new Database9(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync10(dbPath, 384);
+      chmodSync11(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
@@ -58429,7 +58513,7 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync11, mkdirSync as mkdirSync22 } from "node:fs";
+import { chmodSync as chmodSync12, mkdirSync as mkdirSync22 } from "node:fs";
 import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
 import { homedir as homedir29 } from "node:os";
 import { dirname as dirname26, join as join36 } from "node:path";
@@ -58456,7 +58540,7 @@ class LocalFileExtractionJobStore {
     }
     this.db = this.readonly ? new Database10(dbPath, { readonly: true }) : new Database10(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync11(dbPath, 384);
+      chmodSync12(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -64545,7 +64629,7 @@ function dashboardControlGate(input) {
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Input token</span>` + `<span class="why"> — unlocks every action on this dashboard; never stored by the page.</span></div>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn primary" type="submit">Unlock</button>` + `<button class="btn" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Where is my token?</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Getting the worker token</h4>` + `<p>Ask your agent — copy this prompt into it:</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus:</p>` + `<div class="promptbox"><code>olympus dashboard token</code></div>` + `</div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Input token</span>` + `<span class="why"> — unlocks every action on this dashboard; never stored by the page.</span></div>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn primary" type="submit">Unlock</button>` + `<button class="btn" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Where is my token?</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Getting the worker token</h4>` + `<p>Ask your agent — copy this prompt into it:</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus, from the plugin directory:</p>` + `<div class="promptbox"><code>&lt;rootDir&gt;/bin/olympus dashboard token</code></div>` + `<p class="hint">rootDir comes from <code>openclaw plugins inspect olympus --json</code>.</p>` + `</div>`;
 }
 function attentionRow(input) {
   const why = (input.why ?? "").trim();
@@ -64675,20 +64759,21 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   if (instructions === undefined)
     return;
   const sheetId = `connect-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  const fields = instructions.fields.map((field) => field.name === "client_id" ? field : { ...field, required: false });
-  const secretPlaceholders = Object.fromEntries(instructions.fields.filter((field) => field.name !== "client_id").map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
+  const byo = instructions.advanced_byo ?? instructions;
+  const fields = byo.fields.map((field) => field.name === "client_id" ? field : { ...field, required: false });
+  const secretPlaceholders = Object.fromEntries(byo.fields.filter((field) => field.name !== "client_id").map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${action.label} ${source.label}`,
-    intro: instructions.plain_intro,
-    promptText: instructions.agent_prompt,
+    intro: byo.plain_intro,
+    promptText: byo.agent_prompt,
     source: action.source,
     fields,
     submitLabel: action.label,
     ...action.publisher_client ? {
       publisher: {
-        intro: `Olympus connects ${source.label} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.",
-        byoSummary: "Use my own app instead"
+        intro: instructions.plain_intro,
+        byoSummary: instructions.diy_summary
       }
     } : {},
     ...Object.keys(secretPlaceholders).length > 0 ? { placeholders: secretPlaceholders } : {},
@@ -65148,7 +65233,7 @@ var init_components = __esm(() => {
   init_phases();
   init_theme();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
-  DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "I need the Olympus worker token to unlock the dashboard controls. Run `olympus dashboard token` " + "(or read OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file) and give me the token so I can " + "paste it into the dashboard. Do not change any configuration.";
+  DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from " + "`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read " + "OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste " + "it into the dashboard. Do not change any configuration.";
 });
 
 // src/workers/dashboard/lane-state.ts
@@ -66828,7 +66913,7 @@ function setupHref2(basePath) {
   return `${path}${separator}${SETUP_QUERY_PARAM3}`;
 }
 function renderProgress(source, progress, now) {
-  const headingText = progress.delta ? "Current update" : source.connection.state === "syncing" || source.freshness.label === "Waiting for first check" ? "Initial ingestion" : "Ingestion";
+  const headingText = progress.delta ? "Current update" : source.connection.state === "syncing" || source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL ? "Initial ingestion" : "Ingestion";
   const heading = `
         <div class="dsect">${headingText}</div>`;
   const bars = progress.phases.map((phase) => {
@@ -69498,7 +69583,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync23, lstatSync as lstatSync13, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
+import { chmodSync as chmodSync13, copyFileSync, existsSync as existsSync23, lstatSync as lstatSync14, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
 import { dirname as dirname31 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -69604,13 +69689,13 @@ function writeSourceIngestionExclusionsFile(options) {
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
   if (existsSync23(path)) {
-    const stat5 = lstatSync13(path);
+    const stat5 = lstatSync14(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync12(backupPath, 384);
+    chmodSync13(backupPath, 384);
   } else {
     mkdirSync25(dirname31(path), { recursive: true });
   }
@@ -70391,7 +70476,7 @@ class GogcliEmailConnectorStub {
       configured: false,
       connector: this.name,
       raw_email_exposed: false,
-      detail: "gogcli is not wired yet. Configure the Gateway-side connector before enabling email answers."
+      detail: EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL
     };
   }
 }
@@ -73529,7 +73614,7 @@ function cheapWorkerHealth(connector, degradedCredentials = []) {
     ...degradedCredentials.length > 0 ? { degraded_credentials: degradedCredentials } : {},
     raw_email_exposed: false,
     dependency_check: "not_run",
-    detail: configured ? "Worker process is alive; connector dependency health was not checked on this cheap liveness path." : "gogcli is not wired yet. Configure the Gateway-side connector before enabling email answers."
+    detail: configured ? "Worker process is alive; connector dependency health was not checked on this cheap liveness path." : EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL
   };
 }
 function withCredentialDegradations(result, degradedCredentials) {
@@ -73606,7 +73691,7 @@ function html(value, status = 200, extraHeaders) {
     }
   });
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
   init_email_policy();
   init_publisher_oauth_client();
@@ -77494,7 +77579,7 @@ import {
   closeSync as closeSync4,
   existsSync as existsSync14,
   fsyncSync as fsyncSync3,
-  lstatSync as lstatSync7,
+  lstatSync as lstatSync8,
   mkdirSync as mkdirSync13,
   openSync as openSync4,
   readSync as readSync2,
@@ -77717,7 +77802,7 @@ function verifyOlympusDataExport(options) {
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
-    const stats = lstatSync7(path);
+    const stats = lstatSync8(path);
     if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== artifact.bytes || sha256File(path) !== artifact.sha256) {
       throw new OperationError("source_index_error", `Olympus data export artifact failed verification: ${artifact.relativePath}`);
     }
@@ -78127,7 +78212,7 @@ function assertDeleteTargetSafe(target) {
     return;
   }
   if (target.kind === "known_root") {
-    if (!lstatSync7(target.path).isDirectory()) {
+    if (!lstatSync8(target.path).isDirectory()) {
       throw new OperationError("invalid_params", `Refusing to recursively delete non-directory Olympus root: ${target.path}`);
     }
     return;
@@ -78139,7 +78224,7 @@ function assertDeleteTargetSafe(target) {
   }
 }
 function assertRegularFileTarget(path) {
-  const stat3 = lstatSync7(path);
+  const stat3 = lstatSync8(path);
   if (!stat3.isFile()) {
     throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
   }
@@ -78237,7 +78322,7 @@ init_version();
 init_atomic_file();
 import { createHash as createHash26 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync21, lstatSync as lstatSync12, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync21, lstatSync as lstatSync13, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
 import { dirname as dirname24, isAbsolute as isAbsolute5, join as join34 } from "node:path";
 
@@ -78247,11 +78332,11 @@ init_operation_error();
 import { createHash as createHash25, randomUUID as randomUUID12 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import {
-  chmodSync as chmodSync9,
+  chmodSync as chmodSync10,
   closeSync as closeSync6,
   existsSync as existsSync19,
   fsyncSync as fsyncSync4,
-  lstatSync as lstatSync10,
+  lstatSync as lstatSync11,
   mkdtempSync,
   openSync as openSync6,
   readFileSync as readFileSync21,
@@ -78351,7 +78436,7 @@ function validateArtifactPath(path) {
   }
   let stats;
   try {
-    stats = lstatSync10(trimmed2);
+    stats = lstatSync11(trimmed2);
   } catch {
     throw new OperationError("invalid_params", `Upgrade artifact does not exist: ${trimmed2}`);
   }
@@ -78428,7 +78513,7 @@ function runTar(args, action) {
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
     const path = join32(root, entry.name);
-    const stats = lstatSync10(path);
+    const stats = lstatSync11(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
     }
@@ -78463,7 +78548,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
   return version;
 }
 function assertManagedVersionRoot(root, artifactSha256) {
-  const stats = lstatSync10(root);
+  const stats = lstatSync11(root);
   if (!stats.isDirectory() || stats.isSymbolicLink() || basename5(root) !== artifactSha256) {
     throw new OperationError("config_error", "Managed upgrade version path is unsafe.");
   }
@@ -78482,7 +78567,7 @@ function readJsonRecord(path, label) {
 }
 function assertRegularFile(path, label) {
   try {
-    const stats = lstatSync10(path);
+    const stats = lstatSync11(path);
     if (stats.isFile() && !stats.isSymbolicLink())
       return;
   } catch {}
@@ -78493,12 +78578,12 @@ function makeVersionTreeReadOnly(root) {
     const path = join32(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
-      chmodSync9(path, 365);
+      chmodSync10(path, 365);
     } else {
-      chmodSync9(path, 292);
+      chmodSync10(path, 292);
     }
   }
-  chmodSync9(root, 365);
+  chmodSync10(root, 365);
   if (!statSync8(root).isDirectory())
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
 }
@@ -78528,7 +78613,7 @@ function hashVersionTree(root, relativeRoot, digest) {
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
     const path = join32(root, entry.name);
-    const stats = lstatSync10(path);
+    const stats = lstatSync11(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
       hashVersionTree(path, relativePath, digest);
@@ -78564,7 +78649,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir) {
   }
 }
 function removeStagingTree(root) {
-  chmodSync9(root, 448);
+  chmodSync10(root, 448);
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
     if (entry.isDirectory())
       removeStagingTree(join32(root, entry.name));
@@ -78577,7 +78662,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID13 } from "node:crypto";
-import { existsSync as existsSync20, linkSync, lstatSync as lstatSync11, readFileSync as readFileSync22 } from "node:fs";
+import { existsSync as existsSync20, linkSync, lstatSync as lstatSync12, readFileSync as readFileSync22 } from "node:fs";
 import { join as join33 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join33(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -78644,7 +78729,7 @@ function releaseLifecycleMutationLock(lockPath, nonce) {
 }
 function readLifecycleMutationOwner(path) {
   try {
-    const stats = lstatSync11(path);
+    const stats = lstatSync12(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       throw new Error("not a regular lock file");
     const value = JSON.parse(readFileSync22(path, "utf8"));
@@ -78691,10 +78776,10 @@ function runWorkerLifecycle(action, options = {}) {
       return uninstallLifecycle(normalized);
     refuseInterruptedTransaction(normalized);
     const serviceAction = runWorkerServiceAction(action, serviceActionOptions(normalized));
-    const service = inspectWorkerService(serviceActionOptions(normalized));
     const expected = action === "stop" ? ["inactive", "missing"] : ["active"];
+    const service = settleWorkerServiceState(normalized, expected);
     if (!expected.includes(service.state)) {
-      throw new OperationError("config_error", `olympus worker ${action} completed but status is ${service.state}.`, "Run olympus worker status and follow its recovery action.");
+      throw lifecycleActionFailure(action, service.state, normalized);
     }
     return {
       schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
@@ -78850,25 +78935,59 @@ function installManagedWorkerFiles(options = {}) {
   const platform2 = normalizeLifecyclePlatform(options.platform ?? osPlatform2());
   const homeDir = validateHomeDir(options.homeDir ?? homedir27());
   const effective = { ...options, platform: platform2, homeDir };
-  if (options.dryRun === true)
-    return installWorkerService(serviceInstallOptions(effective, true));
+  const activate = options.activate !== false;
+  if (options.dryRun === true) {
+    return { install: installWorkerService(serviceInstallOptions(effective, true)), activation: "skipped" };
+  }
   ensurePrivateRootDirectorySync(homeDir);
   const lock = acquireLifecycleMutationLock(homeDir, "install", options.now);
   try {
     recoverInterruptedTransaction(effective);
     const preview = installWorkerService(serviceInstallOptions(effective, true));
     beginTransaction("install", effective, preview, "unknown");
+    let install;
     try {
-      const install = installWorkerService(serviceInstallOptions(effective, false));
+      install = installWorkerService(serviceInstallOptions(effective, false));
       markTransactionCommitReady(effective);
       clearTransaction(effective);
-      return install;
     } catch (error) {
       rollbackTransaction(effective, { activatePrevious: false, touchServiceManager: false });
       throw error;
     }
+    if (!activate)
+      return { install, activation: "skipped" };
+    return activateManagedWorkerFiles(install, effective);
   } finally {
     lock.release();
+  }
+}
+function activateManagedWorkerFiles(install, effective) {
+  try {
+    runWorkerServiceAction("install", serviceActionOptions(effective));
+    const service = settleWorkerServiceState(effective, ["active"]);
+    if (service.state === "active")
+      return { install, service, activation: "started" };
+    return {
+      install,
+      service,
+      activation: "failed",
+      activation_detail: lifecycleActionFailure("install", service.state, effective).message
+    };
+  } catch (error) {
+    const service = inspectWorkerServiceSafely(effective);
+    return {
+      install,
+      ...service ? { service } : {},
+      activation: "failed",
+      activation_detail: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+function inspectWorkerServiceSafely(effective) {
+  try {
+    return inspectWorkerService(serviceActionOptions(effective));
+  } catch {
+    return;
   }
 }
 function uninstallLifecycle(options) {
@@ -79198,6 +79317,42 @@ function serviceInstallOptions(options, dryRun) {
     dryRun
   };
 }
+var DEFAULT_ACTION_SETTLE_TIMEOUT_MS = 15000;
+var DEFAULT_ACTION_SETTLE_POLL_MS = 500;
+function settleWorkerServiceState(options, expected) {
+  const timeoutMs = validateSettleWindow(options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS, "Lifecycle action settle timeout", 120000);
+  const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle action settle poll interval", 1e4);
+  const deadline = Date.now() + timeoutMs;
+  let service = inspectWorkerService(serviceActionOptions(options));
+  while (!expected.includes(service.state) && Date.now() < deadline) {
+    waitForActivationSettle(pollMs);
+    service = inspectWorkerService(serviceActionOptions(options));
+  }
+  if (!expected.includes(service.state) && expected.includes("active") && workerAnswersReadiness(options)) {
+    return { ...service, state: "active" };
+  }
+  return service;
+}
+function validateSettleWindow(value, label, max) {
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    throw new OperationError("invalid_params", `${label} must be between 0 and ${max} milliseconds.`);
+  }
+  return value;
+}
+function workerAnswersReadiness(options) {
+  try {
+    const url = `http://127.0.0.1:${workerReadinessPort(options)}/v1/health`;
+    return options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
+  } catch {
+    return false;
+  }
+}
+function lifecycleActionFailure(action, state, options) {
+  const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+  const paths = workerServicePaths(options.platform, options.homeDir);
+  const message = `olympus worker ${action} completed but status is ${state}.`;
+  return new OperationError("config_error", logLine ? `${message} The worker's last log line was: ${logLine}` : message, `Read the worker log at ${paths.errorLogPath} and ${paths.logPath}, then run olympus worker status and follow its recovery action.`);
+}
 function activationFailure(message, options) {
   const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
   const paths = workerServicePaths(options.platform, options.homeDir);
@@ -79225,7 +79380,7 @@ function validateHomeDir(value) {
 }
 function assertRegularFile2(path, label) {
   try {
-    if (lstatSync12(path).isFile())
+    if (lstatSync13(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
@@ -79496,9 +79651,9 @@ async function runSetupWizard(options) {
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
   let wroteSovereignty = false;
-  let install;
+  let managedWorker;
   if (options.dryRun) {
-    install = installManagedWorkerFiles(workerOptions(options, workerToken));
+    managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
     writeSovereigntyConfigFile({
       config: presetConfig,
@@ -79506,8 +79661,9 @@ async function runSetupWizard(options) {
       ...options.force !== undefined ? { force: options.force } : {}
     });
     wroteSovereignty = true;
-    install = installManagedWorkerFiles(workerOptions(options, workerToken));
+    managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   }
+  const workerState = managedWorker.activation === "skipped" ? "not_started" : managedWorker.service?.state ?? "unknown";
   const connections = [];
   for (const source of options.connectSources ?? []) {
     if (!options.connectSource) {
@@ -79543,7 +79699,10 @@ async function runSetupWizard(options) {
     },
     worker: {
       authTokenRef: "worker.env:OLYMPUS_WORKER_AUTH_TOKEN",
-      install
+      install: managedWorker.install,
+      state: workerState,
+      next: workerState === "active" ? "The managed worker is running; open the dashboard with olympus dashboard." : workerState === "not_started" ? "Dry run: rerun without --dry-run to write and start the managed worker." : "Run olympus worker install, then olympus worker status.",
+      ...managedWorker.activation_detail ? { activation_detail: managedWorker.activation_detail } : {}
     },
     connections,
     dashboard: {
@@ -80877,6 +81036,9 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     const answerReadiness = asRecord16(source.answer_readiness);
     const queue = asRecord16(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
+    const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
+    if (source.configured !== true && !inFlight)
+      continue;
     if (connectionState === "awaiting_consent")
       add({ kind: "oauth_pending", source_id: sourceId });
     if (connectionState === "reauth_required") {
@@ -80887,9 +81049,6 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
       else if (capability.dependencies[0]) {
         add({ kind: "missing_dependency", source_id: sourceId, dependency_id: capability.dependencies[0].id });
       }
-    }
-    if (capability.authentication.type === "paired_session" && (connectionState === "not_connected" || connectionState === "needs_setup")) {
-      add({ kind: "pairing_pending", source_id: sourceId });
     }
     if (answerReadiness?.state === "needs_attention" || needsAttention) {
       add({
@@ -81502,9 +81661,9 @@ function runDashboardCommand() {
     opened = false;
   }
   return {
-    url,
+    url: openUrl,
     opened,
-    hint: dashboardToken ? "If the dashboard asks you to unlock it, run olympus dashboard token and paste that value." : "No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value."
+    hint: dashboardToken ? "This URL carries the read-only view token, not the worker token; unlocking the controls still needs olympus dashboard token." : "No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value."
   };
 }
 if (__require.main == __require.module) {

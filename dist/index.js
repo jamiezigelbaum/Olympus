@@ -948,7 +948,7 @@ function parseSources(value, label) {
   }
   return sources;
 }
-var SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION = 1, SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
+var SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION = 1, SOURCE_INGESTION_EXCLUSIONS_PATH_ENV = "OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH", SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
 var init_source_ingestion_exclusions = __esm(() => {
   init_operation_error();
   SOURCE_INGESTION_DISPOSITION_RANK = {
@@ -2102,8 +2102,163 @@ var init_secret_store = __esm(() => {
 });
 
 // src/core/config.ts
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
+}
+function configWithEnvironmentOverrides(config, env) {
+  const next = structuredClone(config);
+  applyEnvironmentOverrides(next, env);
+  validateConfig(next);
+  return next;
+}
+function applyEnvironmentOverrides(config, env) {
+  if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
+    config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
+  }
+  if (env.OLYMPUS_WORKER_AUTH_TOKEN?.trim()) {
+    config.worker.authToken = env.OLYMPUS_WORKER_AUTH_TOKEN.trim();
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_ENABLED !== undefined) {
+    config.worker.scheduler.enabled = parseBoolean(env.OLYMPUS_WORKER_SCHEDULER_ENABLED, "OLYMPUS_WORKER_SCHEDULER_ENABLED");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS !== undefined) {
+    config.worker.scheduler.sourceIds = parseSchedulerSourceIds(env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS);
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS) {
+    config.worker.scheduler.tickSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS, "OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS) {
+    config.worker.scheduler.syncIntervalSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS, "OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS) {
+    config.worker.scheduler.freshnessThresholdHours = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS, "OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS) {
+    config.worker.scheduler.errorBackoffSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS, "OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES) {
+    config.worker.scheduler.maxTransientRetries = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES, "OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES");
+  }
+  if (env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()) {
+    config.sovereignty = {
+      ...config.sovereignty ?? {},
+      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
+    };
+  }
+  if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
+    config.sovereignty = {
+      ...config.sovereignty ?? {},
+      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
+    };
+  }
+  if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
+    config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
+  }
+  if (env.OLYMPUS_ARGUS_TRANSPORT) {
+    config.argus.transport = parseTransport(env.OLYMPUS_ARGUS_TRANSPORT);
+  }
+  let fastLaneEnvChanged = false;
+  if (env.OLYMPUS_ARGUS_FAST_BASE_URL) {
+    config.argus.lanes.fast.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_FAST_BASE_URL);
+    fastLaneEnvChanged = true;
+  }
+  if (env.OLYMPUS_ARGUS_DEEP_BASE_URL) {
+    config.argus.lanes.deep.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_DEEP_BASE_URL);
+  }
+  if (env.OLYMPUS_ARGUS_FAST_MODEL) {
+    config.argus.lanes.fast.model = env.OLYMPUS_ARGUS_FAST_MODEL;
+    fastLaneEnvChanged = true;
+  }
+  if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
+    config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
+  }
+  if (fastLaneEnvChanged) {
+    mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
+  }
+  applyModelProfileEnv(config, "default_chat", env, "OLYMPUS_ARGUS_DEFAULT_CHAT");
+  applyModelProfileEnv(config, "source_answer", env, "OLYMPUS_ARGUS_SOURCE_ANSWER");
+  applyModelProfileEnv(config, "classification_fast", env, "OLYMPUS_ARGUS_CLASSIFICATION_FAST");
+  applyModelProfileEnv(config, "embedding_secure_local", env, "OLYMPUS_ARGUS_EMBEDDING_SECURE_LOCAL");
+  applyModelProfileEnv(config, "vlm_document", env, "OLYMPUS_ARGUS_VLM_DOCUMENT");
+  applyModelProfileEnv(config, "vlm_fast", env, "OLYMPUS_ARGUS_VLM_FAST");
+  applyModelProfileEnv(config, "vlm_qwen36_27b", env, "OLYMPUS_ARGUS_VLM_QWEN36_27B");
+  applyModelProfileEnv(config, "vlm_qwen36_35b", env, "OLYMPUS_ARGUS_VLM_QWEN36_35B");
+  if (env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS) {
+    config.argus.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_EMAIL_ENABLED) {
+    config.email.enabled = parseBoolean(env.OLYMPUS_EMAIL_ENABLED, "OLYMPUS_EMAIL_ENABLED");
+  }
+  if (env.OLYMPUS_EMAIL_BASE_URL) {
+    config.email.baseUrl = normalizeSourceWorkerBaseUrl(env.OLYMPUS_EMAIL_BASE_URL);
+  }
+  if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
+    config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV) {
+    config.email.localPacketsDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV, "OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV");
+  }
+  if (env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV) {
+    config.email.indexAdminDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV, "OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV");
+  }
+  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
+    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
+    config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED) {
+    config.sourceIndex.answerDevEnabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync3(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+  }
+  if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
+    config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
+  }
+  if (env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim()) {
+    config.sourceIndex.ingestionPolicies.dropboxPersonal = {
+      ...config.sourceIndex.ingestionPolicies.dropboxPersonal ?? {},
+      policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
+    };
+  }
+  if (env.OLYMPUS_FILE_DELIVERY_ENABLED) {
+    config.fileDelivery.enabled = parseBoolean(env.OLYMPUS_FILE_DELIVERY_ENABLED, "OLYMPUS_FILE_DELIVERY_ENABLED");
+  }
+  if (env.OLYMPUS_FILE_DELIVERY_BASE_URL) {
+    config.fileDelivery.baseUrl = trimTrailingSlash(env.OLYMPUS_FILE_DELIVERY_BASE_URL);
+  }
+  if (env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS) {
+    config.fileDelivery.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_CASTOR_WORKSPACE_ENABLED) {
+    config.castorWorkspace.enabled = parseBoolean(env.OLYMPUS_CASTOR_WORKSPACE_ENABLED, "OLYMPUS_CASTOR_WORKSPACE_ENABLED");
+  }
+  if (env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL) {
+    config.castorWorkspace.baseUrl = trimTrailingSlash(env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL);
+  }
+  if (env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS) {
+    config.castorWorkspace.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_ENABLED) {
+    config.domainExpert.enabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_ENABLED, "OLYMPUS_DOMAIN_EXPERT_ENABLED");
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED) {
+    config.domainExpert.liveToolsEnabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED, "OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED");
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_BASE_URL) {
+    config.domainExpert.baseUrl = trimTrailingSlash(env.OLYMPUS_DOMAIN_EXPERT_BASE_URL);
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS) {
+    config.domainExpert.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) {
+    config.domainExpert.authToken = env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN.trim();
+  }
+  if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
+    config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
+  }
 }
 function configFromPluginConfig(pluginConfig) {
   const config = defaultConfig();
@@ -2366,6 +2521,17 @@ function applyModelProfileConfig(config, profile, profileConfig) {
     config.argus.modelProfiles[profile].purpose = profileConfig.purpose;
   }
 }
+function applyModelProfileEnv(config, profile, env, prefix) {
+  const baseUrl = env[`${prefix}_BASE_URL`];
+  const model = env[`${prefix}_MODEL`];
+  const secretRef = env[`${prefix}_SECRET_REF`];
+  if (baseUrl)
+    config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
+  if (model)
+    config.argus.modelProfiles[profile].model = model;
+  if (secretRef?.trim())
+    config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+}
 function validateConfig(config) {
   if (config.sovereignty?.configPath !== undefined) {
     if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
@@ -2547,6 +2713,13 @@ function normalizeSourceWorkerBaseUrl(value) {
     return trimmed;
   }
   return trimmed;
+}
+function parsePositiveNumber(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new OperationError("invalid_params", `${name} must be greater than zero.`);
+  }
+  return number;
 }
 function parseBoolean(value, name) {
   const normalized = value.trim().toLowerCase();
@@ -3039,7 +3212,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname4, join as join3 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -3054,8 +3227,8 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
-  if (existsSync3(configPath)) {
-    const parsed = JSON.parse(readFileSync4(configPath, "utf8"));
+  if (existsSync4(configPath)) {
+    const parsed = JSON.parse(readFileSync5(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -5423,7 +5596,7 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync5, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { dirname as dirname6, join as join4 } from "node:path";
 function defaultHandleRegistryPath() {
@@ -5433,10 +5606,10 @@ function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
 }
 function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync4(path)) {
+  if (!existsSync5(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync5(path, "utf8"));
+  const parsed = JSON.parse(readFileSync6(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -5474,7 +5647,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, prese
   }, null, 2));
 }
 function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync4(path))
+  if (!existsSync5(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -5504,7 +5677,7 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
   });
 }
 function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync4(path))
+  if (!existsSync5(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -5831,6 +6004,7 @@ var init_answer_ready_coverage = __esm(() => {
 // src/workers/dashboard/vocabulary.ts
 var DASHBOARD_UNCONNECTED_STATES;
 var init_vocabulary = __esm(() => {
+  init_source_dashboard();
   init_answer_ready_coverage();
   init_scheduler_markers();
   DASHBOARD_UNCONNECTED_STATES = new Set([
@@ -5841,6 +6015,7 @@ var init_vocabulary = __esm(() => {
 
 // src/workers/dashboard/phases.ts
 var init_phases = __esm(() => {
+  init_source_dashboard();
   init_vocabulary();
 });
 
@@ -5915,7 +6090,7 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync7, lstatSync as lstatSync2, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname8, join as join6 } from "node:path";
 function defaultSensitivityMapPath() {
@@ -5927,13 +6102,13 @@ function resolveSensitivityMapPath(options = {}) {
 }
 function loadSensitivityMap(options = {}) {
   const path = resolveSensitivityMapPath(options);
-  if (!existsSync6(path)) {
+  if (!existsSync7(path)) {
     if (options.allowMissing)
       return;
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync7(path, "utf8")), path);
+    return parseSensitivityMap(JSON.parse(readFileSync8(path, "utf8")), path);
   } catch (error) {
     if (options.ignoreInvalid)
       return;
@@ -9029,6 +9204,7 @@ var init_source_dashboard = __esm(() => {
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
+  init_types();
   init_scheduler_markers();
   init_answer_ready_coverage();
   init_vocabulary();
@@ -9968,7 +10144,7 @@ var SYSTEM_CLOCK = Object.freeze({
 });
 
 // src/core/worker-auth.ts
-import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
@@ -9994,7 +10170,7 @@ function readWorkerSetupEnv(options = {}) {
     const stat2 = statSync2(path);
     if (!stat2.isFile() || (stat2.mode & 63) !== 0)
       return;
-    return parseWorkerSetupEnv(readFileSync3(path, "utf8"));
+    return parseWorkerSetupEnv(readFileSync4(path, "utf8"));
   } catch {
     return;
   }
@@ -12170,7 +12346,7 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname10, join as join9 } from "node:path";
 init_sovereignty();
 
@@ -12273,7 +12449,7 @@ function storeSecretRemedy(key) {
 init_connected_handles();
 
 // src/core/connect.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync6, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join5 } from "node:path";
 init_secret_store();
@@ -12318,7 +12494,7 @@ function defaultDetachedOAuthStateDir() {
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync6(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync7(path, "utf8")));
   } catch {
     return;
   }
@@ -12395,13 +12571,8 @@ var INGESTION_STUCK_ERROR_HOURS = 72;
 var INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 var CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
 async function runDoctor(input) {
-  const deps = input.env === undefined ? input : {
-    ...input,
-    env: environmentWithWorkerSetupEnv({
-      env: input.env,
-      ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
-    })
-  };
+  const inputEnv = input.env;
+  const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
   const checks = [
     await safeCheck("dependencies", () => dependencyCheck(deps)),
     await safeCheck("source_capability_catalog", () => sourceCapabilityCatalogCheck(deps)),
@@ -12435,6 +12606,40 @@ async function sourceCapabilityCatalogCheck(deps) {
     detail: `Public source catalog declares ${V0_4_PUBLIC_SOURCE_CAPABILITIES.length} sources; ${connected.length} connected. Source-conditioned dependencies for connected sources: ${dependencyLabels.join(", ") || "none until a source is connected"}.`
   };
 }
+function doctorDepsWithLayeredEnvironment(input, inputEnv) {
+  const env = environmentWithWorkerSetupEnv({
+    env: inputEnv,
+    ...input.workerEnvPath ? { workerEnvPath: input.workerEnvPath } : {}
+  });
+  let config = input.config;
+  try {
+    config = configWithEnvironmentOverrides(input.config, env);
+  } catch {
+    config = input.config;
+  }
+  return { ...input, env, config };
+}
+function doctorSovereigntyEngine(deps) {
+  if (deps.sovereigntyEngine)
+    return deps.sovereigntyEngine;
+  const inline = deps.config.sovereignty?.policy;
+  if (inline !== undefined)
+    return loadSovereigntyEngine({ inlineConfig: inline });
+  const configPath = doctorSovereigntyConfigPath(deps);
+  if (configPath === undefined || !existsSync8(configPath))
+    return;
+  return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
+}
+function doctorSovereigntyConfigPath(deps) {
+  const env = deps.env ?? process.env;
+  const explicit = deps.config.sovereignty?.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
+  if (explicit)
+    return explicit;
+  if (deps.env === undefined)
+    return defaultSovereigntyConfigPath();
+  const home = deps.env.HOME?.trim();
+  return home ? join9(home, ".olympus", "sovereignty.json") : undefined;
+}
 async function safeCheck(name, run) {
   try {
     return await run();
@@ -12449,8 +12654,8 @@ async function safeCheck(name, run) {
 async function argusProfileCheck(deps, profile) {
   const name = "argus_model_pool";
   const profileConfig = deps.config.argus.modelProfiles[profile];
-  const hasSovereigntyPolicy = Boolean(deps.sovereigntyEngine || deps.config.sovereignty?.policy || deps.config.sovereignty?.configPath);
-  if (!hasSovereigntyPolicy) {
+  const sovereigntyEngine = doctorSovereigntyEngine(deps);
+  if (!sovereigntyEngine) {
     return {
       name,
       ok: true,
@@ -12458,10 +12663,7 @@ async function argusProfileCheck(deps, profile) {
     };
   }
   {
-    const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-      ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-      ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-    });
+    const engine = sovereigntyEngine;
     const profiles = Object.values(engine.config.modelProfiles);
     const hasLocalLane = profiles.some((p) => p.provider === "local-openai-compatible");
     if (!hasLocalLane) {
@@ -12532,17 +12734,14 @@ async function dependencyCheck(deps) {
   };
 }
 async function sovereigntyModelLaneCheck(deps) {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: "sovereignty_model_lanes",
       ok: true,
-      detail: "Skipped: no explicit sovereignty policy is configured for lane probing."
+      detail: "Skipped: no sovereignty policy is configured for lane probing."
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-    ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-  });
   const fetchImpl = deps.fetchImpl ?? fetch;
   const profiles = Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.provider === "local-openai-compatible" && profile.baseUrl);
   if (profiles.length === 0) {
@@ -12579,17 +12778,14 @@ async function sovereigntyModelLaneCheck(deps) {
   };
 }
 async function sovereigntyPrerequisiteCheck(deps) {
-  if (!deps.sovereigntyEngine && !deps.config.sovereignty?.policy && !deps.config.sovereignty?.configPath) {
+  const engine = doctorSovereigntyEngine(deps);
+  if (!engine) {
     return {
       name: "sovereignty_prerequisites",
       ok: true,
-      detail: "Skipped: no explicit sovereignty policy is configured for prerequisite checks."
+      detail: "Skipped: no sovereignty policy is configured for prerequisite checks."
     };
   }
-  const engine = deps.sovereigntyEngine ?? loadSovereigntyEngine({
-    ...deps.config.sovereignty?.policy ? { inlineConfig: deps.config.sovereignty.policy } : {},
-    ...deps.config.sovereignty?.configPath ? { configPath: deps.config.sovereignty.configPath } : {}
-  });
   const unmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
@@ -13172,9 +13368,9 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync7(path))
+    if (!existsSync8(path))
       return;
-    const parsed = JSON.parse(readFileSync8(path, "utf8"));
+    const parsed = JSON.parse(readFileSync9(path, "utf8"));
     const record = asRecord13(parsed);
     const sources = asRecord13(record.sources);
     const normalized = {};
@@ -13408,7 +13604,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync7(join9(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync8(join9(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -15249,7 +15445,7 @@ function optionalAttachmentType(value) {
 init_public_surface();
 
 // src/private-extension-contract.ts
-import { existsSync as existsSync8, readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync10 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { basename, dirname as dirname11, join as join10 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15296,7 +15492,7 @@ var PRIVATE_EXTENSION_MANIFEST_NAMESPACE = "olympus";
 var PRIVATE_EXTENSION_MANIFEST_KEY = "privateExtensions";
 var PRIVATE_EXTENSION_MARKER_FIELDS = ["required", "contractVersion", "module"];
 var SOURCE_CHECKOUT_DIRNAME = "src";
-function readPrivateExtensionRequirement(manifestPath, readFile3 = (path) => readFileSync9(path, "utf8")) {
+function readPrivateExtensionRequirement(manifestPath, readFile3 = (path) => readFileSync10(path, "utf8")) {
   let parsed;
   try {
     parsed = JSON.parse(readFile3(manifestPath));
@@ -15360,9 +15556,9 @@ function resolveSiblingManifestPath(baseDir, fileExists) {
 var requireFromThisModule = createRequire2(import.meta.url);
 function loadPrivateExtensions(options = {}) {
   const baseDir = options.baseDir ?? dirname11(fileURLToPath(import.meta.url));
-  const fileExists = options.fileExists ?? existsSync8;
+  const fileExists = options.fileExists ?? existsSync9;
   const loadModule = options.loadModule ?? requireFromThisModule;
-  const readFile3 = options.readFile ?? ((path) => readFileSync9(path, "utf8"));
+  const readFile3 = options.readFile ?? ((path) => readFileSync10(path, "utf8"));
   const sourceCheckout = isSourceCheckoutLayout(baseDir);
   const permitted = permittedOverlayBasename(baseDir);
   for (const candidate of PRIVATE_EXTENSION_MODULE_BASENAMES) {
