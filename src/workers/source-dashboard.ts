@@ -788,8 +788,14 @@ export interface DashboardSourceCard {
    */
   content_arrives_extracted?: boolean;
   /**
-   * False when this worker cannot run Sync now for this source, so nothing on
+   * False when Sync now cannot be run for this source right now, so nothing on
    * the page offers the control or advises pressing it.
+   *
+   * Two ways it is false: this worker has no sync route for the source, and the
+   * source is not connected. The second is why an unconnected Dropbox card read
+   * `sync_now_available: true` — the flag answered only "is the dispatch chain
+   * wired?" and there is nothing to sync from an account nobody has connected
+   * (clean-install rehearsal, 2026-09-05).
    *
    * Absent means the caller declared nothing, which keeps the control offered:
    * a hand-written fixture and an older payload must not lose a button.
@@ -1850,13 +1856,17 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
     );
-    // Stamped after the card is built rather than threaded through it: this is
-    // a fact about the worker's dispatch chain, not about the source.
+    // Stamped after the card is built rather than threaded through it: the
+    // dispatch chain is a fact about the worker, and whether there is anything
+    // to sync is a fact about the card.
     const syncSource = definition.connect_action.kind === 'oauth' || definition.connect_action.kind === 'api_key'
       ? definition.connect_action.source
       : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined) return card;
-    const withSyncAnswer = { ...card, sync_now_available: options.syncNowAvailable(syncSource) };
+    const withSyncAnswer = {
+      ...card,
+      sync_now_available: card.configured && options.syncNowAvailable(syncSource),
+    };
     // The readiness ladder's initial-sync advice names Sync now, so it is
     // rebuilt once the card knows whether this worker can run it.
     withSyncAnswer.setup = dashboardSourceSetupStatus(withSyncAnswer);
