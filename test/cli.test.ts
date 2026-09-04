@@ -761,13 +761,17 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toEqual({
-        url: 'http://127.0.0.1:8010/dashboard',
-        opened: true,
-        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
-      });
-      // The URL and whether it opened, and nothing else: no token and no
-      // token-shaped field in output that gets pasted into issues.
+      // The printed URL is the one that works: it carries the derived read-only
+      // dash_ view token, which is the only way a browser reaches the HTML.
+      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
+      expect(output.opened).toBe(true);
+      expect(output.hint).toBe(
+        'This URL carries the read-only view token, not the worker token;'
+        + ' unlocking the controls still needs olympus dashboard token.',
+      );
+      expect(output.url).toBe(openedUrl.trim());
+      // The shape stays three fields, and the WORKER bearer is still absent:
+      // dash_ carries no control authority and is refused by every control route.
       expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);
@@ -804,11 +808,13 @@ describe('CLI tool surface', () => {
       const output = JSON.parse(stdout);
       const openedUrl = readFileSync(openerLog, 'utf8');
 
-      expect(output).toMatchObject({
-        url: 'http://127.0.0.1:8010/dashboard',
-        opened: true,
-        hint: 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.',
-      });
+      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
+      expect(output.opened).toBe(true);
+      expect(output.hint).toBe(
+        'This URL carries the read-only view token, not the worker token;'
+        + ' unlocking the controls still needs olympus dashboard token.',
+      );
+      expect(output.url).toBe(openedUrl.trim());
       expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
       expect(stdout).not.toContain(workerToken);
       expect(stderr).not.toContain(workerToken);

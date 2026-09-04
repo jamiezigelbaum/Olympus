@@ -2253,14 +2253,19 @@ function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
   } catch {
     opened = false;
   }
-  // The URL and whether the browser opened, and nothing else. No token and no
-  // token-shaped field: this output is pasted into issues and chat logs, and
-  // the one place a token is handed over is the command that exists to do it.
+  // The URL printed is the URL that works. `dash_` is a DERIVED, read-only view
+  // token, not the worker bearer: workers/dashboard/index.ts states it is the
+  // only way a browser reaches this HTML, because a bearer header cannot be
+  // typed into an address bar, and workers/http.ts admits it to GET /dashboard
+  // alone. Printing the bare path handed the reader a URL that 401s and no way
+  // to tell why (clean-install rehearsal, 2026-09-05). It carries no control
+  // authority, so it is not the secret the token command exists to hand over —
+  // that one still never appears here.
   return {
-    url,
+    url: openUrl,
     opened,
     hint: dashboardToken
-      ? 'If the dashboard asks you to unlock it, run olympus dashboard token and paste that value.'
+      ? 'This URL carries the read-only view token, not the worker token; unlocking the controls still needs olympus dashboard token.'
       : 'No worker auth token found; run olympus setup first, then olympus dashboard token for the unlock value.',
   };
 }
