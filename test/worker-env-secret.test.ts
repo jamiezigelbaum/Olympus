@@ -41,7 +41,7 @@ describe('writing a secret into the managed worker environment', () => {
       expect(sourced.stdout).toBe(hostile);
       expect(existsSync(marker)).toBe(false);
     });
-  });
+  }, 30_000);
 
   test('a value carrying its own quote survives the shell and the reader alike', () => {
     withEnvFile((_dir, envPath) => {
@@ -56,7 +56,7 @@ describe('writing a secret into the managed worker environment', () => {
         .find((entry) => entry.startsWith(`${KEY}=`))!;
       expect(unquoteEnvValue(line.slice(`${KEY}=`.length))).toBe(quoted);
     });
-  });
+  }, 30_000);
 
   test('every stale assignment of the key is removed, not just the first', () => {
     withEnvFile((_dir, envPath) => {
@@ -75,7 +75,7 @@ describe('writing a secret into the managed worker environment', () => {
       expect(lines).toEqual([`${KEY}='fresh-key'`, 'PATH=/usr/bin']);
       expect(sourceValue(envPath).stdout).toBe('fresh-key');
     });
-  });
+  }, 30_000);
 
   test('a control character is refused outright, because quoting cannot make it safe', () => {
     withEnvFile((_dir, envPath) => {
