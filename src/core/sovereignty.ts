@@ -467,6 +467,11 @@ export function writeSovereigntyConfigFile(input: {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  // The mode argument applies at CREATION only, so a --force overwrite left an
+  // existing world-readable policy file exactly as world-readable as it found
+  // it. This file records how sensitive data is handled; it is owner-only every
+  // time it is written, not only the first time.
+  chmodSync(path, 0o600);
   return path;
 }
 

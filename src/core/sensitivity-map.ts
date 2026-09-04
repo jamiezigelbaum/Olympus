@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
@@ -57,6 +57,10 @@ export interface SensitivityMapValidationResult {
   schemaVersion?: 1;
   categories: number;
   categoryIds: string[];
+  /** The file's mode after validation, as a 4-digit octal string (e.g. "0600"). */
+  permissions?: string;
+  /** True when validation had to tighten a group- or world-readable map. */
+  permissionsTightened?: boolean;
 }
 
 export interface SensitivityMapMatchInput {
@@ -112,13 +116,48 @@ export function validateSensitivityMapFile(options: SensitivityMapLoadOptions = 
   const path = resolveSensitivityMapPath(options);
   const map = loadSensitivityMap({ ...options, path });
   if (!map) throw new OperationError('config_error', `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
+  const custody = tightenSensitivityMapPermissions(path);
   return {
     ok: true,
     path,
     schemaVersion: map.schemaVersion,
     categories: map.categories.length,
     categoryIds: map.categories.map((category) => category.id),
+    ...custody,
   };
+}
+
+/**
+ * Make the map owner-only, and say whether it had to be changed.
+ *
+ * Nothing in Olympus writes this file: the install guide has the owner's agent
+ * write it, which lands it at the process umask — 0644 on a clean macOS install
+ * (clean-install rehearsal, 2026-09-05). It is a list of what the owner
+ * considers sensitive and what it looks like, sitting inside a 0700 directory
+ * that hides it from other users but not from anything running as them.
+ * Validation is the one command that opens this file by name and is entitled to
+ * fix it, so it does, and reports the change rather than performing it silently.
+ */
+function tightenSensitivityMapPermissions(path: string): {
+  permissions?: string;
+  permissionsTightened?: boolean;
+} {
+  try {
+    const stat = lstatSync(path);
+    // Never chmod through a symlink or at a non-regular file: that is somebody
+    // else's inode, and this command has no business changing its mode.
+    if (!stat.isFile()) return {};
+    const mode = stat.mode & 0o777;
+    if ((mode & 0o077) === 0) return { permissions: formatFileMode(mode) };
+    chmodSync(path, 0o600);
+    return { permissions: '0600', permissionsTightened: true };
+  } catch {
+    return {};
+  }
+}
+
+function formatFileMode(mode: number): string {
+  return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
 }
 
 /**
