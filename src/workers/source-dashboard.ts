@@ -41,6 +41,7 @@ import {
   credentialHealthDegradations,
   credentialHealthReportIsStale,
   type CredentialHealthReport,
+  type CredentialHealthResult,
 } from './credential-health.ts';
 import type { SourceIndexLastRefresh, SourceIndexStatusCorpus, SourceIndexStatusResult } from './source-index/status.ts';
 import { ITEMS_EMBEDDED_COUNT_KEY } from './source-index/status.ts';
@@ -2676,7 +2677,8 @@ function connectionStateFromDefinition(
   const handles = handlesForDefinition(definition, registry);
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
   const probeNeedsRepair = probeResults.some((result) =>
-    result.status === 'reauth_required' || result.status === 'missing');
+    (result.status === 'reauth_required' || result.status === 'missing')
+    && !probeEvidencePredatesReconnect(result, handles));
   const reauthRequired = probeNeedsRepair
     || handles.some((handle) => backendStatus(handle) === 'reauth_required');
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== 'reauth_required');
@@ -3288,6 +3290,42 @@ function credentialHealthForDefinition(
   if (!report) return [];
   return report.results.filter((result) =>
     result.source_ids.includes(definition.source_id) || result.provider === definition.provider);
+}
+
+/**
+ * Whether a probe result is talking about a credential that no longer exists.
+ *
+ * The health report is written once a night. A one-click reconnect during the
+ * day replaces the registry handle outright — new refresh token, new
+ * `connectedAt`, no `backendState` — but nothing rewrites last night's report.
+ * So a `reauth_required` result checked at 23:20 kept the Dropbox card
+ * demanding a reconnect for the whole of the next day, over a credential the
+ * owner had already reconnected at 09:38 and synced with (owner, 2026-09-04).
+ * A probe whose evidence predates the connection it names proves nothing about
+ * that connection, so it stops counting as a repair demand. It is disregarded,
+ * not contradicted: the next nightly probe re-decides on fresh evidence.
+ *
+ * Handle-for-handle, because the report names the handle it probed and a
+ * provider-wide match would let one reconnected account silence a sibling
+ * account's real failure. A result carrying no handle falls back to the
+ * definition's handles — the same set it was selected by.
+ *
+ * Both timestamps must parse. An unparseable one is no evidence of anything,
+ * and today's behaviour (the probe counts) is the safe answer there.
+ */
+function probeEvidencePredatesReconnect(
+  result: CredentialHealthResult,
+  handles: readonly ConnectedCredentialHandle[],
+): boolean {
+  const checkedAt = Date.parse(result.checked_at);
+  if (!Number.isFinite(checkedAt)) return false;
+  const named = result.handle
+    ? handles.filter((handle) => handle.handle === result.handle)
+    : handles;
+  return named.some((handle) => {
+    const connectedAt = Date.parse(handle.connectedAt);
+    return Number.isFinite(connectedAt) && connectedAt > checkedAt;
+  });
 }
 
 function backendStatus(handle: ConnectedCredentialHandle): string | undefined {

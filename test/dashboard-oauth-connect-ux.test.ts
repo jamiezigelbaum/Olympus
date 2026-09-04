@@ -576,6 +576,14 @@ describe('an unauthenticated callback cannot touch an attempt without its state'
     // Success keeps the more specific wording: it also says what happens next.
     expect(completed).toContain('It picks the new connection up on its own.');
     expect(completed).not.toContain('You can close this tab and return to the Olympus dashboard.');
+    // The reader's real next step is the tab they started from, which never
+    // navigated away. The link is the fallback, and it says so: a token-less
+    // /dashboard used to answer a raw 401 JSON body (owner, 2026-09-04).
+    for (const page of [refused, completed]) {
+      expect(page).toContain('Olympus dashboard tab you started from');
+      expect(page).toContain('>Back to the dashboard tab</a>');
+    }
+    expect(completed).toContain('The Olympus dashboard tab you started from is still open.');
   });
 
   test('the expired-attempt page is the same fixed link, with no origin echoed', async () => {

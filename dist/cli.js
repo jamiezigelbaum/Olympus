@@ -36719,7 +36719,7 @@ function connectionFromDefinition(definition, registry, credentialHealth, covera
 function connectionStateFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, syncRunning, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pending, providerRefusing, now, registryUnreadable, unpaired) {
   const handles = handlesForDefinition(definition, registry);
   const probeResults = credentialHealthForDefinition(definition, credentialHealth);
-  const probeNeedsRepair = probeResults.some((result) => result.status === "reauth_required" || result.status === "missing");
+  const probeNeedsRepair = probeResults.some((result) => (result.status === "reauth_required" || result.status === "missing") && !probeEvidencePredatesReconnect(result, handles));
   const reauthRequired = probeNeedsRepair || handles.some((handle) => backendStatus(handle) === "reauth_required");
   const activeHandles = handles.filter((handle) => backendStatus(handle) !== "reauth_required");
   const sessionEvidence = definition.connect_action.kind === "guided_session" ? sessionConnectionEvidence(coverage, freshness) : undefined;
@@ -37075,6 +37075,16 @@ function credentialHealthForDefinition(definition, report) {
   if (!report)
     return [];
   return report.results.filter((result) => result.source_ids.includes(definition.source_id) || result.provider === definition.provider);
+}
+function probeEvidencePredatesReconnect(result, handles) {
+  const checkedAt = Date.parse(result.checked_at);
+  if (!Number.isFinite(checkedAt))
+    return false;
+  const named = result.handle ? handles.filter((handle) => handle.handle === result.handle) : handles;
+  return named.some((handle) => {
+    const connectedAt = Date.parse(handle.connectedAt);
+    return Number.isFinite(connectedAt) && connectedAt > checkedAt;
+  });
 }
 function backendStatus(handle) {
   return typeof handle.backendState?.status === "string" ? handle.backendState.status : undefined;
@@ -66980,6 +66990,16 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse(authorization.status);
       }
     }
+    if (isDashboardHtmlNavigationRoute(request)) {
+      const authorization = authorizeDashboardControlSession(request, authToken, now(), false, true);
+      if (authorization.status === "allowed") {
+        const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken));
+        return withRenewedDashboardControlCookie(response, authorization, now());
+      }
+      if (authorization.status === "origin_mismatch") {
+        return dashboardControlForbiddenResponse(authorization.status);
+      }
+    }
     if (isDashboardControlRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
       if (authorization.status === "allowed") {
@@ -66997,6 +67017,11 @@ function isDashboardControlReadRoute(request) {
     return false;
   const path = new URL(request.url).pathname;
   return path === "/dashboard/dispositions" || path === "/dashboard/dispositions.json";
+}
+function isDashboardHtmlNavigationRoute(request) {
+  if (request.method !== "GET")
+    return false;
+  return new URL(request.url).pathname === "/dashboard";
 }
 function isDashboardControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === "/dashboard/control/session";
@@ -67078,7 +67103,7 @@ function mintDashboardControlSession(authToken, origin, nowMs) {
     expiresAtMs: dashboardControlExpiresAtMs(parts)
   };
 }
-function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf) {
+function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf, allowOriginlessNavigation = false) {
   const cookie = cookieValue(request.headers.get("Cookie"), DASHBOARD_CONTROL_COOKIE);
   if (!cookie)
     return { status: "missing" };
@@ -67091,7 +67116,7 @@ function authorizeDashboardControlSession(request, authToken, nowMs, requireCsrf
   const expiresAtMs = dashboardControlExpiresAtMs(parts);
   if (expiresAtMs <= nowMs || parts.issuedSeconds * 1000 > nowMs + 5 * 60000)
     return { status: "missing" };
-  const origin = sameRequestOrigin(request, !requireCsrf);
+  const origin = sameRequestOrigin(request, !requireCsrf, allowOriginlessNavigation && !requireCsrf);
   if (origin === undefined)
     return { status: "origin_mismatch" };
   if (!constantTimeStringEqual(parts.originTag, dashboardControlOriginTag(authToken, origin))) {
@@ -67141,9 +67166,12 @@ function dashboardControlSessionCookie(sessionId, maxAgeSeconds) {
 function remainingSessionSeconds(expiresAtMs, nowMs) {
   return Math.max(1, Math.round((expiresAtMs - nowMs) / 1000));
 }
-function sameRequestOrigin(request, allowReferer = false) {
+function sameRequestOrigin(request, allowReferer = false, allowRequestTargetWhenUnstated = false) {
+  const target = requestTargetOrigin(request);
   const claimed = request.headers.get("Origin") ?? (allowReferer ? request.headers.get("Referer") : null);
-  if (!claimed || claimed === "null")
+  if (!claimed)
+    return allowRequestTargetWhenUnstated ? target : undefined;
+  if (claimed === "null")
     return;
   let origin;
   try {
@@ -67151,11 +67179,12 @@ function sameRequestOrigin(request, allowReferer = false) {
   } catch {
     return;
   }
+  return origin === target ? origin : undefined;
+}
+function requestTargetOrigin(request) {
   const url = new URL(request.url);
-  const direct = url.origin;
   const forwardedProto = request.headers.get("X-Forwarded-Proto")?.split(",")[0]?.trim().toLowerCase();
-  const forwarded = forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url.host}` : direct;
-  return origin === forwarded ? origin : undefined;
+  return forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url.host}` : url.origin;
 }
 function withoutDashboardControlContextHeader(request) {
   if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER))
@@ -72424,7 +72453,7 @@ function dashboardOAuthFailureHtml(options) {
     heading: `Could not connect ${options.source}`,
     paragraphs: [
       `Could not connect ${options.source}: ${options.reason}`,
-      "You can close this tab and return to the Olympus dashboard."
+      "You can close this tab and go back to the Olympus dashboard tab you started from."
     ],
     returnTo: options.returnTo,
     status: options.status
@@ -72434,7 +72463,7 @@ function dashboardOAuthCompleteHtml(options) {
   return dashboardOAuthLandingHtml({
     title: "Olympus connected",
     heading: `Connected ${options.source}`,
-    paragraphs: ["You can close this tab and go back to the Olympus dashboard. It picks the new connection up on its own."],
+    paragraphs: ["You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own."],
     returnTo: options.returnTo,
     status: 200
   });
@@ -72453,7 +72482,7 @@ function dashboardOAuthLandingHtml(options) {
     <main>
       <h1>${escapeHtml3(options.heading)}</h1>
 ${paragraphs}
-      <p><a href="${escapeHtml3(options.returnTo)}">Return to dashboard</a></p>
+      <p><a href="${escapeHtml3(options.returnTo)}">Back to the dashboard tab</a></p>
     </main>
   </body>
 </html>`, options.status, {

@@ -5347,7 +5347,7 @@ function dashboardOAuthFailureHtml(options: {
     heading: `Could not connect ${options.source}`,
     paragraphs: [
       `Could not connect ${options.source}: ${options.reason}`,
-      'You can close this tab and return to the Olympus dashboard.',
+      'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
     returnTo: options.returnTo,
     status: options.status,
@@ -5359,8 +5359,11 @@ function dashboardOAuthFailureHtml(options: {
  *
  * This page is reached in the tab `window.open` created, not in the dashboard,
  * so it tells the reader the one thing that is true of that tab: it is finished
- * and can be closed. The link back is kept for the reader who opened the flow
- * in this tab anyway (an old bookmark, a copied authorization URL).
+ * and can be closed. It also names the tab that is NOT finished — the dashboard
+ * the flow was started from, which is still open and polling — because the
+ * reader's actual next step is to look at that tab, not to open a second one.
+ * The link back is kept for the reader who opened the flow in this tab anyway
+ * (an old bookmark, a copied authorization URL).
  */
 function dashboardOAuthCompleteHtml(options: {
   source: DashboardOAuthSource;
@@ -5369,8 +5372,9 @@ function dashboardOAuthCompleteHtml(options: {
   return dashboardOAuthLandingHtml({
     title: 'Olympus connected',
     heading: `Connected ${options.source}`,
-    // The more specific of the two sentences: it also says what happens next.
-    paragraphs: ['You can close this tab and go back to the Olympus dashboard. It picks the new connection up on its own.'],
+    // The more specific of the two sentences: it also says what happens next,
+    // and where. The dashboard tab that opened this one never navigated away.
+    paragraphs: ['You can close this tab. The Olympus dashboard tab you started from is still open. It picks the new connection up on its own.'],
     returnTo: options.returnTo,
     status: 200,
   });
@@ -5407,16 +5411,18 @@ function dashboardOAuthLandingHtml(options: {
     <main>
       <h1>${escapeHtml(options.heading)}</h1>
 ${paragraphs}
-      <p><a href="${escapeHtml(options.returnTo)}">Return to dashboard</a></p>
+      <p><a href="${escapeHtml(options.returnTo)}">Back to the dashboard tab</a></p>
     </main>
   </body>
 </html>`, options.status, {
     // This page is reached at a URL that carried (or still carries) `code` and
     // `state` in its own query string. `no-store` keeps it out of the disk
     // cache, but a browser still sends `Referer` when the reader clicks the
-    // "Return to dashboard" link or any future link this page grows — unless
-    // the response says not to. Same header the relay's own `_headers` sets
-    // for the identical reason.
+    // "Back to the dashboard tab" link or any future link this page grows —
+    // unless the response says not to. Same header the relay's own `_headers`
+    // sets for the identical reason. That suppressed Referer is also why an
+    // unlocked browser's control-session cookie now authorizes GET /dashboard
+    // on its own (see http.ts): this link arrives naming no origin at all.
     'Referrer-Policy': 'no-referrer',
   });
 }

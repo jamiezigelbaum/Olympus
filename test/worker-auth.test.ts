@@ -331,6 +331,63 @@ describe('worker HTTP bind and auth', () => {
     expect(seen.filter((request) => new URL(request.url).pathname === '/dashboard/sync-now')).toHaveLength(3);
   });
 
+  // The OAuth "done" tab's link back is a token-less top-level navigation from
+  // a page served with Referrer-Policy: no-referrer, so it arrives naming no
+  // origin at all. It used to land on a raw 401 JSON body (owner, 2026-09-04).
+  test('an unlocked browser may navigate to the dashboard page with no token and no stated origin', async () => {
+    const origin = 'http://127.0.0.1:17777';
+    const seen: Request[] = [];
+    const fetch = withWorkerBearerAuth(async (request) => {
+      seen.push(request);
+      return new Response('<!doctype html>', {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }, { authToken: 'worker-secret' });
+
+    const mint = await fetch(new Request(`${origin}/dashboard/control/session`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer worker-secret', Origin: origin },
+    }));
+    const cookie = mint.headers.get('Set-Cookie')!.split(';')[0]!;
+    const csrfToken = (await mint.json() as { csrf_token: string }).csrf_token;
+
+    const navigated = await fetch(new Request(`${origin}/dashboard`, { headers: { Cookie: cookie } }));
+    expect(navigated.status).toBe(200);
+    expect(navigated.headers.get('Content-Type')).toContain('text/html');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(csrfToken);
+
+    // No cookie is still no dashboard.
+    expect((await fetch(new Request(`${origin}/dashboard`))).status).toBe(401);
+
+    // The data endpoint keeps both of its proofs: the cookie alone does not
+    // open it, with or without a stated origin.
+    expect((await fetch(new Request(`${origin}/dashboard.json`, { headers: { Cookie: cookie } }))).status).toBe(401);
+    expect((await fetch(new Request(`${origin}/dashboard.json`, {
+      headers: { Cookie: cookie, Referer: `${origin}/dashboard` },
+    }))).status).toBe(401);
+    expect((await fetch(new Request(`${origin}/dashboard.json`))).status).toBe(401);
+
+    // Unstated is not the same as foreign: a session minted against another
+    // worker origin, and a navigation that states an attacker origin, are both
+    // still refused.
+    expect((await fetch(new Request('http://127.0.0.1:19999/dashboard', {
+      headers: { Cookie: cookie },
+    }))).status).toBe(403);
+    expect((await fetch(new Request(`${origin}/dashboard`, {
+      headers: { Cookie: cookie, Referer: 'http://attacker.test/' },
+    }))).status).toBe(403);
+
+    // The relaxation is confined to the read: a control POST still needs the
+    // origin stated and the CSRF token presented.
+    expect((await fetch(new Request(`${origin}/dashboard/sync-now`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-Olympus-CSRF': csrfToken },
+    }))).status).toBe(403);
+
+    expect(seen).toHaveLength(1);
+  });
+
   test('control-session mint refuses missing bearer and cross-origin requests', async () => {
     const fetch = withWorkerBearerAuth(async () => new Response('unreachable'), {
       authToken: 'worker-secret',

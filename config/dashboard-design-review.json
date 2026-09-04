@@ -31,10 +31,10 @@
     "src/workers/source-dispositions.ts",
     "src/workers/source-ingestion-ledger.ts"
   ],
-  "implementation_guard_sha256": "8a10e643416859e7adf2f4dd5cf3613009097905f4fd86070743b0ddf549e83a",
+  "implementation_guard_sha256": "225d6b4bfbca6ae7cc7e8cb22b81d9864b5e6a42bace324ab0df1af62f8ff71f",
   "pending_review": {
     "requested_on": "2026-09-02",
-    "reason": "The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance."
+    "reason": "The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again."
   },
   "reviewed_states": [
     {
