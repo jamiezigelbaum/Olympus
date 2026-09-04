@@ -55,10 +55,10 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
       'src/workers/source-dispositions.ts',
       'src/workers/source-ingestion-ledger.ts',
     ],
-    implementation_guard_sha256: '242de01a4b824cf2e79673e65519b91e424aec88454b1a732ed89ad2a8059116',
+    implementation_guard_sha256: '22b7701a5a18de3670a7f5a249c7dad675f15354b3731c76bdb5d89c27f2c441',
     pending_review: {
       requested_on: '2026-09-02',
-      reason: 'The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again.',
+      reason: 'The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again. The second clean-install rehearsal (2026-09-05) then changed the unconnected-source states again: every not-connected card reads one readiness, a never-run source says it is waiting for the first sync, a publisher setup sheet leads from the one-click sentence the action itself carries, and the worker-token gate names the plugin bin path.',
     },
     reviewed_states: [
       {
