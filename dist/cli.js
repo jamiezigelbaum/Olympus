@@ -36147,12 +36147,12 @@ function dashboardHasRunBefore(source) {
 function dashboardAwaitingFirstSync(source, now) {
   if (dashboardHasRunBefore(source))
     return false;
-  const since = firstSyncClock(source, now);
+  const since = dashboardFirstSyncClock(source, now);
   if (since === undefined)
     return false;
   return now.getTime() - since <= DASHBOARD_FIRST_SYNC_GRACE_HOURS * 3600000;
 }
-function firstSyncClock(source, now) {
+function dashboardFirstSyncClock(source, now) {
   for (const candidate of [source.connection.connected_at, source.movement?.first_seen_at]) {
     const at = Date.parse(candidate ?? "");
     if (Number.isFinite(at) && at <= now.getTime())
@@ -66586,10 +66586,10 @@ function idleEvidenceHours(source, now) {
 function firstSyncIdleHours(source, now) {
   if (dashboardHasRunBefore(source))
     return;
-  const connectedAt = Date.parse(source.connection.connected_at ?? "");
-  if (!Number.isFinite(connectedAt) || connectedAt > now.getTime())
+  const since = dashboardFirstSyncClock(source, now);
+  if (since === undefined)
     return;
-  return (now.getTime() - connectedAt) / 3600000;
+  return (now.getTime() - since) / 3600000;
 }
 function graceHours(source) {
   const threshold = source.freshness.threshold_hours;
