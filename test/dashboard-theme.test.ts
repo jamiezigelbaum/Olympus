@@ -173,9 +173,23 @@ describe('dashboard stylesheet', () => {
     // Sync now button, its status text and the agent-prompt control (owner,
     // 2026-09-04): the text column had a zero flex basis while the controls
     // kept their intrinsic width.
-    expect(DASHBOARD_THEME_CSS).toContain('.attncard .grow { flex: 1 1 320px; min-width: 0; }');
-    const row = DASHBOARD_THEME_CSS.split('\n').find((line) => line.startsWith('.attncard {'));
-    expect(row).toContain('flex-wrap: wrap');
+    expect(DASHBOARD_THEME_CSS).toContain('.attncard.banner { flex-wrap: wrap; }');
+    expect(DASHBOARD_THEME_CSS).toContain('.attncard.banner .grow { flex: 1 1 320px; min-width: 0; }');
+  });
+
+  test('leaves every other attention-card shape exactly as it was', () => {
+    // The source page's one banner is a paragraph with controls; the home rows
+    // and the whole-row links are neither, and the mobile block below owns what
+    // they do at 375px -- including the documented exclusion that keeps a
+    // row-link's single chevron beside its text rather than on its own line.
+    const base = DASHBOARD_THEME_CSS.split('\n').find((line) => line.startsWith('.attncard {'))!;
+    expect(base).not.toContain('flex-wrap');
+    expect(DASHBOARD_THEME_CSS).toContain('.attncard .grow { flex: 1; }');
+    expect(DASHBOARD_THEME_CSS).toContain('.attncard:not(.rowzone) { flex-wrap: wrap; }');
+    // The mobile rule is declared after the banner rule, so at 375px the
+    // banner's basis gives way to the full-width one rather than fighting it.
+    expect(DASHBOARD_THEME_CSS.indexOf('.attncard:not(.rowzone) .grow'))
+      .toBeGreaterThan(DASHBOARD_THEME_CSS.indexOf('.attncard.banner .grow'));
   });
 
   test('is balanced, so an inlined <style> cannot swallow the page', () => {
