@@ -692,16 +692,25 @@ describe('CLI tool surface', () => {
             },
             {
               source_id: 'telegram.messages',
-              connection: { state: 'not_connected' },
-              answer_readiness: { state: 'disconnected' },
+              configured: false,
+              connection: { state: 'reauth_required' },
+              answer_readiness: { state: 'needs_attention' },
               queue_health: { needs_attention: 0 },
             },
             {
               source_id: 'dropbox.files',
+              configured: true,
               connection: { state: 'connected' },
               answer_readiness: { state: 'needs_attention' },
               queue_health: { needs_attention: 1 },
               embedding_lane_state: 'embedding_lane_disabled',
+            },
+            {
+              source_id: 'readwise.library',
+              configured: false,
+              connection: { state: 'not_connected' },
+              answer_readiness: { state: 'disconnected' },
+              queue_health: { needs_attention: 0 },
             },
           ],
         }));
@@ -764,6 +773,9 @@ describe('CLI tool surface', () => {
         expect.objectContaining({ kind: 'partial_sync', source_id: 'dropbox.files', restart_required: false }),
         expect.objectContaining({ kind: 'missing_dependency', source_id: 'dropbox.files', restart_required: false }),
       ]));
+      // And the unconnected source in the same payload contributes nothing:
+      // recovery is a list of work the operator can resume.
+      expect(JSON.stringify(onlineOutput.recovery)).not.toContain('readwise.library');
 
       await new Promise<void>((resolve) => server.close(() => resolve()));
       serverOpen = false;
