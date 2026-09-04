@@ -389,11 +389,17 @@ export const DASHBOARD_CONTROL_GATE_ID = 'dashboard-controls';
  * The prompt a reader hands their agent to get the worker token (owner ruling,
  * 2026-09-01: the agent may read it out of the worker env file and hand it
  * over in chat). Names the file and the command, never the value.
+ *
+ * `olympus` is NOT on PATH on a fresh install — the install guide runs it as
+ * `"$OLYMPUS_BIN"` for exactly that reason — so a bare command sent the reader
+ * to "command not found" (clean-install rehearsal, 2026-09-05). The prompt and
+ * the CLI line below both name where the binary lives.
  */
 export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
-  'I need the Olympus worker token to unlock the dashboard controls. Run `olympus dashboard token` '
-  + '(or read OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file) and give me the token so I can '
-  + 'paste it into the dashboard. Do not change any configuration.';
+  'I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from '
+  + '`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read '
+  + 'OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste '
+  + 'it into the dashboard. Do not change any configuration.';
 
 /**
  * The one dashboard-level custody gate for every mutating source control.
@@ -438,8 +444,9 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>`
     + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
-    + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus:</p>`
-    + `<div class="promptbox"><code>olympus dashboard token</code></div>`
+    + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus, from the plugin directory:</p>`
+    + `<div class="promptbox"><code>&lt;rootDir&gt;/bin/olympus dashboard token</code></div>`
+    + `<p class="hint">rootDir comes from <code>openclaw plugins inspect olympus --json</code>.</p>`
     + `</div>`;
 }
 

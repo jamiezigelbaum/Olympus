@@ -592,7 +592,7 @@ describe('dashboard setup framing and copy', () => {
 
     expect(locked).toContain('Input token');
     expect(locked).toContain('Where is my token?');
-    expect(locked).toContain('olympus dashboard token');
+    expect(locked).toContain('&lt;rootDir&gt;/bin/olympus dashboard token');
     expect(connected).toContain('Dashboard controls unlocked');
     expect(connected).not.toContain('name="worker_token"');
 
