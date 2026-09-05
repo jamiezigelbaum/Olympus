@@ -12,7 +12,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Secure corpora remain lexical-only in v0.4');
+    expect(docs).toContain('Secure search remains lexical-only in `private-cloud-only`');
+    expect(docs).toContain('local presets configure local secure embeddings');
+    expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
     expect(docs).not.toContain('end-to-end-encrypted inference');
