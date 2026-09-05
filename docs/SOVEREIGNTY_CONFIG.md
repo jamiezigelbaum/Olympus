@@ -50,6 +50,11 @@ Local presets support local secure embeddings; do not describe every v0.4
 preset as lexical-only. Venice E2EE integration and cloud secure embeddings
 are outside this release.
 
+The current CLI's generic Venice pitch still describes secure search as
+lexical-only across v0.4. That sentence is stale for local presets; inspect the
+effective policy and use the table above. Correcting this readiness wording
+belongs with the small beta settings follow-up, not a privacy-policy change.
+
 ### Give your agent this prompt
 
 > Help me configure Olympus's models for this beta using the installed

@@ -489,6 +489,8 @@ installation complete through supported commands.
 The minimum product follow-up for testing is a bounded supported settings
 path for explicit dimensions and the user's local endpoints/model IDs, with
 validation and truthful preflight before activating the worker. Preserve
+the distinction between private-cloud-only's lexical secure search and local
+presets' secure embeddings in the CLI readiness text. Preserve
 unrelated settings and existing vector identities; require approval and a
 cost estimate for changes that would re-embed data. Prove a fresh install
 with keys and dimensions, both local endpoint contracts when selected, and

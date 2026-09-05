@@ -200,8 +200,9 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
-  release claim. Secure corpora remain lexical-only in v0.4; Olympus never
-  falls back to an ordinary cloud embedding provider. `local-only` never uses
+  release claim. Secure search remains lexical-only in `private-cloud-only`;
+  local presets configure local secure embeddings. Olympus never falls back
+  to an ordinary cloud embedding provider for secure data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
   sees secure data.
   Turning secure data off is
