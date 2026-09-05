@@ -479,25 +479,25 @@ server/model requirements, and separate secure/non-secure search and reasoning.
 This is the bounded testing scope; a full dashboard model wizard is not a
 v0.4 requirement.
 
-**Open beta blocker — managed model settings.** A valid Gemini key currently
-activates a constructor that requires an unset cloud embedding dimension;
-local embeddings require their own dimension too. Existing setup/connect
-commands cannot persist these settings, and the local preset endpoints/model
-IDs cannot be chosen through setup. Documentation alone cannot make a fresh
-installation complete through supported commands.
+**Shipped-model startup correction.** A valid Gemini key used to activate a
+constructor that required an unset dimension, despite that dimension already
+being registered by Olympus. The shared factory now uses the existing
+canonical identity when no dimension was configured: Gemini Embedding 2 is
+3072 and the registered local Qwen embedding model is 2560. Explicit settings
+keep precedence; malformed settings and unknown models without a dimension
+still refuse. Canonical model identities, epochs, and stored vectors are not
+changed. CLI readiness wording now distinguishes private-cloud-only keyword
+search from local secure embeddings. Tests cover fresh preset/key construction
+and existing identity/override boundaries.
 
-The minimum product follow-up for testing is a bounded supported settings
-path for explicit dimensions and the user's local endpoints/model IDs, with
-validation and truthful preflight before activating the worker. Preserve
-the distinction between private-cloud-only's lexical secure search and local
-presets' secure embeddings in the CLI readiness text. Preserve
-unrelated settings and existing vector identities; require approval and a
-cost estimate for changes that would re-embed data. Prove a fresh install
-with keys and dimensions, both local endpoint contracts when selected, and
-one small cited-answer round trip before calling it beta-ready. A one-off
-operator repair is not clean-install qualification. This follow-up remains
-open; this documentation change does not implement it or approve a live
-dimension change.
+**Remaining custom-model setup work.** The CLI still lacks a complete settings
+path for arbitrary local endpoints/model IDs and explicit dimensions. That
+remains a bounded follow-up for users who need custom models; shipped defaults
+no longer require a generated-file repair. Preserve unrelated settings and
+existing vector identities and require approval/cost estimates for any
+re-embedding. Clean-install qualification still needs both local endpoint
+contracts when selected and a small cited-answer round trip; constructor tests
+alone do not qualify the beta or a live installation.
 
 **v0.5 planned — Models & privacy dashboard.** Build on the existing source
 dashboard and shared configuration owner, with these product outcomes:
@@ -532,7 +532,7 @@ file edits or an agent-only repair.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Agent-led model/account setup is documented; the managed model-settings blocker above remains open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Real-provider and pilot receipts remain pending for a newly qualified candidate. Every source must pass clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
+| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,

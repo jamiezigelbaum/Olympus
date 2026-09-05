@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createSovereigntyEngine, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   createSourceIndexEmbeddingProviderFromSovereignty,
@@ -7,6 +7,22 @@ import {
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 
 describe('worker boot secretRef degradation', () => {
+  test('a fresh preset and connected Gemini key construct the boot provider without dimension configuration', () => {
+    const provider = createSourceIndexEmbeddingProviderFromSovereignty(
+      createSovereigntyEngine(loadSovereigntyPreset('no-sensitive')),
+      'internal',
+      { OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'fixture-key' },
+    );
+
+    expect(provider).toMatchObject({
+      provider: 'google-gemini',
+      modelId: 'gemini-embedding-2',
+      backend: 'cloud',
+      dimension: 3072,
+      epochId: 'cloud:google-gemini:gemini-embedding-2:provider-reported',
+    });
+  });
+
   test('worker boots green with a deliberately unresolvable secretRef while the affected lane stays disabled and retries are bounded', async () => {
     let resolveCalls = 0;
     const scheduled: Array<() => void> = [];

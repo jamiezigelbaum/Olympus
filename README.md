@@ -153,8 +153,8 @@ managed plugin; use the resolved executable rather than assuming it is on PATH.
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
-It explains the separate secure/non-secure routes and the current dimension
-configuration blocker before you connect keys or restart.
+It explains the separate secure/non-secure routes, registered embedding
+defaults, and custom-model requirements before you connect keys or restart.
 
 ## Supported sources
 

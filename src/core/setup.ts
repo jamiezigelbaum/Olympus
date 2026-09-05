@@ -114,7 +114,7 @@ export interface SetupWizardResult {
 export const VENICE_PITCH_TEXT = [
   'Secure source answers follow the selected preset: local-first tries your local lane before Venice; private-cloud-only uses Venice without a local-model requirement.',
   'In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.',
-  'Secure corpora remain lexical-only in v0.4; Olympus never falls back to an ordinary cloud embedding provider.',
+  'Secure search is lexical-only with private-cloud-only; local presets use local secure embeddings. Olympus never falls back to an ordinary cloud embedding provider for secure data.',
   'Turning the secure tier off is a deliberate choice after this screen.',
 ] as const;
 

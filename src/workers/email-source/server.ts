@@ -186,6 +186,7 @@ import {
   OpenAICompatibleSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
+import { canonicalEmbeddingDimension } from '../source-index/embedding-identity.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
   createGoogleDriveConnectorStoreSchedulerSource,
@@ -281,6 +282,12 @@ function requireSourceEmbeddingDimension(options: {
   model: string;
 }): number {
   const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
+  // Shipped models already have authoritative dimensions in the identity
+  // registry. Use those only when unset; an explicit invalid value must refuse.
+  if (options.envKeys.every((key) => options.env[key] === undefined)) {
+    const canonicalDimension = canonicalEmbeddingDimension(options.model);
+    if (canonicalDimension !== undefined) return canonicalDimension;
+  }
   const envKey = configuredKey ?? options.envKeys[options.envKeys.length - 1]!;
   const raw = options.env[envKey]?.trim();
   const dimension = raw === undefined || raw.length === 0 ? Number.NaN : Number(raw);

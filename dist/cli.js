@@ -8685,6 +8685,9 @@ function canonicalIdentity(input) {
 function canonicalEmbeddingIdentityForModel(modelId) {
   return CANONICAL_EMBEDDING_IDENTITIES.find((identity) => identity.modelId === modelId);
 }
+function canonicalEmbeddingDimension(modelId) {
+  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
+}
 function resolveEmbeddingEpoch(input) {
   const derived = buildEmbeddingEpoch(input);
   const override = input.epochOverride?.trim();
@@ -75728,6 +75731,11 @@ function createEmailSourceConnectorFromEnv(env = process.env) {
 }
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
+  if (options.envKeys.every((key) => options.env[key] === undefined)) {
+    const canonicalDimension = canonicalEmbeddingDimension(options.model);
+    if (canonicalDimension !== undefined)
+      return canonicalDimension;
+  }
   const envKey = configuredKey ?? options.envKeys[options.envKeys.length - 1];
   const raw = options.env[envKey]?.trim();
   const dimension = raw === undefined || raw.length === 0 ? Number.NaN : Number(raw);
@@ -77507,6 +77515,7 @@ var init_server4 = __esm(async () => {
   init_secret_store();
   init_credential_degradation();
   init_embeddings();
+  init_embedding_identity();
   init_source_scheduler();
   init_source_watch();
   init_source_watch_runtime();
@@ -79576,7 +79585,7 @@ init_worker_auth();
 var VENICE_PITCH_TEXT = [
   "Secure source answers follow the selected preset: local-first tries your local lane before Venice; private-cloud-only uses Venice without a local-model requirement.",
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
-  "Secure corpora remain lexical-only in v0.4; Olympus never falls back to an ordinary cloud embedding provider.",
+  "Secure search is lexical-only with private-cloud-only; local presets use local secure embeddings. Olympus never falls back to an ordinary cloud embedding provider for secure data.",
   "Turning the secure tier off is a deliberate choice after this screen."
 ];
 function runSetupDependencyCheck(input = {}) {
