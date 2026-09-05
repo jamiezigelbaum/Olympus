@@ -10,16 +10,19 @@ Use this guide with your own agent after the plugin is installed. The
 [agent install guide](../INSTALL_FOR_AGENTS.md) owns consent, credential
 sourcing, existing-install safety, and restart procedures.
 
-**Current readiness limit:** the shipped CLI can connect Gemini and Venice
-keys, but it cannot yet persist the embedding dimensions required by the
-worker. With a valid Gemini key and no dimension setting, the worker fails at
-startup. Local embeddings also require an explicit dimension. Before changing
-keys or restarting, have the agent check this prerequisite without displaying
-credentials. If it is missing, report the blocker to the maintainer; do not
-hand-edit `worker.env`, invent a CLI flag, or present the setup as complete.
-The small managed-settings fix required for beta is tracked in the
-[release plan](V0_4_RELEASE.md#model-setup-for-testing-and-v05). This guide does
-not qualify an installation that still has that blocker.
+**Shipped model defaults:** the worker uses Olympus's registered dimensions
+when no dimension override is supplied: Gemini Embedding 2 uses 3072 and the
+registered local `secure-local-qwen3-embed` model uses 2560. A fresh install
+using those models needs no dimension flag or generated-file edit. Explicit
+settings retain precedence and invalid values still refuse startup.
+
+**Custom-model limit:** an unregistered model still needs its authoritative
+dimension, and the CLI does not yet expose a complete custom model-settings
+path. Stop and report that limitation instead of inventing flags, relabelling
+another model as a registered one, or editing `worker.env`. Older builds that
+refuse a missing dimension for a shipped model need the qualified beta fix;
+reconnecting the key does not repair them. See the
+[release plan](V0_4_RELEASE.md#model-setup-for-testing-and-v05).
 
 ### Choose reasoning and search separately
 
@@ -34,10 +37,10 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Non-secure embeddings | Secure search | Secure answers | You supply |
 |---|---|---|---|---|
-| `private-cloud-only` — beta default when you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key and dimension; Venice account, usable API balance and key |
-| `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key and dimension; local server, exact model IDs and local embedding dimension |
+| `private-cloud-only` — beta default when you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
+| `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
 | `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key and dimension |
+| `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key |
 
 `local-only` describes the handling of **secure** data; the shipped preset
 still uses Gemini for non-secure embeddings. It is not an all-offline preset.
@@ -50,19 +53,15 @@ Local presets support local secure embeddings; do not describe every v0.4
 preset as lexical-only. Venice E2EE integration and cloud secure embeddings
 are outside this release.
 
-The current CLI's generic Venice pitch still describes secure search as
-lexical-only across v0.4. That sentence is stale for local presets; inspect the
-effective policy and use the table above. Correcting this readiness wording
-belongs with the small beta settings follow-up, not a privacy-policy change.
-
 ### Give your agent this prompt
 
 > Help me configure Olympus's models for this beta using the installed
 > `docs/SOVEREIGNTY_CONFIG.md` and `INSTALL_FOR_AGENTS.md`. Explain which data
 > goes to Gemini, Venice, or local models before asking me to choose a preset.
-> First check the installed version and whether the required embedding
-> dimensions can be configured through its supported commands. If that path
-> is missing, report the beta blocker instead of editing generated files.
+> First check the installed version and effective model identities. Use the
+> registered dimensions for shipped models when no override is configured.
+> If a custom model needs unsupported settings, report the limitation instead
+> of editing generated files or disguising it as another model.
 > Help me create my own provider accounts and set a spending limit; I will
 > handle sign-in, terms, purchases, and billing changes. Fetch credentials only
 > from exact password-manager items I name and authorize, and pass each key
@@ -98,9 +97,10 @@ embedding or sufficient quota. Confirm the dimension prerequisite **before**
 this step and follow the managed restart procedure only after it is met.
 
 Gemini Embedding 2's [documented default](https://ai.google.dev/gemini-api/docs/embeddings)
-is 3072 dimensions. Record the explicitly agreed output size and expected
-usage cost; the worker currently requires
-`OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY`. Never change an
+is 3072 dimensions, matching Olympus's registered default. Existing
+`OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY` settings take
+precedence; no new setting is needed for the shipped model. Record the chosen
+model, output size, and expected usage cost. Never change an
 existing embedding size merely to make startup pass. An existing corpus needs
 an approved migration/re-embedding decision, with vectors preserved.
 
@@ -150,9 +150,12 @@ guide or download a particular model without checking hardware requirements.
 
 Using synthetic text only, verify `/models`, a short `/chat/completions`
 request, and an `/embeddings` response. Record the actual model ID and vector
-length. Local dimensions come from the model, not the Gemini default; the
-worker requires `OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY` for this
-route. The same current managed-settings blocker applies if it is absent.
+length. Local dimensions come from the model, not the Gemini default. The
+registered `secure-local-qwen3-embed` model defaults to 2560; an existing
+`OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY` setting takes precedence.
+Do not assign that model ID to a different model or vector space. An
+unregistered model without an explicit dimension still refuses startup, and
+the current custom-settings limitation applies to that case.
 Keep secure embedding requests on loopback; local reasoning with optional
 Venice escalation does not permit Venice or Gemini to receive secure
 embedding inputs.
@@ -167,10 +170,10 @@ keyword-only operation honestly. No indexed data means no answer proof yet.
 
 The v0.4 dashboard handles source connections and shows progress/credential
 problems, but it has no complete model-account or embedding-configuration
-wizard. Full model setup in the dashboard is planned for v0.5. Until the
-small CLI prerequisite gap is closed and clean-install proof passes, use this
-guide for preparation and report the blocker; do not repair testers' machines
-through undocumented edits.
+wizard. Full model setup in the dashboard is planned for v0.5. The registered
+defaults remove the missing-dimension startup failure for shipped models;
+custom model configuration and clean-install qualification still need their
+own proof. Do not repair testers' machines through undocumented edits.
 
 ## Purpose
 

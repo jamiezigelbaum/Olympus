@@ -45,7 +45,8 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('ordinary API with a live-catalog Private or plain TEE model');
       expect(pitch).toContain('does not provide or qualify E2EE out of the box');
       expect(pitch).toContain('custom integrations are user-owned');
-      expect(pitch).toContain('Secure corpora remain lexical-only in v0.4');
+      expect(pitch).toContain('Secure search is lexical-only with private-cloud-only');
+      expect(pitch).toContain('local presets use local secure embeddings');
       expect(pitch).toContain('Turning the secure tier off is a deliberate choice');
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');

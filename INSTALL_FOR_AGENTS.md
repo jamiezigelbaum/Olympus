@@ -662,10 +662,13 @@ report "your keys are set up" after the fact.
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
 before this step. It separates Gemini non-secure embeddings, local secure
 embeddings, Venice secure reasoning, and private-cloud-only's keyword search.
-The current worker requires explicit cloud/local embedding dimensions, but
-the CLI cannot yet persist them. If a required dimension is missing, stop
-before connecting a key or restarting: report the beta blocker rather than
-hand-editing `worker.env` or declaring readiness from key validity alone.
+The worker uses registered dimensions for shipped models when there is no
+override (Gemini Embedding 2: 3072; registered local embedding model: 2560).
+Do not add a dimension flag or edit `worker.env` for those defaults. An unknown
+model still needs a verified explicit dimension; report unsupported custom
+configuration rather than inventing flags or declaring readiness from key
+validity alone. Older packages with the shipped-model missing-dimension
+startup error need the qualified fix, not another credential read.
 The guide also covers creating the user's provider accounts and API spending
 limits; the operator completes sign-in, terms, purchases, and billing changes.
 
