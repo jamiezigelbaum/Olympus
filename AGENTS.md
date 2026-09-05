@@ -2,8 +2,6 @@
 
 Olympus is an OpenClaw plugin.
 
-For a human-facing project overview, read [README.md](README.md).
-
 ## Velocity ruling (owner, 2026-07-30) — no calendar scheduling for ready work
 
 A ceremony, deploy, or cutover runs the MOMENT its preconditions are
@@ -29,25 +27,17 @@ that is the tell: name the actual unmet precondition or go.
 
 ## Start Here
 
-> **Release work: read
-> [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) first.** It is the authority for
-> v0.4 scope, sequence, decisions, and completion. Dated CTO handoffs are
-> historical or runtime snapshots and do not define release direction.
+This file supplies the standing invariants. Read the smallest relevant source
+files and the authorities below when the task reaches their surface; expand
+context when dependencies or unresolved questions require it.
 
-1. Read this file.
-2. Read [README.md](README.md) for the product shape.
-3. Read [docs/CONTRACTS.md](docs/CONTRACTS.md) — the stable, versioned
-   source-pipeline contracts and invariant architecture.
-4. Read [docs/ENGINEERING_PROCESS.md](docs/ENGINEERING_PROCESS.md) for the
-   canonical development and delivery path.
-5. Read [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) for the active milestone,
-   scope, sequence, and decisions.
-6. Read the smallest relevant source files and docs before editing.
-
-When fixing or updating live OpenClaw/Castor/Argus behavior from Codex, use
-the Codex skill `openclaw-runtime-update` (if not loaded, read
-`~/.codex/skills/openclaw-runtime-update/SKILL.md` first) — it is
-the inside-OpenClaw update checklist.
+| Task surface | Read |
+|---|---|
+| Product orientation | [README.md](README.md) for the product shape |
+| Source-pipeline implementation or architecture review | Relevant sections of [docs/CONTRACTS.md](docs/CONTRACTS.md) and [`src/core/contracts.ts`](src/core/contracts.ts), before writing pipeline code |
+| Repository implementation or delivery | [docs/ENGINEERING_PROCESS.md](docs/ENGINEERING_PROCESS.md) and [docs/ops/HARNESS_PROTOCOL.md](docs/ops/HARNESS_PROTOCOL.md), before implementing or merging |
+| Release or milestone scope, sequence, decisions, or completion | [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) first; dated CTO handoffs supply historical or runtime evidence and do not define release direction |
+| Live OpenClaw/Castor/Argus changes | [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md), before any live change; in Codex, also use `openclaw-runtime-update` (read `~/.codex/skills/openclaw-runtime-update/SKILL.md` if not loaded) |
 
 ## OpenClaw system-change protocol (non-negotiable)
 
@@ -144,18 +134,15 @@ Enforcement is mechanical, so this survives any thread or tool:
   to require exact-SHA green CI until the artifact-provenance receipt path is
   separately proven and adopted.
 
-### Kickoff card (paste at the top of any implementation thread)
+### Task briefs and completion
 
-> You are implementing inside Olympus, a capability-shaped source pipeline.
-> Read docs/CONTRACTS.md first. The contracts (SourceConnector, EvidencePack,
-> Analyst) are stable and versioned — implement them; do not route around them.
-> Only SourceConnector may be source-specific; no question-specific logic in the
-> Analyst, ever. There is no template answer path — never add one.
-> "Done" means relevant focused local proof, required exact-head CI lanes, and
-> the post-merge workflow for the exact `main` SHA are green. Source-pipeline
-> structural changes also require the held-out eval
-> (`eval/`). Contract changes follow the versioned change gate in
-> docs/ENGINEERING_PROCESS.md.
+Frame implementation work with the outcome, relevant context, scope, and
+done-when. Follow the canonical
+[delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): relevant focused
+local proof, required exact-head CI lanes, and the post-merge workflow for the
+exact `main` SHA must be green. Source-pipeline structural changes also require
+the held-out eval (`eval/`); contract changes follow the
+[versioned change gate](docs/ENGINEERING_PROCESS.md#contract-evolution).
 
 ## Who may execute (multi-harness)
 
