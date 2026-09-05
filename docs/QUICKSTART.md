@@ -24,16 +24,25 @@ terminal: *"Retrieve and follow the instructions in INSTALL_FOR_AGENTS.md"*
 whole guide, asks you for the decisions that are yours, and verifies the
 result. The steps below are the same flow, by hand.
 
-Before first setup, have these preset prerequisites ready:
+Before first setup, follow the
+[agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
+It covers account creation, API spending, exact password-manager references,
+local models, and the required embedding dimensions. **Current blocker:** the
+CLI cannot yet persist those dimensions. If your installation lacks them,
+stop before connecting keys or restarting and report the blocker; do not edit
+the generated worker environment. A guide is not a substitute for that fix.
+
+The preset prerequisites are:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin`, a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
-| `local-only` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin`, a local OpenAI-compatible source-answer server on `http://127.0.0.1:8000/v1`, and a local OpenAI-compatible embedding server on `http://127.0.0.1:28011/v1`. |
-| `private-cloud-only` | a Gemini API key connected with `printf '%s' "$GEMINI_API_KEY" \| olympus connect gemini --api-key-stdin` and a Venice API key connected with `printf '%s' "$VENICE_API_KEY" \| olympus connect venice --api-key-stdin`. |
-| `no-sensitive` | a Gemini API key, connected the same way, for source embeddings. |
+| `local-first` | Gemini key and dimension for non-secure embeddings; a funded Venice API key; local answer and embedding models with exact IDs and a local embedding dimension. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
+| `local-only` | Gemini key and dimension for non-secure embeddings; local answer and embedding models with exact IDs and a local embedding dimension, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
+| `private-cloud-only` | Gemini key and dimension for non-secure embeddings; a funded Venice API key for secure answers. Secure search is local keyword search, with no secure embedding model or local server required. |
+| `no-sensitive` | Gemini key and dimension for non-secure embeddings. Secure content is unavailable to answering. |
 
-A local runtime means a server actually answering on those two ports. An
+A local runtime means a server actually answering at the effective policy's
+endpoints and serving its exact answer and embedding model IDs. An
 installed plugin is not a runtime — OpenClaw ships a built-in `llama-cpp`
 provider plugin on machines that have never run a local model.
 

@@ -538,8 +538,9 @@ never run a local model, and treating it as a cue recommends
 `local-first` to someone with nothing to serve it. The only thing worth
 reporting is a running OpenAI-compatible HTTP server actually answering on
 the ports Olympus's local lanes are configured to use — the answer
-endpoint and the embedding endpoint (`local-first`/`local-only` default to
-`http://127.0.0.1:8000/v1` and `http://127.0.0.1:28011/v1`). Probe those,
+endpoint and the embedding endpoint (both shipped `local-first`/`local-only`
+profiles use `http://127.0.0.1:28090/v1`, with distinct model IDs). Read the
+effective policy and probe its endpoints and models,
 and if nothing answers, you detected nothing: ask the question above with
 no preamble. Use their answer to mark which option below is recommended
 for them, then present all four.
@@ -657,6 +658,17 @@ Each credential here is its own Rule one gate: explain it in one plain
 sentence, ask, connect, then move to the next — never sweep the list and
 report "your keys are set up" after the fact.
 
+**Model readiness before keys.** Follow the packaged
+[agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
+before this step. It separates Gemini non-secure embeddings, local secure
+embeddings, Venice secure reasoning, and private-cloud-only's keyword search.
+The current worker requires explicit cloud/local embedding dimensions, but
+the CLI cannot yet persist them. If a required dimension is missing, stop
+before connecting a key or restarting: report the beta blocker rather than
+hand-editing `worker.env` or declaring readiness from key validity alone.
+The guide also covers creating the user's provider accounts and API spending
+limits; the operator completes sign-in, terms, purchases, and billing changes.
+
 **Credential sourcing (password-manager-aware).** Before sending the
 operator to a website to copy a key — or asking them to paste anything —
 ask where they keep secrets, or note what this machine already offers
@@ -746,8 +758,11 @@ printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
   a single quote (`… value must not contain a single quote.`), whose
   remedy is the one the error gives — rotate the key at the provider and
   store one without a quote.
-- Venice API key (`local-first` or `private-cloud-only`): the operator creates one at
-  https://venice.ai, then you connect it via stdin so it never appears in
+- Venice API key (`local-first` or `private-cloud-only`): follow the
+  [Venice account and API setup](docs/SOVEREIGNTY_CONFIG.md#venice-create-an-account-with-api-access)
+  instructions. The operator needs a usable API balance and an Inference Only
+  key with an agreed consumption limit; a chat subscription alone is not proof
+  of API readiness. Then connect it via stdin so it never appears in
   shell history or logs (you run this; do not show it as a copy block):
 
 ```bash
