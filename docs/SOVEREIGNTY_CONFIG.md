@@ -1,7 +1,176 @@
 # Sovereignty Configuration
 
 Status: active
-Updated: 2026-07-26
+Updated: 2026-09-05
+
+## Agent-led model setup for the v0.4 beta
+
+Use this guide with your own agent after the plugin is installed. The
+[Quickstart](QUICKSTART.md) covers installation; the
+[agent install guide](../INSTALL_FOR_AGENTS.md) owns consent, credential
+sourcing, existing-install safety, and restart procedures.
+
+**Current readiness limit:** the shipped CLI can connect Gemini and Venice
+keys, but it cannot yet persist the embedding dimensions required by the
+worker. With a valid Gemini key and no dimension setting, the worker fails at
+startup. Local embeddings also require an explicit dimension. Before changing
+keys or restarting, have the agent check this prerequisite without displaying
+credentials. If it is missing, report the blocker to the maintainer; do not
+hand-edit `worker.env`, invent a CLI flag, or present the setup as complete.
+The small managed-settings fix required for beta is tracked in the
+[release plan](V0_4_RELEASE.md#model-setup-for-testing-and-v05). This guide does
+not qualify an installation that still has that blocker.
+
+### Choose reasoning and search separately
+
+An **answer model** reads retrieved evidence and writes an answer.
+An **embedding model** turns permitted material into vectors for semantic
+search. Buying a Venice account does not configure embeddings. A provider
+approved for secure answers is not automatically approved for secure vectors.
+
+Here, **non-secure** means public data and classified private data that you
+permit ordinary cloud models to process. **Secure** includes health, finance,
+legal, and similarly sensitive material. Secrets are denied to every model.
+
+| Preset | Non-secure embeddings | Secure search | Secure answers | You supply |
+|---|---|---|---|---|
+| `private-cloud-only` — beta default when you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key and dimension; Venice account, usable API balance and key |
+| `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key and dimension; local server, exact model IDs and local embedding dimension |
+| `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
+| `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key and dimension |
+
+`local-only` describes the handling of **secure** data; the shipped preset
+still uses Gemini for non-secure embeddings. It is not an all-offline preset.
+The ordinary answer path uses the host's configured inference route by default.
+Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
+
+Secure content never goes to Gemini. The private-cloud-only preset does not
+require a GPU or a local embedding server: its secure search stays lexical.
+Local presets support local secure embeddings; do not describe every v0.4
+preset as lexical-only. Venice E2EE integration and cloud secure embeddings
+are outside this release.
+
+The current CLI's generic Venice pitch still describes secure search as
+lexical-only across v0.4. That sentence is stale for local presets; inspect the
+effective policy and use the table above. Correcting this readiness wording
+belongs with the small beta settings follow-up, not a privacy-policy change.
+
+### Give your agent this prompt
+
+> Help me configure Olympus's models for this beta using the installed
+> `docs/SOVEREIGNTY_CONFIG.md` and `INSTALL_FOR_AGENTS.md`. Explain which data
+> goes to Gemini, Venice, or local models before asking me to choose a preset.
+> First check the installed version and whether the required embedding
+> dimensions can be configured through its supported commands. If that path
+> is missing, report the beta blocker instead of editing generated files.
+> Help me create my own provider accounts and set a spending limit; I will
+> handle sign-in, terms, purchases, and billing changes. Fetch credentials only
+> from exact password-manager items I name and authorize, and pass each key
+> directly to the documented stdin connect command. Never ask me to paste a
+> key into chat. For local models, confirm my hardware, server, exact model
+> IDs, endpoints, and measured vector dimension. Preserve existing vectors
+> and settings. Report account/key validity, model readiness, worker health,
+> and a cited-answer test separately; do not call setup complete just because
+> a key was accepted. Stop at any missing prerequisite and explain the next
+> supported action.
+
+### Gemini: create and connect your own key
+
+1. Open [Google AI Studio's API Keys page](https://aistudio.google.com/apikey)
+   in your own Google account. Create or select the Cloud project for Olympus;
+   an existing project may need to be imported into AI Studio first. Follow
+   Google's [API-key instructions](https://ai.google.dev/gemini-api/docs/api-key).
+2. Review the current [Gemini pricing and data-use terms](https://ai.google.dev/gemini-api/docs/pricing#gemini-embedding-2).
+   Free and paid tiers have different data-use terms. Do not infer a privacy
+   guarantee from the label "private" in Olympus, and do not enable billing
+   without your own approval. Set appropriate quota/billing alerts; an alert
+   alone is not a spending cap.
+3. Create a key for this installation, keep it in your password manager, and
+   give the agent its exact item/field reference. The agent fetches it once
+   and runs `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect gemini --api-key-stdin`,
+   using the executable resolved from `openclaw plugins inspect olympus --json`.
+   `KEY` represents an in-memory manager read or your silent terminal input,
+   never a value pasted into a command, file, chat, or log. Unset it afterward.
+
+The connect command validates the key before storing it in the owner-only
+managed worker environment. That confirms authentication, not successful
+embedding or sufficient quota. Confirm the dimension prerequisite **before**
+this step and follow the managed restart procedure only after it is met.
+
+Gemini Embedding 2's [documented default](https://ai.google.dev/gemini-api/docs/embeddings)
+is 3072 dimensions. Record the explicitly agreed output size and expected
+usage cost; the worker currently requires
+`OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY`. Never change an
+existing embedding size merely to make startup pass. An existing corpus needs
+an approved migration/re-embedding decision, with vectors preserved.
+
+### Venice: create an account with API access
+
+This step applies to `private-cloud-only` and `local-first`.
+
+1. Create or sign in to your account at [Venice](https://venice.ai), then open
+   [API settings](https://venice.ai/settings/api).
+2. Check the account's spendable API balance and
+   [current API pricing](https://docs.venice.ai/overview/pricing). A chat login
+   or subscription by itself does not prove usable API funds. You approve any
+   subscription, credit purchase, or billing change; the agent does not buy it
+   as part of installation.
+3. Follow Venice's [key creation guide](https://docs.venice.ai/guides/getting-started/generating-api-key).
+   Create an **Inference Only** key named for this Olympus installation and
+   set a consumption limit you accept. Save the one-time key display in your
+   password manager. An Admin key is unnecessary.
+4. Authorize the named-item read and have your agent run
+   `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect venice --api-key-stdin`, then
+   unset `KEY`. This writes Olympus's `store:venice.api_key` entry. It does not
+   purchase credits or silently change your privacy preset.
+
+Verify both the key and one small, consented model request: a valid key may
+still be blocked by an empty balance or a per-key limit. Use only a model the
+live Venice catalog and Olympus policy accept for secure answers. Do not
+respond to an unavailable route by sending secure data to an ordinary cloud
+provider. Keep the preset's existing model choice unless you approve a change.
+
+### Local models: bring a running server
+
+For local presets, the agent should inventory your hardware and existing
+model software, then help you run an answer model and a separate embedding
+model. A model file, an OpenClaw provider plugin, or a chat-only server is not
+enough. The server must expose working OpenAI-compatible chat and embedding
+endpoints. [Ollama](https://docs.ollama.com/api/openai-compatibility) and
+[LM Studio](https://lmstudio.ai/docs/developer/openai-compat) document compatible
+interfaces; check the chosen runtime and model rather than assuming parity.
+
+Read the installed preset and effective policy first. The shipped
+`local-first` and `local-only` presets use `http://127.0.0.1:28090/v1` for both
+profiles, with model IDs `delphi/source-answer` and `secure-local-qwen3-embed`.
+These are expected model IDs, not proof a server exists. Your agent must verify
+that the endpoint serves those IDs, or explain the explicitly approved policy
+configuration needed for your server. Do not blindly use ports from an older
+guide or download a particular model without checking hardware requirements.
+
+Using synthetic text only, verify `/models`, a short `/chat/completions`
+request, and an `/embeddings` response. Record the actual model ID and vector
+length. Local dimensions come from the model, not the Gemini default; the
+worker requires `OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY` for this
+route. The same current managed-settings blocker applies if it is absent.
+Keep secure embedding requests on loopback; local reasoning with optional
+Venice escalation does not permit Venice or Gemini to receive secure
+embedding inputs.
+
+### Verify readiness, then connect a source
+
+Have the agent check these as separate results: the chosen preset and data
+destinations; each required credential, endpoint and dimension; successful
+worker activation and `olympus doctor`; then one user-selected source, a
+bounded initial sync, and a normal question with checked citations. Report
+keyword-only operation honestly. No indexed data means no answer proof yet.
+
+The v0.4 dashboard handles source connections and shows progress/credential
+problems, but it has no complete model-account or embedding-configuration
+wizard. Full model setup in the dashboard is planned for v0.5. Until the
+small CLI prerequisite gap is closed and clean-install proof passes, use this
+guide for preparation and report the blocker; do not repair testers' machines
+through undocumented edits.
 
 ## Purpose
 

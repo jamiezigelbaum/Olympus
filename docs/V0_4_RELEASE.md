@@ -107,8 +107,9 @@ testers have exercised the normal product journey without custom engineering.
   end-to-end encryption out of the box. User-owned custom integrations remain
   outside the release claim. The normal `private-cloud-only` route uses Venice
   through its ordinary API with a model that the live Venice catalog classifies
-  as Private or plain TEE. Slice 4 adds no E2EE-specific mechanism. Secure
-  corpora remain lexical-only in v0.4; adding a cloud embedding lane is deferred
+  as Private or plain TEE. Slice 4 adds no E2EE-specific mechanism. In this
+  posture, secure corpora remain lexical-only; the local presets configure
+  local secure embeddings. Adding a secure cloud embedding lane is deferred
   and is not a Slice 4 gate. This accepted product limit must be visible in
   setup, status, and the capability matrix.
 - **2026-08-31 — Slice 4 beta shape.** The beta cohort is fluid; participant
@@ -468,6 +469,61 @@ Hermes, Hermes availability of any skill beyond the optional audited
 `$XDG_DATA_HOME/openclaw/olympus/` rename or data migration, a Hermes analyst
 backend, and Hermes-specific ops tooling.
 
+## Model setup for testing and v0.5
+
+The beta uses the packaged
+[agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta),
+linked from README, Quickstart, and the agent install guide. It covers the
+user's own Gemini and Venice accounts, API keys and spending limits, local
+server/model requirements, and separate secure/non-secure search and reasoning.
+This is the bounded testing scope; a full dashboard model wizard is not a
+v0.4 requirement.
+
+**Open beta blocker — managed model settings.** A valid Gemini key currently
+activates a constructor that requires an unset cloud embedding dimension;
+local embeddings require their own dimension too. Existing setup/connect
+commands cannot persist these settings, and the local preset endpoints/model
+IDs cannot be chosen through setup. Documentation alone cannot make a fresh
+installation complete through supported commands.
+
+The minimum product follow-up for testing is a bounded supported settings
+path for explicit dimensions and the user's local endpoints/model IDs, with
+validation and truthful preflight before activating the worker. Preserve
+the distinction between private-cloud-only's lexical secure search and local
+presets' secure embeddings in the CLI readiness text. Preserve
+unrelated settings and existing vector identities; require approval and a
+cost estimate for changes that would re-embed data. Prove a fresh install
+with keys and dimensions, both local endpoint contracts when selected, and
+one small cited-answer round trip before calling it beta-ready. A one-off
+operator repair is not clean-install qualification. This follow-up remains
+open; this documentation change does not implement it or approve a live
+dimension change.
+
+**v0.5 planned — Models & privacy dashboard.** Build on the existing source
+dashboard and shared configuration owner, with these product outcomes:
+
+- A user can see and choose answer and embedding providers separately for
+  secure and non-secure data, with keyword-only search explicitly available.
+- Account creation/API-credit guidance links to the provider, and credential
+  entry, validation, replacement, and revocation guidance work without putting
+  secrets in browser storage. Model access, credit/budget, and key validity
+  are separate readiness results.
+- Local setup discovers or verifies a loopback server, lists its actual model
+  IDs, tests chat and embedding endpoints, and confirms output dimensions.
+  Provider documentation remains the installation handoff; this is not a new
+  general-purpose model-download or hosting platform.
+- Applying settings is atomic, validates before activation, reports the policy
+  actually loaded by the worker, and recovers safely on failure. Changing a
+  populated vector space previews affected data and cost and requires explicit
+  approval; it never silently discards vectors or downgrades privacy.
+- The flow proves readiness with a bounded test, explains blocked/degraded
+  states in ordinary language, and gives one concrete recovery action.
+
+The dashboard work does not authorize secure cloud embeddings or E2EE, new
+providers, multi-account support, or a broader change to v0.4 privacy policy.
+Its exit is the same user journey on macOS and Linux without manual generated
+file edits or an agent-only repair.
+
 ## Current register
 
 | Slice | State | Completion proof |
@@ -476,7 +532,7 @@ backend, and Hermes-specific ops tooling.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. These repository fixes require a newly qualified candidate; real-provider and pilot receipts are still pending. Every source must pass clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
+| 4. Pilot and release | pending | Agent-led model/account setup is documented; the managed model-settings blocker above remains open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Real-provider and pilot receipts remain pending for a newly qualified candidate. Every source must pass clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,
