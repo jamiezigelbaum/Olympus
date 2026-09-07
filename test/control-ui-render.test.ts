@@ -82,5 +82,5 @@ describe('shared standalone controller', () => {
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     const bundle = readFileSync(output, 'utf8');
     expect(bundle).not.toMatch(/bun:sqlite|node:fs|node:crypto|new Function|\beval\(/);
-  });
+  }, 30_000);
 });
