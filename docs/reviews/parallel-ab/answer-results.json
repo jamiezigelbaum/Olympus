@@ -1,7 +1,7 @@
 {
   "kind": "olympus_real_model_synthetic_ab_result",
   "model": "gemini-2.5-flash",
-  "runtime": "Bun 1.3.8; identical runtime and dependency tree for both arms",
+  "runtime": "Bun 1.3.8; shared candidate-locked dependency directory for both source arms; see shared-dependencies.json",
   "specSha256": "ff4af1a13ae31d35e5bbdf4c720b25731f086b688c3c42f6f84e4740659ceed9",
   "sourceBindings": {
     "main": {

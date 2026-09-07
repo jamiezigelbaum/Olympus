@@ -70,5 +70,6 @@
     "path": "release-artifacts/parallel/ab-evidence/synthetic-evidence.tgz",
     "sha256": "747c6160f4d4fe690d7257ac97c7a612a0c66157ecc6cc5aa6e6b0d768cbdd84",
     "bytes": 302268
-  }
+  },
+  "model_comparison_dependencies": "Both source arms deliberately shared the candidate-locked dependency tree via a symlink. Directory equality and inventory digest are recorded in shared-dependencies.json. Separate packaged-host tests used their independently built artifacts."
 }

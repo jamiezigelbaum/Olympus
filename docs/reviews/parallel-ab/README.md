@@ -30,8 +30,12 @@ files are opened read-only; whole-file hashes are checked before and after.
 The model was `gemini-2.5-flash` through the explicit cloud lane, with keyword
 retrieval, temperature zero, thinking disabled, 12 candidates, 800 characters
 per candidate and 1,024 output tokens. Query planning, self-heal, secondary
-Analyst auditing and embeddings were disabled. Both arms used Bun 1.3.8 and the
-same dependencies in isolated scratch state. Credentials remained on the
+Analyst auditing and embeddings were disabled. Both arms used Bun 1.3.8 and shared the candidate-locked dependency directory
+in isolated scratch state: main/node_modules linked to parallel/node_modules
+before preparation or model calls. The [dependency receipt](shared-dependencies.json)
+records resolved-directory equality and a 4,145-entry inventory digest. This
+controls dependencies for the model comparison; the separate packaged-host
+tests used independently built artifacts. Credentials remained on the
 configured host and are absent from these artifacts.
 
 All 16 pairs had identical retrieval, hydration, prompts and request bodies.
@@ -108,7 +112,10 @@ store runners and their raw observations are retained in the same local
 
 To rerun the paired test, export the exact two revisions with `git archive`
 (`src`, `eval`, `package.json`, `bun.lock`, `tsconfig.json`) into separate scratch
-roots. Install the locked dependencies, then invoke `paired-answer.ts` with
+roots. Install the candidate locked dependencies with `bun install
+--frozen-lockfile --ignore-scripts`, and link main/node_modules to the candidate
+node_modules directory as recorded in the dependency receipt. Then invoke
+`paired-answer.ts` with
 Bun and `--prepare`, `--rootMain`, `--rootParallel`, `--corpus`, `--questions`,
 `--snapshotDir` and `--outputDir` pointing to those roots, these frozen fixture
 files and fresh output directories. Inspect the frozen spec; invoke `--smoke`
