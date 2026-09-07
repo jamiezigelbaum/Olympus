@@ -114,6 +114,61 @@ process.stdout.write(`${remaining}\t${reset}\t${used}\t${limit}\t${brokerUsed}\t
 '
 }
 
+run_secrets_audit_gate() {
+  # Supported OpenClaw audit v1: --check returns 1 even for native OAuth
+  # information. Match only that record, never arbitrary LEGACY_RESIDUE.
+  # Capture reports in memory without shell substitution (which drops NULs)
+  # and emit fixed text only: upstream diagnostics and fields may be sensitive.
+  # shellcheck disable=SC2016  # JavaScript source, not shell expansion
+  "${audit_environment[@]}" "$NODE_BIN" -e '
+const { spawnSync } = require("node:child_process");
+const path = require("node:path");
+const exactKeys = (value, keys) => value !== null && typeof value === "object"
+  && !Array.isArray(value) && Object.keys(value).length === keys.length
+  && keys.every(key => Object.hasOwn(value, key));
+const text = value => typeof value === "string" && value.trim().length > 0
+  && !/[\u0000-\u001f\u007f]/u.test(value);
+const count = value => Number.isSafeInteger(value) && value >= 0;
+try {
+  const audit = spawnSync(process.argv[1], ["secrets", "audit", "--check", "--allow-exec", "--json"], {
+    stdio: ["ignore", "pipe", "ignore"], maxBuffer: 8 * 1024 * 1024,
+  });
+  if (audit.error || audit.signal || ![0, 1].includes(audit.status)) process.exit(1);
+  const report = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(audit.stdout));
+  if (!exactKeys(report, ["version", "status", "resolution", "filesScanned", "summary", "findings"])
+      || report.version !== 1 || !Array.isArray(report.findings)
+      || !Array.isArray(report.filesScanned) || report.filesScanned.length === 0
+      || !report.filesScanned.every(file => text(file) && path.isAbsolute(file))
+      || new Set(report.filesScanned).size !== report.filesScanned.length
+      || !exactKeys(report.resolution, ["refsChecked", "skippedExecRefs", "resolvabilityComplete"])
+      || !count(report.resolution.refsChecked) || report.resolution.skippedExecRefs !== 0
+      || report.resolution.resolvabilityComplete !== true
+      || !exactKeys(report.summary, ["plaintextCount", "unresolvedRefCount", "shadowedRefCount", "legacyResidueCount"])
+      || !Object.values(report.summary).every(count)
+      || report.summary.plaintextCount !== 0 || report.summary.unresolvedRefCount !== 0
+      || report.summary.shadowedRefCount !== 0
+      || report.summary.legacyResidueCount !== report.findings.length) process.exit(1);
+  for (const finding of report.findings) {
+    if (!exactKeys(finding, ["code", "severity", "file", "jsonPath", "message", "provider", "profileId"])
+        || finding.code !== "LEGACY_RESIDUE" || finding.severity !== "info"
+        || finding.message !== "OAuth credentials are present (out of scope for static SecretRef migration)."
+        || !text(finding.provider) || !text(finding.profileId)
+        || finding.jsonPath !== `profiles.${finding.profileId}`
+        || !text(finding.file) || path.basename(finding.file) !== "openclaw-agent.sqlite"
+        || !report.filesScanned.includes(finding.file)) process.exit(1);
+  }
+  const hasOAuth = report.findings.length > 0;
+  if (report.status !== (hasOAuth ? "findings" : "clean")
+      || audit.status !== (hasOAuth ? 1 : 0)) process.exit(1);
+  process.stdout.write(hasOAuth
+    ? "Secrets audit passed: only native OAuth informational records; static credential checks are clear.\n"
+    : "Secrets audit passed: clean.\n");
+} catch {
+  process.exit(1);
+}
+' "$OPENCLAW_BIN"
+}
+
 prove_gateway_stale_cache_readiness() {
   # The readiness implementation and the broker manifest are deployment-owned
   # and live outside this repository, so both default to empty here. An
@@ -196,7 +251,7 @@ print_plan() {
   echo "  2. Run: ${OPENCLAW_BIN} config validate"
   echo "  3. Run: ${OPENCLAW_BIN} doctor --lint --severity-min error --non-interactive"
   if (( SECRETS_TOUCHED == 1 )); then
-    echo "  4. Run: ${OPENCLAW_BIN} secrets audit --check --allow-exec"
+    echo "  4. Run: ${OPENCLAW_BIN} secrets audit --check --allow-exec --json (only exact native OAuth information may pass with exit 1)."
   fi
   echo "  5. Run once: ${OPENCLAW_BIN} gateway restart"
   echo "  6. Prove the current systemd invocation identity, bounded loopback HTTP response, and any exact corroborating listening line from that InvocationID."
@@ -359,8 +414,8 @@ for (const value of words) process.stdout.write(value + "\0");
     audit_environment+=("${gateway_broker_env[@]}")
     echo "Auditing under ${#gateway_broker_env[@]} OLYMPUS_OP_* variable(s) borrowed from ${GATEWAY_UNIT}."
   fi
-  if ! "${audit_environment[@]}" "$OPENCLAW_BIN" secrets audit --check --allow-exec; then
-    echo "openclaw secrets audit --check --allow-exec failed; refusing Gateway restart." >&2
+  if ! run_secrets_audit_gate; then
+    echo "openclaw secrets audit --check --allow-exec --json refused: credential findings, unsupported report, or command failure; refusing Gateway restart." >&2
     exit "$EXIT_CREDENTIAL_UNSAFE"
   fi
 fi
