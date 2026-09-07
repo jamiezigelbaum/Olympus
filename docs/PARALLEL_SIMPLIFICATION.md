@@ -1,7 +1,7 @@
 # Olympus parallel simplification experiment
 
-Status: implemented and locally verified; independent review in progress.
-This is not an adopted release direction.
+Status: implemented, locally verified, and independently reviewed within the
+focused public-boundary scope. Adoption remains a separate owner decision.
 
 ## Outcome and authority
 
@@ -29,7 +29,7 @@ privacy presets; and OpenClaw native tools plus Hermes MCP support.
   a separate product decision.
 - Inspect the repository broadly, then deepen only concrete candidates. An
   unused export or green test suite alone does not prove safe deletion.
-- Stop work by 2026-09-08 01:50 Europe/Lisbon (00:50 UTC), including delegates.
+- Original session cutoff: 2026-09-08 01:50 Europe/Lisbon (00:50 UTC), including delegates.
 
 ## Evaluation
 
@@ -47,9 +47,9 @@ They do not establish real-provider, clean-host, or beta qualification.
 - [x] Create dedicated worktree from refreshed `origin/main`.
 - [x] Establish local baseline and map runtime/product boundaries.
 - [x] Decide which mechanisms to delete, simplify, or retain.
-- [x] Implement justified changes; commit the independent ledger change.
-- [ ] Validate the resulting alternative and independently review it.
-- [ ] Record evidence, residual limits, and a reproducible comparison path.
+- [x] Implement justified changes in separate ledger, product-deletion, and review-follow-up commits.
+- [x] Validate the alternative and independently review the changed public boundaries.
+- [x] Record evidence, residual limits, and a reproducible comparison path.
 
 ## Findings and decisions
 
@@ -104,13 +104,35 @@ not a claim that every remaining line has been independently audited.
 Baseline typecheck passed. Baseline fast checks: 3,935 plugin tests passed
 (one skipped) and 50 exchange-service tests passed.
 
+At runtime commit `03d87c1f47cc99ad73cb7d03487be66c52d7ee89`,
 `bun run verify:full` passes: 3,878 tests, zero failures, one intentional skip
 for a live macOS Keychain write, across 315 files. This includes the Go bridge,
 exchange service, lifecycle, architecture, credential, and evaluation-harness
 tests. Typecheck, contract fingerprint, and rebuilt-bundle consistency pass.
 Packaged-artifact checks also pass with the existing synthetic Google client
-fixture. Independent review and disposable-home rehearsal results will be
-recorded after completion.
+fixture. Follow-up commit `ab38fea7e86d5d9223487b291c99226f5e140694`
+passes typecheck and 30 focused tests; its runtime bundles are byte-identical
+to the reviewed commit.
+
+The complete fake-service-manager matrix passes all 112 simulated cells,
+covering install, lifecycle, dashboard/dependency inventory, upgrade, rollback,
+and uninstall for both platform configurations. User-data sentinels survive
+upgrade, rollback, and uninstall. These are two local fixture rehearsals,
+not two real host installations or seven provider qualifications.
+
+Packaged native tool definitions and CLI schemas are identical to the baseline;
+see [public-surface parity](reviews/parallel-public-surface-parity.json).
+The [focused independent review](reviews/parallel-focused-review.md) reports
+PASS with three minor findings, all addressed in the tested follow-up. The
+earlier broad Fable review timed out without a verdict. The reviewer did not
+review the later follow-up commit or every retained implementation.
+
+Net source reduction through the follow-up: **22,103 lines (16.13%)** of the
+137,011-line baseline. The fixture archive grows from 670,201 to 679,034 bytes
+(8,833 bytes, 1.32%) after removing the second minifier. The gain is a smaller
+maintenance surface and one runtime source, not a claim of better compression
+or faster answers. Full machine-readable results are in the
+[validation summary](reviews/parallel-validation.json).
 
 Of nineteen dashboard fixture routes, eighteen produce byte-identical HTML to
 the baseline. Background differs only by removal of the dead private-ledger
@@ -121,15 +143,35 @@ does not replace the existing pending owner acceptance of the dashboard.
 
 ## Parallel build and test
 
-Use this branch's dedicated worktree. `bun install --frozen-lockfile`,
-`bun run verify:full`, and `bun run test:go` exercise the alternative locally.
-Package checks use the same public archive inventory as v0.4.
+Use this branch's dedicated worktree. Run `bun install --frozen-lockfile` and
+`bun run verify:full` for the full local comparison, or the closest affected
+tests during further edits. Package checks use the same public archive
+inventory as v0.4. The branch is backed up as
+`origin/codex/first-principles-simplification`; no pull request or merge is part
+of this experiment. Remote CI was not run: the unchanged workflow triggers on
+`main` and pull requests, while this work stays on its parallel branch.
 
-The simulated clean-home runner accepts `--plan <fixture-plan.json>`, so
+The simulated clean-home runner accepts `--fixture --plan <fixture-plan.json>`, so
 artifact identities for this experiment can be supplied without rewriting the
-active release plan. Its fake service managers and disposable homes exercise
+active release plan, and the proof names the exact plan digest and fixture
+mode. Its fake service managers and disposable homes exercise
 installation and rollback mechanics only; they are not clean-host or real
 provider qualification.
+
+The local `release-artifacts/parallel/` directory contains the exact test-only
+candidate and baseline archives, fixture plan, and receipts. Rehearse either
+platform from this worktree with:
+
+```sh
+bun scripts/qualification/simulated-clean-home.ts \
+  --fixture --plan release-artifacts/parallel/fixture-plan.json \
+  --artifact release-artifacts/parallel/candidate.tgz \
+  --previous-artifact release-artifacts/parallel/baseline-911caf3f.tgz \
+  --host-os darwin_arm64 --output release-artifacts/parallel/darwin.jsonl
+```
+
+Use `linux_x64_ubuntu_lts` and a separate output file for the Linux fixture.
+These generated archives are local test assets, not committed release inputs.
 
 Any artifact built with the synthetic Google client fixture is for tests only.
 Real-provider, private-corpus held-out evaluation, clean-host qualification,

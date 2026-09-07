@@ -1,0 +1,140 @@
+{
+  "kind": "olympus_parallel_experiment_validation",
+  "baseline_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+  "runtime_commit": "03d87c1f47cc99ad73cb7d03487be66c52d7ee89",
+  "source": {
+    "baseline_lines": 137011,
+    "added_lines": 201,
+    "removed_lines": 22304,
+    "net_removed_lines": 22103,
+    "net_removed_percent": 16.13
+  },
+  "full_verification": {
+    "command": "bun run verify:full",
+    "passed": 3878,
+    "failed": 0,
+    "skipped": 1,
+    "files": 315,
+    "skip_reason": "live macOS Keychain backend write disabled",
+    "includes_go_bridge": true,
+    "includes_exchange_service": true,
+    "commit": "03d87c1f47cc99ad73cb7d03487be66c52d7ee89"
+  },
+  "contracts": {
+    "version": "1.0.0",
+    "sha256": "5445e704de2508c6aed6fec230da9e4d0f529d69260bf9d369d66fc6ff10d175",
+    "unchanged": true
+  },
+  "simulation": {
+    "kind": "olympus_release_qualification_summary",
+    "schema_version": 1,
+    "artifact_sha256": "468f21e26f98ba5d8490aac2c016d875605e15e125afeb19a9165a78a7975054",
+    "artifact_bytes": 679034,
+    "attempts": 112,
+    "passed": 112,
+    "eligible_passes": 112,
+    "failed": 0,
+    "skipped": 0,
+    "real_provider_passes": 0,
+    "simulated_passes": 112,
+    "pilot_attempts": 0,
+    "pilot_wants_reuse": 0,
+    "assistance": {
+      "documented_flow": 112,
+      "documented_recovery": 0,
+      "engineering_intervention": 0
+    },
+    "failure_reasons": {},
+    "matrix": "simulated",
+    "complete": true
+  },
+  "public_surface_parity": {
+    "kind": "packaged_public_surface_parity",
+    "baseline_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+    "candidate_commit": "03d87c1f47cc99ad73cb7d03487be66c52d7ee89",
+    "native_tools": {
+      "names": [
+        "argus_complete",
+        "argus_list_models",
+        "argus_ping",
+        "olympus_doctor",
+        "source_answer",
+        "source_index_search",
+        "source_index_status",
+        "source_watch_cancel",
+        "source_watch_create",
+        "source_watches"
+      ],
+      "identical": true,
+      "baseline_sha256": "d6ca33b68b2c0825881949e114d2bf8d1e046a1e916c2e755ec88d23b558ccfb",
+      "candidate_sha256": "d6ca33b68b2c0825881949e114d2bf8d1e046a1e916c2e755ec88d23b558ccfb"
+    },
+    "cli_schema": {
+      "identical": true,
+      "baseline_sha256": "ebfa4741ef57dc89738208838ee4d392b2bedb46ce2bd881930b494957f9340d",
+      "candidate_sha256": "ebfa4741ef57dc89738208838ee4d392b2bedb46ce2bd881930b494957f9340d"
+    },
+    "network_access": false
+  },
+  "dashboard_parity": {
+    "routes": 19,
+    "identical": 18,
+    "expected_differences": 1,
+    "difference": "Background private-ledger dead link removed; corresponding poll fingerprint changes"
+  },
+  "artifacts": {
+    "purpose": "synthetic Google client fixture only",
+    "candidate_bytes": 679034,
+    "baseline_bytes": 670201,
+    "delta_bytes": 8833,
+    "delta_percent": 1.32
+  },
+  "live_provider_qualification": false,
+  "private_corpus_held_out_run": false,
+  "real_host_qualification": false,
+  "dashboard_owner_acceptance": "pending",
+  "main_merged": false,
+  "deployed": false,
+  "independent_review": {
+    "broad_fable_review": "timed_out_without_verdict",
+    "focused_fable_review": "PASS for focused public-boundary scope",
+    "review_commit": "03d87c1f47cc99ad73cb7d03487be66c52d7ee89",
+    "blocking_findings": 0,
+    "minor_findings": 3,
+    "disposition": "all3 locally addressed in follow-up commit; follow-up not independently re-reviewed"
+  },
+  "follow_up_commit": "ab38fea7e86d5d9223487b291c99226f5e140694",
+  "qualification_runner_commit": "ab38fea7e86d5d9223487b291c99226f5e140694",
+  "follow_up_verification": {
+    "commit": "ab38fea7e86d5d9223487b291c99226f5e140694",
+    "typecheck": "passed",
+    "tests_passed": 30,
+    "tests_failed": 0,
+    "files": 4,
+    "runtime_bundles_unchanged": true
+  },
+  "simulation_proofs": [
+    {
+      "kind": "olympus_simulated_clean_home_proof",
+      "schema_version": 1,
+      "host_os": "darwin_arm64",
+      "fixture_mode": true,
+      "plan_sha256": "bc43ee1f743900a67b0e9be5e37bcd0423c870fb588984242b15cdaeb62af81f",
+      "artifact_sha256": "468f21e26f98ba5d8490aac2c016d875605e15e125afeb19a9165a78a7975054",
+      "previous_artifact_sha256": "bd47865f20c82d076d189948a1acb248f5929e7f9e73c50d35789cdd292cec0b",
+      "cells": 56,
+      "content_free": true
+    },
+    {
+      "kind": "olympus_simulated_clean_home_proof",
+      "schema_version": 1,
+      "host_os": "linux_x64_ubuntu_lts",
+      "fixture_mode": true,
+      "plan_sha256": "bc43ee1f743900a67b0e9be5e37bcd0423c870fb588984242b15cdaeb62af81f",
+      "artifact_sha256": "468f21e26f98ba5d8490aac2c016d875605e15e125afeb19a9165a78a7975054",
+      "previous_artifact_sha256": "bd47865f20c82d076d189948a1acb248f5929e7f9e73c50d35789cdd292cec0b",
+      "cells": 56,
+      "content_free": true
+    }
+  ]
+}
