@@ -20,6 +20,15 @@ const plan = JSON.parse(readFileSync(join(ROOT, 'config/release-qualification-pl
 };
 
 describe('Slice 3F exact qualification plan', () => {
+  test('requires explicit fixture mode before accepting a custom rehearsal plan', () => {
+    const result = Bun.spawnSync([
+      'bun', 'scripts/qualification/simulated-clean-home.ts',
+      '--plan', 'config/release-qualification-plan.json',
+    ], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain('custom simulation plan requires --fixture');
+  });
+
   test('pins the approved hosts, exact seven sources, executable owners, and normal-install rule', () => {
     expect(plan.simulated_matrix.map((entry) => entry.host_os)).toEqual(['darwin_arm64', 'linux_x64_ubuntu_lts']);
     for (const matrix of plan.simulated_matrix) {

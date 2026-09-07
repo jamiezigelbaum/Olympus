@@ -50,15 +50,13 @@ export type ConnectSource =
   | 'google'
   | 'gmail'
   | 'google-drive'
-  | 'gcp'
   | 'dropbox'
   | 'x'
   | 'telegram'
   | 'whatsapp'
   | 'venice'
   | 'readwise'
-  | 'gemini'
-  | 'notion';
+  | 'gemini';
 
 export interface ConnectOAuthOptions {
   source: 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x';

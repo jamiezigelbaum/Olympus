@@ -9,6 +9,10 @@ import { workerServicePaths } from '../../src/core/worker-service.ts';
 import { verifyQualificationArtifact } from './artifact.ts';
 import { pinWorkerReadinessPort, startSimulatedReadinessServer, waitForSimulatedReadiness } from './readiness-stub.ts';
 
+const fixtureMode = process.argv.includes('--fixture');
+if (process.argv.includes('--plan') && !fixtureMode) {
+  throw new Error('A custom simulation plan requires --fixture; it does not qualify the committed release plan.');
+}
 const artifact = requiredPath('--artifact');
 const previousArtifact = requiredPath('--previous-artifact');
 const hostOs = required('--host-os');
@@ -19,7 +23,9 @@ const startedAt = new Date().toISOString();
 const planPath = process.argv.includes('--plan')
   ? requiredPath('--plan')
   : resolve(import.meta.dir, '../../config/release-qualification-plan.json');
-const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+const planBytes = readFileSync(planPath);
+const planSha = createHash('sha256').update(planBytes).digest('hex');
+const plan = JSON.parse(planBytes.toString('utf8')) as {
   assertion_contracts: Record<string, string[]>;
   candidate_artifact: { artifact_sha256: string; artifact_bytes: number };
   rollback_baseline: { artifact_sha256: string; artifact_bytes: number };
@@ -136,7 +142,7 @@ try {
   }
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, `${receipts.map((receipt) => JSON.stringify(receipt)).join('\n')}\n`, { mode: 0o600 });
-  console.log(JSON.stringify({ kind: 'olympus_simulated_clean_home_proof', schema_version: 1, host_os: hostOs, artifact_sha256: artifactSha, previous_artifact_sha256: previousSha, cells: receipts.length, content_free: true }));
+  console.log(JSON.stringify({ kind: 'olympus_simulated_clean_home_proof', schema_version: 1, host_os: hostOs, fixture_mode: fixtureMode, plan_sha256: planSha, artifact_sha256: artifactSha, previous_artifact_sha256: previousSha, cells: receipts.length, content_free: true }));
 } finally {
   Bun.spawnSync(['chmod', '-R', 'u+rwX', scratch], { stdout: 'ignore', stderr: 'ignore' });
   rmSync(scratch, { recursive: true, force: true });

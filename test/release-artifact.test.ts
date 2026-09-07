@@ -134,6 +134,7 @@ describe('release artifact packaging', () => {
       const packagedRuntime = readFileSync(join(packageDir, 'dist', 'cli.js'), 'utf8');
       expect(packagedRuntime).toContain(GOOGLE_PILOT_CLIENT_ID_FIXTURE);
       expect(packagedRuntime).not.toContain('__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__');
+      expect(packagedRuntime).not.toContain('OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID');
       expect(packagedReadme).not.toContain('olympus x reconcile recover');
       expect(packagedReadme).not.toContain('olympus x content recover');
       expect(readFileSync(join(packageDir, 'INSTALL_FOR_AGENTS.md'), 'utf8'))
