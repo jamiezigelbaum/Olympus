@@ -8,6 +8,33 @@ import { optionalToolchain } from './helpers/required-toolchain.ts';
 const SCRIPT = join(import.meta.dir, '..', 'scripts', 'ops', 'openclaw-safe-restart.sh');
 const script = readFileSync(SCRIPT, 'utf8');
 
+const oauthFinding = {
+  code: 'LEGACY_RESIDUE',
+  severity: 'info',
+  file: '/fixture/agents/main/agent/openclaw-agent.sqlite',
+  jsonPath: 'profiles.openai-codex:default',
+  message: 'OAuth credentials are present (out of scope for static SecretRef migration).',
+  provider: 'openai-codex',
+  profileId: 'openai-codex:default',
+};
+
+function auditReport(findings: Array<Record<string, unknown>> = []) {
+  return {
+    version: 1,
+    status: findings.some(finding => finding.code === 'REF_UNRESOLVED')
+      ? 'unresolved' : findings.length ? 'findings' : 'clean',
+    resolution: { refsChecked: 3, skippedExecRefs: 0, resolvabilityComplete: true },
+    filesScanned: ['/fixture/openclaw.json', oauthFinding.file],
+    summary: {
+      plaintextCount: findings.filter(finding => finding.code === 'PLAINTEXT_FOUND').length,
+      unresolvedRefCount: findings.filter(finding => finding.code === 'REF_UNRESOLVED').length,
+      shadowedRefCount: findings.filter(finding => finding.code === 'REF_SHADOWED').length,
+      legacyResidueCount: findings.filter(finding => finding.code === 'LEGACY_RESIDUE').length,
+    },
+    findings,
+  };
+}
+
 describe('OpenClaw safe restart', () => {
   test('is valid Bash and shellcheck clean when shellcheck is available', () => {
     const bash = Bun.which('bash');
@@ -211,7 +238,111 @@ describe('OpenClaw safe restart', () => {
     const result = runScenario({ args: ['--secrets-touched'], failStep: 'secrets' });
 
     expect(result.exitCode).toBe(78);
-    expect(result.stderr).toContain('openclaw secrets audit --check --allow-exec failed; refusing Gateway restart.');
+    expect(result.stderr).toContain('openclaw secrets audit --check --allow-exec --json refused:');
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+  }, 30_000);
+
+  test('permits exact native OAuth information with exit 1 and still proves one restart', () => {
+    const result = runScenario({
+      args: ['--secrets-touched'],
+      auditOutput: JSON.stringify(auditReport([
+        oauthFinding,
+        { ...oauthFinding, provider: 'another-provider', profileId: 'another-provider:work', jsonPath: 'profiles.another-provider:work' },
+      ])),
+      auditExit: 1,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('only native OAuth informational records');
+    expect(result.stdout).toContain('Gateway boot proved: MainPID=4242');
+    expect(result.captured).toContain('openclaw_args=secrets audit --check --allow-exec --json\n');
+    expect(result.captured.match(/openclaw_args=gateway restart/g)).toHaveLength(1);
+    expect(result.stdout + result.stderr).not.toContain(oauthFinding.profileId);
+  }, 30_000);
+
+  test.each([
+    { code: 'PLAINTEXT_FOUND', severity: 'warn' },
+    { code: 'REF_SHADOWED', severity: 'warn' },
+    { code: 'REF_UNRESOLVED', severity: 'error' },
+    { code: 'UNKNOWN_CODE', severity: 'info' },
+    { code: 'LEGACY_RESIDUE', severity: 'warn' },
+    { message: 'Legacy credential residue exists.' },
+    { severity: 'error' },
+    { severity: 'warning' },
+    { file: '/fixture/auth.json' },
+    { file: '/unscanned/openclaw-agent.sqlite' },
+    { jsonPath: 'profiles.some-other-profile' },
+    { profileId: '' },
+    { provider: '' },
+    { provider: null },
+    { profileId: 'invalid\nprofile' },
+    { extra: 'unknown schema' },
+  ])('refuses changed OAuth record %j alone and mixed with valid OAuth information', (patch) => {
+    for (const mixed of [false, true]) {
+      const finding = { ...oauthFinding, ...patch };
+      const result = runScenario({
+        args: ['--secrets-touched', '--preflight-only'],
+        auditOutput: JSON.stringify(auditReport(mixed ? [oauthFinding, finding] : [finding])),
+        auditExit: finding.code === 'REF_UNRESOLVED' ? 2 : 1,
+      });
+      expect(result.exitCode).toBe(78);
+      expect(result.captured).not.toContain('openclaw_args=gateway restart');
+      expect(result.stdout).not.toContain('preflight passed');
+    }
+  }, 30_000);
+
+  test.each([
+    '', 'not-json upstream-private-sentinel', '{}', 'null', '[]',
+    JSON.stringify({ ...auditReport(), version: 2 }),
+    JSON.stringify({ ...auditReport(), findings: [null] }),
+    JSON.stringify({ ...auditReport(), findings: {} }),
+    JSON.stringify({ ...auditReport(), status: 'findings' }),
+    JSON.stringify({ ...auditReport(), extra: true }),
+    JSON.stringify({ ...auditReport(), filesScanned: [] }),
+    JSON.stringify({ ...auditReport(), filesScanned: [1] }),
+    JSON.stringify({ ...auditReport(), resolution: { refsChecked: 3, skippedExecRefs: 1, resolvabilityComplete: true } }),
+    JSON.stringify({ ...auditReport(), resolution: { refsChecked: 3, skippedExecRefs: 0, resolvabilityComplete: false } }),
+    JSON.stringify({ ...auditReport(), resolution: { refsChecked: -1, skippedExecRefs: 0, resolvabilityComplete: true } }),
+    JSON.stringify({ ...auditReport(), resolution: null }),
+    JSON.stringify({ ...auditReport(), summary: { ...auditReport().summary, legacyResidueCount: 1 } }),
+    JSON.stringify({ ...auditReport(), summary: { ...auditReport().summary, plaintextCount: 1 } }),
+    JSON.stringify({ ...auditReport(), summary: { ...auditReport().summary, unresolvedRefCount: 1 } }),
+    JSON.stringify({ ...auditReport(), summary: { ...auditReport().summary, shadowedRefCount: 1 } }),
+    JSON.stringify({ ...auditReport(), summary: { ...auditReport().summary, plaintextCount: '0' } }),
+    JSON.stringify({ ...auditReport([oauthFinding]), summary: auditReport().summary }),
+    JSON.stringify({ ...auditReport([oauthFinding]), status: 'clean' }),
+    JSON.stringify({ ...auditReport([oauthFinding]), status: 'unresolved' }),
+  ])('refuses malformed or inconsistent audit report %# without leaking diagnostics', (auditOutput) => {
+    const result = runScenario({
+      args: ['--secrets-touched', '--preflight-only'],
+      auditOutput,
+      auditStderr: 'upstream-private-sentinel',
+      auditExit: auditOutput.includes('OAuth credentials') ? 1 : 0,
+    });
+    expect(result.exitCode).toBe(78);
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+    expect(result.stdout).not.toContain('preflight passed');
+    expect(result.stdout + result.stderr).not.toContain('upstream-private-sentinel');
+  }, 30_000);
+
+  test.each([0, 1, 2, 7, 126, 127, 137])('accepts exit %i only with its consistent supported report', (auditExit) => {
+    for (const hasOAuth of [false, true]) {
+      const result = runScenario({
+        args: ['--secrets-touched', '--preflight-only'],
+        auditOutput: JSON.stringify(auditReport(hasOAuth ? [oauthFinding] : [])),
+        auditExit,
+      });
+      expect(result.exitCode).toBe(auditExit === (hasOAuth ? 1 : 0) ? 0 : 78);
+      expect(result.captured).not.toContain('openclaw_args=gateway restart');
+    }
+  }, 30_000);
+
+  test.each(['nul', 'utf8', 'oversize', 'signal'] as const)('refuses %s audit output or termination', (auditCorruption) => {
+    const result = runScenario({
+      args: ['--secrets-touched', '--preflight-only'],
+      auditCorruption,
+    });
+    expect(result.exitCode).toBe(78);
+    expect(result.stdout).not.toContain('preflight passed');
     expect(result.captured).not.toContain('openclaw_args=gateway restart');
   }, 30_000);
 
@@ -497,6 +628,10 @@ describe('OpenClaw safe restart', () => {
 });
 
 interface ScenarioOptions {
+  auditOutput?: string;
+  auditStderr?: string;
+  auditExit?: number;
+  auditCorruption?: 'nul' | 'utf8' | 'oversize' | 'signal';
   args?: string[];
   brokerReason?: string;
   brokerState?: 'ok' | 'blocked';
@@ -575,16 +710,27 @@ function runScenario(options: ScenarioOptions = {}): {
     '#!/usr/bin/env bash',
     'set -euo pipefail',
     `printf 'openclaw_args=%s\\n' "$*" >> ${shellQuote(capture)}`,
-    'if [[ "$*" == "secrets audit --check --allow-exec" ]]; then',
+    'if [[ "$*" == "secrets audit --check --allow-exec --json" ]]; then',
     `  printf 'audit_env_caller=%s\\n' "\${OLYMPUS_OP_BROKER_CALLER:-unset}" >> ${shellQuote(capture)}`,
     `  printf 'audit_env_inherited=%s\\n' "\${OLYMPUS_OP_INHERITED:-unset}" >> ${shellQuote(capture)}`,
     'fi',
     'case "${TEST_FAIL_STEP:-}" in',
     '  config) [[ "$*" == "config validate" ]] && exit 7 ;;',
     '  doctor) [[ "$*" == "doctor --lint --severity-min error --non-interactive" ]] && exit 8 ;;',
-    '  secrets) [[ "$*" == "secrets audit --check --allow-exec" ]] && exit 9 ;;',
+    '  secrets) [[ "$*" == "secrets audit --check --allow-exec --json" ]] && exit 9 ;;',
     '  restart) [[ "$*" == "gateway restart" ]] && exit 10 ;;',
     'esac',
+    'if [[ "$*" == "secrets audit --check --allow-exec --json" ]]; then',
+    '  printf "%s" "$TEST_AUDIT_OUTPUT"',
+    '  printf "%s" "$TEST_AUDIT_STDERR" >&2',
+    '  case "$TEST_AUDIT_CORRUPTION" in',
+    "    nul) printf '\\000' ;;",
+    "    utf8) printf '\\377' ;;",
+    '    oversize) head -c 8388609 /dev/zero ;;',
+    '    signal) kill -TERM "$$" ;;',
+    '  esac',
+    '  exit "$TEST_AUDIT_EXIT"',
+    'fi',
     `if [[ "$*" == "gateway restart" ]]; then : > ${shellQuote(restartDone)}; fi`,
     'exit 0',
   ].join('\n'));
@@ -675,6 +821,10 @@ function runScenario(options: ScenarioOptions = {}): {
     HOME: home,
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     TEST_FAIL_STEP: options.failStep ?? '',
+    TEST_AUDIT_OUTPUT: options.auditOutput ?? JSON.stringify(auditReport()),
+    TEST_AUDIT_STDERR: options.auditStderr ?? '',
+    TEST_AUDIT_EXIT: String(options.auditExit ?? 0),
+    TEST_AUDIT_CORRUPTION: options.auditCorruption ?? '',
     TEST_BROKER_STATE: options.brokerState ?? 'ok',
     TEST_BROKER_REASON: options.brokerReason ?? '',
     TEST_CACHE_READINESS_FAIL: options.cacheReadinessFail ? '1' : '0',

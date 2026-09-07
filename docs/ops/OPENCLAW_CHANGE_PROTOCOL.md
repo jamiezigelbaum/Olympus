@@ -27,7 +27,17 @@ skills, cron, services), in this order:
    workstream — coordinate, don't freelance.**
 3. **Validate before restart:** `openclaw config validate && openclaw doctor
    --lint --severity-min error --non-interactive`. If secrets/providers were
-   touched, also `openclaw secrets audit --check --allow-exec`.
+   touched, the wrapper also runs `openclaw secrets audit --check --allow-exec --json`.
+   Its supported audit-v1 classifier accepts clean/exit-0 reports or
+   findings/exit-1 reports containing only the exact native OAuth
+   `LEGACY_RESIDUE`/`info` records: the upstream OAuth out-of-scope message,
+   provider/profile identity, matching `profiles.<profileId>` path, and a
+   scanned `openclaw-agent.sqlite` file. Resolution must be complete with no
+   skipped exec refs, and every summary count must agree. Native OAuth login
+   remains intact. Plaintext, shadowing, unresolved refs, other legacy residue,
+   unknown or malformed records/reports, inconsistent status/counts/exits, and
+   command failures all refuse restart. The wrapper prints fixed verdicts;
+   upstream audit bodies and errors are never copied into restart output.
 4. **Restart ONLY via the sanctioned wrapper:**
    `scripts/ops/openclaw-safe-restart.sh` (merged 2026-07-16) — it runs the
    quota preflight, the validate/lint gates, exactly one
