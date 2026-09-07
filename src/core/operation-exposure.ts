@@ -12,7 +12,6 @@ export type OperationSurface = 'native' | 'mcp' | 'cli';
 export interface OperationExposureContext {
   config: OlympusConfig;
   surface: OperationSurface;
-  activeModel?: unknown;
 }
 
 export function exposedOperations(
@@ -36,9 +35,6 @@ export function shouldExposeOperation(
   // on any other surface the handler could do nothing but refuse.
   if (operation.requiresOpenClawSessionRoute && context.surface !== 'native') {
     return false;
-  }
-  if (operation.nativeExposure === 'sourceIndexAnswerDevOnly') {
-    return context.config.sourceIndex.answerDevEnabled;
   }
   if (operation.nativeExposure === 'sourceIndexEnabledOnly') {
     return isSourceIndexReadSurfaceEnabled(context.config);

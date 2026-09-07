@@ -130,8 +130,6 @@ import {
   DROPBOX_INGESTION_EXCLUSION_SOURCE,
   DROPBOX_FILES_CORPUS_ID,
   defaultDropboxConnectorStoreDbPath,
-  createDropboxEvalShardExportHandler,
-  createDropboxSourceExportHandler,
   defineDropboxFilesCorpus,
   createDropboxConnectorStore,
   dropboxIngestionExclusionMatcher,
@@ -266,11 +264,7 @@ export function createEmailSourceConnectorFromEnv(env: Record<string, string | u
       ...(env.OLYMPUS_EMAIL_SOURCE_ACCOUNT
         ? { account: env.OLYMPUS_EMAIL_SOURCE_ACCOUNT }
         : {}),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-      ...(env.OLYMPUS_EMAIL_SOURCE_AUTH_MODE === 'service-account'
-        ? { authMode: 'service-account' as const }
-        : {}),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
     })
     : undefined;
 }
@@ -981,7 +975,6 @@ function analystRouteTrustDomain(pack: { candidates: readonly { trustDomain: Sou
   return 'public_safe';
 }
 
-
 function parseRequiredTimeoutSeconds(value: string, name: string): number {
   return parseOptionalTimeoutSeconds(value, name) ?? (() => {
     throw new Error(`${name} must be a positive number of seconds.`);
@@ -1194,12 +1187,7 @@ export function connectorStoreAnswerScope(input: {
   };
 }
 
-
-
 /** The analyst's own test for a candidate it matched but could not read. */
-
-
-
 
 export function accountFromDropboxCredentialHandle(value: string | undefined): string | undefined {
   const handle = value?.trim();
@@ -1207,7 +1195,6 @@ export function accountFromDropboxCredentialHandle(value: string | undefined): s
   const match = /^dropbox\.([a-z0-9_-]+)(?:\.|$)/i.exec(handle);
   return match?.[1];
 }
-
 
 export async function main(): Promise<void> {
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
@@ -2588,7 +2575,6 @@ export function sourceIndexLaneStorageEnabled(
  * absent flag must not recreate or schedule it during normal product runtime.
  */
 
-
 export interface SourceIndexLaneDecision {
   enabled: boolean;
   envName: string;
@@ -3061,14 +3047,10 @@ function bootSecretOptions(
   };
 }
 
-
 function optionalEnv(env: Record<string, string | undefined>, name: string): string | undefined {
   const value = env[name]?.trim();
   return value || undefined;
 }
-
-
-
 
 export function commaSeparatedEnv(value: string | undefined): string[] {
   return (value ?? '')

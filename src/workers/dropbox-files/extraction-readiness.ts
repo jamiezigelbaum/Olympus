@@ -26,7 +26,7 @@
 import type {
   FileExtractionCompleteness,
   FileExtractionStatus,
-} from '../../core/source-family.ts';
+} from '../file-extraction/types.ts';
 import { dropboxOutOfContentScopeSql } from './content-scope-policy.ts';
 
 /**

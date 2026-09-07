@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomic } from '../../core/atomic-file.ts';
-import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
+
 import {
   FileLeaseBusyError,
   FileLeaseLostError,
@@ -11,24 +11,13 @@ import {
   type FileLeaseOptions,
 } from '../../core/file-lease.ts';
 import {
-  GOOGLE_OAUTH_TOKEN_URL,
-} from '../../core/google-service-account.ts';
-import {
   fetchBoundedText,
   isAbortError,
   isBoundedResponseTooLargeError,
 } from '../../core/http-timeout.ts';
 import { googlePublisherExchangeRefreshUrl } from '../../core/oauth-relay.ts';
 import { isGooglePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import {
-  googleServiceAccountTokenUrl,
-  parseGoogleServiceAccountKey,
-  signGoogleServiceAccountJwt,
-  GOOGLE_JWT_BEARER_GRANT_TYPE,
-  type GoogleServiceAccountKey,
-} from '../../core/google-service-account.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
 import {
   createDefaultSecretStore,
   normalizeSecretRef,
@@ -50,7 +39,7 @@ import {
  * must be refused at parse rather than cast into this union and trusted by
  * every downstream policy that keys off it.
  */
-const PUBLIC_CREDENTIAL_PROVIDERS = [
+export const CREDENTIAL_PROVIDERS = [
   'readwise',
   'gmail',
   'google_drive',
@@ -60,20 +49,6 @@ const PUBLIC_CREDENTIAL_PROVIDERS = [
   'x',
 ] as const;
 
-const PRIVATE_CREDENTIAL_PROVIDERS = [
-  'notion',
-  'google_calendar',
-  'gcp',
-  'whatsapp_business',
-  'apple_messages',
-  'reflect',
-  'roam',
-] as const;
-
-export const CREDENTIAL_PROVIDERS = [
-  ...PUBLIC_CREDENTIAL_PROVIDERS,
-  ...(PUBLIC_RUNTIME_BUILD ? [] : PRIVATE_CREDENTIAL_PROVIDERS),
-] as const;
 
 export type CredentialProvider = typeof CREDENTIAL_PROVIDERS[number];
 
@@ -373,27 +348,6 @@ export interface EnvOAuth2RefreshDefinition {
   exchangeVia?: 'publisher_endpoint';
 }
 
-/**
- * A Google service-account key used under domain-wide delegation.
- *
- * The impersonated subject is declared per handle rather than once per
- * process: delegation is granted across the whole organisation and the JWT's
- * `sub` claim is what selects the mailbox, so one key serves the personal and
- * the business account through two handles that differ only in this field.
- * The subject's env NAMES live in the repo-owned default, never in the
- * on-disk handle registry, so editing that registry cannot silently redirect
- * impersonation at a mailbox the owner did not intend; the mailbox VALUE
- * comes from the same wrapper-exported environment that already supplies the
- * service-account key, which is strictly more powerful than the subject.
- */
-export interface EnvServiceAccountJwtDefinition {
-  tokenUrl?: string;
-  credentialJsonEnvNames: string[];
-  credentialJsonSecretRef?: string;
-  impersonatedSubjectEnvNames: string[];
-  scopes?: string[];
-}
-
 export interface EnvCredentialHandleDefinition {
   handle: string;
   provider: CredentialProvider;
@@ -403,7 +357,7 @@ export interface EnvCredentialHandleDefinition {
   tokenSecretRefs?: string[];
   statusEnvNames?: string[];
   oauth2Refresh?: EnvOAuth2RefreshDefinition;
-  serviceAccountJwt?: EnvServiceAccountJwtDefinition;
+
   scopes?: string[];
   accountRole?: string;
   trustDomain?: SourceTrustDomain;
@@ -464,47 +418,9 @@ export class CredentialBrokerError extends Error {
   }
 }
 
+const GOOGLE_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const GOOGLE_DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
-const GOOGLE_CALENDAR_READONLY_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
-
-/**
- * The one env var the 1Password runtime wrapper has to export. Every delegated
- * handle also accepts a handle-specific name first, so a single mailbox can be
- * pointed at a different key later without disturbing the others.
- */
-const GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = 'OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON';
-
-function delegatedGoogleHandle(options: {
-  handle: string;
-  provider: CredentialProvider;
-  accountRole: string;
-  trustDomain: SourceTrustDomain;
-  capability: string;
-  scopes: string[];
-  impersonatedSubjectEnvNames: string[];
-  credentialJsonEnvNames: string[];
-}): EnvCredentialHandleDefinition {
-  return {
-    handle: options.handle,
-    provider: options.provider,
-    accountRole: options.accountRole,
-    trustDomain: options.trustDomain,
-    allowedCapabilities: [options.capability],
-    scopes: [...options.scopes],
-    tokenEnvNames: [],
-    serviceAccountJwt: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      credentialJsonEnvNames: [
-        ...options.credentialJsonEnvNames,
-        GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME,
-      ],
-      impersonatedSubjectEnvNames: [...options.impersonatedSubjectEnvNames],
-      scopes: [...options.scopes],
-    },
-    expiresInSeconds: 3600,
-  };
-}
 
 const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
   {
@@ -519,59 +435,21 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
       tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
       clientIdEnvNames: [
         'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID']),
+
       ],
       clientSecretEnvNames: [
         'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET']),
+
       ],
       refreshTokenEnvNames: [
         'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN']),
+
       ],
       scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
     },
     expiresInSeconds: 3600,
   },
-  ...(PUBLIC_RUNTIME_BUILD ? [] : ([delegatedGoogleHandle({
-    handle: 'gmail.business_ocu',
-    provider: 'gmail',
-    accountRole: 'business_ocu',
-    trustDomain: 'secure_local',
-    capability: 'gmail.email.sync',
-    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    impersonatedSubjectEnvNames: [
-      'OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT',
-      'OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT',
-    ],
-    credentialJsonEnvNames: ['OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON'],
-  }),
-  {
-    handle: 'gmail.personal.direct',
-    provider: 'gmail',
-    accountRole: 'personal',
-    trustDomain: 'secure_local',
-    allowedCapabilities: ['gmail.email.sync'],
-    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    tokenEnvNames: [],
-    oauth2Refresh: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      clientIdEnvNames: [
-        'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_ID',
-        'OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID',
-      ],
-      clientSecretEnvNames: [
-        'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_SECRET',
-        'OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET',
-      ],
-      refreshTokenEnvNames: [
-        'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_REFRESH_TOKEN',
-        'OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN',
-      ],
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    },
-    expiresInSeconds: 3600,
-  }] satisfies EnvCredentialHandleDefinition[])),
+
   {
     handle: 'google_drive.personal',
     provider: 'google_drive',
@@ -584,82 +462,21 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
       tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
       clientIdEnvNames: [
         'OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID']),
+
       ],
       clientSecretEnvNames: [
         'OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET']),
+
       ],
       refreshTokenEnvNames: [
         'OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN',
-        ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN']),
+
       ],
       scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
     },
     expiresInSeconds: 3600,
   },
-  // Domain-wide delegated service-account lane. Nothing here expires the way a
-  // user refresh token does, and no consent screen is ever shown again. The
-  // three handles share one key and differ only in the mailbox they act for.
-  ...(PUBLIC_RUNTIME_BUILD ? [] : ([delegatedGoogleHandle({
-    handle: 'gmail.personal.delegated',
-    provider: 'gmail',
-    accountRole: 'personal',
-    trustDomain: 'secure_local',
-    capability: 'gmail.email.sync',
-    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    impersonatedSubjectEnvNames: [
-      'OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SUBJECT',
-      'OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT',
-    ],
-    credentialJsonEnvNames: ['OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SERVICE_ACCOUNT_JSON'],
-  }),
-  delegatedGoogleHandle({
-    handle: 'gmail.business_ocu.delegated',
-    provider: 'gmail',
-    accountRole: 'business_ocu',
-    trustDomain: 'secure_local',
-    capability: 'gmail.email.sync',
-    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    impersonatedSubjectEnvNames: [
-      'OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT',
-      'OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT',
-    ],
-    credentialJsonEnvNames: ['OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON'],
-  }),
-  delegatedGoogleHandle({
-    handle: 'google_drive.personal.delegated',
-    provider: 'google_drive',
-    accountRole: 'personal',
-    trustDomain: 'internal',
-    capability: 'google_drive.docs.sync',
-    // drive.readonly only. The connectors read document text through the Drive
-    // export endpoint (files/{id}/export), never the Docs API, and
-    // documents.readonly is NOT delegated to this key — the token exchange
-    // rejects it. Declaring it would be a claim we cannot honour.
-    scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-    impersonatedSubjectEnvNames: [
-      'OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SUBJECT',
-      'OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT',
-    ],
-    credentialJsonEnvNames: ['OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SERVICE_ACCOUNT_JSON'],
-  }),
-  delegatedGoogleHandle({
-    handle: 'google_calendar.personal.delegated',
-    provider: 'google_calendar',
-    accountRole: 'personal',
-    trustDomain: 'secure_local',
-    capability: 'google_calendar.events.read',
-    // calendar.readonly must ALSO be delegated to the shared client in the
-    // Google Admin console before the token exchange will honour it — same
-    // enforcement the documents.readonly note above records for Drive.
-    scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
-    impersonatedSubjectEnvNames: [
-      'OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SUBJECT',
-      'OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT',
-    ],
-    credentialJsonEnvNames: ['OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SERVICE_ACCOUNT_JSON'],
-  })] satisfies EnvCredentialHandleDefinition[])),
+
   {
     handle: 'readwise.personal',
     provider: 'readwise',
@@ -669,7 +486,7 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
     scopes: ['readwise.export:read', 'readwise.reader:read'],
     tokenEnvNames: [
       'OLYMPUS_CREDENTIAL_READWISE_PERSONAL_TOKEN',
-      ...(PUBLIC_RUNTIME_BUILD ? [] : ['OLYMPUS_CREDENTIAL_READWISE_CASTOR_RUNTIME_TOKEN']),
+
       'OLYMPUS_SOURCE_INDEX_READWISE_TOKEN',
       'READWISE_TOKEN',
     ],
@@ -728,26 +545,7 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
       backendLabel: 'local_private:telegram_telethon_reader',
     },
   },
-  ...(PUBLIC_RUNTIME_BUILD ? [] : ([{
-    handle: 'whatsapp.business',
-    provider: 'whatsapp_business',
-    sessionKind: 'webhook_token',
-    accountRole: 'business',
-    trustDomain: 'secure_local',
-    allowedCapabilities: ['whatsapp.business.messages.sync'],
-    scopes: ['whatsapp_business_messaging', 'whatsapp_business_management'],
-    tokenEnvNames: [],
-    statusEnvNames: ['OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY'],
-    expiresInSeconds: 900,
-    backendState: {
-      kind: 'webhook_token',
-      webhookIntegrationId: 'twilio_whatsapp_business',
-      validationMode: 'broker_verified_event',
-      verifierReference: 'twilio_whatsapp_business_verifier',
-      leaseId: 'twilio_whatsapp_business_webhook_lease',
-      backendLabel: 'twilio:whatsapp_business_gateway',
-    },
-  }] satisfies EnvCredentialHandleDefinition[])),
+
   {
     handle: 'whatsapp.personal_local',
     provider: 'whatsapp_personal',
@@ -768,26 +566,7 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
       backendLabel: 'local_private:whatsapp_local_app_reader',
     },
   },
-  ...(PUBLIC_RUNTIME_BUILD ? [] : ([{
-    handle: 'apple_messages.local',
-    provider: 'apple_messages',
-    sessionKind: 'local_app_database',
-    accountRole: 'local',
-    trustDomain: 'secure_local',
-    allowedCapabilities: ['apple_messages.messages.sync'],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: ['OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY'],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: 'local_app_database',
-      databaseSourceId: 'apple_messages_local',
-      readerWorker: 'apple_messages_reader',
-      databaseRole: 'messages_readonly',
-      scopeLabel: 'local_messages',
-      backendLabel: 'local_private:apple_messages_reader',
-    },
-  }] satisfies EnvCredentialHandleDefinition[])),
+
   {
     handle: 'x.bookmarks.personal',
     provider: 'x',
@@ -820,59 +599,8 @@ const DEFAULT_ENV_HANDLES: EnvCredentialHandleDefinition[] = [
     },
     expiresInSeconds: 3600,
   },
-  ...(PUBLIC_RUNTIME_BUILD ? [] : ([{
-    handle: 'reflect.archive',
-    provider: 'reflect',
-    sessionKind: 'archive_path',
-    accountRole: 'archive',
-    trustDomain: 'internal',
-    allowedCapabilities: ['reflect.archive.import'],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: ['OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY'],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: 'archive_path',
-      archiveRootAlias: 'reflect_archive',
-      readerWorker: 'archive_import_reader',
-      contentBounds: 'approved_archive_root',
-      backendLabel: 'local_private:archive_import',
-    },
-  },
-  {
-    handle: 'roam.archive',
-    provider: 'roam',
-    sessionKind: 'archive_path',
-    accountRole: 'archive',
-    trustDomain: 'internal',
-    allowedCapabilities: ['roam.archive.import'],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: ['OLYMPUS_CREDENTIAL_ROAM_ARCHIVE_READY'],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: 'archive_path',
-      archiveRootAlias: 'roam_archive',
-      readerWorker: 'archive_import_reader',
-      contentBounds: 'approved_archive_root',
-      backendLabel: 'local_private:archive_import',
-    },
-  }] satisfies EnvCredentialHandleDefinition[])),
-];
 
-/**
- * Handles this repository owns a service-account key for. A handle merely
- * *named* like a delegated one has no assertion to sign, so callers deciding
- * whether a credential can be reissued for free must require the positive
- * definition rather than trust the name.
- */
-// OLYMPUS_PUBLIC_RUNTIME_CREDENTIAL_HANDLES_START
-export const SERVICE_ACCOUNT_CREDENTIAL_HANDLES: ReadonlySet<string> = new Set(
-  DEFAULT_ENV_HANDLES
-    .filter((definition) => definition.serviceAccountJwt !== undefined)
-    .map((definition) => definition.handle),
-);
-// OLYMPUS_PUBLIC_RUNTIME_CREDENTIAL_HANDLES_END
+];
 
 export class JsonCredentialOAuth2StateStore implements CredentialOAuth2StateStore {
   private readonly path: string;
@@ -1128,11 +856,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     if (definition.oauth2Refresh) {
       return this.issueOAuth2RefreshSession(definition, request.capability);
     }
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    if (definition.serviceAccountJwt) {
-      return this.issueServiceAccountJwtSession(definition, request.capability);
-    }
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
     throw missingCredentialError(request.handle, request.capability);
   }
 
@@ -1173,16 +897,6 @@ export class EnvCredentialBroker implements CredentialBroker {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) =>
       this.issueFreshOAuth2RefreshSession(definition, capability, cacheKey));
   }
-
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  private issueServiceAccountJwtSession(
-    definition: EnvCredentialHandleDefinition,
-    capability: string,
-  ): Promise<CredentialSession> {
-    return this.mintCachedBearerSession(definition, capability, (cacheKey) =>
-      this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
-  }
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
   /**
    * Reuse a live token, collapse concurrent mints into one, and honour the
@@ -1527,117 +1241,6 @@ export class EnvCredentialBroker implements CredentialBroker {
     );
   }
 
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  /**
-   * Mint a bearer token from the domain-wide delegated service-account key.
-   *
-   * Nothing here expires the way a user refresh token does and no consent
-   * screen is ever involved; the JWT's `sub` claim selects whose mailbox or
-   * drive the token reads.
-   */
-  private async issueFreshServiceAccountJwtSession(
-    definition: EnvCredentialHandleDefinition,
-    capability: string,
-    cacheKey: string,
-  ): Promise<CredentialSession> {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount) throw missingCredentialError(definition.handle, capability);
-
-    const now = this.now();
-    const rawCredential = await this.resolveFirstSecret(
-      serviceAccount.credentialJsonEnvNames,
-      serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : [],
-    );
-    if (!rawCredential) throw missingCredentialError(definition.handle, capability);
-
-    // The subject is not a secret, but without it the JWT selects nobody's
-    // mailbox — treat a missing subject exactly like a missing credential.
-    const impersonatedSubject = firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames);
-    if (!impersonatedSubject) throw missingCredentialError(definition.handle, capability);
-
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    if (storedState?.status === 'reauth_required') {
-      throw serviceAccountDelegationError(definition.handle, capability);
-    }
-
-    const requestedScopes = serviceAccount.scopes?.length ? serviceAccount.scopes : definition.scopes ?? [];
-    // Parser messages are fixed literals that never interpolate the credential,
-    // so they are safe to surface. A signing failure is not, so it stays
-    // generic — the key must not reach an error message.
-    let credential: GoogleServiceAccountKey;
-    try {
-      credential = parseGoogleServiceAccountKey(rawCredential);
-    } catch (error) {
-      throw new CredentialBrokerError(
-        'credential_backend_malformed',
-        `Credential handle ${definition.handle} service-account JSON is invalid: ${errorMessage(error)}`,
-        { handle: definition.handle, capability },
-      );
-    }
-    let assertion: string;
-    try {
-      assertion = signGoogleServiceAccountJwt({
-        credential,
-        scopes: requestedScopes,
-        subject: impersonatedSubject,
-        now,
-      });
-    } catch {
-      throw new CredentialBrokerError(
-        'credential_backend_malformed',
-        `Credential handle ${definition.handle} service-account assertion could not be signed.`,
-        { handle: definition.handle, capability },
-      );
-    }
-
-    let tokenResponse: OAuth2RefreshTokenResponse;
-    try {
-      tokenResponse = await exchangeServiceAccountAssertion({
-        tokenUrl: serviceAccount.tokenUrl?.trim() || googleServiceAccountTokenUrl(credential),
-        assertion,
-        fetchImpl: this.fetchImpl,
-        secrets: [assertion, credential.private_key, credential.private_key_id],
-      });
-    } catch (error) {
-      if (isTerminalServiceAccountAssertionError(error)) {
-        await this.oauth2StateStore?.save(definition.handle, {
-          ...storedState,
-          status: 'reauth_required',
-          updatedAt: now.toISOString(),
-        });
-        this.markRegistryHandleReauthRequired(definition.handle, now);
-        throw serviceAccountDelegationError(definition.handle, capability);
-      }
-      if (error instanceof OAuth2TokenEndpointError) {
-        const brokerError = new CredentialBrokerError(
-          'credential_refresh_failed',
-          `Credential handle ${definition.handle} service-account token mint failed (${error.status}): ${error.safeDetail}`,
-          { handle: definition.handle, capability },
-        );
-        this.recordMintFailure(cacheKey, brokerError);
-        throw brokerError;
-      }
-      throw error;
-    }
-
-    // No self-healing write here on success: a stamped reauth_required is
-    // cleared by the owner once delegation is actually fixed, never by a
-    // request that happened to succeed.
-    const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : requestedScopes;
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds,
-    });
-    if (isReusableMintedSession(session, now)) PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
-  }
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-
   private recordMintFailure(cacheKey: string, error: CredentialBrokerError): void {
     if (this.oauth2RefreshFailureBackoffMs <= 0) return;
     PROCESS_MINT_FAILURE_BACKOFF.set(cacheKey, {
@@ -1719,9 +1322,7 @@ export class EnvCredentialBroker implements CredentialBroker {
       return statusFromDefinition(definition, 'available', now);
     }
     if (!definition.oauth2Refresh) {
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-      if (definition.serviceAccountJwt) return this.serviceAccountJwtStatus(definition, now);
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
       return statusFromDefinition(definition, 'missing', now);
     }
 
@@ -1743,30 +1344,6 @@ export class EnvCredentialBroker implements CredentialBroker {
         : 'missing';
     return statusFromDefinition(definition, status, now);
   }
-
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  private async serviceAccountJwtStatus(
-    definition: EnvCredentialHandleDefinition,
-    now: Date,
-  ): Promise<CredentialHandleStatus> {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount) return statusFromDefinition(definition, 'missing', now);
-    const rawCredential = await this.resolveFirstSecret(
-      serviceAccount.credentialJsonEnvNames,
-      serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : [],
-    );
-    if (!rawCredential) return statusFromDefinition(definition, 'missing', now);
-    if (!firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames)) {
-      return statusFromDefinition(definition, 'missing', now);
-    }
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    return statusFromDefinition(
-      definition,
-      storedState?.status === 'reauth_required' ? 'reauth_required' : 'available',
-      now,
-    );
-  }
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
   private async resolveDescriptorBackendState(
     definition: EnvCredentialHandleDefinition,
@@ -2250,81 +1827,6 @@ async function refreshOAuth2AccessToken(options: {
   };
 }
 
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-/**
- * Exchange a signed service-account assertion for an access token.
- *
- * The response body is redacted against the assertion and the key material
- * before it is ever attached to an error, because the assertion is itself a
- * usable credential for the next hour.
- */
-async function exchangeServiceAccountAssertion(options: {
-  tokenUrl: string;
-  assertion: string;
-  fetchImpl: CredentialBrokerFetch;
-  secrets: Array<string | undefined>;
-}): Promise<OAuth2RefreshTokenResponse> {
-  const body = new URLSearchParams();
-  body.set('grant_type', GOOGLE_JWT_BEARER_GRANT_TYPE);
-  body.set('assertion', options.assertion);
-
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: providerErrorFromText(text),
-      safeDetail: safeCredentialText(text, options.secrets),
-    });
-  }
-
-  const payload = parseJsonObject(text, 'Google service-account token endpoint');
-  const accessToken = optionalString(payload.access_token);
-  if (!accessToken) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: undefined,
-      safeDetail: 'token endpoint did not return access_token',
-    });
-  }
-  // A JWT-bearer exchange never returns a refresh token, and that is the point:
-  // there is no rotating secret to expire.
-  return {
-    accessToken,
-    refreshToken: undefined,
-    expiresInSeconds: optionalNumber(payload.expires_in),
-    scopes: scopesFromValue(payload.scope),
-  };
-}
-
-/**
- * Terminal for the delegated lane means a human has to change something in
- * Workspace admin — the subject is not a real user, or the client is not
- * authorised for the scopes requested. Retrying cannot fix any of these.
- *
- * `invalid_grant` needs its description read first, because Google also answers
- * it when the assertion's `iat`/`exp` fall outside its window — a host clock
- * that NTP has not stepped yet. That is transient, and nothing in the product
- * clears a stamped `.delegated` handle: there is no connect command for one, so
- * a skewed clock would kill Gmail and Drive ingestion until someone hand-edited
- * the broker state.
- */
-function isTerminalServiceAccountAssertionError(error: unknown): error is OAuth2TokenEndpointError {
-  if (!(error instanceof OAuth2TokenEndpointError)) return false;
-  if (error.providerError === 'invalid_grant') {
-    return !ASSERTION_TIMING_REJECTED_DETAIL.test(error.safeDetail);
-  }
-  return isPermanentOAuthClientError(error.providerError);
-}
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-
 /**
  * Refusals of the client registration or of the authorization itself: a wrong
  * client secret, a client not authorised for this grant, an authorization the
@@ -2341,19 +1843,6 @@ function isPermanentOAuthClientError(providerError: string | undefined): boolean
     || providerError === 'unauthorized_client'
     || providerError === 'access_denied';
 }
-
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-const ASSERTION_TIMING_REJECTED_DETAIL =
-  /(?:short-lived token|reasonable timeframe|check your iat and exp|jwt is (?:not yet valid|expired)|assertion (?:is )?expired)/i;
-
-function serviceAccountDelegationError(handle: string, capability: string): CredentialBrokerError {
-  return new CredentialBrokerError(
-    'credential_reauth_required',
-    `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`,
-    { handle, capability },
-  );
-}
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error';
@@ -2487,12 +1976,6 @@ function mergeRegistryHandleWithDefault(
     throw new Error(`Connected credential handle capability exceeds its default: ${registry.handle}`);
   }
 
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  // The service-account lane is repo-owned only: a registry entry has no way to
-  // declare one, so editing handles.json cannot redirect impersonation at a
-  // mailbox the owner did not intend. A bare entry inherits the default's.
-  const serviceAccountJwt = fallback.serviceAccountJwt;
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   const registryOwnsOAuth = registry.oauth2Refresh !== undefined;
   const oauth2Refresh = registry.oauth2Refresh
     ? {
@@ -2533,9 +2016,7 @@ function mergeRegistryHandleWithDefault(
     ...(tokenSecretRefs?.length ? { tokenSecretRefs: [...tokenSecretRefs] } : {}),
     ...(statusEnvNames.length ? { statusEnvNames } : {}),
     ...(oauth2Refresh ? { oauth2Refresh } : {}),
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    ...(serviceAccountJwt ? { serviceAccountJwt } : {}),
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
     scopes: registry.scopes?.length ? [...registry.scopes] : [...(fallback.scopes ?? [])],
     ...(sessionKind ? { sessionKind } : {}),
     ...(registry.accountRole ?? fallback.accountRole

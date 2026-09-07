@@ -29,7 +29,6 @@ import {
 } from '../src/core/sovereignty.ts';
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
-import { renderEmbeddingLedgerPage } from '../src/workers/dashboard/pages/embedding-ledger.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
@@ -488,25 +487,6 @@ Bun.serve({
     ];
     if (!states.includes(state)) {
       return new Response(`states: ${states.map((name) => `/${name}`).join(' ')}`, { status: 404 });
-    }
-    if (url.searchParams.has('embedding-ledger')) {
-      const page = renderEmbeddingLedgerPage({
-        skipped: 0,
-        path: '/preview/embedding-ledger.jsonl',
-        entries: [{
-          recorded_at: '2026-07-07T18:00:00.000Z',
-          kind: 'model_decision',
-          what: 'Keep the approved local embedding model for secure Dropbox material.',
-          model_id: 'preview/local-embedding-model',
-          epoch: 'preview-v1',
-          endpoint: 'http://127.0.0.1:8000/v1',
-          scope: { corpora: ['secure_local.dropbox.files'], chunks: { 'secure_local.dropbox.files': 600_000 } },
-          why: 'Preserve semantic search without sending secure Dropbox material to a public endpoint.',
-          approved_by: 'jamie',
-          status: 'complete',
-        }],
-      }, { now: NOW, basePath: `/${state}` });
-      return new Response(page, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
     }
     const page = renderDashboardHtmlRoute({
       url,

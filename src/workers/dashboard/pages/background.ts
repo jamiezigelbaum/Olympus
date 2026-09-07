@@ -79,12 +79,6 @@ const DEFAULT_BASE_PATH = '/dashboard';
 const DETAIL_QUERY_PARAM = 'source';
 
 /**
- * The embedding ledger's address. Another page owns it; this is a link and
- * nothing more, so nothing here depends on it existing yet.
- */
-const EMBEDDING_LEDGER_QUERY_PARAM = 'embedding-ledger';
-
-/**
  * The page's own options: everything home's renderer takes, plus the lane
  * reports the worker read before the render.
  *
@@ -748,7 +742,7 @@ function renderBackgroundBody(
   });
   if (lanes.length === 0) {
     return `${nav}
-        <div class="foot">No background lane is reporting right now.</div>${renderInformational(options)}`;
+        <div class="foot">No background lane is reporting right now.</div>${renderInformational()}`;
   }
   const banners = armLaneBanners({
     lanes: lanes.map((lane) => ({ name: lane.name, status: lane.status })),
@@ -760,7 +754,7 @@ function renderBackgroundBody(
     renderKpis(backgroundKpis(view, lanes)),
     renderLanes(lanes),
     renderRecentRuns(view, now),
-    renderInformational(options),
+    renderInformational(),
   ].filter((section) => section.length > 0).join('');
 }
 
@@ -951,26 +945,13 @@ const STRIP_TONE_COLORS: Readonly<Record<DashboardLaneTone, string>> = {
   idle: 'var(--line)',
 };
 
-/**
- * The informational close: what these lanes are, and the one link out.
- *
- * The embedding ledger is another page's job. This is a link and nothing more,
- * so a worktree where that page does not exist yet renders a link that 404s
- * rather than a page that fails to build.
- */
-function renderInformational(options: DashboardBackgroundPageOptions | undefined): string {
-  const basePath = options?.basePath ?? DEFAULT_BASE_PATH;
-  const separator = basePath.includes('?') ? '&' : '?';
-  const href = safeHref(`${basePath}${separator}${EMBEDDING_LEDGER_QUERY_PARAM}`);
-  const link = href === undefined
-    ? ''
-    : `<div class="infolink"><a href="${escapeHtml(href)}">Embedding decisions &amp; history →</a>`
-      + `<span class="quiet"> Model changes, re-embeds, and who approved them.</span></div>`;
+/** The informational close: what these lanes are. */
+function renderInformational(): string {
   return `
         <div class="dsect">About these lanes</div>
         <div class="info">Nothing here is on a clock. Each lane runs when the machine has room for it, and
         the overnight guard decides every minute which lane that is. A lane that is not moving says who
-        stopped it; a lane whose state cannot be read says exactly that instead of guessing.</div>${link}`;
+        stopped it; a lane whose state cannot be read says exactly that instead of guessing.</div>`;
 }
 
 /* ------------------------------------------------------------------ kpis -- */

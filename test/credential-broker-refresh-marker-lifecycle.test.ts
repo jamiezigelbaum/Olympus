@@ -1,4 +1,3 @@
-import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,22 +22,6 @@ const X_CLIENT_ENV = {
   OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_ID: 'x-client-id-fixture',
   OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_SECRET: 'x-client-secret-fixture',
 };
-
-// Generated here and discarded with the process; no real key may be a fixture.
-const THROWAWAY = generateKeyPairSync('rsa', {
-  modulusLength: 2048,
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-});
-
-const SERVICE_ACCOUNT_JSON = JSON.stringify({
-  type: 'service_account',
-  project_id: 'olympus-fixture-project',
-  private_key_id: 'fixture-key-id',
-  private_key: THROWAWAY.privateKey,
-  client_email: 'olympus-secure@olympus-fixture-project.iam.gserviceaccount.com',
-  token_uri: 'https://oauth2.googleapis.com/token',
-});
 
 const temporaryRoots: string[] = [];
 
@@ -124,53 +107,6 @@ describe('a transient refusal never latches a live credential handle', () => {
     // outcome is genuinely unknown and the marker must survive.
     expect((await store.load('x.bookmarks.personal'))?.pendingRefreshStartedAt)
       .toBe('2026-07-28T03:00:00.000Z');
-  });
-
-  test('a clock-skew invalid_grant is retryable, not a delegation refusal', async () => {
-    const dir = temporaryDir('olympus-marker-jwt-skew-');
-    const registryPath = join(dir, 'handles.json');
-    writeFileSync(registryPath, JSON.stringify({
-      version: 1,
-      handles: [{
-        handle: 'gmail.personal.delegated',
-        provider: 'gmail',
-        accountRole: 'personal',
-        trustDomain: 'secure_local',
-        allowedCapabilities: ['gmail.email.sync'],
-        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
-        connectedAt: '2026-07-28T10:00:00.000Z',
-      }],
-    }));
-    const store = new MemoryOAuth2StateStore();
-    const broker = createEnvCredentialBroker({
-      env: { OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON: SERVICE_ACCOUNT_JSON, OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT: 'owner-personal@example.test', OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT: 'owner-business@example.test' },
-      handleRegistryPath: registryPath,
-      oauth2StateStore: store,
-      oauth2CacheNamespace: 'marker-jwt-skew',
-      oauth2RefreshFailureBackoffMs: 0,
-      now: () => new Date('2026-07-28T12:00:00.000Z'),
-      // What Google answers when the host clock has not been stepped by NTP
-      // yet: the same error code as a genuine delegation refusal.
-      fetch: async () => new Response(JSON.stringify({
-        error: 'invalid_grant',
-        error_description: 'Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe. Check your iat and exp values in the JWT claim.',
-      }), { status: 400 }),
-    });
-
-    const error = await broker.issueSession({
-      handle: 'gmail.personal.delegated',
-      provider: 'gmail',
-      capability: 'gmail.email.sync',
-      trustDomain: 'secure_local',
-    }).catch((reason: unknown) => reason);
-
-    // No product path clears a stamped delegated handle, so a skewed clock
-    // used to kill Gmail and Drive ingestion until someone hand-edited JSON.
-    expect((error as CredentialBrokerError).code).toBe('credential_refresh_failed');
-    expect(String(error)).not.toContain('PRIVATE KEY');
-    await expect(store.load('gmail.personal.delegated')).resolves.toBeUndefined();
-    expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status)
-      .toBeUndefined();
   });
 
   test('a reconnect that installs a new refresh token retires the stale marker', async () => {

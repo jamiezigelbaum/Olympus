@@ -16,7 +16,10 @@ const output = requiredPath('--output');
 if (hostOs !== 'darwin_arm64' && hostOs !== 'linux_x64_ubuntu_lts') throw new Error('--host-os is unsupported.');
 const platform = hostOs === 'darwin_arm64' ? 'darwin' : 'linux';
 const startedAt = new Date().toISOString();
-const plan = JSON.parse(readFileSync(resolve(import.meta.dir, '../../config/release-qualification-plan.json'), 'utf8')) as {
+const planPath = process.argv.includes('--plan')
+  ? requiredPath('--plan')
+  : resolve(import.meta.dir, '../../config/release-qualification-plan.json');
+const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
   assertion_contracts: Record<string, string[]>;
   candidate_artifact: { artifact_sha256: string; artifact_bytes: number };
   rollback_baseline: { artifact_sha256: string; artifact_bytes: number };

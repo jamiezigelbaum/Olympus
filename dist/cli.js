@@ -2961,42 +2961,6 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
-  if (env.OLYMPUS_FILE_DELIVERY_ENABLED) {
-    config.fileDelivery.enabled = parseBoolean(env.OLYMPUS_FILE_DELIVERY_ENABLED, "OLYMPUS_FILE_DELIVERY_ENABLED");
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_BASE_URL) {
-    config.fileDelivery.baseUrl = trimTrailingSlash(env.OLYMPUS_FILE_DELIVERY_BASE_URL);
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS) {
-    config.fileDelivery.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_ENABLED) {
-    config.castorWorkspace.enabled = parseBoolean(env.OLYMPUS_CASTOR_WORKSPACE_ENABLED, "OLYMPUS_CASTOR_WORKSPACE_ENABLED");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL) {
-    config.castorWorkspace.baseUrl = trimTrailingSlash(env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL);
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS) {
-    config.castorWorkspace.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_ENABLED) {
-    config.domainExpert.enabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_ENABLED, "OLYMPUS_DOMAIN_EXPERT_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED) {
-    config.domainExpert.liveToolsEnabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED, "OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_BASE_URL) {
-    config.domainExpert.baseUrl = trimTrailingSlash(env.OLYMPUS_DOMAIN_EXPERT_BASE_URL);
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS) {
-    config.domainExpert.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) {
-    config.domainExpert.authToken = env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN.trim();
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
-    config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
-  }
 }
 function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
@@ -3087,15 +3051,6 @@ function mergeConfig(target, source) {
         ...source.sourceIndex.ingestionPolicies ?? {}
       }
     };
-  }
-  if (source.fileDelivery) {
-    target.fileDelivery = { ...target.fileDelivery, ...source.fileDelivery };
-  }
-  if (source.castorWorkspace) {
-    target.castorWorkspace = { ...target.castorWorkspace, ...source.castorWorkspace };
-  }
-  if (source.domainExpert) {
-    target.domainExpert = { ...target.domainExpert, ...source.domainExpert };
   }
 }
 function mirrorFastLaneToProfiles(config, profiles) {
@@ -3196,59 +3151,12 @@ function validateConfig(config) {
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policy !== undefined) {
     config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(config.sourceIndex.ingestionPolicies.dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
   }
-  assertBoolean(config.fileDelivery.enabled, "fileDelivery.enabled");
-  assertBoolean(config.castorWorkspace.enabled, "castorWorkspace.enabled");
-  if (config.domainExpert.defaultDomainId !== undefined) {
-    if (typeof config.domainExpert.defaultDomainId !== "string") {
-      throw new OperationError("config_error", "domainExpert.defaultDomainId must be a string.");
-    }
-    const trimmed = config.domainExpert.defaultDomainId.trim();
-    if (trimmed) {
-      config.domainExpert.defaultDomainId = trimmed;
-    } else {
-      delete config.domainExpert.defaultDomainId;
-    }
-  }
-  if (config.domainExpert.authToken !== undefined) {
-    if (typeof config.domainExpert.authToken !== "string") {
-      throw new OperationError("config_error", "domainExpert.authToken must be a string.");
-    }
-    const trimmed = config.domainExpert.authToken.trim();
-    if (trimmed) {
-      config.domainExpert.authToken = trimmed;
-    } else {
-      delete config.domainExpert.authToken;
-    }
-  }
-  assertBoolean(config.domainExpert.enabled, "domainExpert.enabled");
-  assertBoolean(config.domainExpert.liveToolsEnabled, "domainExpert.liveToolsEnabled");
   if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
     throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
   }
   config.email.baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
-  if (typeof config.fileDelivery.baseUrl !== "string" || !config.fileDelivery.baseUrl.startsWith("http://") && !config.fileDelivery.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "fileDelivery.baseUrl must be an HTTP(S) URL.");
-  }
-  config.fileDelivery.baseUrl = trimTrailingSlash(config.fileDelivery.baseUrl);
-  if (typeof config.castorWorkspace.baseUrl !== "string" || !config.castorWorkspace.baseUrl.startsWith("http://") && !config.castorWorkspace.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "castorWorkspace.baseUrl must be an HTTP(S) URL.");
-  }
-  config.castorWorkspace.baseUrl = trimTrailingSlash(config.castorWorkspace.baseUrl);
-  if (typeof config.domainExpert.baseUrl !== "string" || !config.domainExpert.baseUrl.startsWith("http://") && !config.domainExpert.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "domainExpert.baseUrl must be an HTTP(S) URL.");
-  }
-  config.domainExpert.baseUrl = trimTrailingSlash(config.domainExpert.baseUrl);
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.fileDelivery.requestTimeoutSeconds !== "number" || !Number.isFinite(config.fileDelivery.requestTimeoutSeconds) || config.fileDelivery.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "fileDelivery.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.castorWorkspace.requestTimeoutSeconds !== "number" || !Number.isFinite(config.castorWorkspace.requestTimeoutSeconds) || config.castorWorkspace.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "castorWorkspace.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.domainExpert.requestTimeoutSeconds !== "number" || !Number.isFinite(config.domainExpert.requestTimeoutSeconds) || config.domainExpert.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "domainExpert.requestTimeoutSeconds must be greater than zero.");
   }
 }
 function parseSchedulerSourceIds(value) {
@@ -3427,22 +3335,6 @@ var init_config = __esm(() => {
       answerDevEnabled: false,
       corpusRegistry: defaultSourceCorpusRegistryConfig(),
       ingestionPolicies: {}
-    },
-    fileDelivery: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8020/v1",
-      requestTimeoutSeconds: 30
-    },
-    castorWorkspace: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8030/v1",
-      requestTimeoutSeconds: 300
-    },
-    domainExpert: {
-      enabled: false,
-      liveToolsEnabled: false,
-      baseUrl: "http://127.0.0.1:8040/v1",
-      requestTimeoutSeconds: 600
     }
   };
   ARGUS_MODEL_PROFILES = [
@@ -3555,98 +3447,6 @@ var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEM
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
-
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
-
-// src/core/google-service-account.ts
-import { createSign } from "node:crypto";
-function parseGoogleServiceAccountKey(rawCredential, options = {}) {
-  if (!rawCredential?.trim())
-    throw new Error("Google service-account credential is empty.");
-  let parsed;
-  try {
-    parsed = JSON.parse(rawCredential);
-  } catch {
-    throw new Error("Google service-account credential is not valid JSON.");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Google service-account credential must be a JSON object.");
-  }
-  const credential = parsed;
-  if (credential.type !== "service_account") {
-    throw new Error("Google credential JSON must be a service_account key.");
-  }
-  if (typeof credential.client_email !== "string" || !credential.client_email.trim()) {
-    throw new Error("Google service-account credential JSON is missing client_email.");
-  }
-  if (options.expectedClientEmail && credential.client_email !== options.expectedClientEmail) {
-    throw new Error(`GCP credential client_email does not match ${options.expectedClientEmail}.`);
-  }
-  if (typeof credential.private_key !== "string" || !credential.private_key.includes("PRIVATE KEY")) {
-    throw new Error("Google service-account credential JSON is missing private_key.");
-  }
-  if (typeof credential.project_id !== "string" || !credential.project_id.trim()) {
-    throw new Error("Google service-account credential JSON is missing project_id.");
-  }
-  if (credential.token_uri !== undefined && (typeof credential.token_uri !== "string" || !/^https:\/\//.test(credential.token_uri))) {
-    throw new Error("Google service-account credential token_uri must be an https URL.");
-  }
-  return {
-    type: "service_account",
-    project_id: credential.project_id,
-    private_key: credential.private_key,
-    client_email: credential.client_email,
-    ...typeof credential.private_key_id === "string" ? { private_key_id: credential.private_key_id } : {},
-    ...credential.token_uri ? { token_uri: credential.token_uri } : {}
-  };
-}
-function googleServiceAccountTokenUrl(credential) {
-  return credential.token_uri || GOOGLE_OAUTH_TOKEN_URL;
-}
-function signGoogleServiceAccountJwt(options) {
-  const scope = normalizedScopeClaim(options.scopes);
-  const subject = options.subject?.trim();
-  if (options.subject !== undefined && !subject) {
-    throw new Error("Google service-account impersonated subject must be non-empty.");
-  }
-  const nowSeconds = Math.floor((options.now?.getTime() ?? Date.now()) / 1000);
-  const lifetimeSeconds = normalizedLifetimeSeconds(options.lifetimeSeconds);
-  const header = { alg: "RS256", typ: "JWT" };
-  const claims = {
-    iss: options.credential.client_email,
-    scope,
-    aud: googleServiceAccountTokenUrl(options.credential),
-    iat: nowSeconds,
-    exp: nowSeconds + lifetimeSeconds,
-    ...subject ? { sub: subject } : {}
-  };
-  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
-  const signature = createSign("RSA-SHA256").update(unsigned).sign(options.credential.private_key);
-  return `${unsigned}.${base64Url(signature)}`;
-}
-function normalizedScopeClaim(scopes) {
-  const normalized = [...new Set(scopes.map((scope) => scope.trim()).filter(Boolean))];
-  if (normalized.length === 0)
-    throw new Error("Google service-account assertion requires at least one scope.");
-  return normalized.join(" ");
-}
-function normalizedLifetimeSeconds(lifetimeSeconds) {
-  if (lifetimeSeconds === undefined)
-    return DEFAULT_ASSERTION_LIFETIME_SECONDS;
-  if (!Number.isFinite(lifetimeSeconds) || lifetimeSeconds <= 0) {
-    throw new Error("Google service-account assertion lifetime must be positive.");
-  }
-  return Math.min(Math.floor(lifetimeSeconds), MAX_ASSERTION_LIFETIME_SECONDS);
-}
-function base64UrlJson(value) {
-  return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
-}
-function base64Url(value) {
-  return value.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer", DEFAULT_ASSERTION_LIFETIME_SECONDS = 3600, MAX_ASSERTION_LIFETIME_SECONDS = 3600;
-var init_google_service_account = () => {};
 
 // src/core/http-timeout.ts
 async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
@@ -4385,27 +4185,6 @@ function isCredentialRefreshBusyError(error) {
   const candidate = error;
   return candidate.subsystem === CREDENTIAL_BROKER_ERROR_SUBSYSTEM && candidate.code === "credential_refresh_busy" && candidate.retryable === true && (candidate.retryAfterMs === undefined || typeof candidate.retryAfterMs === "number" && Number.isSafeInteger(candidate.retryAfterMs) && candidate.retryAfterMs > 0);
 }
-function delegatedGoogleHandle(options) {
-  return {
-    handle: options.handle,
-    provider: options.provider,
-    accountRole: options.accountRole,
-    trustDomain: options.trustDomain,
-    allowedCapabilities: [options.capability],
-    scopes: [...options.scopes],
-    tokenEnvNames: [],
-    serviceAccountJwt: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      credentialJsonEnvNames: [
-        ...options.credentialJsonEnvNames,
-        GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME
-      ],
-      impersonatedSubjectEnvNames: [...options.impersonatedSubjectEnvNames],
-      scopes: [...options.scopes]
-    },
-    expiresInSeconds: 3600
-  };
-}
 
 class JsonCredentialOAuth2StateStore {
   path;
@@ -4595,9 +4374,6 @@ class EnvCredentialBroker {
     if (definition.oauth2Refresh) {
       return this.issueOAuth2RefreshSession(definition, request.capability);
     }
-    if (definition.serviceAccountJwt) {
-      return this.issueServiceAccountJwtSession(definition, request.capability);
-    }
     throw missingCredentialError(request.handle, request.capability);
   }
   async status(handle) {
@@ -4621,9 +4397,6 @@ class EnvCredentialBroker {
   }
   issueOAuth2RefreshSession(definition, capability) {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshOAuth2RefreshSession(definition, capability, cacheKey));
-  }
-  issueServiceAccountJwtSession(definition, capability) {
-    return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
     const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
@@ -4814,78 +4587,6 @@ class EnvCredentialBroker {
     this.markRegistryHandleReauthRequired(definition.handle, now);
     throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} rotated its refresh token but ${reason}; the handle must be reauthorized.`, { handle: definition.handle, capability });
   }
-  async issueFreshServiceAccountJwtSession(definition, capability, cacheKey) {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount)
-      throw missingCredentialError(definition.handle, capability);
-    const now = this.now();
-    const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
-    if (!rawCredential)
-      throw missingCredentialError(definition.handle, capability);
-    const impersonatedSubject = firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames);
-    if (!impersonatedSubject)
-      throw missingCredentialError(definition.handle, capability);
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    if (storedState?.status === "reauth_required") {
-      throw serviceAccountDelegationError(definition.handle, capability);
-    }
-    const requestedScopes = serviceAccount.scopes?.length ? serviceAccount.scopes : definition.scopes ?? [];
-    let credential;
-    try {
-      credential = parseGoogleServiceAccountKey(rawCredential);
-    } catch (error) {
-      throw new CredentialBrokerError("credential_backend_malformed", `Credential handle ${definition.handle} service-account JSON is invalid: ${errorMessage(error)}`, { handle: definition.handle, capability });
-    }
-    let assertion;
-    try {
-      assertion = signGoogleServiceAccountJwt({
-        credential,
-        scopes: requestedScopes,
-        subject: impersonatedSubject,
-        now
-      });
-    } catch {
-      throw new CredentialBrokerError("credential_backend_malformed", `Credential handle ${definition.handle} service-account assertion could not be signed.`, { handle: definition.handle, capability });
-    }
-    let tokenResponse;
-    try {
-      tokenResponse = await exchangeServiceAccountAssertion({
-        tokenUrl: serviceAccount.tokenUrl?.trim() || googleServiceAccountTokenUrl(credential),
-        assertion,
-        fetchImpl: this.fetchImpl,
-        secrets: [assertion, credential.private_key, credential.private_key_id]
-      });
-    } catch (error) {
-      if (isTerminalServiceAccountAssertionError(error)) {
-        await this.oauth2StateStore?.save(definition.handle, {
-          ...storedState,
-          status: "reauth_required",
-          updatedAt: now.toISOString()
-        });
-        this.markRegistryHandleReauthRequired(definition.handle, now);
-        throw serviceAccountDelegationError(definition.handle, capability);
-      }
-      if (error instanceof OAuth2TokenEndpointError) {
-        const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} service-account token mint failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
-        this.recordMintFailure(cacheKey, brokerError);
-        throw brokerError;
-      }
-      throw error;
-    }
-    const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : requestedScopes;
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
-    });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
-  }
   recordMintFailure(cacheKey, error) {
     if (this.oauth2RefreshFailureBackoffMs <= 0)
       return;
@@ -4932,8 +4633,6 @@ class EnvCredentialBroker {
       return statusFromDefinition(definition, "available", now);
     }
     if (!definition.oauth2Refresh) {
-      if (definition.serviceAccountJwt)
-        return this.serviceAccountJwtStatus(definition, now);
       return statusFromDefinition(definition, "missing", now);
     }
     const clientId = await this.resolveFirstSecret(definition.oauth2Refresh.clientIdEnvNames, definition.oauth2Refresh.clientIdSecretRef ? [definition.oauth2Refresh.clientIdSecretRef] : []);
@@ -4941,19 +4640,6 @@ class EnvCredentialBroker {
     const refreshToken = await this.resolveFirstSecret(definition.oauth2Refresh.refreshTokenEnvNames ?? [], definition.oauth2Refresh.refreshTokenSecretRef ? [definition.oauth2Refresh.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const status = clientId && refreshToken ? storedState?.status === "reauth_required" ? "reauth_required" : "available" : clientId ? "reauth_required" : "missing";
     return statusFromDefinition(definition, status, now);
-  }
-  async serviceAccountJwtStatus(definition, now) {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount)
-      return statusFromDefinition(definition, "missing", now);
-    const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
-    if (!rawCredential)
-      return statusFromDefinition(definition, "missing", now);
-    if (!firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames)) {
-      return statusFromDefinition(definition, "missing", now);
-    }
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    return statusFromDefinition(definition, storedState?.status === "reauth_required" ? "reauth_required" : "available", now);
   }
   async resolveDescriptorBackendState(definition, sessionKind, now) {
     const stored = await this.backendStateStore?.load(definition.handle);
@@ -5259,55 +4945,8 @@ async function refreshOAuth2AccessToken(options) {
     scopes: scopesFromValue(payload.scope)
   };
 }
-async function exchangeServiceAccountAssertion(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", GOOGLE_JWT_BEARER_GRANT_TYPE);
-  body.set("assertion", options.assertion);
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: providerErrorFromText(text),
-      safeDetail: safeCredentialText(text, options.secrets)
-    });
-  }
-  const payload = parseJsonObject(text, "Google service-account token endpoint");
-  const accessToken = optionalString(payload.access_token);
-  if (!accessToken) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: undefined,
-      safeDetail: "token endpoint did not return access_token"
-    });
-  }
-  return {
-    accessToken,
-    refreshToken: undefined,
-    expiresInSeconds: optionalNumber(payload.expires_in),
-    scopes: scopesFromValue(payload.scope)
-  };
-}
-function isTerminalServiceAccountAssertionError(error) {
-  if (!(error instanceof OAuth2TokenEndpointError))
-    return false;
-  if (error.providerError === "invalid_grant") {
-    return !ASSERTION_TIMING_REJECTED_DETAIL.test(error.safeDetail);
-  }
-  return isPermanentOAuthClientError(error.providerError);
-}
 function isPermanentOAuthClientError(providerError) {
   return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
-}
-function serviceAccountDelegationError(handle, capability) {
-  return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : "unknown error";
@@ -5365,7 +5004,6 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
   if (registry.allowedCapabilities.some((capability) => !allowedByDefault.has(capability))) {
     throw new Error(`Connected credential handle capability exceeds its default: ${registry.handle}`);
   }
-  const serviceAccountJwt = fallback.serviceAccountJwt;
   const registryOwnsOAuth = registry.oauth2Refresh !== undefined;
   const oauth2Refresh = registry.oauth2Refresh ? {
     ...registry.oauth2Refresh,
@@ -5400,7 +5038,6 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...tokenSecretRefs?.length ? { tokenSecretRefs: [...tokenSecretRefs] } : {},
     ...statusEnvNames.length ? { statusEnvNames } : {},
     ...oauth2Refresh ? { oauth2Refresh } : {},
-    ...serviceAccountJwt ? { serviceAccountJwt } : {},
     scopes: registry.scopes?.length ? [...registry.scopes] : [...fallback.scopes ?? []],
     ...sessionKind ? { sessionKind } : {},
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
@@ -5621,13 +5258,13 @@ function safeCredentialText(text, secrets) {
 }
 function credentialTextVariants(secret) {
   const base64 = Buffer.from(secret).toString("base64");
-  const base64Url2 = Buffer.from(secret).toString("base64url");
+  const base64Url = Buffer.from(secret).toString("base64url");
   return uniqueStrings([
     secret,
     encodeURIComponent(secret),
     base64,
     base64.replace(/=+$/, ""),
-    base64Url2
+    base64Url
   ]);
 }
 function redactBase64CredentialTokens(text, secrets) {
@@ -5655,18 +5292,16 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", DEFAULT_ENV_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
-  init_google_service_account();
   init_http_timeout();
   init_oauth_relay();
   init_publisher_oauth_client();
-  init_google_service_account();
   init_secret_store();
   init_connected_handles();
-  PUBLIC_CREDENTIAL_PROVIDERS = [
+  CREDENTIAL_PROVIDERS = [
     "readwise",
     "gmail",
     "google_drive",
@@ -5674,19 +5309,6 @@ var init_credential_broker = __esm(() => {
     "telegram",
     "whatsapp_personal",
     "x"
-  ];
-  PRIVATE_CREDENTIAL_PROVIDERS = [
-    "notion",
-    "google_calendar",
-    "gcp",
-    "whatsapp_business",
-    "apple_messages",
-    "reflect",
-    "roam"
-  ];
-  CREDENTIAL_PROVIDERS = [
-    ...PUBLIC_CREDENTIAL_PROVIDERS,
-    ...PUBLIC_RUNTIME_BUILD ? [] : PRIVATE_CREDENTIAL_PROVIDERS
   ];
   CredentialBrokerError = class CredentialBrokerError extends Error {
     subsystem = CREDENTIAL_BROKER_ERROR_SUBSYSTEM;
@@ -5719,62 +5341,18 @@ var init_credential_broker = __esm(() => {
       oauth2Refresh: {
         tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
         clientIdEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID"
         ],
         clientSecretEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET"
         ],
         refreshTokenEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN"
         ],
         scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
       },
       expiresInSeconds: 3600
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      delegatedGoogleHandle({
-        handle: "gmail.business_ocu",
-        provider: "gmail",
-        accountRole: "business_ocu",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-      }),
-      {
-        handle: "gmail.personal.direct",
-        provider: "gmail",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        allowedCapabilities: ["gmail.email.sync"],
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        tokenEnvNames: [],
-        oauth2Refresh: {
-          tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-          clientIdEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_ID",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"
-          ],
-          clientSecretEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_SECRET",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"
-          ],
-          refreshTokenEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_REFRESH_TOKEN",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"
-          ],
-          scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
-        },
-        expiresInSeconds: 3600
-      }
-    ],
     {
       handle: "google_drive.personal",
       provider: "google_drive",
@@ -5786,75 +5364,18 @@ var init_credential_broker = __esm(() => {
       oauth2Refresh: {
         tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
         clientIdEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID"
         ],
         clientSecretEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET"
         ],
         refreshTokenEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN"
         ],
         scopes: [GOOGLE_DRIVE_READONLY_SCOPE]
       },
       expiresInSeconds: 3600
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      delegatedGoogleHandle({
-        handle: "gmail.personal.delegated",
-        provider: "gmail",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "gmail.business_ocu.delegated",
-        provider: "gmail",
-        accountRole: "business_ocu",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "google_drive.personal.delegated",
-        provider: "google_drive",
-        accountRole: "personal",
-        trustDomain: "internal",
-        capability: "google_drive.docs.sync",
-        scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "google_calendar.personal.delegated",
-        provider: "google_calendar",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        capability: "google_calendar.events.read",
-        scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      })
-    ],
     {
       handle: "readwise.personal",
       provider: "readwise",
@@ -5864,7 +5385,6 @@ var init_credential_broker = __esm(() => {
       scopes: ["readwise.export:read", "readwise.reader:read"],
       tokenEnvNames: [
         "OLYMPUS_CREDENTIAL_READWISE_PERSONAL_TOKEN",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_READWISE_CASTOR_RUNTIME_TOKEN"],
         "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
         "READWISE_TOKEN"
       ],
@@ -5923,26 +5443,6 @@ var init_credential_broker = __esm(() => {
         backendLabel: "local_private:telegram_telethon_reader"
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      handle: "whatsapp.business",
-      provider: "whatsapp_business",
-      sessionKind: "webhook_token",
-      accountRole: "business",
-      trustDomain: "secure_local",
-      allowedCapabilities: ["whatsapp.business.messages.sync"],
-      scopes: ["whatsapp_business_messaging", "whatsapp_business_management"],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY"],
-      expiresInSeconds: 900,
-      backendState: {
-        kind: "webhook_token",
-        webhookIntegrationId: "twilio_whatsapp_business",
-        validationMode: "broker_verified_event",
-        verifierReference: "twilio_whatsapp_business_verifier",
-        leaseId: "twilio_whatsapp_business_webhook_lease",
-        backendLabel: "twilio:whatsapp_business_gateway"
-      }
-    }],
     {
       handle: "whatsapp.personal_local",
       provider: "whatsapp_personal",
@@ -5963,26 +5463,6 @@ var init_credential_broker = __esm(() => {
         backendLabel: "local_private:whatsapp_local_app_reader"
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      handle: "apple_messages.local",
-      provider: "apple_messages",
-      sessionKind: "local_app_database",
-      accountRole: "local",
-      trustDomain: "secure_local",
-      allowedCapabilities: ["apple_messages.messages.sync"],
-      scopes: [],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY"],
-      expiresInSeconds: 3600,
-      backendState: {
-        kind: "local_app_database",
-        databaseSourceId: "apple_messages_local",
-        readerWorker: "apple_messages_reader",
-        databaseRole: "messages_readonly",
-        scopeLabel: "local_messages",
-        backendLabel: "local_private:apple_messages_reader"
-      }
-    }],
     {
       handle: "x.bookmarks.personal",
       provider: "x",
@@ -6014,54 +5494,12 @@ var init_credential_broker = __esm(() => {
         scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
       },
       expiresInSeconds: 3600
-    },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        handle: "reflect.archive",
-        provider: "reflect",
-        sessionKind: "archive_path",
-        accountRole: "archive",
-        trustDomain: "internal",
-        allowedCapabilities: ["reflect.archive.import"],
-        scopes: [],
-        tokenEnvNames: [],
-        statusEnvNames: ["OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY"],
-        expiresInSeconds: 3600,
-        backendState: {
-          kind: "archive_path",
-          archiveRootAlias: "reflect_archive",
-          readerWorker: "archive_import_reader",
-          contentBounds: "approved_archive_root",
-          backendLabel: "local_private:archive_import"
-        }
-      },
-      {
-        handle: "roam.archive",
-        provider: "roam",
-        sessionKind: "archive_path",
-        accountRole: "archive",
-        trustDomain: "internal",
-        allowedCapabilities: ["roam.archive.import"],
-        scopes: [],
-        tokenEnvNames: [],
-        statusEnvNames: ["OLYMPUS_CREDENTIAL_ROAM_ARCHIVE_READY"],
-        expiresInSeconds: 3600,
-        backendState: {
-          kind: "archive_path",
-          archiveRootAlias: "roam_archive",
-          readerWorker: "archive_import_reader",
-          contentBounds: "approved_archive_root",
-          backendLabel: "local_private:archive_import"
-        }
-      }
-    ]
+    }
   ];
-  SERVICE_ACCOUNT_CREDENTIAL_HANDLES = new Set(DEFAULT_ENV_HANDLES.filter((definition) => definition.serviceAccountJwt !== undefined).map((definition) => definition.handle));
   PROCESS_MINTED_SESSION_CACHE = new Map;
   PROCESS_MINT_IN_FLIGHT = new Map;
   PROCESS_MINT_FAILURE_BACKOFF = new Map;
   OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  ASSERTION_TIMING_REJECTED_DETAIL = /(?:short-lived token|reasonable timeframe|check your iat and exp|jwt is (?:not yet valid|expired)|assertion (?:is )?expired)/i;
   OAuth2TokenEndpointError = class OAuth2TokenEndpointError extends Error {
     status;
     providerError;
@@ -7321,288 +6759,12 @@ var init_corpus_adapter = __esm(() => {
   init_corpus();
 });
 
-// src/workers/source-export/dropbox.ts
-var DropboxSourceExportRequestError, DropboxSourceExportDestinationError;
-var init_dropbox = __esm(() => {
-  init_credential_broker();
-  init_corpus_adapter();
-  DropboxSourceExportRequestError = class DropboxSourceExportRequestError extends Error {
-    kind = "dropbox_source_export_invalid_request";
-    constructor(message) {
-      super(message);
-      this.name = "DropboxSourceExportRequestError";
-    }
-  };
-  DropboxSourceExportDestinationError = class DropboxSourceExportDestinationError extends Error {
-    kind = "dropbox_source_export_destination_not_allowed";
-    constructor(message) {
-      super(message);
-      this.name = "DropboxSourceExportDestinationError";
-    }
-  };
-});
-
-// src/workers/file-extraction/extractors/command-runner.ts
-import { Buffer as Buffer2 } from "node:buffer";
-import { spawn } from "node:child_process";
-async function runExtractionCommand(request) {
-  return new Promise((resolve2, reject) => {
-    const child = spawn(request.command, request.args, {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    const stdout = [];
-    const stderr = [];
-    let settled = false;
-    const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
-    const timer = useTimeout ? setTimeout(() => {
-      if (settled)
-        return;
-      settled = true;
-      child.kill("SIGKILL");
-      reject(new ExtractionCommandTimeoutError({
-        command: request.command,
-        timeoutMs: request.timeoutMs
-      }));
-    }, request.timeoutMs) : undefined;
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.on("error", (error) => {
-      if (settled)
-        return;
-      settled = true;
-      if (timer)
-        clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      if (settled)
-        return;
-      settled = true;
-      if (timer)
-        clearTimeout(timer);
-      const result = {
-        stdout: Buffer2.concat(stdout).toString("utf8"),
-        stderr: Buffer2.concat(stderr).toString("utf8")
-      };
-      if (code === 0) {
-        resolve2(result);
-        return;
-      }
-      reject(new ExtractionCommandError({
-        command: request.command,
-        exitCode: code,
-        stdout: result.stdout,
-        stderr: result.stderr
-      }));
-    });
-  });
-}
-var ExtractionCommandError, ExtractionCommandTimeoutError;
-var init_command_runner = __esm(() => {
-  ExtractionCommandError = class ExtractionCommandError extends Error {
-    command;
-    exitCode;
-    stdout;
-    stderr;
-    constructor(input) {
-      super(input.exitCode === null ? `${input.command} exited without an exit code.` : `${input.command} exited with status ${input.exitCode}.`);
-      this.name = "ExtractionCommandError";
-      this.command = input.command;
-      this.exitCode = input.exitCode;
-      this.stdout = input.stdout;
-      this.stderr = input.stderr;
-    }
-  };
-  ExtractionCommandTimeoutError = class ExtractionCommandTimeoutError extends Error {
-    command;
-    timeoutMs;
-    constructor(input) {
-      super(`${input.command} timed out.`);
-      this.name = "ExtractionCommandTimeoutError";
-      this.command = input.command;
-      this.timeoutMs = input.timeoutMs;
-    }
-  };
-});
-
-// src/workers/file-extraction/extractors/pdf-render.ts
-import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join as join7 } from "node:path";
-function parsePdfInfoPageCount(stdout) {
-  const match = /^Pages:\s*(\d+)\s*$/im.exec(stdout);
-  if (!match?.[1])
-    return;
-  const parsed = Number(match[1]);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-function matchRenderedPageNumber(name, outputFormat) {
-  const match = outputFormat === "jpeg" ? /^page-(\d+)\.jpe?g$/i.exec(name) ?? /^page(\d+)\.jpe?g$/i.exec(name) : /^page-(\d+)\.png$/i.exec(name) ?? /^page(\d+)\.png$/i.exec(name);
-  if (!match?.[1])
-    return;
-  return Number(match[1]);
-}
-async function renderPdfPages(input) {
-  const renderCommand = input.renderCommand?.trim() || DEFAULT_PDF_RENDER_COMMAND;
-  const infoCommand = input.infoCommand?.trim() || DEFAULT_PDF_INFO_COMMAND;
-  const renderCommandRunner = input.renderCommandRunner ?? runExtractionCommand;
-  const infoCommandRunner = input.infoCommandRunner ?? renderCommandRunner;
-  const timeoutMs = input.timeoutMs ?? DEFAULT_PDF_RENDER_TIMEOUT_MS;
-  const outputFormat = input.outputFormat ?? "jpeg";
-  const tempDir = await mkdtemp(join7(tmpdir(), TEMP_DIR_PREFIX));
-  try {
-    const inputPath = join7(tempDir, "input.pdf");
-    const outputPrefix = join7(tempDir, "page");
-    await writeFile(inputPath, input.bytes);
-    let totalPages;
-    try {
-      const info = await infoCommandRunner({
-        command: infoCommand,
-        args: [inputPath],
-        timeoutMs
-      });
-      totalPages = parsePdfInfoPageCount(info.stdout);
-    } catch {
-      totalPages = undefined;
-    }
-    const lastPage = Math.min(input.maxPages, totalPages ?? input.maxPages);
-    await renderCommandRunner({
-      command: renderCommand,
-      args: [
-        "-f",
-        "1",
-        "-l",
-        String(lastPage),
-        ...outputFormat === "jpeg" ? ["-jpeg", "-jpegopt", "quality=85"] : ["-png"],
-        "-r",
-        String(DEFAULT_PDF_RENDER_DPI),
-        inputPath,
-        outputPrefix
-      ],
-      timeoutMs
-    });
-    const entries = (await readdir(tempDir)).map((name) => {
-      const pageNumber = matchRenderedPageNumber(name, outputFormat);
-      if (pageNumber === undefined)
-        return;
-      return { name, pageNumber };
-    }).filter((value) => Boolean(value)).filter((value) => Number.isInteger(value.pageNumber) && value.pageNumber > 0).sort((left, right) => left.pageNumber - right.pageNumber).slice(0, input.maxPages);
-    if (entries.length === 0) {
-      const singleFilePath = `${outputPrefix}.${outputFormat === "jpeg" ? "jpg" : "png"}`;
-      try {
-        return {
-          pages: [{
-            pageNumber: 1,
-            bytes: new Uint8Array(await readFile3(singleFilePath)),
-            mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
-            dpi: DEFAULT_PDF_RENDER_DPI
-          }],
-          ...totalPages !== undefined ? { totalPages } : {}
-        };
-      } catch {
-        throw new Error("Local PDF rendering produced no page images.");
-      }
-    }
-    return {
-      pages: await Promise.all(entries.map(async (entry) => ({
-        pageNumber: entry.pageNumber,
-        bytes: new Uint8Array(await readFile3(join7(tempDir, entry.name))),
-        mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
-        dpi: DEFAULT_PDF_RENDER_DPI
-      }))),
-      ...totalPages !== undefined ? { totalPages } : {}
-    };
-  } finally {
-    await rm2(tempDir, { recursive: true, force: true });
-  }
-}
-async function renderSinglePdfPageForVision(input) {
-  const tempDir = await mkdtemp(join7(tmpdir(), TEMP_DIR_PREFIX));
-  try {
-    const inputPath = join7(tempDir, "input.pdf");
-    const outputPrefix = join7(tempDir, "page");
-    const outputPath = `${outputPrefix}.jpg`;
-    await writeFile(inputPath, input.bytes);
-    await input.renderCommandRunner({
-      command: input.renderCommand,
-      args: [
-        "-f",
-        String(input.pageNumber),
-        "-l",
-        String(input.pageNumber),
-        "-singlefile",
-        "-jpeg",
-        "-jpegopt",
-        "quality=85",
-        "-r",
-        String(input.dpi),
-        inputPath,
-        outputPrefix
-      ],
-      timeoutMs: input.timeoutMs
-    });
-    return {
-      pageNumber: input.pageNumber,
-      bytes: new Uint8Array(await readFile3(outputPath)),
-      mimeType: "image/jpeg",
-      dpi: input.dpi
-    };
-  } finally {
-    await rm2(tempDir, { recursive: true, force: true });
-  }
-}
-async function renderPdfFirstPageForVision(input) {
-  const tempDir = await mkdtemp(join7(tmpdir(), TEMP_DIR_PREFIX));
-  try {
-    const inputPath = join7(tempDir, "input.pdf");
-    const outputPrefix = join7(tempDir, "page");
-    const outputPath = `${outputPrefix}.png`;
-    await writeFile(inputPath, input.bytes);
-    await input.commandRunner({
-      command: input.command,
-      args: [
-        "-f",
-        "1",
-        "-l",
-        "1",
-        "-singlefile",
-        "-png",
-        "-r",
-        String(DEFAULT_PDF_RENDER_DPI),
-        inputPath,
-        outputPrefix
-      ],
-      timeoutMs: input.timeoutMs
-    });
-    return {
-      bytes: new Uint8Array(await readFile3(outputPath)),
-      mimeType: "image/png"
-    };
-  } finally {
-    await rm2(tempDir, { recursive: true, force: true });
-  }
-}
-var DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000, DEFAULT_PDF_RENDER_COMMAND = "pdftoppm", DEFAULT_PDF_INFO_COMMAND = "pdfinfo", DEFAULT_PDF_RENDER_DPI = 180, PDF_RENDER_DPI_STEPS, TEMP_DIR_PREFIX = "olympus-extraction-pdf-render-";
-var init_pdf_render = __esm(() => {
-  init_command_runner();
-  PDF_RENDER_DPI_STEPS = [180, 150, 120, 100];
-});
-
-// src/workers/source-eval-shard/dropbox.ts
-var init_dropbox2 = __esm(() => {
-  init_corpus_adapter();
-  init_provider_client();
-  init_pdf_render();
-  init_credential_broker();
-  init_approved_scope_filter();
-});
-
 // src/core/sensitivity-map.ts
 import { chmodSync, existsSync as existsSync7, lstatSync as lstatSync2, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { dirname as dirname6, join as join7 } from "node:path";
 function defaultSensitivityMapPath() {
-  return join8(homedir6(), ".olympus", "sensitivity-map.json");
+  return join7(homedir6(), ".olympus", "sensitivity-map.json");
 }
 function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
@@ -8773,7 +7935,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { Buffer as Buffer3 } from "node:buffer";
+import { Buffer as Buffer2 } from "node:buffer";
 import { createHash as createHash6 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -8930,7 +8092,7 @@ class GeminiSourceEmbeddingProvider {
       return {
         inlineData: {
           mimeType,
-          data: Buffer3.from(bytes).toString("base64")
+          data: Buffer2.from(bytes).toString("base64")
         }
       };
     } catch {
@@ -17047,9 +16209,9 @@ var init_venice_models = __esm(() => {
 // src/core/sovereignty.ts
 import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join9 } from "node:path";
+import { dirname as dirname8, join as join8 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join9(homedir7(), ".olympus", "sovereignty.json");
+  return join8(homedir7(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -17287,8 +16449,8 @@ function writeSovereigntyConfigFile(input) {
   return path;
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join9(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join9(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
+  const sourceLayoutPath = join8(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join8(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
   const path = existsSync8(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync8(path, "utf8"));
   return validateSovereigntyConfig(parsed);
@@ -18877,13 +18039,13 @@ var init_qualification = __esm(() => {
 
 // src/workers/dropbox-files/connector-store.ts
 import { homedir as homedir8 } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join9 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir8(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join9(homedir8(), ".local", "share");
+  return join9(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 function dropboxIngestionExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), DROPBOX_INGESTION_EXCLUSION_SOURCE, { enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA });
@@ -19025,8 +18187,6 @@ var init_dropbox_files = __esm(() => {
   init_locator_result_projector();
   init_content_policy();
   init_dropbox_content_hash();
-  init_dropbox();
-  init_dropbox2();
   init_corpus_adapter();
   init_qualification();
   init_connector_store2();
@@ -19502,7 +18662,7 @@ var init_request_budget = __esm(() => {
 // src/workers/google-connectors/gmail.ts
 import { createHash as createHash8 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
-import { join as join11 } from "node:path";
+import { join as join10 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -19745,8 +18905,8 @@ function defaultGmailRequestBudgetStatePath(env = process.env) {
   const configured = env[GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir9(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "gmail-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
+  return join10(dataHome, "openclaw", "olympus", "gmail-daily-request-budget.json");
 }
 function budgetedGmailApiClient(inner, budget, provenance) {
   return {
@@ -19812,15 +18972,15 @@ function defaultGmailConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir9(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "gmail-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
+  return join10(dataHome, "openclaw", "olympus", "gmail-connector-store.sqlite");
 }
 function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir9(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
+  return join10(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -20376,7 +19536,7 @@ var init_gmail_live_sync = __esm(() => {
 // src/workers/google-connectors/drive.ts
 import { createHash as createHash10 } from "node:crypto";
 import { homedir as homedir10 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join11 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -20658,8 +19818,8 @@ function defaultGoogleDriveRequestBudgetStatePath(env = process.env) {
   const configured = env[GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "google-drive-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "google-drive-daily-request-budget.json");
 }
 function createRestGoogleDriveApiClient(options) {
   return new RestGoogleDriveApiClient({
@@ -20819,15 +19979,15 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 function defaultGoogleDriveSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "google-drive-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "google-drive-secure-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -21389,12 +20549,12 @@ var init_google_connectors = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 import { homedir as homedir11 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join12 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join13(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join12(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join13(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join12(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 function defineInternalTelegramMessagesCorpus() {
   return defineSourceIndexCorpus({
@@ -21431,11 +20591,11 @@ var init_corpus_adapter2 = __esm(() => {
 import { createHash as createHash12 } from "node:crypto";
 import { existsSync as existsSync10, lstatSync as lstatSync4, readFileSync as readFileSync10, readdirSync } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join13 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
   const home = env.HOME?.trim() || homedir12();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(home, ".local", "share");
-  return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join14(dataHome, "olympus", "telegram-capture", "spool");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join13(home, ".local", "share");
+  return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join13(dataHome, "olympus", "telegram-capture", "spool");
 }
 function createTelegramCaptureSpoolConnector(options) {
   const spoolDir = requiredString3(options.spoolDir, "spool directory");
@@ -21529,7 +20689,7 @@ function readTelegramCaptureSpool(options) {
         continue;
       if (admitThrough && name > admitThrough.file)
         break;
-      const path = join14(options.spoolDir, name);
+      const path = join13(options.spoolDir, name);
       const stat2 = lstatSync4(path);
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
@@ -22261,7 +21421,7 @@ var init_corpus_adapter3 = __esm(() => {
 import { createHash as createHash13 } from "node:crypto";
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync11 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname10, join as join15 } from "node:path";
+import { dirname as dirname10, join as join14 } from "node:path";
 
 class ReadwiseDailyRequestBudget {
   utcDay = "";
@@ -22333,8 +21493,8 @@ function defaultReadwiseRequestBudgetStatePath(env = process.env) {
   const configured = env[READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir13(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "readwise-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir13(), ".local", "share");
+  return join14(dataHome, "openclaw", "olympus", "readwise-daily-request-budget.json");
 }
 function readReadwiseRequestBudgetState(statePath) {
   let raw;
@@ -22511,8 +21671,8 @@ function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir13(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir13(), ".local", "share");
+  return join14(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 function readwiseDailyRequestBudgetFromEnv(env = process.env) {
   const value = env[READWISE_DAILY_REQUEST_BUDGET_ENV];
@@ -23528,7 +22688,7 @@ var init_folder_facets = __esm(() => {
 // src/workers/x-bookmarks/connector.ts
 import { createHash as createHash15 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join15 } from "node:path";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount2(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
@@ -23568,8 +22728,8 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir14(), ".local", "share");
-  return join16(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir14(), ".local", "share");
+  return join15(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 function xBookmarkLocalItemId(account, postId) {
   return `${requireAccount2(account)}:${requirePostId(postId)}`;
@@ -23683,7 +22843,7 @@ var init_connector3 = __esm(() => {
 import { createHash as createHash16, randomUUID as randomUUID6 } from "node:crypto";
 import { chmodSync as chmodSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { dirname as dirname11, join as join17 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -23722,8 +22882,8 @@ function defaultXBookmarksApiUsageDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir15(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "x-bookmarks-api-usage.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir15(), ".local", "share");
+  return join16(dataHome, "openclaw", "olympus", "x-bookmarks-api-usage.sqlite");
 }
 function xBookmarksReconcileWatermarkResult(watermark) {
   const folderDegraded = watermark.folder_provenance === "degraded";
@@ -24620,7 +23780,7 @@ var init_live_control2 = __esm(() => {
 import { createHash as createHash17, randomUUID as randomUUID7 } from "node:crypto";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync10 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { dirname as dirname12, join as join18 } from "node:path";
+import { dirname as dirname12, join as join17 } from "node:path";
 import { Database as Database4 } from "bun:sqlite";
 function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH?.trim();
@@ -24630,8 +23790,8 @@ function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
     return ":memory:";
   if (usageDbPath?.trim())
     return `${usageDbPath.trim()}.reconcile`;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir16(), ".local", "share");
-  return join18(dataHome, "openclaw", "olympus", "x-bookmarks-reconcile-state.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir16(), ".local", "share");
+  return join17(dataHome, "openclaw", "olympus", "x-bookmarks-reconcile-state.sqlite");
 }
 
 class LocalXBookmarksReconcileStateStore {
@@ -29094,7 +28254,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 import { existsSync as existsSync12, readFileSync as readFileSync12, readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
-import { join as join19 } from "node:path";
+import { join as join18 } from "node:path";
 function createWhatsAppLiveSourceConnector(options) {
   const spoolDir = requireNonEmpty4(options.spoolDir, "WhatsApp live connector spoolDir");
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp live connector account");
@@ -29131,7 +28291,7 @@ function createWhatsAppLiveSourceConnector(options) {
       let match;
       const reactionIndex = createWhatsAppReactionIndexBuilder();
       for (const file of listSpoolFiles(spoolDir)) {
-        for (const line of terminatedLines(join19(spoolDir, file))) {
+        for (const line of terminatedLines(join18(spoolDir, file))) {
           const message = parseSpoolLine(line);
           if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid))
             continue;
@@ -29162,7 +28322,7 @@ function readWhatsAppLiveSpoolStatus(spoolDir) {
   const files = listSpoolFiles(spoolDir);
   const reactionIndex = createWhatsAppReactionIndexBuilder();
   for (const file of files) {
-    for (const line of terminatedLines(join19(spoolDir, file))) {
+    for (const line of terminatedLines(join18(spoolDir, file))) {
       lines += 1;
       if (line.trim() === "")
         continue;
@@ -29218,7 +28378,7 @@ function readSpoolPage(spoolDir, start, limit) {
   for (const file of files) {
     if (start !== undefined && file < start.file)
       continue;
-    const lines = terminatedLines(join19(spoolDir, file));
+    const lines = terminatedLines(join18(spoolDir, file));
     let lineIndex = start !== undefined && file === start.file ? Math.min(start.line, lines.length) : 0;
     while (lineIndex < lines.length) {
       if (projectedItems() >= limit) {
@@ -29294,7 +28454,7 @@ function resolveReactionTargets(spoolDir, targetIds) {
   if (targetIds.size === 0)
     return targets;
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join19(spoolDir, file))) {
+    for (const line of terminatedLines(join18(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined)
         continue;
@@ -29324,7 +28484,7 @@ function createReactionSnapshotReader(spoolDir) {
 function buildReactionSnapshot(spoolDir) {
   const builder = createWhatsAppReactionIndexBuilder();
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join19(spoolDir, file))) {
+    for (const line of terminatedLines(join18(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined)
         continue;
@@ -29339,7 +28499,7 @@ function buildReactionSnapshot(spoolDir) {
 function spoolFingerprint(spoolDir) {
   return listSpoolFiles(spoolDir).map((file) => {
     try {
-      const stats = statSync4(join19(spoolDir, file));
+      const stats = statSync4(join18(spoolDir, file));
       return `${file}:${stats.size}:${stats.mtimeMs}`;
     } catch {
       return `${file}:gone`;
@@ -29591,20 +28751,20 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { homedir as homedir17 } from "node:os";
-import { join as join20 } from "node:path";
+import { join as join19 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join20(env.HOME?.trim() || homedir17(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join20(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(env.HOME?.trim() || homedir17(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join19(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppSpoolDir(env = process.env) {
-  return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join20(defaultWhatsAppStateDir(env), "spool");
+  return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join19(defaultWhatsAppStateDir(env), "spool");
 }
 function defaultWhatsAppMediaDir(env = process.env) {
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join20(transcribeStateDir || defaultWhatsAppStateDir(env), "media", "audio");
+  return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join19(transcribeStateDir || defaultWhatsAppStateDir(env), "media", "audio");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join20(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join19(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 function sanitizeWhatsAppLiveCursor(cursor) {
   if (cursor === undefined)
@@ -29764,7 +28924,7 @@ var init_file_extraction_source = __esm(() => {
 });
 
 // src/workers/whatsapp/extraction-source.ts
-import { readFile as readFile4, realpath, stat as stat2 } from "node:fs/promises";
+import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { basename, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 
 class WhatsAppExtractionSource {
@@ -29822,7 +28982,7 @@ class WhatsAppExtractionSource {
         throw new FileExtractionSourceError("source_too_large");
       }
       return {
-        bytes: await readFile4(path),
+        bytes: await readFile3(path),
         ...ref.mimeType ? { mimeType: ref.mimeType } : {},
         sizeBytes: file.size
       };
@@ -29897,31 +29057,31 @@ var init_whatsapp = __esm(() => {
 // src/core/pairing-session-paths.ts
 import { lstatSync as lstatSync6, realpathSync, rmSync as rmSync3 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
-import { basename as basename2, dirname as dirname14, join as join21, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
+import { basename as basename2, dirname as dirname14, join as join20, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
 function resolveHomeDir(context) {
   return context.homeDir?.trim() || homedir18();
 }
 function olympusDataRoots(context = {}) {
   const home = resolveHomeDir(context);
   return [
-    join21(home, ".olympus"),
-    join21(home, ".config", "olympus"),
-    join21(home, ".local", "share", "olympus"),
-    join21(home, ".local", "share", "openclaw", "olympus"),
-    join21(home, ".local", "state", "olympus"),
-    join21(home, ".cache", "olympus"),
-    join21(home, "Library", "Logs", "Olympus")
+    join20(home, ".olympus"),
+    join20(home, ".config", "olympus"),
+    join20(home, ".local", "share", "olympus"),
+    join20(home, ".local", "share", "openclaw", "olympus"),
+    join20(home, ".local", "state", "olympus"),
+    join20(home, ".cache", "olympus"),
+    join20(home, "Library", "Logs", "Olympus")
   ];
 }
 function whatsappStateDir(context = {}) {
   const env = context.env ?? {};
   const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
-  return configured ? whatsappStateDirFromValue(configured) : join21(env.XDG_DATA_HOME?.trim() || join21(resolveHomeDir(context), ".local", "share"), "olympus", "whatsapp-live");
+  return configured ? whatsappStateDirFromValue(configured) : join20(env.XDG_DATA_HOME?.trim() || join20(resolveHomeDir(context), ".local", "share"), "olympus", "whatsapp-live");
 }
 function whatsappPairingSessionPaths(context = {}) {
   const stateDir = whatsappStateDir(context);
-  const sessionDb = join21(stateDir, "session.db");
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join21(stateDir, "qr.txt")];
+  const sessionDb = join20(stateDir, "session.db");
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join20(stateDir, "qr.txt")];
 }
 function telegramSessionBase(value) {
   const trimmed2 = value.trim();
@@ -29934,9 +29094,9 @@ function whatsappStateDirFromValue(value) {
 function telegramSessionBasePath(context = {}) {
   const env = context.env ?? {};
   const home = context.homeDir?.trim() || env.HOME?.trim() || homedir18();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join21(home, ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join20(home, ".local", "share");
   const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
-  return configured ? telegramSessionBase(configured) : join21(dataHome, "olympus", "telegram", "telegram.personal");
+  return configured ? telegramSessionBase(configured) : join20(dataHome, "olympus", "telegram", "telegram.personal");
 }
 function telegramPairingSessionPaths(context = {}) {
   const base = telegramSessionBasePath(context);
@@ -29951,8 +29111,8 @@ function pairingSessionPathsFromStoredValue(source, storedValue) {
     return [`${base}.session`, `${base}.session-journal`];
   }
   const stateDir = whatsappStateDirFromValue(value);
-  const sessionDb = join21(stateDir, "session.db");
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join21(stateDir, "qr.txt")];
+  const sessionDb = join20(stateDir, "session.db");
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join20(stateDir, "qr.txt")];
 }
 function pairingSessionPathOverridden(source, context = {}) {
   const env = context.env ?? {};
@@ -30005,7 +29165,7 @@ function validatePairingPath(path, roots, canonicalRoots) {
   const components = relative3(root, absolute).split(sep3).filter((part) => part !== "");
   let current = root;
   for (const [index, component] of components.entries()) {
-    current = join21(current, component);
+    current = join20(current, component);
     const inspection = inspectPath(current);
     if (inspection.kind === "error") {
       return { refusal: { reason: "inspection_failed", path: absolute, component: current } };
@@ -30214,7 +29374,7 @@ var init_public_source_capabilities = __esm(() => {
 import { createHmac as createHmac2 } from "node:crypto";
 import { readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
-import { join as join22 } from "node:path";
+import { join as join21 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   return optionalToken2(config.worker.authToken) ?? optionalToken2((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
@@ -30282,7 +29442,7 @@ function environmentWithWorkerSetupEnv(options = {}) {
 }
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join22(options.homeDir ?? optionalToken2(env.HOME) ?? homedir19(), ".config", "olympus", "worker.env");
+  return options.workerEnvPath ?? join21(options.homeDir ?? optionalToken2(env.HOME) ?? homedir19(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -30322,7 +29482,7 @@ var init_worker_auth = () => {};
 // src/core/worker-service.ts
 import { chmodSync as chmodSync8, closeSync as closeSync3, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync12, openSync as openSync3, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
 import { homedir as homedir20, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join23, relative as relative4, sep as sep4 } from "node:path";
+import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join22, relative as relative4, sep as sep4 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
 function installWorkerService(options = {}) {
   const platform2 = normalizePlatform(options.platform ?? osPlatform());
@@ -30644,22 +29804,22 @@ function defaultWorkerServiceExec(command, args) {
 function workerServicePaths(platform2, homeDir) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join23(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join22(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join23(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join23(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join23(logDir, "worker.log"),
-      errorLogPath: join23(logDir, "worker.err")
+      unitPath: join22(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join22(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join22(logDir, "worker.log"),
+      errorLogPath: join22(logDir, "worker.err")
     };
   }
-  const stateDir = join23(homeDir, ".local", "state", "olympus", "worker");
+  const stateDir = join22(homeDir, ".local", "state", "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join23(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join23(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join23(stateDir, "worker.log"),
-    errorLogPath: join23(stateDir, "worker.err")
+    unitPath: join22(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join22(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join22(stateDir, "worker.log"),
+    errorLogPath: join22(stateDir, "worker.err")
   };
 }
 function renderLaunchdWorkerUnit(input) {
@@ -30910,13 +30070,13 @@ function validatedAbsolutePath(value, label) {
 }
 function defaultOlympusCliJs(options) {
   if (options.workingDirectory) {
-    return join23(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
+    return join22(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
   }
   const invoked = process.argv[1]?.trim();
   if (invoked && !invoked.startsWith("-") && basename3(invoked) === "cli.js") {
-    return isAbsolute2(invoked) ? invoked : join23(process.cwd(), invoked);
+    return isAbsolute2(invoked) ? invoked : join22(process.cwd(), invoked);
   }
-  return join23(process.cwd(), "dist", "cli.js");
+  return join22(process.cwd(), "dist", "cli.js");
 }
 function defaultWorkerPath(bunBin, existingPath) {
   const entries = [
@@ -31279,7 +30439,7 @@ import {
   mkdirSync as mkdirSync14
 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
-import { dirname as dirname17, isAbsolute as isAbsolute3, join as join25 } from "node:path";
+import { dirname as dirname17, isAbsolute as isAbsolute3, join as join24 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -31293,11 +30453,11 @@ function sourceWatchAuthenticatedRouteHeaders(route) {
 }
 function defaultSourceWatchDbPath(env = process.env) {
   const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join25(homedir22(), ".local", "share");
+  const dataRoot = configured || join24(homedir22(), ".local", "share");
   if (!isAbsolute3(dataRoot)) {
     throw new TypeError("Source watch XDG_DATA_HOME must be an absolute private data root.");
   }
-  return join25(dataRoot, "openclaw", "olympus", "source-watches.sqlite");
+  return join24(dataRoot, "openclaw", "olympus", "source-watches.sqlite");
 }
 function createTrustedSourceWatchOwnerContext(input) {
   assertOnlyFields(input, OWNER_CONTEXT_FIELDS, "owner context");
@@ -32532,131 +31692,6 @@ class EmailClient {
       ...detail !== undefined ? { detail } : {}
     };
   }
-  async answer(options) {
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: options.question,
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    if (typeof data.answer !== "string" || data.answer.length === 0) {
-      throw new OperationError("email_error", "Email answer response did not include a non-empty answer.");
-    }
-    return {
-      answer: data.answer,
-      ...data.evidence !== undefined ? { evidence: data.evidence } : {},
-      ...data.audit !== undefined ? { audit: parseEmailAudit(data.audit) } : {},
-      policy: {
-        raw_email_exposed: false,
-        reasoning_lane: "delphi_local"
-      }
-    };
-  }
-  async search(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email source packets require an approved local/private session.", "OpenClaw native tools do not currently provide trustworthy active model/provider metadata to Olympus. Keep source packets disabled unless using the explicit local development proof gate.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before using local-only email source packets.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.question ? { question: options.question } : {},
-        ...options.query ? { query: options.query } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.includeSanitizedText !== undefined ? { include_sanitized_text: options.includeSanitizedText } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
-  async indexSync(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before syncing the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.newerThanDays !== undefined ? { newer_than_days: options.newerThanDays } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.query ? { query: options.query } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexEmbed(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index embedding requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before embedding the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.modelId ? { model_id: options.modelId } : {},
-        ...options.force !== undefined ? { force: options.force } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexSearch(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email index source packets require an approved local/private session.", "Keep local email index packets disabled unless the active caller is an approved Olympus local model session.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before searching the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.label ? { label: options.label } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
@@ -32835,31 +31870,6 @@ class EmailClient {
       includeLocators: options.includeLocators === true
     });
   }
-  async sourceExport(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source export requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        destination_root: options.destinationRoot,
-        items: options.items.map((item) => ({
-          path: item.path,
-          ...item.destSubfolder ? { dest_subfolder: item.destSubfolder } : {}
-        })),
-        ...options.account ? { account: options.account } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
   async sourceTranscribe(options) {
     if (!this.config.sourceIndex.answerDevEnabled) {
       throw new OperationError("source_index_answer_dev_required", "Source transcription requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
@@ -32907,116 +31917,6 @@ class EmailClient {
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return data;
-  }
-  async sourceIndexPromotionCandidates(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion candidates require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-candidates`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.corpusId ? { corpus_id: options.corpusId } : {},
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionCandidatesResult(data);
-  }
-  async sourceIndexPromotionProposal(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposals require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        classification_ids: options.classificationIds,
-        canonical_type: options.canonicalType,
-        target_surface: options.targetSurface,
-        reason_code: options.reasonCode,
-        ...options.proposedBy ? { proposed_by: options.proposedBy } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalResult(data);
-  }
-  async sourceIndexPromotionProposals(options = {}) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal listing requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/list`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.status ? { status: options.status } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalsResult(data);
-  }
-  async sourceIndexPromotionProposalDetail(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal details require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/get`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalDetailResult(data);
-  }
-  async sourceIndexPromotionDecision(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion decisions require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-decisions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId,
-        decision: options.decision,
-        ...options.decidedBy ? { decided_by: options.decidedBy } : {},
-        ...options.reasonCode ? { reason_code: options.reasonCode } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionDecisionResult(data);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -33252,36 +32152,6 @@ function asRecord8(value) {
   }
   return value;
 }
-function parseEmailAudit(value) {
-  const audit = asRecord8(value);
-  const parsed = {
-    request_id: requiredString4(audit.request_id, "audit.request_id"),
-    queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-    metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-    evidence_count: requiredNumber(audit.evidence_count, "audit.evidence_count"),
-    reasoner_ms: requiredNumber(audit.reasoner_ms, "audit.reasoner_ms"),
-    fallback_used: requiredBoolean(audit.fallback_used, "audit.fallback_used")
-  };
-  if (audit.planner_used !== undefined) {
-    parsed.planner_used = requiredBoolean(audit.planner_used, "audit.planner_used");
-  }
-  if (audit.planner_fallback_used !== undefined) {
-    parsed.planner_fallback_used = requiredBoolean(audit.planner_fallback_used, "audit.planner_fallback_used");
-  }
-  if (audit.planned_search_count !== undefined) {
-    parsed.planned_search_count = requiredNumber(audit.planned_search_count, "audit.planned_search_count");
-  }
-  if (audit.planner_failure_reason !== undefined) {
-    parsed.planner_failure_reason = requiredPlannerFailureReason(audit.planner_failure_reason);
-  }
-  if (audit.retrieval_searches_attempted !== undefined) {
-    parsed.retrieval_searches_attempted = requiredNumber(audit.retrieval_searches_attempted, "audit.retrieval_searches_attempted");
-  }
-  if (audit.retrieval_search_summaries !== undefined) {
-    parsed.retrieval_search_summaries = parseRetrievalSearchSummaries(audit.retrieval_search_summaries);
-  }
-  return parsed;
-}
 function requiredString4(value, name) {
   if (typeof value !== "string" || value.length === 0) {
     throw new OperationError("email_error", `${name} must be a non-empty string.`);
@@ -33300,121 +32170,6 @@ function requiredNonNegativeNumber(value, name) {
     throw new OperationError("email_error", `${name} must be non-negative.`);
   }
   return number;
-}
-function requiredBoolean(value, name) {
-  if (typeof value !== "boolean") {
-    throw new OperationError("email_error", `${name} must be a boolean.`);
-  }
-  return value;
-}
-function requiredPlannerFailureReason(value) {
-  if (value === "timeout" || value === "http_error" || value === "invalid_json" || value === "invalid_plan" || value === "empty_plan" || value === "error") {
-    return value;
-  }
-  throw new OperationError("email_error", "audit.planner_failure_reason must be a known safe planner failure reason.");
-}
-function parseRetrievalSearchSummaries(value) {
-  if (!Array.isArray(value)) {
-    throw new OperationError("email_error", "audit.retrieval_search_summaries must be an array.");
-  }
-  return value.map((item, index) => {
-    const summary = asRecord8(item);
-    const source = summary.source;
-    if (source !== "baseline" && source !== "planner") {
-      throw new OperationError("email_error", `audit.retrieval_search_summaries.${index}.source must be safe.`);
-    }
-    return {
-      source,
-      index: requiredNumber(summary.index, `audit.retrieval_search_summaries.${index}.index`),
-      hits: requiredNumber(summary.hits, `audit.retrieval_search_summaries.${index}.hits`),
-      new_candidates_after_dedupe: requiredNumber(summary.new_candidates_after_dedupe, `audit.retrieval_search_summaries.${index}.new_candidates_after_dedupe`),
-      capped: requiredBoolean(summary.capped, `audit.retrieval_search_summaries.${index}.capped`)
-    };
-  });
-}
-function parseEmailSourcePacketResult(value) {
-  const packet = asRecord8(value.packet);
-  const audit = asRecord8(value.audit);
-  const policy = asRecord8(value.policy);
-  if (packet.kind !== "email_source_packet") {
-    throw new OperationError("email_error", "email_search response packet.kind must be email_source_packet.");
-  }
-  if (packet.source !== "gmail") {
-    throw new OperationError("email_error", "email_search response packet.source must be gmail.");
-  }
-  if (!Array.isArray(packet.items)) {
-    throw new OperationError("email_error", "email_search response packet.items must be an array.");
-  }
-  if (policy.raw_email_exposed !== false || policy.local_only !== true || policy.requires_local_session !== true) {
-    throw new OperationError("email_error", "email_search response policy must be local-only and raw-email-safe.");
-  }
-  if (audit.local_packet !== true || audit.raw_email_exposed !== false) {
-    throw new OperationError("email_error", "email_search response audit must be local packet and raw-email-safe.");
-  }
-  return {
-    packet: {
-      kind: "email_source_packet",
-      packet_id: requiredString4(packet.packet_id, "packet.packet_id"),
-      source: "gmail",
-      ...typeof packet.account === "string" ? { account: packet.account } : {},
-      items: packet.items.map(parseEmailSourcePacketItem)
-    },
-    audit: {
-      request_id: requiredString4(audit.request_id, "audit.request_id"),
-      queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-      metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-      items_returned: requiredNumber(audit.items_returned, "audit.items_returned"),
-      sanitized_reads_attempted: requiredNumber(audit.sanitized_reads_attempted, "audit.sanitized_reads_attempted"),
-      sanitized_reads_succeeded: requiredNumber(audit.sanitized_reads_succeeded, "audit.sanitized_reads_succeeded"),
-      truncated: requiredBoolean(audit.truncated, "audit.truncated"),
-      local_packet: true,
-      raw_email_exposed: false,
-      ...audit.retrieval_source === "local_index" ? { retrieval_source: "local_index" } : {},
-      ...audit.retrieval_mode === "keyword" || audit.retrieval_mode === "hybrid" ? { retrieval_mode: audit.retrieval_mode } : {},
-      ...audit.requested_retrieval_mode === "keyword" || audit.requested_retrieval_mode === "hybrid" ? { requested_retrieval_mode: audit.requested_retrieval_mode } : {},
-      ...typeof audit.keyword_candidates === "number" ? { keyword_candidates: audit.keyword_candidates } : {},
-      ...typeof audit.vector_candidates === "number" ? { vector_candidates: audit.vector_candidates } : {},
-      ...typeof audit.fused_candidates === "number" ? { fused_candidates: audit.fused_candidates } : {},
-      ...typeof audit.semantic_skipped_reason === "string" ? { semantic_skipped_reason: audit.semantic_skipped_reason } : {},
-      ...typeof audit.embedding_model_id === "string" ? { embedding_model_id: audit.embedding_model_id } : {},
-      ...audit.vector_backend === "exact_scan" ? { vector_backend: "exact_scan" } : {},
-      ...typeof audit.latency_ms === "number" ? { latency_ms: audit.latency_ms } : {},
-      ...typeof audit.threads_returned === "number" ? { threads_returned: audit.threads_returned } : {}
-    },
-    policy: {
-      raw_email_exposed: false,
-      local_only: true,
-      requires_local_session: true
-    }
-  };
-}
-function parseEmailSourcePacketItem(value) {
-  const item = asRecord8(value);
-  const provenance = asRecord8(item.provenance);
-  if (provenance.source !== "gmail" && provenance.provider !== "gmail") {
-    throw new OperationError("email_error", "packet item provenance provider/source must be gmail.");
-  }
-  return {
-    ...typeof item.item_id === "string" ? { item_id: item.item_id } : {},
-    ...typeof item.thread_id === "string" ? { thread_id: item.thread_id } : {},
-    ...typeof item.subject === "string" ? { subject: item.subject } : {},
-    ...typeof item.from === "string" ? { from: item.from } : {},
-    ...typeof item.to === "string" ? { to: item.to } : {},
-    ...typeof item.date === "string" ? { date: item.date } : {},
-    ...typeof item.sanitized_text === "string" ? { sanitized_text: item.sanitized_text } : {},
-    provenance: {
-      ...provenance.source === "gmail" ? { source: "gmail" } : {},
-      ...provenance.provider === "gmail" ? { provider: "gmail" } : {},
-      ...typeof provenance.account === "string" ? { account: provenance.account } : {},
-      ...typeof provenance.message_id === "string" ? { message_id: provenance.message_id } : {},
-      ...typeof provenance.thread_id === "string" ? { thread_id: provenance.thread_id } : {},
-      ...typeof provenance.local_message_id === "string" ? { local_message_id: provenance.local_message_id } : {},
-      ...Array.isArray(provenance.chunk_ids) ? { chunk_ids: provenance.chunk_ids.filter((id) => typeof id === "string") } : {},
-      ...typeof provenance.sync_run_id === "string" ? { sync_run_id: provenance.sync_run_id } : {},
-      ...typeof provenance.checkpoint_id === "string" ? { checkpoint_id: provenance.checkpoint_id } : {},
-      ...typeof provenance.source_version === "string" ? { source_version: provenance.source_version } : {}
-    }
-  };
 }
 function parseSourceIndexAnswerResult(value) {
   const answer = requiredString4(value.answer, "answer");
@@ -33714,212 +32469,6 @@ function parseSourceWatchResult(value, kind) {
     policy: safePolicy
   };
 }
-function parseSourceIndexPromotionCandidatesResult(value) {
-  if (value.kind !== "dropbox_content_promotion_candidates") {
-    throw new OperationError("email_error", "source index promotion candidates result must have kind=dropbox_content_promotion_candidates.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion candidates returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.candidates)) {
-    throw new OperationError("email_error", "source index promotion candidates must include a candidates array.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.promotion_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion candidates policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_candidates",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString4(value.account, "account"),
-    scope_key_hash: requiredString4(value.scope_key_hash, "scope_key_hash"),
-    candidates: value.candidates,
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      promotion_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal") {
-    throw new OperationError("email_error", "source index promotion proposal result must have kind=dropbox_content_promotion_proposal.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal returned an unsupported corpus.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.proposal_only !== true) {
-    throw new OperationError("email_error", "source index promotion proposal policy must describe a local proposal-only write.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString4(value.account, "account"),
-    scope_key_hash: requiredString4(value.scope_key_hash, "scope_key_hash"),
-    proposal_id: requiredString4(value.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString4(value.proposal_revision_id, "proposal_revision_id"),
-    status: "proposed",
-    canonical_type: requiredString4(value.canonical_type, "canonical_type"),
-    target_surface: requiredString4(value.target_surface, "target_surface"),
-    reason_code: requiredString4(value.reason_code, "reason_code"),
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    trust_domain: "secure_local",
-    trust_tiers: Array.isArray(value.trust_tiers) ? value.trust_tiers.map(String) : [],
-    policy_decisions: Array.isArray(value.policy_decisions) ? value.policy_decisions.map(String) : [],
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      proposal_only: true
-    }
-  };
-}
-function parseSourceIndexPromotionProposalsResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposals") {
-    throw new OperationError("email_error", "source index promotion proposals result must have kind=dropbox_content_promotion_proposals.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposals returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.proposals)) {
-    throw new OperationError("email_error", "source index promotion proposals must include a proposals array.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposals policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposals",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposals: value.proposals.map((proposal) => parseSourceIndexPromotionProposalSummary(asRecord8(proposal))),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalDetailResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal_detail") {
-    throw new OperationError("email_error", "source index promotion proposal detail result must have kind=dropbox_content_promotion_proposal_detail.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal detail returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.evidence) || !Array.isArray(value.decisions)) {
-    throw new OperationError("email_error", "source index promotion proposal detail must include evidence and decisions arrays.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal detail policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal_detail",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal: parseSourceIndexPromotionProposalSummary(asRecord8(value.proposal)),
-    evidence: value.evidence.map((item) => {
-      const record = asRecord8(item);
-      return {
-        classification_id: requiredString4(record.classification_id, "classification_id"),
-        evidence_ordinal: requiredNumber(record.evidence_ordinal, "evidence_ordinal"),
-        target_kind: requiredString4(record.target_kind, "target_kind"),
-        source_content_hash: requiredString4(record.source_content_hash, "source_content_hash"),
-        provider_file_id_hash: requiredString4(record.provider_file_id_hash, "provider_file_id_hash"),
-        ...record.revision_hash !== undefined ? { revision_hash: requiredString4(record.revision_hash, "revision_hash") } : {},
-        ...record.content_hash !== undefined ? { content_hash: requiredString4(record.content_hash, "content_hash") } : {},
-        ...record.structural_ref_hash !== undefined ? { structural_ref_hash: requiredString4(record.structural_ref_hash, "structural_ref_hash") } : {},
-        trust_tier: requiredString4(record.trust_tier, "trust_tier"),
-        trust_domain: "secure_local",
-        policy_decision: requiredString4(record.policy_decision, "policy_decision"),
-        review_status_at_proposal: requiredString4(record.review_status_at_proposal, "review_status_at_proposal"),
-        finding_count: requiredNumber(record.finding_count, "finding_count")
-      };
-    }),
-    decisions: value.decisions.map((item) => {
-      const record = asRecord8(item);
-      if (record.resource_write_performed !== false || record.execution_performed !== false) {
-        throw new OperationError("email_error", "source index promotion decisions must not report external writes or executions.");
-      }
-      return {
-        decision_id: requiredString4(record.decision_id, "decision_id"),
-        decision: requiredString4(record.decision, "decision"),
-        ...record.reason_code !== undefined ? { reason_code: requiredString4(record.reason_code, "reason_code") } : {},
-        decided_at: requiredString4(record.decided_at, "decided_at"),
-        resource_write_performed: false,
-        execution_performed: false
-      };
-    }),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalSummary(record) {
-  if (record.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal summaries must not report external resource writes.");
-  }
-  return {
-    proposal_id: requiredString4(record.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString4(record.proposal_revision_id, "proposal_revision_id"),
-    account: requiredString4(record.account, "account"),
-    scope_key_hash: requiredString4(record.scope_key_hash, "scope_key_hash"),
-    canonical_type: requiredString4(record.canonical_type, "canonical_type"),
-    target_surface: requiredString4(record.target_surface, "target_surface"),
-    reason_code: requiredString4(record.reason_code, "reason_code"),
-    status: requiredString4(record.status, "status"),
-    evidence_count: requiredNumber(record.evidence_count, "evidence_count"),
-    decision_count: requiredNumber(record.decision_count, "decision_count"),
-    resource_write_performed: false,
-    created_at: requiredString4(record.created_at, "created_at"),
-    updated_at: requiredString4(record.updated_at, "updated_at")
-  };
-}
-function parseSourceIndexPromotionDecisionResult(value) {
-  if (value.kind !== "dropbox_content_promotion_decision") {
-    throw new OperationError("email_error", "source index promotion decision result must have kind=dropbox_content_promotion_decision.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion decision returned an unsupported corpus.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.execution_performed !== false) {
-    throw new OperationError("email_error", "source index promotion decision policy must describe a local review-ledger write only.");
-  }
-  const decision = requiredString4(value.decision, "decision");
-  return {
-    kind: "dropbox_content_promotion_decision",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal_id: requiredString4(value.proposal_id, "proposal_id"),
-    decision_id: requiredString4(value.decision_id, "decision_id"),
-    decision,
-    status: decision,
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      execution_performed: false
-    }
-  };
-}
 function optionalRetrievalMode(value) {
   return value === "keyword" || value === "hybrid" ? value : undefined;
 }
@@ -34112,9 +32661,6 @@ function shouldExposeOperation(operation, context) {
   }
   if (operation.requiresOpenClawSessionRoute && context.surface !== "native") {
     return false;
-  }
-  if (operation.nativeExposure === "sourceIndexAnswerDevOnly") {
-    return context.config.sourceIndex.answerDevEnabled;
   }
   if (operation.nativeExposure === "sourceIndexEnabledOnly") {
     return isSourceIndexReadSurfaceEnabled(context.config);
@@ -34483,13 +33029,13 @@ var init_unpaired_sources = __esm(() => {
 });
 
 // src/core/connect.ts
-import { Buffer as Buffer4 } from "node:buffer";
-import { spawn as spawn2 } from "node:child_process";
+import { Buffer as Buffer3 } from "node:buffer";
+import { spawn } from "node:child_process";
 import { createHash as createHash24, randomBytes as randomBytes3 } from "node:crypto";
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir23 } from "node:os";
-import { dirname as dirname18, join as join26 } from "node:path";
+import { dirname as dirname18, join as join25 } from "node:path";
 import { stdin as processStdin } from "node:process";
 async function connectOAuthSource(options) {
   const pending = await startOAuthSourceConnection(options);
@@ -34509,7 +33055,7 @@ async function connectOAuthSourceDetached(options) {
   mkdirSync15(logDir, { recursive: true, mode: 448 });
   const statePath = detachedOAuthStatePath({ stateDir, source: options.source, accountRole });
   cleanupTerminalDetachedOAuthState(statePath);
-  const logPath = join26(logDir, `${options.source}.${accountRole}.${startedAt.replaceAll(/[:.]/g, "-")}.log`);
+  const logPath = join25(logDir, `${options.source}.${accountRole}.${startedAt.replaceAll(/[:.]/g, "-")}.log`);
   const requestPath = `${statePath}.request.${process.pid}.${Date.now()}.json`;
   writePrivateJson(requestPath, {
     source: options.source,
@@ -34720,11 +33266,11 @@ async function finishOAuthSourceConnection(options) {
   }
 }
 function createOAuthPkceState() {
-  const verifier = base64Url2(randomBytes3(32));
+  const verifier = base64Url(randomBytes3(32));
   return {
     verifier,
-    challenge: base64Url2(createHash24("sha256").update(verifier).digest()),
-    state: base64Url2(randomBytes3(24))
+    challenge: base64Url(createHash24("sha256").update(verifier).digest()),
+    state: base64Url(randomBytes3(24))
   };
 }
 function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
@@ -35220,9 +33766,9 @@ function restorePriorUnpairedRecord(prior, registryPath) {
 async function readApiKeyFromStdin(stdin = processStdin) {
   const chunks = [];
   for await (const chunk of stdin) {
-    chunks.push(Buffer4.isBuffer(chunk) ? chunk : Buffer4.from(chunk));
+    chunks.push(Buffer3.isBuffer(chunk) ? chunk : Buffer3.from(chunk));
   }
-  return Buffer4.concat(chunks).toString("utf8").trim();
+  return Buffer3.concat(chunks).toString("utf8").trim();
 }
 function oauthAuthorizeOrigin(source) {
   return new URL(oauthSourceDefinition(source).authUrl).origin;
@@ -35396,7 +33942,7 @@ function directTokenExchangeRequest(options) {
     "Content-Type": "application/x-www-form-urlencoded"
   };
   if (options.source === "x" && options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer4.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+    headers.Authorization = `Basic ${Buffer3.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
   } else {
     body.set("client_id", options.clientId);
     if (isGoogleOAuthSource(options.source) && options.clientSecret)
@@ -35426,13 +33972,13 @@ function oauthErrorCodeFromBody(text) {
   }
 }
 function defaultDetachedOAuthStateDir() {
-  return join26(homedir23(), ".olympus", "pending-oauth");
+  return join25(homedir23(), ".olympus", "pending-oauth");
 }
 function defaultDetachedOAuthLogDir() {
-  return join26(homedir23(), ".olympus", "logs");
+  return join25(homedir23(), ".olympus", "logs");
 }
 function detachedOAuthStatePath(options) {
-  return join26(options.stateDir ?? defaultDetachedOAuthStateDir(), `${safeStatePathSegment(options.source)}.${safeStatePathSegment(safeAccountRole(options.accountRole ?? "personal"))}.json`);
+  return join25(options.stateDir ?? defaultDetachedOAuthStateDir(), `${safeStatePathSegment(options.source)}.${safeStatePathSegment(safeAccountRole(options.accountRole ?? "personal"))}.json`);
 }
 function writeDetachedOAuthState(path, state) {
   mkdirSync15(dirname18(path), { recursive: true, mode: 448 });
@@ -35576,7 +34122,7 @@ function isOAuthSource(source) {
 function openBrowser(url) {
   const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn2(command, args, { stdio: "ignore", detached: true });
+  const child = spawn(command, args, { stdio: "ignore", detached: true });
   child.once("error", (error) => {
     console.warn(`[olympus] WARNING: could not open the authorization URL automatically: ${error.message}`);
     console.warn(`[olympus] Open this authorization URL manually: ${url}`);
@@ -35589,7 +34135,7 @@ function safeAccountRole(value) {
     throw new Error("Account role must be a safe label.");
   return trimmed2;
 }
-function base64Url2(bytes) {
+function base64Url(bytes) {
   return bytes.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 function errorDetail(error) {
@@ -36414,11 +34960,11 @@ var init_phases = __esm(() => {
 });
 
 // src/workers/credential-health.ts
-import { mkdirSync as mkdirSync16, readFileSync as readFileSync18 } from "node:fs";
-import { homedir as homedir24, uptime } from "node:os";
-import { dirname as dirname19, join as join27 } from "node:path";
+import { readFileSync as readFileSync18 } from "node:fs";
+import { homedir as homedir24 } from "node:os";
+import { join as join26 } from "node:path";
 function defaultCredentialHealthReportPath() {
-  return join27(homedir24(), ".local", "state", "olympus", "credential-health", "current.json");
+  return join26(homedir24(), ".local", "state", "olympus", "credential-health", "current.json");
 }
 function readCredentialHealthReport(path = defaultCredentialHealthReportPath()) {
   let parsed;
@@ -36442,7 +34988,7 @@ function credentialHealthDegradations(report, now = new Date) {
       display_name: "Credential health: stale probe report",
       state: "retrying",
       status_label: "Credential unavailable - needs your attention",
-      hint: "The daily credential health probe has not reported recently, so connection state may be out of date. Inspect the credential-health probe service.",
+      hint: "This credential health report is out of date. Check the source connection status in Setup.",
       attempts: 1,
       max_attempts: 1
     }];
@@ -36452,7 +34998,7 @@ function credentialHealthDegradations(report, now = new Date) {
     display_name: `Credential health: ${result.handle}`,
     state: result.status === "degraded" ? "retrying" : "stopped",
     status_label: "Credential unavailable - needs your attention",
-    hint: result.status === "degraded" ? "The proactive credential check could not confirm this connection. Inspect the credential-health service and retry." : "Reconnect or restore this credential, then rerun the credential-health probe.",
+    hint: result.status === "degraded" ? "This report could not confirm the connection. Check its current status in Setup and retry the source." : "Reconnect or restore this source credential in Setup.",
     attempts: 1,
     max_attempts: 1,
     ...result.source_ids.length > 0 ? { affected_profiles: [...result.source_ids] } : {}
@@ -36523,22 +35069,16 @@ function isHealthStatus(value) {
   return value === "healthy" || value === "reauth_required" || value === "missing" || value === "degraded" || value === "skipped";
 }
 function isCredentialType(value) {
-  return value === "oauth2_refresh" || value === "rotating_oauth2_refresh" || value === "service_account_jwt" || value === "static_api_key" || value === "non_refreshable_session";
+  return value === "oauth2_refresh" || value === "rotating_oauth2_refresh" || value === "static_api_key" || value === "non_refreshable_session";
 }
 function isProbeMode(value) {
   return value === "active" || value === "passive";
 }
-var SAFE_ID2, ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
+var SAFE_ID2, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS;
 var init_credential_health = __esm(() => {
-  init_atomic_file();
-  init_connected_handles();
-  init_credential_broker();
   SAFE_ID2 = /^[a-zA-Z0-9._:-]{1,160}$/;
-  ROTATING_PROVIDERS = new Set(["x"]);
-  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
   CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
   CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
-  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 
 // src/workers/source-index/status.ts
@@ -36778,9 +35318,9 @@ var init_status = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { mkdirSync as mkdirSync17 } from "node:fs";
+import { mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
-import { dirname as dirname20, join as join28 } from "node:path";
+import { dirname as dirname19, join as join27 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
 function dashboardGuidedSessionAgentPrompt(source) {
   if (source === "telegram") {
@@ -36789,8 +35329,8 @@ function dashboardGuidedSessionAgentPrompt(source) {
   return "Connect WhatsApp to Olympus using the supported QR pairing flow. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
 }
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join28(homedir25(), ".local", "share");
-  return join28(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join27(homedir25(), ".local", "share");
+  return join27(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 function phaseAtParity(sample, counter, value) {
   if (sample.settled_pass !== true)
@@ -36809,7 +35349,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync17(dirname20(dbPath), { recursive: true });
+      mkdirSync16(dirname19(dbPath), { recursive: true });
     this.db = new Database7(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -38788,9 +37328,9 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync18, mkdirSync as mkdirSync18 } from "node:fs";
+import { existsSync as existsSync18, mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir26 } from "node:os";
-import { dirname as dirname21, join as join29 } from "node:path";
+import { dirname as dirname20, join as join28 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -38848,7 +37388,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync18(dirname21(dbPath), { recursive: true });
+      mkdirSync17(dirname20(dbPath), { recursive: true });
     this.db = new Database8(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -38865,77 +37405,9 @@ class SqliteSourceIngestionLedgerStore {
       );
       CREATE INDEX IF NOT EXISTS source_dashboard_samples_corpus_time_idx
         ON source_dashboard_samples (corpus_id, sampled_at);
-      CREATE TABLE IF NOT EXISTS source_ingestion_ledger (
-        source_id TEXT PRIMARY KEY,
-        label TEXT NOT NULL,
-        primary_corpus_id TEXT NOT NULL,
-        corpus_ids_json TEXT NOT NULL,
-        family TEXT NOT NULL,
-        trust_domains_json TEXT NOT NULL,
-        configured INTEGER NOT NULL,
-        items INTEGER NOT NULL,
-        content_indexed INTEGER NOT NULL,
-        metadata_only INTEGER NOT NULL,
-        failed INTEGER NOT NULL,
-        coverage_percent REAL NOT NULL DEFAULT 0,
-        stuck_queued INTEGER NOT NULL,
-        stuck_active INTEGER NOT NULL,
-        held_paused INTEGER NOT NULL,
-        broken INTEGER NOT NULL,
-        ingestion_health_json TEXT NOT NULL DEFAULT '{}',
-        freshness_hours REAL,
-        last_sync_at TEXT,
-        attention_json TEXT NOT NULL,
-        failure_breakdown_json TEXT NOT NULL,
-        refreshed_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS source_ingestion_unreadable_content (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        path_display TEXT,
-        status TEXT NOT NULL,
-        extractor_kind TEXT NOT NULL,
-        error_class TEXT,
-        updated_at TEXT NOT NULL,
-        refreshed_at TEXT NOT NULL
-      );
     `);
-    ensureColumn(this.db, "source_ingestion_ledger", "coverage_percent", "REAL NOT NULL DEFAULT 0");
-    ensureColumn(this.db, "source_ingestion_ledger", "ingestion_health_json", "TEXT NOT NULL DEFAULT '{}'");
   }
   record(snapshot) {
-    const upsert = this.db.query(`
-      INSERT INTO source_ingestion_ledger (
-        source_id, label, primary_corpus_id, corpus_ids_json, family,
-        trust_domains_json, configured, items, content_indexed, metadata_only,
-        failed, coverage_percent, stuck_queued, stuck_active, held_paused, broken,
-        ingestion_health_json, freshness_hours, last_sync_at, attention_json,
-        failure_breakdown_json, refreshed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(source_id) DO UPDATE SET
-        label = excluded.label,
-        primary_corpus_id = excluded.primary_corpus_id,
-        corpus_ids_json = excluded.corpus_ids_json,
-        family = excluded.family,
-        trust_domains_json = excluded.trust_domains_json,
-        configured = excluded.configured,
-        items = excluded.items,
-        content_indexed = excluded.content_indexed,
-        metadata_only = excluded.metadata_only,
-        failed = excluded.failed,
-        coverage_percent = excluded.coverage_percent,
-        stuck_queued = excluded.stuck_queued,
-        stuck_active = excluded.stuck_active,
-        held_paused = excluded.held_paused,
-        broken = excluded.broken,
-        ingestion_health_json = excluded.ingestion_health_json,
-        freshness_hours = excluded.freshness_hours,
-        last_sync_at = excluded.last_sync_at,
-        attention_json = excluded.attention_json,
-        failure_breakdown_json = excluded.failure_breakdown_json,
-        refreshed_at = excluded.refreshed_at
-    `);
     const sample = this.db.query(`
       INSERT INTO source_dashboard_samples (
         source_id, corpus_id, sampled_at, indexed_items, content_ready_items,
@@ -38953,15 +37425,8 @@ class SqliteSourceIngestionLedgerStore {
           LIMIT ?
         )
     `);
-    const insertUnreadable = this.db.query(`
-      INSERT INTO source_ingestion_unreadable_content (
-        source_id, name, path_display, status, extractor_kind, error_class,
-        updated_at, refreshed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
     this.db.transaction(() => {
       for (const row of snapshot.rows) {
-        upsert.run(row.source_id, row.label, row.primary_corpus_id, JSON.stringify(row.corpus_ids), row.family, JSON.stringify(row.trust_domains), row.configured ? 1 : 0, row.items, row.content_indexed, row.metadata_only, row.failed, row.coverage_percent, row.stuck.queued, row.stuck.active, row.stuck.held_paused, row.stuck.broken, JSON.stringify(row.ingestion_health), row.freshness_hours ?? null, row.last_sync_at ?? null, JSON.stringify(row.attention), JSON.stringify(row.failure_breakdown ?? []), snapshot.generated_at);
         sample.run(row.source_id, row.primary_corpus_id, snapshot.generated_at, row.items, row.content_indexed, row.stuck.queued, row.stuck.active, row.failed + row.stuck.broken);
       }
       const generatedAt = Date.parse(snapshot.generated_at);
@@ -38970,10 +37435,6 @@ class SqliteSourceIngestionLedgerStore {
       }
       for (const corpusId of new Set(snapshot.rows.map((row) => row.primary_corpus_id))) {
         trimCorpusSamples.run(corpusId, corpusId, MAX_SAMPLES_PER_CORPUS2);
-      }
-      this.db.query("DELETE FROM source_ingestion_unreadable_content").run();
-      for (const item of snapshot.unreadable_content ?? []) {
-        insertUnreadable.run(item.source_id, item.name, item.path_display ?? null, item.status, item.extractor_kind, item.error_class ?? null, item.updated_at, snapshot.generated_at);
       }
     })();
   }
@@ -39613,7 +38074,7 @@ function mergeConnectorStoreDefinitions(stores) {
   return Array.from(byCorpusId.values());
 }
 function whatsappConnectorStoreDbPath(env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join29(env.XDG_DATA_HOME?.trim() || join29(homedir26(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join28(env.XDG_DATA_HOME?.trim() || join28(homedir26(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
 }
 function number(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -39653,12 +38114,6 @@ function applyDrainActivity(row, value, now) {
 }
 function sumByStatus(rows, status) {
   return rows.filter((row) => row.status === status).reduce((sum2, row) => sum2 + row.count, 0);
-}
-function ensureColumn(db, table, column, definition) {
-  const columns = db.query(`PRAGMA table_info(${table})`).all();
-  if (columns.some((entry) => entry.name === column))
-    return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 function dedupe(values) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
@@ -39741,8 +38196,8 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync19, mkdirSync as mkdirSync19, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname22, join as join30 } from "node:path";
+import { existsSync as existsSync19, mkdirSync as mkdirSync18, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname21, join as join29 } from "node:path";
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
@@ -39811,7 +38266,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join30(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join29(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -40520,7 +38975,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join30(dirname22(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join29(dirname21(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -40564,7 +39019,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync19(dirname22(path), { recursive: true });
+  mkdirSync18(dirname21(path), { recursive: true });
   writeFileSync7(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -40745,15 +39200,11 @@ function hasSyncRecord(corpus) {
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
+  const registry = createPublicSourceCorpusRegistry(deps.config.sourceIndex.corpusRegistry);
   return corpora.filter((entry) => {
-    const corpus = asRecord9(entry);
-    const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "";
-    return !isDomainCorpus(corpusId) || deps.config.domainExpert.enabled === true;
+    const corpusId = asRecord9(entry).corpus_id;
+    return typeof corpusId === "string" && registry.has(corpusId, "status");
   });
-  return corpora;
-}
-function isDomainCorpus(corpusId) {
-  return corpusId.startsWith("internal.solon.") || corpusId.startsWith("secure_local.solon.");
 }
 function staleTaskAttempt(task, deps) {
   const attemptedAt = typeof task.last_attempt_at === "string" ? task.last_attempt_at : undefined;
@@ -40777,7 +39228,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join30(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join29(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -40804,38 +39255,9 @@ var init_doctor = __esm(() => {
   init_source_dashboard();
   init_ingestion_throughput();
   init_public_source_capabilities();
+  init_source_corpus_registry();
   STALE_RUNNING_SYNC_MS = 24 * 60 * 60 * 1000;
   CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
-});
-
-// src/core/domain-expert.ts
-var DOMAIN_AGENT_ACTIONS, DOMAIN_SOURCE_ACTIONS, RAG_CORPUS_ACTIONS, DOMAIN_DOC_ACTIONS, DOMAIN_SOURCE_KINDS, ANNAS_ARCHIVE_FORMATS;
-var init_domain_expert = __esm(() => {
-  init_operation_error();
-  DOMAIN_AGENT_ACTIONS = ["bootstrap", "status"];
-  DOMAIN_SOURCE_ACTIONS = ["add", "list", "status", "remove"];
-  RAG_CORPUS_ACTIONS = ["create", "import", "stage_import", "web_import", "notion_import", "list_files", "delete_file", "status", "refresh"];
-  DOMAIN_DOC_ACTIONS = [
-    "read",
-    "comment",
-    "visual_insert",
-    "visual_replace",
-    "accept_visual_edits",
-    "reject_visual_edits"
-  ];
-  DOMAIN_SOURCE_KINDS = [
-    "book",
-    "pdf",
-    "epub",
-    "google_doc",
-    "blog_post",
-    "transcript",
-    "note",
-    "dataset",
-    "web_page",
-    "unknown"
-  ];
-  ANNAS_ARCHIVE_FORMATS = ["pdf", "epub", "mobi", "azw3", "djvu", "unknown"];
 });
 
 // src/core/source-index/selected-item-safety.ts
@@ -40914,19 +39336,9 @@ function optionalSourceIndexStatusCorpusId(value, config) {
     return;
   return publicSourceCorpusRegistry(config).require(corpusId, "status");
 }
-function asSourceIndexSyncCorpusId(value, config) {
-  const corpusId = asString(value, "corpus_id");
-  return sourceCorpusRegistry(config).require(corpusId, "sync");
-}
 function asSourceIndexSearchCorpusId(value, config) {
   const corpusId = asString(value, "corpus_id");
   return publicSourceCorpusRegistry(config).require(corpusId, "search");
-}
-function optionalSourceIndexPromotionCandidateCorpusId(value, config) {
-  const corpusId = optionalString9(value);
-  if (corpusId === undefined)
-    return;
-  return sourceCorpusRegistry(config).require(corpusId, "promotion_candidates");
 }
 function optionalSourceWatchMode(value) {
   const mode = optionalString9(value);
@@ -40939,137 +39351,6 @@ function requireSourceWatchRoute(ctx) {
     throw new OperationError("source_index_policy_violation", "Durable watch management requires an authenticated OpenClaw owner and delivery route.", "Create and manage watches from an owner-authenticated OpenClaw channel session.");
   }
   return ctx.sourceWatchRoute;
-}
-function asPromotionCanonicalType(value) {
-  const canonicalType = asString(value, "canonical_type");
-  if (includesString(SOURCE_INDEX_PROMOTION_CANONICAL_TYPES, canonicalType))
-    return canonicalType;
-  throw new OperationError("invalid_params", "canonical_type is not supported.");
-}
-function asPromotionTargetSurface(value) {
-  const targetSurface = asString(value, "target_surface");
-  if (includesString(SOURCE_INDEX_PROMOTION_TARGET_SURFACES, targetSurface))
-    return targetSurface;
-  throw new OperationError("invalid_params", "target_surface is not supported.");
-}
-function asPromotionReasonCode(value) {
-  const reasonCode = asString(value, "reason_code");
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionReasonCode(value) {
-  const reasonCode = optionalString9(value);
-  if (reasonCode === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionProposalStatus(value) {
-  const status = optionalString9(value);
-  if (status === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES, status))
-    return status;
-  throw new OperationError("invalid_params", "status is not supported.");
-}
-function asPromotionDecision(value) {
-  const decision = asString(value, "decision");
-  if (includesString(SOURCE_INDEX_PROMOTION_DECISIONS, decision))
-    return decision;
-  throw new OperationError("invalid_params", "decision is not supported.");
-}
-function includesString(values, value) {
-  return values.includes(value);
-}
-function optionalSourceTranscribeMode(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "enqueue" || value === "status")
-    return value;
-  throw new OperationError("invalid_params", "mode must be enqueue or status.");
-}
-function asSourceTranscribeItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString9(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox audio file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox audio file path.");
-  }
-  return items;
-}
-function asSourceMediaIngestItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString9(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox image file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox image file path.");
-  }
-  return items;
-}
-function asSourceExportItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => sourceExportItemFromEntry(entry, index));
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one export item.");
-  }
-  return items;
-}
-function sourceExportItemEntries(value) {
-  if (Array.isArray(value))
-    return value;
-  if (typeof value === "string" && value.trim()) {
-    const text = value.trim();
-    if (text.startsWith("[")) {
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        throw new OperationError("invalid_params", "items must be valid JSON when passed as a JSON array string.");
-      }
-      if (!Array.isArray(parsed)) {
-        throw new OperationError("invalid_params", "items must be a JSON array of export items.");
-      }
-      return parsed;
-    }
-    return text.split(",").map((item) => item.trim()).filter(Boolean);
-  }
-  throw new OperationError("invalid_params", "items must be a JSON array of export items or a comma-separated list of source paths.");
-}
-function sourceExportItemFromEntry(entry, index) {
-  if (typeof entry === "string" && entry.trim()) {
-    return { path: entry.trim() };
-  }
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    const record = entry;
-    const path = optionalString9(record.path);
-    if (!path) {
-      throw new OperationError("invalid_params", `items.${index}.path must be a non-empty string.`);
-    }
-    const destSubfolder = optionalString9(record.dest_subfolder);
-    return {
-      path,
-      ...destSubfolder !== undefined ? { destSubfolder } : {}
-    };
-  }
-  throw new OperationError("invalid_params", `items.${index} must be a source path string or an object with a path.`);
 }
 function findOperationByCliName(cliName) {
   return operations.find((operation) => operation.cliHints.name === cliName);
@@ -41107,9 +39388,7 @@ function parameterEnum(operation, paramName, param, options) {
   const config = options.config ?? defaultConfig();
   const capability = sourceCorpusCapabilityForParameter(operation.name, paramName);
   if (capability) {
-    const publicOperation = V0_4_PUBLIC_NATIVE_TOOLS.includes(operation.name);
-    const registry = publicOperation ? publicSourceCorpusRegistry(config) : sourceCorpusRegistry(config);
-    return { enum: registry.ids(capability) };
+    return { enum: publicSourceCorpusRegistry(config).ids(capability) };
   }
   return param.enum ? { enum: param.enum } : {};
 }
@@ -41120,18 +39399,11 @@ function sourceCorpusCapabilityForParameter(operationName, paramName) {
     return "answer";
   if (operationName === "source_index_status")
     return "status";
-  if (operationName === "source_index_sync")
-    return "sync";
   if (operationName === "source_index_search")
     return "search";
   if (operationName === "source_watch_create")
     return "search";
-  if (operationName === "source_index_promotion_candidates")
-    return "promotion_candidates";
   return;
-}
-function sourceCorpusRegistry(config) {
-  return createSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
 }
 function publicSourceCorpusRegistry(config) {
   return createPublicSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
@@ -41139,15 +39411,6 @@ function publicSourceCorpusRegistry(config) {
 function renderIdentityTemplate(value, config) {
   const identity = config?.identity ?? { ownerName: "the owner", assistantName: "the calling assistant" };
   return value.replace(/\{\{ownerName\}\}/g, identity.ownerName).replace(/\{\{assistantName\}\}/g, identity.assistantName);
-}
-async function runDomainExpert(ctx, tool, rawParams) {
-  if (ctx.domainExpert && ctx.config.domainExpert.enabled && ctx.config.domainExpert.liveToolsEnabled) {
-    return ctx.domainExpert.run(tool, rawParams);
-  }
-  throw new OperationError("domain_expert_not_configured", `${tool} is unavailable because the live domain-expert backend is not enabled in this Olympus runtime.`, "Enable both domainExpert.enabled and domainExpert.liveToolsEnabled after configuring the runtime worker.");
-}
-function domainExpertToolsAvailable(config) {
-  return config.domainExpert.enabled && config.domainExpert.liveToolsEnabled;
 }
 function asString(value, name) {
   if (typeof value !== "string" || value.length === 0) {
@@ -41191,7 +39454,7 @@ function optionalExactNarrowingString(value, name) {
 function optionalTrustDomainConsistency(value, corpusId, config) {
   if (value === undefined)
     return;
-  const selectedCorpus = sourceCorpusRegistry(config).list("search").find((corpus) => corpus.corpusId === corpusId);
+  const selectedCorpus = publicSourceCorpusRegistry(config).list("search").find((corpus) => corpus.corpusId === corpusId);
   if (!selectedCorpus) {
     throw new OperationError("invalid_request", "The selected corpus trust domain is unavailable.");
   }
@@ -41332,57 +39595,6 @@ function optionalAnalystModel(value, name, analystProvider) {
   }
   return normalized;
 }
-function optionalTelegramTrustDomain(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "internal" || value === "secure_local")
-    return value;
-  throw new OperationError("invalid_params", "trust_domain must be internal or secure_local.");
-}
-function optionalTelegramSyncDirection(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "forward" || value === "backfill")
-    return value;
-  throw new OperationError("invalid_params", "sync_direction must be forward or backfill.");
-}
-function optionalXBookmarksSyncMode(value, corpusId) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (corpusId !== "internal.x.bookmarks") {
-    throw new OperationError("invalid_params", "mode is supported only for internal.x.bookmarks source-index sync.");
-  }
-  if (value === "head" || value === "reconcile" || value === "folder_facet_refresh" || value === "window_diagnostic" || value === "preservation-reattest")
-    return value;
-  throw new OperationError("invalid_params", "mode must be head, reconcile, window_diagnostic, folder_facet_refresh, or preservation-reattest for X bookmarks source-index sync.");
-}
-function asFileDeliveryWriteMode(value) {
-  const writeMode = asString(value, "write_mode");
-  if (writeMode === "dry_run" || writeMode === "create_new" || writeMode === "overwrite_with_approval") {
-    return writeMode;
-  }
-  throw new OperationError("invalid_params", "write_mode must be dry_run, create_new, or overwrite_with_approval.");
-}
-function asFileDeliveryTrustDomain(value) {
-  const trustDomain = asString(value, "trust_domain");
-  if (trustDomain === "public_safe" || trustDomain === "internal" || trustDomain === "secure_local") {
-    return trustDomain;
-  }
-  throw new OperationError("invalid_params", "trust_domain must be public_safe, internal, or secure_local.");
-}
-function optionalFileContentEncoding(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "utf8" || value === "base64")
-    return value;
-  throw new OperationError("invalid_params", "content_encoding must be utf8 or base64.");
-}
-function asCastorWorkspaceAction(value) {
-  if (value === "health" || value === "list" || value === "read" || value === "write" || value === "delete" || value === "export_gcs") {
-    return value;
-  }
-  throw new OperationError("invalid_params", "action must be health, list, read, write, delete, or export_gcs.");
-}
 function optionalAttachmentType(value) {
   if (value === undefined || value === null || value === "")
     return;
@@ -41390,23 +39602,15 @@ function optionalAttachmentType(value) {
     return value;
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
-var SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS, SOURCE_INDEX_PROMOTION_CANONICAL_TYPES, SOURCE_INDEX_PROMOTION_TARGET_SURFACES, SOURCE_INDEX_PROMOTION_REASON_CODES, SOURCE_INDEX_PROMOTION_DECISIONS, SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES, ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
 var init_operations = __esm(() => {
   init_doctor();
   init_config();
-  init_domain_expert();
   init_config();
   init_operation_error();
   init_selected_item_safety();
   init_source_corpus_registry();
   init_venice_models();
-  init_public_surface();
-  SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS = ["secure_local.dropbox.files"];
-  SOURCE_INDEX_PROMOTION_CANONICAL_TYPES = ["project", "project_work_item", "area", "person", "organization", "resource", "topic", "fact", "secure_companion", "resource_wiki_page"];
-  SOURCE_INDEX_PROMOTION_TARGET_SURFACES = ["review_queue", "source_index", "secure_companion", "obsidian", "resource_wiki"];
-  SOURCE_INDEX_PROMOTION_REASON_CODES = ["manual_review", "high_signal", "recurring_reference", "project_material", "decision_evidence", "resource_candidate"];
-  SOURCE_INDEX_PROMOTION_DECISIONS = ["approved", "rejected", "deferred", "needs_changes"];
-  SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES = ["proposed", ...SOURCE_INDEX_PROMOTION_DECISIONS];
   ARGUS_PROFILE_ENUM = [
     "default_chat",
     "source_answer",
@@ -41537,47 +39741,6 @@ var init_operations = __esm(() => {
           ...maxTokens !== undefined ? { maxTokens } : {}
         };
         return ctx.delphi.complete(completeOptions);
-      }
-    },
-    {
-      name: "email_ping",
-      description: "Check whether the private email source worker is configured and reachable.",
-      params: {},
-      mutating: false,
-      cliHints: { name: "email ping" },
-      handler: async (ctx) => ctx.email.ping()
-    },
-    {
-      name: "email_answer",
-      description: "Ask the configured local/private model lane a bounded question about email without returning raw messages.",
-      params: {
-        question: { type: "string", required: true, description: "Bounded question to answer over email inside the private lane." },
-        account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-        after: { type: "string", description: "Optional lower date/time bound." },
-        before: { type: "string", description: "Optional upper date/time bound." },
-        from: { type: "string", description: "Optional sender constraint." },
-        to: { type: "string", description: "Optional recipient constraint." },
-        max_messages: { type: "number", description: "Optional maximum messages the private lane may inspect." }
-      },
-      mutating: false,
-      cliHints: { name: "email answer", positional: ["question"], stdin: "question" },
-      handler: async (ctx, params) => {
-        const question = asString(params.question, "question");
-        const account = optionalString9(params.account);
-        const after = optionalString9(params.after);
-        const before = optionalString9(params.before);
-        const from = optionalString9(params.from);
-        const to = optionalString9(params.to);
-        const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-        return ctx.email.answer({
-          question,
-          ...account !== undefined ? { account } : {},
-          ...after !== undefined ? { after } : {},
-          ...before !== undefined ? { before } : {},
-          ...from !== undefined ? { from } : {},
-          ...to !== undefined ? { to } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {}
-        });
       }
     },
     {
@@ -41722,72 +39885,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      name: "source_index_sync",
-      description: [
-        "Run a deliberate bounded source-index sync through the private source worker.",
-        "Dropbox sync requires an approved folder/root scope; Telegram sync requires an approved chat scope.",
-        "X bookmarks supports a lightweight head check, complete reconciliation, a bounded content-free window diagnostic, folder-facet representation refresh, or read-only preservation re-attestation through mode.",
-        "This does not browse raw files or perform provider writes."
-      ].join(" "),
-      params: {
-        corpus_id: { type: "string", required: true, description: "Source-index corpus to sync." },
-        mode: { type: "string", enum: ["head", "reconcile", "window_diagnostic", "folder_facet_refresh", "preservation-reattest"], description: "X bookmarks only: run the bounded incremental head check, complete daily reconciliation, the four-probe content-free window diagnostic, folder-facet representation refresh, or post-reconcile read-only preservation re-attestation." },
-        account: { type: "string", description: "Optional source account identity. For Dropbox, omit unless deliberately narrowing to personal; do not pass credential handles such as dropbox.personal or aliases such as dropbox.primary." },
-        approved_scope_key: { type: "string", description: "Dropbox approved folder/root scope key, for example dropbox.personal:/Approved." },
-        folder_path: { type: "string", description: "Approved Dropbox folder path for metadata sync." },
-        folder_id: { type: "string", description: "Approved Dropbox folder id for metadata sync." },
-        recursive: { type: "boolean", description: "Whether Dropbox metadata sync should recurse. Defaults true in the private worker." },
-        max_entries: { type: "number", description: "Maximum Dropbox metadata entries to observe; capped by the private worker." },
-        max_pages: { type: "number", description: "Maximum Dropbox metadata pages to read; capped by the private worker." },
-        chat_scope: { type: "string", description: "Telegram approved chat scope for bounded read sync." },
-        trust_domain: { type: "string", enum: ["internal", "secure_local"], description: "Optional Telegram chat classification for the sync batch. Ordinary approved chats default internal; protected chats must use secure_local." },
-        max_messages: { type: "number", description: "Maximum Telegram messages to read; capped by the private worker." },
-        provider_cursor: { type: "string", description: "Opaque provider cursor for continuation. The worker stores/returns only safe cursor hashes." },
-        sync_direction: { type: "string", enum: ["forward", "backfill"], description: "Telegram sync direction. Defaults to forward freshness; use backfill only for explicit historical drain work." },
-        coverage_start: { type: "string", description: "Optional Telegram coverage start timestamp for currentness tracking." },
-        coverage_end: { type: "string", description: "Optional Telegram coverage end timestamp for currentness tracking." }
-      },
-      mutating: true,
-      nativeExposure: "emailIndexAdminDevOnly",
-      cliHints: { name: "source index sync" },
-      handler: async (ctx, params) => {
-        const corpusId = asSourceIndexSyncCorpusId(params.corpus_id, ctx.config);
-        const mode = optionalXBookmarksSyncMode(params.mode, corpusId);
-        const account = optionalSourceAccount(params.account, corpusId);
-        const approvedScopeKey = optionalString9(params.approved_scope_key);
-        const folderPath = optionalString9(params.folder_path);
-        const folderId = optionalString9(params.folder_id);
-        const recursive = optionalBoolean2(params.recursive, "recursive");
-        const maxEntries = optionalNumber4(params.max_entries, "max_entries");
-        const maxPages = optionalNumber4(params.max_pages, "max_pages");
-        const chatScope = optionalString9(params.chat_scope);
-        const trustDomain = optionalTelegramTrustDomain(params.trust_domain);
-        const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-        const providerCursor = optionalString9(params.provider_cursor);
-        const syncDirection = optionalTelegramSyncDirection(params.sync_direction);
-        const coverageStart = optionalString9(params.coverage_start);
-        const coverageEnd = optionalString9(params.coverage_end);
-        return ctx.email.sourceIndexSync({
-          corpusId,
-          ...mode !== undefined ? { mode } : {},
-          ...account !== undefined ? { account } : {},
-          ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-          ...folderPath !== undefined ? { folderPath } : {},
-          ...folderId !== undefined ? { folderId } : {},
-          ...recursive !== undefined ? { recursive } : {},
-          ...maxEntries !== undefined ? { maxEntries } : {},
-          ...maxPages !== undefined ? { maxPages } : {},
-          ...chatScope !== undefined ? { chatScope } : {},
-          ...trustDomain !== undefined ? { trustDomain } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...providerCursor !== undefined ? { providerCursor } : {},
-          ...syncDirection !== undefined ? { syncDirection } : {},
-          ...coverageStart !== undefined ? { coverageStart } : {},
-          ...coverageEnd !== undefined ? { coverageEnd } : {}
-        });
-      }
-    }],
     {
       name: "source_index_search",
       description: [
@@ -41848,250 +39945,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        name: "source_export",
-        description: [
-          "Materialize already-cited Dropbox source items into a user-owned Dropbox destination folder via a verified server-side provider copy.",
-          "Pass locators (paths) exactly as returned in source citations plus a destination root; the private worker verifies each path against the local Dropbox index and copies inside the user's own Dropbox, so file bytes never leave Dropbox and content never enters any model context.",
-          "Destinations are restricted to the approved export allowlist, S5-classified items are always skipped, existing destination files are skipped rather than overwritten, and the result returns path-level statuses and counts only."
-        ].join(" "),
-        params: {
-          destination_root: { type: "string", required: true, description: "Destination Dropbox folder path, for example /Olympus Exports/Otter Transcripts. Must fall under an allowed export root." },
-          items: { type: "string", required: true, description: 'JSON array of export items. Each item is a source Dropbox path string or an object like {"path":"/2 Areas/Otter/Standup.txt","dest_subfolder":"Standups"}. Paths must be locators already returned by source citations.' },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." },
-          dry_run: { type: "boolean", description: "Validate the destination and per-item statuses without performing any copy." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source export", positional: ["destination_root"] },
-        handler: async (ctx, params) => {
-          const destinationRoot = asString(params.destination_root, "destination_root");
-          const items = asSourceExportItems(params.items);
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const dryRun = optionalBoolean2(params.dry_run, "dry_run");
-          return ctx.email.sourceExport({
-            destinationRoot,
-            items,
-            ...account !== undefined ? { account } : {},
-            ...dryRun !== undefined ? { dryRun } : {}
-          });
-        }
-      },
-      {
-        name: "source_transcribe",
-        description: [
-          "Queue indexed Dropbox audio files (voice memos, brainstorms, meeting recordings) for LOCAL transcription so their transcripts become searchable through the normal source pipeline.",
-          "Pass items with explicit Dropbox path locators to transcribe exactly those files, or omit items to let the planner queue untranscribed audio under the approved scope; mode=status returns calling-assistant-safe job counts without queueing anything.",
-          "Transcription runs on local infrastructure only via a separate drain worker — no audio bytes or transcript text are returned here, and curated exclude fences always apply. The result carries counts and path-level statuses only."
-        ].join(" "),
-        params: {
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-          items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox audio file paths (locators as returned by source search/citations). When given, exactly those paths are queued." },
-          include_path_prefixes: { type: "string", description: "Optional comma-separated path prefixes to narrow the planner to one subtree, for example /2 Areas/Brainstorms." },
-          limit: { type: "number", description: "Maximum audio files the planner may queue in this call. Capped by the private source worker." },
-          mode: { type: "string", enum: ["enqueue", "status"], description: "enqueue (default) queues transcription jobs; status returns calling-assistant-safe transcription job counts without mutating anything." },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source transcribe" },
-        handler: async (ctx, params) => {
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const mode = optionalSourceTranscribeMode(params.mode);
-          const items = params.items !== undefined ? asSourceTranscribeItems(params.items) : undefined;
-          const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-          const limit = optionalNumber4(params.limit, "limit");
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          return ctx.email.sourceTranscribe({
-            approvedScopeKey,
-            ...mode !== undefined ? { mode } : {},
-            ...items !== undefined ? { items } : {},
-            ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-            ...limit !== undefined ? { limit } : {},
-            ...account !== undefined ? { account } : {}
-          });
-        }
-      },
-      {
-        name: "source_media_ingest",
-        description: [
-          "Queue explicitly requested Dropbox photos or image folders for local VLM extraction.",
-          "This is the deliberate on-demand media lane: ordinary broad Dropbox photos/videos stay metadata-only by default, while passed items or include_path_prefixes queue image-like files for local processing.",
-          "No file bytes or extracted text are returned here; the result returns calling-assistant-safe counts plus path-level statuses for explicit items."
-        ].join(" "),
-        params: {
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-          items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox image file paths. When given, exactly those paths are queued." },
-          include_path_prefixes: { type: "string", description: "Optional comma-separated Dropbox folder/path prefixes; image-like files under those prefixes are queued." },
-          limit: { type: "number", description: "Maximum image files the planner may queue in this call. Capped by the private source worker." },
-          max_bytes_per_file: { type: "number", description: "Optional per-file byte cap for local VLM extraction." },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source media ingest" },
-        handler: async (ctx, params) => {
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const items = params.items !== undefined ? asSourceMediaIngestItems(params.items) : undefined;
-          const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-          if ((items?.length ?? 0) === 0 && (includePathPrefixes?.length ?? 0) === 0) {
-            throw new OperationError("invalid_params", "source_media_ingest requires items or include_path_prefixes.");
-          }
-          const limit = optionalNumber4(params.limit, "limit");
-          const maxBytesPerFile = optionalNumber4(params.max_bytes_per_file, "max_bytes_per_file");
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          return ctx.email.sourceMediaIngest({
-            approvedScopeKey,
-            ...items !== undefined ? { items } : {},
-            ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-            ...limit !== undefined ? { limit } : {},
-            ...maxBytesPerFile !== undefined ? { maxBytesPerFile } : {},
-            ...account !== undefined ? { account } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_candidates",
-        description: [
-          "List safe Dropbox evidence candidates for promotion/review without writing to Obsidian or Resource Wiki.",
-          "This returns hashed provenance and review metadata only: no file paths, raw text, source packets, scope keys, vectors, or credentials."
-        ].join(" "),
-        params: {
-          corpus_id: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS], description: "Promotion-candidate corpus. Currently only secure_local.dropbox.files." },
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-          max_results: { type: "number", description: "Maximum safe candidate rows to return. Capped by the private source worker." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion candidates" },
-        handler: async (ctx, params) => {
-          const corpusId = optionalSourceIndexPromotionCandidateCorpusId(params.corpus_id, ctx.config);
-          const account = optionalSourceAccount(params.account, corpusId);
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const maxResults = optionalNumber4(params.max_results, "max_results");
-          return ctx.email.sourceIndexPromotionCandidates({
-            ...corpusId !== undefined ? { corpusId } : {},
-            ...account !== undefined ? { account } : {},
-            approvedScopeKey,
-            ...maxResults !== undefined ? { maxResults } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_propose",
-        description: [
-          "Create a local Dropbox promotion proposal from safe candidate handles without exposing source text or writing Resource Wiki/Obsidian.",
-          "This records append-only review intent over hashed evidence provenance only."
-        ].join(" "),
-        params: {
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker stores and returns only a scope hash." },
-          classification_ids: { type: "string", required: true, description: "Comma-separated or JSON-array candidate classification handles returned by source_index_promotion_candidates." },
-          canonical_type: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_CANONICAL_TYPES], description: "Typed destination shape for the proposed durable knowledge." },
-          target_surface: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_TARGET_SURFACES], description: "Intended review/write surface. This operation records intent only and performs no surface write." },
-          reason_code: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Typed reason this evidence is being proposed." },
-          proposed_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion propose" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const classificationIds = asStringList(params.classification_ids, "classification_ids");
-          const canonicalType = asPromotionCanonicalType(params.canonical_type);
-          const targetSurface = asPromotionTargetSurface(params.target_surface);
-          const reasonCode = asPromotionReasonCode(params.reason_code);
-          const proposedBy = optionalString9(params.proposed_by);
-          return ctx.email.sourceIndexPromotionProposal({
-            ...account !== undefined ? { account } : {},
-            approvedScopeKey,
-            classificationIds,
-            canonicalType,
-            targetSurface,
-            reasonCode,
-            ...proposedBy !== undefined ? { proposedBy } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_proposals",
-        description: [
-          "List local Dropbox promotion proposals for review without exposing source text or writing Resource Wiki/Obsidian.",
-          "This returns proposal metadata and hashed scope only."
-        ].join(" "),
-        params: {
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", description: "Optional Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-          status: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES], description: "Optional proposal status filter." },
-          max_results: { type: "number", description: "Maximum safe proposal rows to return. Capped by the private source worker." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion proposals" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const approvedScopeKey = optionalString9(params.approved_scope_key);
-          const status = optionalPromotionProposalStatus(params.status);
-          const maxResults = optionalNumber4(params.max_results, "max_results");
-          return ctx.email.sourceIndexPromotionProposals({
-            ...account !== undefined ? { account } : {},
-            ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-            ...status !== undefined ? { status } : {},
-            ...maxResults !== undefined ? { maxResults } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_proposal",
-        description: [
-          "Read one local Dropbox promotion proposal detail without exposing source text or writing Resource Wiki/Obsidian.",
-          "This returns hashed evidence metadata and local review decisions only."
-        ].join(" "),
-        params: {
-          proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose or source_index_promotion_proposals." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion proposal" },
-        handler: async (ctx, params) => {
-          const proposalId = asString(params.proposal_id, "proposal_id");
-          return ctx.email.sourceIndexPromotionProposalDetail({
-            proposalId
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_decide",
-        description: [
-          "Record a local review decision on a Dropbox promotion proposal without executing any Resource Wiki, Obsidian, or Dropbox write.",
-          "This is a review-ledger mutation only."
-        ].join(" "),
-        params: {
-          proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose." },
-          decision: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_DECISIONS], description: "Review decision to record." },
-          decided_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." },
-          reason_code: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Optional typed reason for the decision." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion decide" },
-        handler: async (ctx, params) => {
-          const proposalId = asString(params.proposal_id, "proposal_id");
-          const decision = asPromotionDecision(params.decision);
-          const decidedBy = optionalString9(params.decided_by);
-          const reasonCode = optionalPromotionReasonCode(params.reason_code);
-          return ctx.email.sourceIndexPromotionDecision({
-            proposalId,
-            decision,
-            ...decidedBy !== undefined ? { decidedBy } : {},
-            ...reasonCode !== undefined ? { reasonCode } : {}
-          });
-        }
-      }
-    ],
     {
       name: "source_watch_create",
       description: [
@@ -42163,471 +40016,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        name: "xanthos_file_deliver",
-        description: [
-          "Deliver a UTF-8 or base64 file to an approved Xanthos logical root through the bounded file-delivery worker.",
-          "This tool accepts only logical root IDs and relative paths, uses no shell, exposes no absolute host paths, denies overwrites by default, and returns an audit reference."
-        ].join(" "),
-        params: {
-          root_id: { type: "string", required: true, description: "Approved logical destination root, for example olympus_smoke or growth_fleur." },
-          relative_path: { type: "string", required: true, description: "Relative file path below the approved root. Absolute paths and traversal are denied." },
-          content: { type: "string", required: true, description: "File content as UTF-8 text or base64 bytes." },
-          content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding. Defaults to utf8." },
-          write_mode: { type: "string", required: true, enum: ["dry_run", "create_new", "overwrite_with_approval"], description: "dry_run validates only; create_new refuses existing files; overwrite requires explicit approval." },
-          trust_domain: { type: "string", required: true, enum: ["public_safe", "internal", "secure_local"], description: "Trust domain of the content being delivered." },
-          source_provenance: { type: "string", description: "Optional safe provenance for generated content." },
-          idempotency_key: { type: "string", required: true, description: "Stable key for safe retries of the same delivery request." },
-          approval_id: { type: "string", description: "Explicit approval reference required for overwrite_with_approval." },
-          actor_id: { type: "string", description: "Optional caller or agent identity for audit." },
-          session_id: { type: "string", description: "Optional session identity for audit." },
-          model_provider: { type: "string", description: "Optional model/provider identity for audit." },
-          model_id: { type: "string", description: "Optional model identity for audit." }
-        },
-        mutating: true,
-        nativeExposure: "fileDeliveryEnabledOnly",
-        cliHints: { name: "xanthos file deliver" },
-        handler: async (ctx, params) => {
-          if (!ctx.fileDelivery) {
-            throw new OperationError("file_delivery_not_configured", "File delivery client is not configured in this Olympus runtime.");
-          }
-          const rootId = asString(params.root_id, "root_id");
-          const relativePath = asString(params.relative_path, "relative_path");
-          const content = asString(params.content, "content");
-          const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-          const writeMode = asFileDeliveryWriteMode(params.write_mode);
-          const trustDomain = asFileDeliveryTrustDomain(params.trust_domain);
-          const sourceProvenance = optionalString9(params.source_provenance);
-          const idempotencyKey = asString(params.idempotency_key, "idempotency_key");
-          const approvalId = optionalString9(params.approval_id);
-          const actorId = optionalString9(params.actor_id);
-          const sessionId = optionalString9(params.session_id);
-          const modelProvider = optionalString9(params.model_provider);
-          const modelId = optionalString9(params.model_id);
-          return ctx.fileDelivery.deliver({
-            rootId,
-            relativePath,
-            content,
-            ...contentEncoding !== undefined ? { contentEncoding } : {},
-            writeMode,
-            trustDomain,
-            ...sourceProvenance !== undefined ? { sourceProvenance } : {},
-            idempotencyKey,
-            ...approvalId !== undefined ? { approvalId } : {},
-            ...actorId !== undefined ? { actorId } : {},
-            ...sessionId !== undefined ? { sessionId } : {},
-            ...modelProvider !== undefined ? { modelProvider } : {},
-            ...modelId !== undefined ? { modelId } : {}
-          });
-        }
-      },
-      {
-        name: "castor_workspace",
-        description: [
-          "Use {{ownerName}} delegated assistant workfiles through a bounded Xanthos worker.",
-          "Anything inside the approved assistant workfiles root is intentionally delegated to {{assistantName}} for read, write, delete, and export through implemented destination actions without extra S4 approval gating.",
-          "Finder/macOS aliases inside the workspace may be read, listed, and exported; alias targets are not writable or deletable through this tool.",
-          "Use only logical root IDs and relative paths; the tool exposes no absolute host paths and does not grant shell access."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: ["health", "list", "read", "write", "delete", "export_gcs"], description: "Workspace action." },
-          root_id: { type: "string", description: "Approved workspace root id. Use castor_workspace for the configured delegated workfiles root." },
-          relative_path: { type: "string", description: "Relative path inside the workspace root. Empty path means the root." },
-          content: { type: "string", description: "UTF-8 or base64 content for write." },
-          content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding for write. Defaults to utf8." },
-          destination_uri: { type: "string", description: "Allowlisted gs:// destination for export_gcs." },
-          recursive: { type: "boolean", description: "Required for deleting directories; export_gcs is always recursive for directories." },
-          dry_run: { type: "boolean", description: "For export_gcs, defaults true. Set false to perform the upload after inspecting a dry-run." },
-          include_media: { type: "boolean", description: "For directory export_gcs, include media extensions in addition to md/txt/pdf/html. Defaults false." },
-          idempotency_key: { type: "string", description: "Optional stable key for audit/retry correlation." },
-          actor_id: { type: "string", description: "Optional caller identity for audit." },
-          session_id: { type: "string", description: "Optional session identity for audit." }
-        },
-        mutating: true,
-        nativeExposure: "castorWorkspaceEnabledOnly",
-        cliHints: { name: "castor workspace" },
-        handler: async (ctx, params) => {
-          if (!ctx.castorWorkspace) {
-            throw new OperationError("castor_workspace_not_configured", "Delegated workspace client is not configured in this Olympus runtime.");
-          }
-          const action = asCastorWorkspaceAction(params.action);
-          const rootId = optionalString9(params.root_id);
-          const relativePath = typeof params.relative_path === "string" ? params.relative_path : undefined;
-          const content = typeof params.content === "string" ? params.content : undefined;
-          const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-          const destinationUri = optionalString9(params.destination_uri);
-          const recursive = optionalBoolean2(params.recursive, "recursive");
-          const dryRun = optionalBoolean2(params.dry_run, "dry_run");
-          const includeMedia = optionalBoolean2(params.include_media, "include_media");
-          const idempotencyKey = optionalString9(params.idempotency_key);
-          const actorId = optionalString9(params.actor_id);
-          const sessionId = optionalString9(params.session_id);
-          return ctx.castorWorkspace.run({
-            action,
-            ...rootId !== undefined ? { rootId } : {},
-            ...relativePath !== undefined ? { relativePath } : {},
-            ...content !== undefined ? { content } : {},
-            ...contentEncoding !== undefined ? { contentEncoding } : {},
-            ...destinationUri !== undefined ? { destinationUri } : {},
-            ...recursive !== undefined ? { recursive } : {},
-            ...dryRun !== undefined ? { dryRun } : {},
-            ...includeMedia !== undefined ? { includeMedia } : {},
-            ...idempotencyKey !== undefined ? { idempotencyKey } : {},
-            ...actorId !== undefined ? { actorId } : {},
-            ...sessionId !== undefined ? { sessionId } : {}
-          });
-        }
-      },
-      {
-        name: "domain_agent",
-        description: [
-          "Create or inspect a reusable domain expert agent workspace, persona, library, and corpus setup through the configured domain-expert backend.",
-          "Use this when the owner asks to create a governance, dating, trading, or other domain-specific researcher.",
-          "dry_run=true asks the runtime worker for a non-mutating scaffold."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: [...DOMAIN_AGENT_ACTIONS], description: "Domain-agent lifecycle action." },
-          domain_id: { type: "string", description: "Stable domain id. Defaults to governance." },
-          display_name: { type: "string", description: "Optional human name for the domain researcher." },
-          dry_run: { type: "boolean", description: "Defaults true. Live execution is blocked until the runtime backend is configured." }
-        },
-        mutating: true,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "domain agent" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "domain_agent", params)
-      },
-      {
-        name: "domain_ask",
-        description: [
-          "Return a grounded domain-expert answer over a domain library using Gemini Enterprise RAG Engine Cross-Corpus Retrieval.",
-          "This is the public/internal domain-expert lane, separate from the frozen secure-local source_answer pipeline.",
-          "This tool is available only while its live retrieval backend is enabled."
-        ].join(" "),
-        params: {
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          question: { type: "string", required: true, description: "Question for the domain expert to answer from its curated library." },
-          corpus_id: { type: "string", description: "Optional single Vertex RAG corpus id or manifest display name. Defaults to all corpora in the domain manifest." },
-          corpora: { type: "array", description: "Optional corpus ids or manifest display names. Defaults to all corpora in the domain manifest." },
-          max_results: { type: "number", description: "Optional retrieval result target. Defaults to 12." }
-        },
-        mutating: false,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "domain ask", positional: ["question"], stdin: "question" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "domain_ask", params)
-      },
-      {
-        name: "domain_source",
-        description: [
-          "Manage source intake for a domain expert library from files, Google Docs, PDFs, books, blog posts, or web links.",
-          "Worker-backed list/status are read-only registry reads; remove appends an audit tombstone; add keeps the existing intake record path.",
-          "The source record is domain-agnostic and flows into classification, dedupe, staging, Gemini Enterprise import, and source-registry updates.",
-          "dry_run=true asks the configured runtime worker for a non-mutating intake plan."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: [...DOMAIN_SOURCE_ACTIONS], description: "Source lifecycle action." },
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          source_id: { type: "string", description: "Required for status/remove; optional stable id for add." },
-          kind: { type: "string", enum: [...DOMAIN_SOURCE_KINDS], description: "Source kind." },
-          title: { type: "string", description: "Optional source title." },
-          author: { type: "string", description: "Optional source author." },
-          url: { type: "string", description: "Canonical URL or provider locator for link intake." },
-          relative_path: { type: "string", description: "Path inside the domain workspace or delegated alias for folder intake." },
-          corpus_id: { type: "string", description: "Optional target corpus id." },
-          trust_posture: { type: "string", description: "Optional trust/source-review posture." },
-          copyright_posture: { type: "string", description: "Explicit source copyright/import posture when known." },
-          include_history: { type: "boolean", description: "For list, include every registry record per source instead of only current records." },
-          include_removed: { type: "boolean", description: "For list, include sources whose latest record is a removed tombstone." },
-          dry_run: { type: "boolean", description: "Defaults true. Live intake is blocked until the runtime backend is configured." }
-        },
-        mutating: true,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "domain source" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "domain_source", params)
-      },
-      {
-        name: "rag_corpus",
-        description: [
-          "Plan Gemini Enterprise RAG Engine corpus create, import, stage_import, web_import, notion_import, status, or refresh actions for a domain expert.",
-          "The operation enforces the domain manifest GCS allowlist and keeps Olympus as the control plane.",
-          "Live corpus mutations run in the OpenClaw runtime with credentials resolved through SecretRef; dry_run=true returns an operator-reviewable plan."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: [...RAG_CORPUS_ACTIONS], description: "Corpus lifecycle action." },
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          corpus_id: { type: "string", description: "Target corpus id. Defaults to a domain manifest corpus." },
-          rag_file_name: { type: "string", description: "For delete_file, full Vertex ragFiles resource name under the resolved corpus." },
-          page_token: { type: "string", description: "For list_files, Vertex pageToken passthrough." },
-          source_id: { type: "string", description: "Optional source registry id to import or inspect." },
-          gcs_uri: { type: "string", description: "Optional staged gs:// URI. Must be under the domain allowlist." },
-          drive_file_id: { type: "string", description: "Optional Google Drive file id for future direct import paths." },
-          workspace_relative_path: { type: "string", description: "For stage_import, path inside the domain workspace root to recursively stage." },
-          batch_id: { type: "string", description: "Optional deterministic staging batch id. Generated by the worker when omitted." },
-          urls: { type: "array", description: "For web_import, HTTPS URLs to fetch and derive into importable documents; for notion_import, Notion URLs to import through the official API. 1 to 200 entries." },
-          page_ids: { type: "array", description: "For notion_import, raw Notion page ids to import." },
-          database_ids: { type: "array", description: "For notion_import, raw Notion database ids to query and import." },
-          include_media: { type: "boolean", description: "For stage_import or web_import, include media files. Audio/video media is staged raw and transcribed to markdown when live. Defaults false." },
-          transcript_mode: { type: "string", enum: ["auto", "captions", "asr"], description: "For web_import YouTube URLs: auto uses captions then ASR, captions never falls through to ASR, asr skips caption tiers. Defaults auto." },
-          dry_run: { type: "boolean", description: "Defaults true. Live corpus mutation is blocked until the runtime backend is configured." }
-        },
-        mutating: true,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "rag corpus" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "rag_corpus", params)
-      },
-      {
-        name: "domain_doc",
-        description: [
-          "Plan Google Docs collaboration for a domain expert service account: read, comment, visually marked insert/replace, accept, or reject.",
-          "Google Docs API suggestion-mode creation is not treated as available; the supported review path is comments plus approved direct edits in a visible domain-agent style.",
-          "Phase 0 is dry-run only and records the service-account, approval, and visual review contract."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: [...DOMAIN_DOC_ACTIONS], description: "Google Docs collaboration action." },
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          document_id: { type: "string", required: true, description: "Google Docs document id." },
-          text: { type: "string", description: "Text for visual_insert or visual_replace." },
-          comment: { type: "string", description: "Comment text or edit rationale." },
-          range_start: { type: "number", description: "Optional Docs structural index/range start for edit actions." },
-          range_end: { type: "number", description: "Optional Docs structural index/range end for visual_replace." },
-          approval_id: { type: "string", description: "Explicit approval reference required for live direct edits." },
-          edit_batch_id: { type: "string", description: "Stable id for later accept/reject cleanup." },
-          dry_run: { type: "boolean", description: "Defaults true. Live Docs mutation is blocked until the runtime backend is configured." }
-        },
-        mutating: true,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "domain doc" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "domain_doc", params)
-      },
-      {
-        name: "annas_archive_search",
-        description: [
-          "Search Anna Archive through the Castor runtime secret and return ranked candidate book/file metadata for approval.",
-          "The API key is never exposed to the agent; this tool is available only while the runtime worker is enabled."
-        ].join(" "),
-        params: {
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          query: { type: "string", description: "Search query." },
-          topic: { type: "string", description: "Optional topic for top-N book discovery, such as evolutionary biology." },
-          title: { type: "string", description: "Optional title search." },
-          author: { type: "string", description: "Optional author search." },
-          language: { type: "string", description: "Optional preferred language filter or ranking hint." },
-          max_results: { type: "number", description: "Maximum candidate metadata results. Defaults to 10." },
-          top_n: { type: "number", description: "Number of top candidates to rank and present for approval. Defaults to max_results." },
-          format_preference: { type: "string", enum: ["auto", "text_rag", "layout"], description: "Prefer EPUB/text for text-first RAG, PDF for layout-heavy books, or auto." }
-        },
-        mutating: false,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "annas archive search" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_search", params)
-      },
-      {
-        name: "annas_archive_import",
-        description: [
-          "Plan or run an approved Anna Archive PDF/EPUB/etc. download into the owner's Xanthos books folder.",
-          "Requires explicit copyright posture and approval for live execution; RAG ingest is optional and requires an explicit corpus_id."
-        ].join(" "),
-        params: {
-          domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-          annas_archive_id: { type: "string", description: "Anna Archive item id or md5-like locator." },
-          url: { type: "string", description: "Optional Anna Archive URL locator." },
-          format: { type: "string", enum: [...ANNAS_ARCHIVE_FORMATS], description: "Desired or observed file format." },
-          corpus_id: { type: "string", description: "Optional explicit target domain corpus id for RAG ingest." },
-          title: { type: "string", description: "Candidate title, used for deterministic folder naming and audit." },
-          author: { type: "string", description: "Candidate author, used for deterministic folder naming and audit." },
-          year: { type: "string", description: "Candidate publication year, used for deterministic folder naming and audit." },
-          topic: { type: "string", description: "Topic folder under the Xanthos books root." },
-          language: { type: "string", description: "Candidate language metadata." },
-          file_name: { type: "string", description: "Optional original filename from the candidate metadata." },
-          md5: { type: "string", description: "Optional stable Anna/hash locator for duplicate detection." },
-          file_size_bytes: { type: "number", description: "Optional expected file size from candidate metadata." },
-          ingest: { type: "boolean", description: "Also attempt RAG ingest after saving. Requires explicit corpus_id or returns needs_corpus_decision." },
-          copyright_posture: { type: "string", required: true, description: "Explicit copyright/import posture for this item." },
-          approval_id: { type: "string", description: "Explicit approval reference required for live download/import." },
-          dry_run: { type: "boolean", description: "Defaults true. Live download is blocked until approval_id is provided." }
-        },
-        mutating: true,
-        availability: domainExpertToolsAvailable,
-        cliHints: { name: "annas archive import" },
-        handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_import", params)
-      },
-      {
-        name: "email_search",
-        description: [
-          "Search private email and return a sanitized local-only source packet for approved local/private sessions.",
-          "Use query for Gmail search syntax when possible. Answer from returned packet items and cite safe provenance by subject/from/date/message_id.",
-          "Do not request raw Gmail payloads."
-        ].join(" "),
-        params: {
-          question: { type: "string", description: "Optional natural-language question for audit/context. It is not converted into required Gmail terms." },
-          query: { type: "string", description: "Optional Gmail query string chosen by the local model or user." },
-          account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-          after: { type: "string", description: "Optional lower date/time bound." },
-          before: { type: "string", description: "Optional upper date/time bound." },
-          from: { type: "string", description: "Optional sender constraint." },
-          to: { type: "string", description: "Optional recipient constraint." },
-          max_messages: { type: "number", description: "Optional maximum messages to retrieve; capped by the private worker." },
-          include_sanitized_text: { type: "boolean", description: "Whether to include sanitized message text. Defaults true for the local packet path." }
-        },
-        mutating: false,
-        nativeExposure: "localEmailPacketsDevOnly",
-        cliHints: { name: "email search", positional: ["query"], stdin: "query" },
-        handler: async (ctx, params) => {
-          const question = optionalString9(params.question);
-          const query = optionalString9(params.query);
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const after = optionalString9(params.after);
-          const before = optionalString9(params.before);
-          const from = optionalString9(params.from);
-          const to = optionalString9(params.to);
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          const includeSanitizedText = optionalBoolean2(params.include_sanitized_text, "include_sanitized_text");
-          return ctx.email.search({
-            ...question !== undefined ? { question } : {},
-            ...query !== undefined ? { query } : {},
-            ...account !== undefined ? { account } : {},
-            ...after !== undefined ? { after } : {},
-            ...before !== undefined ? { before } : {},
-            ...from !== undefined ? { from } : {},
-            ...to !== undefined ? { to } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {},
-            ...includeSanitizedText !== undefined ? { includeSanitizedText } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_sync",
-        description: "Explicitly seed or rescan the bounded local Gmail source index without returning private content.",
-        params: {
-          account: { type: "string", description: "Optional Google account to scope the bounded seed." },
-          newer_than_days: { type: "number", description: "Bounded recency window. Defaults to 14 days." },
-          max_messages: { type: "number", description: "Maximum Gmail messages to index; capped by the private worker." },
-          query: { type: "string", description: "Optional Gmail query for a bounded proof seed." }
-        },
-        mutating: true,
-        nativeExposure: "emailIndexAdminDevOnly",
-        cliHints: { name: "email index sync" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const newerThanDays = optionalNumber4(params.newer_than_days, "newer_than_days");
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          const query = optionalString9(params.query);
-          return ctx.email.indexSync({
-            ...account !== undefined ? { account } : {},
-            ...newerThanDays !== undefined ? { newerThanDays } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {},
-            ...query !== undefined ? { query } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_embed",
-        description: "Explicitly build local/private embedding artifacts for the bounded Gmail source index without returning private content or vectors.",
-        params: {
-          account: { type: "string", description: "Optional account filter for the embedding build." },
-          model_id: { type: "string", description: "Optional local embedding model ID to require from the configured worker provider." },
-          force: { type: "boolean", description: "Rebuild embeddings even when chunk content hashes are unchanged." }
-        },
-        mutating: true,
-        nativeExposure: "emailIndexAdminDevOnly",
-        cliHints: { name: "email index embed" },
-        handler: async (ctx, params) => {
-          const account = optionalString9(params.account);
-          const modelId = optionalString9(params.model_id);
-          const force = optionalBoolean2(params.force, "force");
-          return ctx.email.indexEmbed({
-            ...account !== undefined ? { account } : {},
-            ...modelId !== undefined ? { modelId } : {},
-            ...force !== undefined ? { force } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_search",
-        description: [
-          "Search the local private email source index and return an Argus-only sanitized source packet with row and provider provenance.",
-          "Use retrieval_mode=hybrid for conceptual aliases when local/private semantic artifacts are available; keyword remains the default exact/FTS path."
-        ].join(" "),
-        params: {
-          query: { type: "string", required: true, description: "Keyword/FTS query for the local email index." },
-          retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Retrieval mode. Defaults to keyword unless hybrid is explicitly requested and semantic artifacts/config are available." },
-          account: { type: "string", description: "Optional account filter." },
-          after: { type: "string", description: "Optional lower date/time bound." },
-          before: { type: "string", description: "Optional upper date/time bound." },
-          from: { type: "string", description: "Optional sender filter." },
-          to: { type: "string", description: "Optional recipient filter." },
-          label: { type: "string", description: "Optional Gmail label filter." },
-          max_messages: { type: "number", description: "Maximum packet items to return; capped by the private worker." }
-        },
-        mutating: false,
-        nativeExposure: "localEmailPacketsDevOnly",
-        cliHints: { name: "email index search", positional: ["query"], stdin: "query" },
-        handler: async (ctx, params) => {
-          const query = asString(params.query, "query");
-          const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
-          const account = optionalString9(params.account);
-          const after = optionalString9(params.after);
-          const before = optionalString9(params.before);
-          const from = optionalString9(params.from);
-          const to = optionalString9(params.to);
-          const label = optionalString9(params.label);
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          return ctx.email.indexSearch({
-            query,
-            ...retrievalMode !== undefined ? { retrievalMode } : {},
-            ...account !== undefined ? { account } : {},
-            ...after !== undefined ? { after } : {},
-            ...before !== undefined ? { before } : {},
-            ...from !== undefined ? { from } : {},
-            ...to !== undefined ? { to } : {},
-            ...label !== undefined ? { label } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {}
-          });
-        }
-      },
-      {
-        name: "expert_hire",
-        description: "Hire a pinned external consultant through the contained Hire Broker. New or drifted counterparties require trusted owner confirmation; all briefs pass the Release Gate before any payment or dispatch.",
-        params: {
-          listing: { type: "object", required: true, description: "Counterparty listing with name, HTTPS endpoint, and optional erc8004 identity claim." },
-          brief: { type: "string", required: true, description: "Self-contained shape-only brief. Never include S4+ content, identifiers, secrets, URLs, or filesystem paths." },
-          budget: { type: "object", required: true, description: "Maximum payment object with positive amount and currency." },
-          owner_confirmed: { type: "boolean", description: "Set only after the owner explicitly approves the exact new or drifted counterparty prompt." }
-        },
-        mutating: true,
-        nativeExposure: "hireBrokerEnabledOnly",
-        cliHints: { name: "expert hire" },
-        handler: async (ctx, params) => {
-          if (!ctx.hireBroker) {
-            throw new OperationError("config_error", "Hire Broker is not configured.");
-          }
-          const ownerConfirmed = params.owner_confirmed === true;
-          return ctx.hireBroker.hire({
-            listing: params.listing,
-            brief: asString(params.brief, "brief"),
-            budget: params.budget,
-            ...ownerConfirmed ? { ownerConfirmed: true } : {},
-            ...ownerConfirmed && ctx.hireBrokerAuthority?.senderIsOwner === true ? { ownerAuthorized: true } : {}
-          });
-        }
-      },
-      {
-        name: "expert_report",
-        description: "Read a consultant result through the hostile-input membrane. Returns only a bounded summary, instruction flags, provenance, and spend; raw report text is never exposed by this tool.",
-        params: {
-          handle: { type: "string", required: true, description: "Opaque Hire Broker handle returned by expert_hire." }
-        },
-        mutating: false,
-        nativeExposure: "hireBrokerEnabledOnly",
-        cliHints: { name: "expert report", positional: ["handle"] },
-        handler: async (ctx, params) => {
-          if (!ctx.hireBroker) {
-            throw new OperationError("config_error", "Hire Broker is not configured.");
-          }
-          return ctx.hireBroker.report(asString(params.handle, "handle"));
-        }
-      }
-    ],
     {
       name: "olympus_doctor",
       description: [
@@ -42645,576 +40033,13 @@ var init_operations = __esm(() => {
 
 // src/version.ts
 import { readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname23, join as join31 } from "node:path";
+import { dirname as dirname22, join as join30 } from "node:path";
 import { fileURLToPath } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname23(dirname23(fileURLToPath(import.meta.url)));
-  manifest = JSON.parse(readFileSync20(join31(repoRoot, "openclaw.plugin.json"), "utf8"));
+  repoRoot = dirname22(dirname22(fileURLToPath(import.meta.url)));
+  manifest = JSON.parse(readFileSync20(join30(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
-});
-
-// src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync11, mkdirSync as mkdirSync21 } from "node:fs";
-import { homedir as homedir29 } from "node:os";
-import { dirname as dirname25, join as join35 } from "node:path";
-import { Database as Database9 } from "bun:sqlite";
-function defaultSourceSchedulerStateDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join35(homedir29(), ".local", "share");
-  return join35(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
-}
-
-class LocalSourceSchedulerStateStore {
-  dbPath;
-  db;
-  constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
-    this.dbPath = dbPath;
-    if (dbPath !== ":memory:") {
-      mkdirSync21(dirname25(dbPath), { recursive: true, mode: 448 });
-    }
-    this.db = new Database9(dbPath, { create: true });
-    if (dbPath !== ":memory:")
-      chmodSync11(dbPath, 384);
-    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
-    assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
-    runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
-  }
-  close() {
-    closeSqliteStore(this.db);
-  }
-  get(key) {
-    const safeKey = requireStateKey(key);
-    const row = this.db.query(`
-      SELECT *
-      FROM source_scheduler_task_state
-      WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-    `).get(safeKey.sourceId, safeKey.corpusId, safeKey.taskId);
-    return row ? decodeRow(row) : undefined;
-  }
-  list() {
-    const rows = this.db.query(`
-      SELECT *
-      FROM source_scheduler_task_state
-      ORDER BY source_id, corpus_id, task_id
-    `).all();
-    return rows.map((row) => decodeRow(row)).filter((state) => state !== undefined);
-  }
-  requestUnpark(input) {
-    const sourceId = requireKeyPart(input.sourceId, "sourceId");
-    const taskId = requireKeyPart(input.taskId, "taskId");
-    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
-    const reason = requireStateToken(input.reason, "reason");
-    const requestedAt = requireTimestamp2(input.requestedAt, "requestedAt");
-    return this.db.transaction(() => {
-      const matches = this.db.query(`
-        SELECT source_id, corpus_id, task_id, not_before_at, attempt_in_progress
-        FROM source_scheduler_task_state
-        WHERE source_id = ? AND task_id = ?
-        ORDER BY corpus_id
-      `).all(sourceId, taskId);
-      if (matches.length === 0) {
-        throw new SourceSchedulerUnparkRefusal("task_not_found", "the selected source and task have no durable scheduler state.");
-      }
-      if (matches.length !== 1) {
-        throw new SourceSchedulerUnparkRefusal("task_identity_ambiguous", "the selected source and task do not identify exactly one scheduler row.");
-      }
-      const observed = matches[0];
-      if (observed.not_before_at !== expectedNotBeforeAt) {
-        throw new SourceSchedulerUnparkRefusal("expected_not_before_mismatch", "observed not_before_at does not match --expected-not-before.");
-      }
-      if (observed.attempt_in_progress === 1) {
-        throw new SourceSchedulerUnparkRefusal("task_attempt_in_progress", "the selected task already has an attempt in progress.");
-      }
-      const pending = this.db.query(`
-        SELECT request_id
-        FROM source_scheduler_unpark_request
-        WHERE source_id = ? AND corpus_id = ? AND task_id = ? AND status = 'pending'
-      `).get(sourceId, observed.corpus_id, taskId);
-      if (pending) {
-        throw new SourceSchedulerUnparkRefusal("unpark_already_pending", "the selected task already has a pending one-attempt unpark request.");
-      }
-      this.db.query(`
-        INSERT INTO source_scheduler_unpark_request (
-          source_id, corpus_id, task_id, expected_not_before_at,
-          reason, requested_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
-      `).run(sourceId, observed.corpus_id, taskId, expectedNotBeforeAt, reason, requestedAt);
-      const receipt = {
-        kind: "source_scheduler_unpark_requested",
-        status: "pending",
-        source_id: sourceId,
-        task_id: taskId,
-        expected_not_before_at: expectedNotBeforeAt,
-        reason,
-        requested_at: requestedAt,
-        policy: {
-          task_scoped: true,
-          expected_state_guarded: true,
-          one_attempt: true,
-          configured_cadence_unchanged: true,
-          counts_only: true
-        }
-      };
-      return receipt;
-    })();
-  }
-  cancelUnpark(input) {
-    const sourceId = requireKeyPart(input.sourceId, "sourceId");
-    const taskId = requireKeyPart(input.taskId, "taskId");
-    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
-    const reason = requireStateToken(input.reason, "reason");
-    const cancelledAt = requireTimestamp2(input.cancelledAt, "cancelledAt");
-    return this.db.transaction(() => {
-      const matches = this.db.query(`
-        SELECT request_id, expected_not_before_at
-        FROM source_scheduler_unpark_request
-        WHERE source_id = ? AND task_id = ? AND status = 'pending'
-        ORDER BY corpus_id
-      `).all(sourceId, taskId);
-      if (matches.length === 0) {
-        throw new SourceSchedulerUnparkRefusal("pending_unpark_not_found", "the selected source and task have no pending unpark request.");
-      }
-      if (matches.length !== 1) {
-        throw new SourceSchedulerUnparkRefusal("task_identity_ambiguous", "the selected source and task do not identify exactly one pending request.");
-      }
-      const pending = matches[0];
-      if (pending.expected_not_before_at !== expectedNotBeforeAt) {
-        throw new SourceSchedulerUnparkRefusal("expected_not_before_mismatch", "the pending request does not match --expected-not-before.");
-      }
-      const cancelled = this.db.query(`
-        UPDATE source_scheduler_unpark_request
-        SET status = 'stale', resolved_at = ?
-        WHERE request_id = ? AND status = 'pending'
-      `).run(cancelledAt, pending.request_id);
-      if (cancelled.changes !== 1) {
-        throw new SourceSchedulerUnparkRefusal("pending_unpark_not_found", "the pending request was already resolved.");
-      }
-      const receipt = {
-        kind: "source_scheduler_unpark_cancelled",
-        status: "cancelled",
-        source_id: sourceId,
-        task_id: taskId,
-        expected_not_before_at: expectedNotBeforeAt,
-        reason,
-        cancelled_at: cancelledAt,
-        policy: {
-          task_scoped: true,
-          expected_request_guarded: true,
-          configured_cadence_unchanged: true,
-          counts_only: true
-        }
-      };
-      return receipt;
-    })();
-  }
-  pendingUnparks() {
-    const rows = this.db.query(`
-      SELECT request_id, source_id, corpus_id, task_id,
-             expected_not_before_at, reason, requested_at
-      FROM source_scheduler_unpark_request
-      WHERE status = 'pending'
-      ORDER BY request_id
-    `).all();
-    return rows.map((row) => ({
-      requestId: row.request_id,
-      sourceId: row.source_id,
-      corpusId: row.corpus_id,
-      taskId: row.task_id,
-      expectedNotBeforeAt: row.expected_not_before_at,
-      reason: row.reason,
-      requestedAt: row.requested_at
-    }));
-  }
-  claimUnparkAttempt(input) {
-    const key = requireStateKey(input);
-    const requestId = requirePositiveSafeInteger(input.requestId, "requestId");
-    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
-    const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
-    return this.db.transaction(() => {
-      const state = this.db.query(`
-        SELECT not_before_at, attempt_in_progress
-        FROM source_scheduler_task_state
-        WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId);
-      if (!state || state.not_before_at !== expectedNotBeforeAt || state.attempt_in_progress === 1) {
-        this.db.query(`
-          UPDATE source_scheduler_unpark_request
-          SET status = 'stale', resolved_at = ?
-          WHERE request_id = ? AND status = 'pending'
-        `).run(attemptedAt, requestId);
-        return;
-      }
-      const claimed = this.db.query(`
-        UPDATE source_scheduler_unpark_request
-        SET status = 'consumed', resolved_at = ?
-        WHERE request_id = ?
-          AND source_id = ? AND corpus_id = ? AND task_id = ?
-          AND expected_not_before_at = ?
-          AND status = 'pending'
-      `).run(attemptedAt, requestId, key.sourceId, key.corpusId, key.taskId, expectedNotBeforeAt);
-      if (claimed.changes !== 1)
-        return;
-      this.recordAttemptStatement(key, attemptedAt);
-      const recorded = this.get(key);
-      if (!recorded) {
-        throw new Error("Source scheduler unpark attempt could not be read after its atomic claim.");
-      }
-      return recorded;
-    })();
-  }
-  recordAttempt(input) {
-    const key = requireStateKey(input);
-    const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
-    return this.writeCurrentVersion(key, () => {
-      this.recordAttemptStatement(key, attemptedAt);
-    });
-  }
-  recordSuccess(input) {
-    const key = requireStateKey(input);
-    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
-    const countsJson = encodeCounts(input.counts);
-    const warningsJson = encodeWarnings(input.warnings);
-    const checkpointSupplied = Object.prototype.hasOwnProperty.call(input, "checkpoint");
-    const checkpoint = input.checkpoint === null || input.checkpoint === undefined ? null : requireCheckpoint(input.checkpoint);
-    const notBeforeAt = input.notBeforeAt === undefined ? null : requireTimestamp2(input.notBeforeAt, "notBeforeAt");
-    const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger(input.effectiveIntervalMs, "effectiveIntervalMs");
-    const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
-    return this.writeCurrentVersion(key, () => {
-      this.db.query(`
-        INSERT INTO source_scheduler_task_state (
-          source_id, corpus_id, task_id, state_version, checkpoint,
-          last_completed_at, last_success_at, not_before_at,
-          attempt_in_progress, consecutive_failures, last_error_kind, last_error_hash,
-          last_result_status, last_counts_json, last_warnings_json,
-          effective_interval_ms, degraded_reason, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
-          checkpoint = CASE WHEN ? = 1 THEN excluded.checkpoint ELSE source_scheduler_task_state.checkpoint END,
-          last_completed_at = excluded.last_completed_at,
-          last_success_at = excluded.last_success_at,
-          not_before_at = excluded.not_before_at,
-          attempt_in_progress = 0,
-          consecutive_failures = 0,
-          last_error_kind = NULL,
-          last_error_hash = NULL,
-          last_result_status = excluded.last_result_status,
-          last_counts_json = excluded.last_counts_json,
-          last_warnings_json = excluded.last_warnings_json,
-          effective_interval_ms = excluded.effective_interval_ms,
-          degraded_reason = excluded.degraded_reason,
-          updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, checkpoint, completedAt, completedAt, notBeforeAt, input.resultStatus, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, checkpointSupplied ? 1 : 0);
-    });
-  }
-  adoptExternalSuccess(input) {
-    const key = requireStateKey(input);
-    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
-    const countsJson = encodeCounts(input.counts);
-    const warningsJson = encodeWarnings(input.warnings);
-    return this.writeCurrentVersion(key, () => {
-      const existing = this.get(key);
-      const newestActivity = Math.max(...[existing?.lastAttemptAt, existing?.lastCompletedAt, existing?.lastSuccessAt].map((value) => value ? Date.parse(value) : Number.NEGATIVE_INFINITY));
-      if (existing && Date.parse(completedAt) <= newestActivity)
-        return;
-      this.db.query(`
-        INSERT INTO source_scheduler_task_state (
-          source_id, corpus_id, task_id, state_version,
-          last_completed_at, last_success_at, attempt_in_progress,
-          consecutive_failures, last_error_kind, last_error_hash,
-          last_result_status, last_counts_json, last_warnings_json,
-          not_before_at, effective_interval_ms, degraded_reason, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)
-        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
-          last_completed_at = excluded.last_completed_at,
-          last_success_at = excluded.last_success_at,
-          attempt_in_progress = 0,
-          consecutive_failures = 0,
-          last_error_kind = NULL,
-          last_error_hash = NULL,
-          last_result_status = excluded.last_result_status,
-          last_counts_json = excluded.last_counts_json,
-          last_warnings_json = excluded.last_warnings_json,
-          not_before_at = NULL,
-          effective_interval_ms = NULL,
-          degraded_reason = NULL,
-          updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, completedAt, input.resultStatus, countsJson, warningsJson, completedAt);
-    });
-  }
-  recordFailure(input) {
-    const key = requireStateKey(input);
-    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
-    const notBeforeAt = requireTimestamp2(input.notBeforeAt, "notBeforeAt");
-    const errorKind = requireStateToken(input.errorKind, "errorKind");
-    const errorHash = requireHash2(input.errorHash);
-    const warningsJson = encodeWarnings(input.warnings);
-    const countsJson = encodeCounts(input.counts);
-    const effectiveIntervalSupplied = Object.prototype.hasOwnProperty.call(input, "effectiveIntervalMs");
-    const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger(input.effectiveIntervalMs, "effectiveIntervalMs");
-    const degradedReasonSupplied = Object.prototype.hasOwnProperty.call(input, "degradedReason");
-    const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
-    return this.writeCurrentVersion(key, () => {
-      this.db.query(`
-        INSERT INTO source_scheduler_task_state (
-          source_id, corpus_id, task_id, state_version,
-          last_completed_at, not_before_at, attempt_in_progress, consecutive_failures,
-          last_error_kind, last_error_hash, last_result_status,
-          last_counts_json, last_warnings_json, effective_interval_ms,
-          degraded_reason, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 'failed', ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
-          last_completed_at = excluded.last_completed_at,
-          not_before_at = excluded.not_before_at,
-          attempt_in_progress = 0,
-          consecutive_failures = source_scheduler_task_state.consecutive_failures + 1,
-          last_error_kind = excluded.last_error_kind,
-          last_error_hash = excluded.last_error_hash,
-          last_result_status = 'failed',
-          last_counts_json = excluded.last_counts_json,
-          last_warnings_json = excluded.last_warnings_json,
-          effective_interval_ms = CASE WHEN ? = 1 THEN excluded.effective_interval_ms ELSE source_scheduler_task_state.effective_interval_ms END,
-          degraded_reason = CASE WHEN ? = 1 THEN excluded.degraded_reason ELSE source_scheduler_task_state.degraded_reason END,
-          updated_at = excluded.updated_at
-      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
-    });
-  }
-  writeCurrentVersion(key, write) {
-    return this.db.transaction(() => {
-      const existing = this.db.query(`
-        SELECT state_version
-        FROM source_scheduler_task_state
-        WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId);
-      if (existing && existing.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION) {
-        throw new Error("Source scheduler task state uses an unsupported state_version.");
-      }
-      write();
-      const state = this.get(key);
-      if (!state)
-        throw new Error("Source scheduler task state could not be read after its atomic update.");
-      return state;
-    })();
-  }
-  recordAttemptStatement(key, attemptedAt) {
-    this.db.query(`
-      INSERT INTO source_scheduler_task_state (
-        source_id, corpus_id, task_id, state_version,
-        last_attempt_at, attempt_in_progress, consecutive_failures, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 1, 0, ?)
-      ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
-        last_attempt_at = excluded.last_attempt_at,
-        attempt_in_progress = 1,
-        updated_at = excluded.updated_at
-    `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, attemptedAt, attemptedAt);
-  }
-}
-function sourceSchedulerStateMigrations() {
-  return [
-    {
-      version: 1,
-      name: "create_source_scheduler_task_state",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS source_scheduler_task_state (
-            source_id TEXT NOT NULL,
-            corpus_id TEXT NOT NULL,
-            task_id TEXT NOT NULL,
-            state_version INTEGER NOT NULL DEFAULT 1,
-            attempt_in_progress INTEGER NOT NULL DEFAULT 0 CHECK(attempt_in_progress IN (0, 1)),
-            checkpoint TEXT,
-            last_attempt_at TEXT,
-            last_completed_at TEXT,
-            last_success_at TEXT,
-            not_before_at TEXT,
-            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-            last_error_kind TEXT,
-            last_error_hash TEXT,
-            last_result_status TEXT CHECK(last_result_status IN ('progress','idle','failed')),
-            last_counts_json TEXT,
-            last_warnings_json TEXT,
-            effective_interval_ms INTEGER,
-            degraded_reason TEXT,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(source_id, corpus_id, task_id)
-          );
-        `);
-      }
-    },
-    {
-      version: 2,
-      name: "add_guarded_scheduler_unpark_requests",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS source_scheduler_unpark_request (
-            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            corpus_id TEXT NOT NULL,
-            task_id TEXT NOT NULL,
-            expected_not_before_at TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            requested_at TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('pending','consumed','stale')),
-            resolved_at TEXT
-          );
-          CREATE UNIQUE INDEX IF NOT EXISTS source_scheduler_unpark_request_pending
-          ON source_scheduler_unpark_request(source_id, corpus_id, task_id)
-          WHERE status = 'pending';
-        `);
-      }
-    }
-  ];
-}
-function requireStateKey(input) {
-  return {
-    sourceId: requireKeyPart(input.sourceId, "sourceId"),
-    corpusId: requireKeyPart(input.corpusId, "corpusId"),
-    taskId: requireKeyPart(input.taskId, "taskId")
-  };
-}
-function requireKeyPart(value, field) {
-  if (typeof value !== "string" || !SAFE_KEY_PART.test(value)) {
-    throw new TypeError(`Source scheduler ${field} must be a safe identifier.`);
-  }
-  return value;
-}
-function requireTimestamp2(value, field) {
-  if (typeof value !== "string" || value.length > 64 || !Number.isFinite(Date.parse(value))) {
-    throw new TypeError(`Source scheduler ${field} must be a valid timestamp.`);
-  }
-  return value;
-}
-function requireStateToken(value, field) {
-  if (typeof value !== "string" || !SAFE_STATE_TOKEN.test(value)) {
-    throw new TypeError(`Source scheduler ${field} must be a safe categorical token.`);
-  }
-  return value;
-}
-function requireHash2(value) {
-  if (typeof value !== "string" || !SAFE_HASH2.test(value)) {
-    throw new TypeError("Source scheduler errorHash must be a lowercase hexadecimal digest.");
-  }
-  return value;
-}
-function requireCheckpoint(value) {
-  if (!isBoundedSourceCheckpoint(value)) {
-    throw new TypeError("Source scheduler checkpoint must be a bounded non-empty string.");
-  }
-  return value;
-}
-function requirePositiveSafeInteger(value, field) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`Source scheduler ${field} must be a positive safe integer.`);
-  }
-  return value;
-}
-function encodeCounts(counts) {
-  if (counts === undefined)
-    return null;
-  const safe = {};
-  for (const key of Object.keys(counts).sort()) {
-    if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(counts[key]) || counts[key] < 0) {
-      throw new TypeError("Source scheduler counts must use safe keys and non-negative safe integers.");
-    }
-    safe[key] = counts[key];
-  }
-  return JSON.stringify(safe);
-}
-function encodeWarnings(warnings) {
-  if (warnings === undefined)
-    return null;
-  const safe = [...new Set(warnings.map((warning) => requireStateToken(warning, "warning")))];
-  return JSON.stringify(safe);
-}
-function decodeRow(row) {
-  if (row.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION)
-    return;
-  if (!SAFE_KEY_PART.test(row.source_id) || !SAFE_KEY_PART.test(row.corpus_id) || !SAFE_KEY_PART.test(row.task_id)) {
-    return;
-  }
-  const updatedAt = safeTimestamp(row.updated_at);
-  if (!updatedAt)
-    return;
-  const lastResultStatus = safeResultStatus(row.last_result_status);
-  const lastCounts = decodeCounts(row.last_counts_json);
-  const lastWarnings = decodeWarnings(row.last_warnings_json);
-  const checkpoint = isBoundedSourceCheckpoint(row.checkpoint) ? row.checkpoint : undefined;
-  const effectiveIntervalMs = typeof row.effective_interval_ms === "number" && Number.isSafeInteger(row.effective_interval_ms) && row.effective_interval_ms > 0 ? row.effective_interval_ms : undefined;
-  const degradedReason = typeof row.degraded_reason === "string" && SAFE_STATE_TOKEN.test(row.degraded_reason) ? row.degraded_reason : undefined;
-  const lastErrorKind = typeof row.last_error_kind === "string" && SAFE_STATE_TOKEN.test(row.last_error_kind) ? row.last_error_kind : undefined;
-  const lastErrorHash = typeof row.last_error_hash === "string" && SAFE_HASH2.test(row.last_error_hash) ? row.last_error_hash : undefined;
-  return {
-    sourceId: row.source_id,
-    corpusId: row.corpus_id,
-    taskId: row.task_id,
-    stateVersion: SOURCE_SCHEDULER_TASK_STATE_VERSION,
-    attemptPending: row.attempt_in_progress === 1,
-    ...checkpoint ? { checkpoint } : {},
-    ...safeTimestamp(row.last_attempt_at) ? { lastAttemptAt: safeTimestamp(row.last_attempt_at) } : {},
-    ...safeTimestamp(row.last_completed_at) ? { lastCompletedAt: safeTimestamp(row.last_completed_at) } : {},
-    ...safeTimestamp(row.last_success_at) ? { lastSuccessAt: safeTimestamp(row.last_success_at) } : {},
-    ...safeTimestamp(row.not_before_at) ? { notBeforeAt: safeTimestamp(row.not_before_at) } : {},
-    consecutiveFailures: Number.isSafeInteger(row.consecutive_failures) && row.consecutive_failures >= 0 ? row.consecutive_failures : 0,
-    ...lastErrorKind ? { lastErrorKind } : {},
-    ...lastErrorHash ? { lastErrorHash } : {},
-    ...lastResultStatus ? { lastResultStatus } : {},
-    ...lastCounts ? { lastCounts } : {},
-    ...lastWarnings ? { lastWarnings } : {},
-    ...effectiveIntervalMs ? { effectiveIntervalMs } : {},
-    ...degradedReason ? { degradedReason } : {},
-    updatedAt
-  };
-}
-function safeTimestamp(value) {
-  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) ? value : undefined;
-}
-function safeResultStatus(value) {
-  return value === "progress" || value === "idle" || value === "failed" ? value : undefined;
-}
-function decodeCounts(value) {
-  if (value === null)
-    return;
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return;
-    const safe = {};
-    for (const [key, count] of Object.entries(parsed)) {
-      if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(count) || count < 0)
-        return;
-      safe[key] = count;
-    }
-    return safe;
-  } catch {
-    return;
-  }
-}
-function decodeWarnings(value) {
-  if (value === null)
-    return;
-  try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.some((warning) => typeof warning !== "string" || !SAFE_STATE_TOKEN.test(warning))) {
-      return;
-    }
-    return [...new Set(parsed)];
-  } catch {
-    return;
-  }
-}
-var SOURCE_SCHEDULER_STATE_STORE_ID = "source-scheduler-state", SOURCE_SCHEDULER_STATE_SCHEMA_VERSION = 2, SOURCE_SCHEDULER_TASK_STATE_VERSION = 1, SAFE_STATE_TOKEN, SAFE_KEY_PART, SAFE_HASH2, SourceSchedulerUnparkRefusal;
-var init_source_scheduler_state = __esm(() => {
-  init_sqlite_migrations();
-  SAFE_STATE_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-  SAFE_KEY_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-  SAFE_HASH2 = /^[a-f0-9]{16,128}$/;
-  SourceSchedulerUnparkRefusal = class SourceSchedulerUnparkRefusal extends Error {
-    code;
-    constructor(code, message) {
-      super(`Source scheduler unpark refused (${code}): ${message}`);
-      this.name = "SourceSchedulerUnparkRefusal";
-      this.code = code;
-    }
-  };
 });
 
 // node_modules/zod/v4/core/core.js
@@ -57521,443 +54346,6 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
-// src/core/file-delivery.ts
-class FileDeliveryClient {
-  config;
-  transport;
-  constructor(config2, transport = createFileDeliveryTransport(config2)) {
-    this.config = config2;
-    this.transport = transport;
-  }
-  async health() {
-    if (!this.config.fileDelivery.enabled) {
-      return {
-        reachable: false,
-        configured: false,
-        base_url: this.config.fileDelivery.baseUrl,
-        policy: {
-          bounded_file_delivery: true,
-          shell_used: false,
-          absolute_path_exposed: false
-        },
-        detail: "File delivery is disabled. Configure a bounded Xanthos delivery worker before exposing the tool."
-      };
-    }
-    const startedAt = performance.now();
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/health`, {
-      method: "GET"
-    });
-    const data = asRecord10(response);
-    assertNoHostPathLeakFields(data);
-    const policy = asRecord10(data.policy);
-    if (policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-      throw new OperationError("file_delivery_error", "File delivery health policy was not bounded and path-safe.");
-    }
-    return {
-      reachable: true,
-      configured: typeof data.configured === "boolean" ? data.configured : true,
-      base_url: this.config.fileDelivery.baseUrl,
-      latency_ms: Math.round(performance.now() - startedAt),
-      ...Array.isArray(data.roots) ? { roots: data.roots } : {},
-      policy: {
-        bounded_file_delivery: true,
-        shell_used: false,
-        absolute_path_exposed: false
-      },
-      ...typeof data.detail === "string" ? { detail: data.detail } : {}
-    };
-  }
-  async deliver(options) {
-    if (!this.config.fileDelivery.enabled) {
-      throw new OperationError("file_delivery_not_configured", "File delivery is disabled.", "Configure the bounded Xanthos file-delivery worker before using file writes.");
-    }
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/file/deliver`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        root_id: options.rootId,
-        relative_path: options.relativePath,
-        content: options.content,
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        write_mode: options.writeMode,
-        trust_domain: options.trustDomain,
-        ...options.sourceProvenance ? { source_provenance: options.sourceProvenance } : {},
-        idempotency_key: options.idempotencyKey,
-        ...options.approvalId ? { approval_id: options.approvalId } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {},
-        ...options.modelProvider ? { model_provider: options.modelProvider } : {},
-        ...options.modelId ? { model_id: options.modelId } : {}
-      })
-    });
-    const data = asRecord10(response);
-    assertNoHostPathLeakFields(data);
-    return parseFileDeliveryResult(data);
-  }
-}
-function createFileDeliveryTransport(config2) {
-  return new DirectHttpFileDeliveryTransport(fetch, workerAuthTokenFromConfig(config2), config2.fileDelivery.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpFileDeliveryTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error2) {
-      if (isAbortError(error2)) {
-        throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker timed out at ${url} after ${this.timeoutMs}ms.`, "The file-delivery worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos file-delivery worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText3(response);
-      throw new OperationError("file_delivery_error", `Bounded file-delivery worker returned HTTP ${response.status}.`, body || "Check the Xanthos file-delivery worker logs.");
-    }
-    return response.json();
-  }
-}
-function parseFileDeliveryResult(value) {
-  const policy = asRecord10(value.policy);
-  if (value.kind !== "file_delivery_result" || policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("file_delivery_error", "File delivery result did not include bounded path-safe policy.");
-  }
-  const writeMode = requiredWriteMode(value.write_mode, "write_mode");
-  const approvalStatus = requiredApprovalStatus(value.approval_status, "approval_status");
-  return {
-    kind: "file_delivery_result",
-    delivery_id: requiredString5(value.delivery_id, "delivery_id"),
-    root_id: requiredString5(value.root_id, "root_id"),
-    relative_path: requiredString5(value.relative_path, "relative_path"),
-    bytes_written: requiredNumber2(value.bytes_written, "bytes_written"),
-    content_sha256: requiredString5(value.content_sha256, "content_sha256"),
-    write_mode: writeMode,
-    created_at: requiredString5(value.created_at, "created_at"),
-    approval_status: approvalStatus,
-    audit_ref: requiredString5(value.audit_ref, "audit_ref"),
-    ...typeof value.idempotent_replay === "boolean" ? { idempotent_replay: value.idempotent_replay } : {},
-    policy: {
-      bounded_file_delivery: true,
-      shell_used: false,
-      absolute_path_exposed: false
-    }
-  };
-}
-function assertNoHostPathLeakFields(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("file_delivery_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields(nested, [...path, key]);
-  }
-}
-function asRecord10(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("file_delivery_error", "File delivery response was not a JSON object.");
-  }
-  return value;
-}
-function requiredString5(value, name) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new OperationError("file_delivery_error", `${name} must be a non-empty string.`);
-  }
-  return value;
-}
-function requiredNumber2(value, name) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new OperationError("file_delivery_error", `${name} must be a finite number.`);
-  }
-  return value;
-}
-function requiredWriteMode(value, name) {
-  if (value === "dry_run" || value === "create_new" || value === "overwrite_with_approval")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported write mode.`);
-}
-function requiredApprovalStatus(value, name) {
-  if (value === "dry_run" || value === "not_required" || value === "approved")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported approval status.`);
-}
-async function safeText3(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-var init_file_delivery = __esm(() => {
-  init_http_timeout();
-  init_operation_error();
-  init_worker_auth();
-});
-
-// src/core/castor-workspace.ts
-class CastorWorkspaceClient {
-  config;
-  transport;
-  constructor(config2, transport = createCastorWorkspaceTransport(config2)) {
-    this.config = config2;
-    this.transport = transport;
-  }
-  async run(options) {
-    if (!this.config.castorWorkspace.enabled) {
-      throw new OperationError("castor_workspace_not_configured", "Delegated workspace is disabled.", "Configure the bounded delegated workspace worker before exposing delegated filesystem access.");
-    }
-    const response = await this.transport.requestJson(`${this.config.castorWorkspace.baseUrl}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: options.action,
-        ...options.rootId ? { root_id: options.rootId } : {},
-        ...options.relativePath !== undefined ? { relative_path: options.relativePath } : {},
-        ...options.content !== undefined ? { content: options.content } : {},
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        ...options.destinationUri ? { destination_uri: options.destinationUri } : {},
-        ...options.recursive !== undefined ? { recursive: options.recursive } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {},
-        ...options.includeMedia !== undefined ? { include_media: options.includeMedia } : {},
-        ...options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {}
-      })
-    });
-    const data = asRecord11(response);
-    assertWorkspacePolicy(data);
-    assertNoHostPathLeakFields2(data);
-    return data;
-  }
-}
-function createCastorWorkspaceTransport(config2) {
-  return new DirectHttpCastorWorkspaceTransport(fetch, workerAuthTokenFromConfig(config2), config2.castorWorkspace.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpCastorWorkspaceTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error2) {
-      if (isAbortError(error2)) {
-        throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker timed out at ${url} after ${this.timeoutMs}ms.`, "The delegated workspace worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos delegated workspace worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText4(response);
-      throw new OperationError("castor_workspace_error", `Delegated workspace worker returned HTTP ${response.status}.`, body || "Check the Xanthos delegated workspace worker logs.");
-    }
-    return response.json();
-  }
-}
-function assertWorkspacePolicy(value) {
-  const policy = asRecord11(value.policy);
-  if (policy.castor_workspace_delegated !== true || policy.shell_exposed_to_agent !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response did not include bounded delegated policy.");
-  }
-}
-function assertNoHostPathLeakFields2(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields2(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("castor_workspace_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields2(nested, [...path, key]);
-  }
-}
-async function safeText4(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-function asRecord11(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response was not an object.");
-  }
-  return value;
-}
-var init_castor_workspace = __esm(() => {
-  init_http_timeout();
-  init_operation_error();
-  init_worker_auth();
-});
-
-// src/core/domain-expert-client.ts
-class DomainExpertClient {
-  config;
-  transport;
-  constructor(config2, transport = createDomainExpertTransport(config2)) {
-    this.config = config2;
-    this.transport = transport;
-  }
-  async run(tool, params) {
-    if (!this.config.domainExpert.enabled) {
-      throw new OperationError("domain_expert_not_configured", "Domain expert worker is disabled.", "Configure the bounded domain expert worker before live Google/Gemini/Docs/Anna actions.");
-    }
-    const defaultDomainId = this.config.domainExpert.defaultDomainId;
-    const requestParams = defaultDomainId && params.domain_id === undefined ? { ...params, domain_id: defaultDomainId } : params;
-    const response = await this.transport.requestJson(`${this.config.domainExpert.baseUrl}/domain`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool, params: requestParams })
-    });
-    assertDomainExpertPolicy(response);
-    return response;
-  }
-}
-function domainExpertAuthTokenFromConfig(config2, options = {}) {
-  return normalizeWorkerAuthToken(config2.domainExpert.authToken) ?? normalizeWorkerAuthToken((options.env ?? process.env).OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? normalizeWorkerAuthToken(readWorkerSetupEnv(options)?.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? workerAuthTokenFromConfig(config2, options);
-}
-function createDomainExpertTransport(config2) {
-  return new DirectHttpDomainExpertTransport(fetch, domainExpertAuthTokenFromConfig(config2), config2.domainExpert.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpDomainExpertTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error2) {
-      if (isAbortError(error2)) {
-        throw new OperationError("domain_expert_unreachable", `Domain expert worker timed out at ${url} after ${this.timeoutMs}ms.`, "The domain expert worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("domain_expert_unreachable", `Domain expert worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Olympus domain expert worker is running.");
-    }
-    if (!response.ok) {
-      const workerError = response.status === 403 ? undefined : parseWorkerError(await safeText5(response));
-      throw new OperationError(response.status === 403 ? "domain_expert_policy_violation" : workerError?.code ?? "domain_expert_error", workerError?.message ?? `Domain expert worker returned HTTP ${response.status}.`, workerError?.suggestion ?? GENERIC_WORKER_ERROR_SUGGESTION);
-    }
-    return response.json();
-  }
-}
-function assertDomainExpertPolicy(value) {
-  const record3 = asRecord12(value);
-  const policy = asRecord12(record3.policy);
-  const controlPlaneOnly = policy.olympus_control_plane_only === true || policy.expert_agents_control_plane_only === true;
-  if (!controlPlaneOnly || policy.raw_runtime_secrets_exposed !== false) {
-    throw new OperationError("domain_expert_error", "Domain expert response did not include the bounded policy contract.");
-  }
-}
-async function safeText5(response) {
-  const reader = response.body?.getReader();
-  if (!reader)
-    return "";
-  const chunks = [];
-  let byteLength = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      byteLength += value.byteLength;
-      if (byteLength > MAX_WORKER_ERROR_BODY_BYTES) {
-        await reader.cancel();
-        return "";
-      }
-      chunks.push(value);
-    }
-    const body = new Uint8Array(byteLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      body.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(body);
-  } catch {
-    return "";
-  } finally {
-    reader.releaseLock();
-  }
-}
-function parseWorkerError(body) {
-  try {
-    const parsed = JSON.parse(body);
-    const error2 = optionalRecord(optionalRecord(parsed)?.error);
-    const code = boundedWorkerErrorString(error2?.code, MAX_WORKER_ERROR_CODE_LENGTH);
-    const message = boundedWorkerErrorString(error2?.message, MAX_WORKER_ERROR_MESSAGE_LENGTH);
-    if (!code || !message)
-      return;
-    const typedCode = PASSTHROUGH_WORKER_ERROR_CODES[code];
-    if (!typedCode)
-      return;
-    const suggestionValue = error2?.suggestion;
-    const suggestion = suggestionValue === undefined ? undefined : boundedWorkerErrorString(suggestionValue, MAX_WORKER_ERROR_SUGGESTION_LENGTH);
-    if (suggestionValue !== undefined && !suggestion)
-      return;
-    return {
-      code: typedCode,
-      message,
-      ...suggestion ? { suggestion } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function optionalRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function boundedWorkerErrorString(value, maxLength) {
-  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u001f\u007f-\u009f]/u.test(value))
-    return;
-  const trimmed2 = value.trim();
-  return trimmed2 || undefined;
-}
-function asRecord12(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("domain_expert_error", "Domain expert response was not an object.");
-  }
-  return value;
-}
-var MAX_WORKER_ERROR_BODY_BYTES, MAX_WORKER_ERROR_CODE_LENGTH = 64, MAX_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_WORKER_ERROR_SUGGESTION_LENGTH = 512, GENERIC_WORKER_ERROR_SUGGESTION = "Check the Olympus domain expert worker logs.", PASSTHROUGH_WORKER_ERROR_CODES;
-var init_domain_expert_client = __esm(() => {
-  init_http_timeout();
-  init_operation_error();
-  init_worker_auth();
-  MAX_WORKER_ERROR_BODY_BYTES = 8 * 1024;
-  PASSTHROUGH_WORKER_ERROR_CODES = Object.freeze({
-    invalid_params: "invalid_params",
-    domain_expert_not_configured: "domain_expert_not_configured",
-    annas_archive_not_configured: "annas_archive_not_configured"
-  });
-});
-
 // src/mcp/tools.ts
 function listMcpTools(config2) {
   return exposedOperations(operations, { config: config2, surface: "mcp" }).map((operation) => ({
@@ -57984,7 +54372,7 @@ async function handleMcpCallTool(request, makeOperationContext = makeContext) {
   }
   const ctx = makeOperationContext();
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "mcp" })) {
-    throw new OperationError("invalid_params", `Olympus operation is not available on this MCP surface: ${operation.name}`, "Enable the matching product or operator configuration for this Olympus surface.");
+    throw new OperationError("invalid_params", `Olympus operation is not available on this MCP surface: ${operation.name}`, "Enable the matching product configuration for this Olympus surface.");
   }
   const result = await operation.handler(ctx, request.params.arguments ?? {});
   return {
@@ -58020,10 +54408,7 @@ function makeContext() {
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
-    email: new EmailClient(config2, createEmailTransport(config2)),
-    fileDelivery: new FileDeliveryClient(config2, createFileDeliveryTransport(config2)),
-    castorWorkspace: new CastorWorkspaceClient(config2, createCastorWorkspaceTransport(config2)),
-    domainExpert: new DomainExpertClient(config2, createDomainExpertTransport(config2))
+    email: new EmailClient(config2, createEmailTransport(config2))
   };
 }
 var init_server3 = __esm(() => {
@@ -58033,9 +54418,6 @@ var init_server3 = __esm(() => {
   init_config();
   init_delphi();
   init_email();
-  init_file_delivery();
-  init_castor_workspace();
-  init_domain_expert_client();
   init_operation_exposure();
   init_operations();
   init_version();
@@ -58043,7 +54425,7 @@ var init_server3 = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile5, realpath as realpath2, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile4, realpath as realpath2, stat as stat3 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve6, sep as sep6 } from "node:path";
 
 class DropboxExtractionSource {
@@ -58295,7 +54677,7 @@ async function readVerifiedCandidate(input) {
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile5(input.candidatePath));
+  const bytes = new Uint8Array(await readFile4(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
@@ -58518,17 +54900,17 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync12, mkdirSync as mkdirSync22 } from "node:fs";
+import { chmodSync as chmodSync11, mkdirSync as mkdirSync20 } from "node:fs";
 import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
-import { homedir as homedir30 } from "node:os";
-import { dirname as dirname26, join as join36 } from "node:path";
-import { Database as Database10 } from "bun:sqlite";
+import { homedir as homedir29 } from "node:os";
+import { dirname as dirname24, join as join34 } from "node:path";
+import { Database as Database9 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join36(homedir30(), ".local", "share");
-  return join36(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join34(homedir29(), ".local", "share");
+  return join34(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -58541,11 +54923,11 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync22(dirname26(dbPath), { recursive: true, mode: 448 });
+      mkdirSync20(dirname24(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = this.readonly ? new Database10(dbPath, { readonly: true }) : new Database10(dbPath, { create: true });
+    this.db = this.readonly ? new Database9(dbPath, { readonly: true }) : new Database9(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync12(dbPath, 384);
+      chmodSync11(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -58563,11 +54945,11 @@ class LocalFileExtractionJobStore {
   enqueue(request) {
     this.assertWritable("enqueue");
     const extractorKind = requireToken2(request.extractorKind, "extractorKind");
-    const extractorVersion = requireKeyPart2(request.extractorVersion, "extractorVersion");
+    const extractorVersion = requireKeyPart(request.extractorVersion, "extractorVersion");
     const policyDecision = requirePolicyDecision(request.policyDecision ?? "index_allowed");
     const policyDecisionSupplied = request.policyDecision === undefined ? 0 : 1;
     const priority = request.priority === undefined ? 0 : requireSafeInteger(request.priority, "priority");
-    const maxBytesPerFile = request.maxBytesPerFile === undefined ? undefined : requirePositiveSafeInteger2(request.maxBytesPerFile, "maxBytesPerFile");
+    const maxBytesPerFile = request.maxBytesPerFile === undefined ? undefined : requirePositiveSafeInteger(request.maxBytesPerFile, "maxBytesPerFile");
     const force = request.force === true;
     const now = nowIso4();
     let jobsQueued = 0;
@@ -58724,10 +55106,10 @@ class LocalFileExtractionJobStore {
   }
   record(request) {
     this.assertWritable("record");
-    const jobId = requireKeyPart2(request.jobId, "jobId");
+    const jobId = requireKeyPart(request.jobId, "jobId");
     const status = requireTerminalStatus(request.status);
     const errorKind = request.errorKind === undefined ? undefined : requireToken2(request.errorKind, "errorKind");
-    const errorHash = request.errorHash === undefined ? undefined : requireHash3(request.errorHash);
+    const errorHash = request.errorHash === undefined ? undefined : requireHash2(request.errorHash);
     const tempBytesCleaned = request.tempBytesCleaned !== false;
     const now = nowIso4();
     return this.db.transaction(() => {
@@ -58973,11 +55355,11 @@ class LocalFileExtractionJobStore {
     };
   }
   get(jobId) {
-    const row = this.jobRow(requireKeyPart2(jobId, "jobId"));
+    const row = this.jobRow(requireKeyPart(jobId, "jobId"));
     return row ? recordFromRow(row) : undefined;
   }
   holdsExtractionClaim(claim) {
-    const row = this.jobRow(requireKeyPart2(claim.jobId, "jobId"));
+    const row = this.jobRow(requireKeyPart(claim.jobId, "jobId"));
     if (!row)
       return false;
     return row.status === "leased" && row.lease_token !== null && row.lease_token === requireBoundedString(claim.leaseToken, "leaseToken") && row.lease_grant_ordinal !== null && row.lease_grant_ordinal === claim.grantOrdinal && claim.grantAuthority === this.claimGrantAuthority();
@@ -58997,7 +55379,7 @@ class LocalFileExtractionJobStore {
     });
   }
   corpusReadiness(corpusId, now = new Date) {
-    const corpus = requireKeyPart2(corpusId, "corpusId");
+    const corpus = requireKeyPart(corpusId, "corpusId");
     const items = this.db.query(`
       WITH item_state AS (
         SELECT
@@ -59064,14 +55446,14 @@ class LocalFileExtractionJobStore {
       FROM extraction_artifacts
       WHERE corpus_id = ? AND local_item_id = ?
       ORDER BY artifact_index ASC
-    `).all(requireKeyPart2(corpusId, "corpusId"), requireBoundedString(localItemId, "localItemId"));
+    `).all(requireKeyPart(corpusId, "corpusId"), requireBoundedString(localItemId, "localItemId"));
     return rows.map((row) => artifactFromRow(row));
   }
   janitorEscalate(lane, request, reason, limit, dryRun) {
     const extractorKind = requireToken2(request.extractorKind ?? "", "extractorKind");
     const lastErrorKind = requireToken2(request.lastErrorKind ?? "", "lastErrorKind");
     const targetKind = requireToken2(request.targetExtractorKind ?? "", "targetExtractorKind");
-    const targetVersion = requireKeyPart2(request.targetExtractorVersion ?? "", "targetExtractorVersion");
+    const targetVersion = requireKeyPart(request.targetExtractorVersion ?? "", "targetExtractorVersion");
     const escalationBudget = clampInteger(request.escalationBudget ?? limit, 0, limit);
     const now = nowIso4();
     let matched = [];
@@ -59168,7 +55550,7 @@ class LocalFileExtractionJobStore {
     }
     if (request.extractorVersion !== undefined) {
       filters.push("extractor_version = ?");
-      params.push(requireKeyPart2(request.extractorVersion, "extractorVersion"));
+      params.push(requireKeyPart(request.extractorVersion, "extractorVersion"));
     }
     if (request.providerItemIds !== undefined && request.providerItemIds.length > 0) {
       filters.push(`provider_item_id IN (${request.providerItemIds.map(() => "?").join(", ")})`);
@@ -59427,8 +55809,8 @@ function jobStatus(value) {
 }
 function requireItemRef(ref) {
   const normalized = {
-    corpusId: requireKeyPart2(ref.corpusId, "corpusId"),
-    provider: requireKeyPart2(ref.provider, "provider"),
+    corpusId: requireKeyPart(ref.corpusId, "corpusId"),
+    provider: requireKeyPart(ref.provider, "provider"),
     accountScope: requireBoundedString(ref.accountScope, "accountScope"),
     approvedScopeKey: requireBoundedString(ref.approvedScopeKey, "approvedScopeKey"),
     providerItemId: requireBoundedString(ref.providerItemId, "providerItemId"),
@@ -59443,14 +55825,14 @@ function requireItemRef(ref) {
 }
 function requireLaneKey(lane) {
   return {
-    corpusId: requireKeyPart2(lane.corpusId, "corpusId"),
-    provider: requireKeyPart2(lane.provider, "provider"),
+    corpusId: requireKeyPart(lane.corpusId, "corpusId"),
+    provider: requireKeyPart(lane.provider, "provider"),
     accountScope: requireBoundedString(lane.accountScope, "accountScope"),
     approvedScopeKey: requireBoundedString(lane.approvedScopeKey, "approvedScopeKey")
   };
 }
-function requireKeyPart2(value, field) {
-  if (typeof value !== "string" || !SAFE_KEY_PART2.test(value)) {
+function requireKeyPart(value, field) {
+  if (typeof value !== "string" || !SAFE_KEY_PART.test(value)) {
     throw new TypeError(`Extraction job ${field} must be a safe identifier.`);
   }
   return value;
@@ -59461,8 +55843,8 @@ function requireToken2(value, field) {
   }
   return value;
 }
-function requireHash3(value) {
-  if (typeof value !== "string" || !SAFE_HASH3.test(value)) {
+function requireHash2(value) {
+  if (typeof value !== "string" || !SAFE_HASH2.test(value)) {
     throw new TypeError("Extraction job errorHash must be a lowercase hexadecimal digest.");
   }
   return value;
@@ -59497,7 +55879,7 @@ function requireSafeInteger(value, field) {
   }
   return value;
 }
-function requirePositiveSafeInteger2(value, field) {
+function requirePositiveSafeInteger(value, field) {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`Extraction job ${field} must be a positive safe integer.`);
   }
@@ -59518,7 +55900,7 @@ function hashString5(value) {
 function nowIso4() {
   return new Date().toISOString();
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART2, SAFE_HASH3, POLICY_DECISIONS, TERMINAL_STATUSES;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 3, FILE_EXTRACTION_JOBS_DB_PATH_ENV = "OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH", DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   NETWORK_ERROR_KINDS = new Set([
@@ -59526,8 +55908,8 @@ var init_job_store = __esm(() => {
     "network_socket_closed"
   ]);
   SAFE_TOKEN2 = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-  SAFE_KEY_PART2 = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-  SAFE_HASH3 = /^[a-f0-9]{16,128}$/;
+  SAFE_KEY_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+  SAFE_HASH2 = /^[a-f0-9]{16,128}$/;
   POLICY_DECISIONS = new Set([
     "index_allowed",
     "index_redacted",
@@ -59676,6 +56058,89 @@ var init_bounded_text = __esm(() => {
     slide: "slide",
     image: "image_description",
     media: "image_description"
+  };
+});
+
+// src/workers/file-extraction/extractors/command-runner.ts
+import { Buffer as Buffer4 } from "node:buffer";
+import { spawn as spawn2 } from "node:child_process";
+async function runExtractionCommand(request) {
+  return new Promise((resolve7, reject) => {
+    const child = spawn2(request.command, request.args, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdout = [];
+    const stderr = [];
+    let settled = false;
+    const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
+    const timer = useTimeout ? setTimeout(() => {
+      if (settled)
+        return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new ExtractionCommandTimeoutError({
+        command: request.command,
+        timeoutMs: request.timeoutMs
+      }));
+    }, request.timeoutMs) : undefined;
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error2) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      reject(error2);
+    });
+    child.on("close", (code) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      const result = {
+        stdout: Buffer4.concat(stdout).toString("utf8"),
+        stderr: Buffer4.concat(stderr).toString("utf8")
+      };
+      if (code === 0) {
+        resolve7(result);
+        return;
+      }
+      reject(new ExtractionCommandError({
+        command: request.command,
+        exitCode: code,
+        stdout: result.stdout,
+        stderr: result.stderr
+      }));
+    });
+  });
+}
+var ExtractionCommandError, ExtractionCommandTimeoutError;
+var init_command_runner = __esm(() => {
+  ExtractionCommandError = class ExtractionCommandError extends Error {
+    command;
+    exitCode;
+    stdout;
+    stderr;
+    constructor(input) {
+      super(input.exitCode === null ? `${input.command} exited without an exit code.` : `${input.command} exited with status ${input.exitCode}.`);
+      this.name = "ExtractionCommandError";
+      this.command = input.command;
+      this.exitCode = input.exitCode;
+      this.stdout = input.stdout;
+      this.stderr = input.stderr;
+    }
+  };
+  ExtractionCommandTimeoutError = class ExtractionCommandTimeoutError extends Error {
+    command;
+    timeoutMs;
+    constructor(input) {
+      super(`${input.command} timed out.`);
+      this.name = "ExtractionCommandTimeoutError";
+      this.command = input.command;
+      this.timeoutMs = input.timeoutMs;
+    }
   };
 });
 
@@ -60165,9 +56630,9 @@ var init_document_formats = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/text.ts
-import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { tmpdir as tmpdir3 } from "node:os";
-import { join as join37 } from "node:path";
+import { mkdtemp, rm as rm2, writeFile } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join35 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -60406,10 +56871,10 @@ async function extractPdfText(input) {
   });
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp2(join37(tmpdir3(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp(join35(tmpdir2(), TEMP_DIR_PREFIX));
   try {
-    const inputPath = join37(tempDir, "input.pdf");
-    await writeFile2(inputPath, input.context.bytes);
+    const inputPath = join35(tempDir, "input.pdf");
+    await writeFile(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
       args: [
@@ -60429,7 +56894,7 @@ async function extractPdfTextWithCommand(input) {
       warnings: ["pdf_text_layer_only", "pdf_text_poppler"]
     });
   } finally {
-    await rm3(tempDir, { recursive: true, force: true });
+    await rm2(tempDir, { recursive: true, force: true });
   }
 }
 function pdfTextExtractionResult(input) {
@@ -60633,7 +57098,7 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX2 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body";
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body";
 var init_text = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -60641,9 +57106,9 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp3, readFile as readFile6, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { tmpdir as tmpdir4 } from "node:os";
-import { join as join38 } from "node:path";
+import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir as tmpdir3 } from "node:os";
+import { join as join36 } from "node:path";
 function createOcrExtractor(options = {}) {
   const kind = options.kind ?? OCR_EXTRACTOR_KIND;
   const version2 = options.version ?? OCR_EXTRACTOR_VERSION;
@@ -60707,12 +57172,12 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp3(join38(tmpdir4(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp2(join36(tmpdir3(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join38(tempDir, "input.pdf");
-    const outputPath = join38(tempDir, "output.pdf");
-    const sidecarPath = join38(tempDir, "sidecar.txt");
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join36(tempDir, "input.pdf");
+    const outputPath = join36(tempDir, "output.pdf");
+    const sidecarPath = join36(tempDir, "sidecar.txt");
+    await writeFile2(inputPath, input.bytes);
     try {
       await input.commandRunner({
         command: OCR_PDF_COMMAND,
@@ -60740,7 +57205,7 @@ async function extractPdfOcr(input) {
         throw error2;
       return { status: "failed_terminal", errorKind: rejectionKind };
     }
-    const bounded = boundText(normalizeExtractedText(await readFile6(sidecarPath, "utf8")), input.maxBoundedTextChars);
+    const bounded = boundText(normalizeExtractedText(await readFile5(sidecarPath, "utf8")), input.maxBoundedTextChars);
     if (!bounded.text) {
       return mediaDescriptorOutput({
         mimeType: input.mimeType,
@@ -60764,14 +57229,14 @@ async function extractPdfOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm3(tempDir, { recursive: true, force: true });
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp3(join38(tmpdir4(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp2(join36(tmpdir3(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join38(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
-    await writeFile3(inputPath, input.bytes);
+    const inputPath = join36(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    await writeFile2(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
       args: [
@@ -60808,7 +57273,7 @@ async function extractImageOcr(input) {
       ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
     };
   } finally {
-    await rm4(tempDir, { recursive: true, force: true });
+    await rm3(tempDir, { recursive: true, force: true });
   }
 }
 function classifyOcrDeterministicPdfRejection(error2) {
@@ -60853,7 +57318,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX3 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND = "ocrmypdf", OCR_IMAGE_COMMAND = "tesseract", TEMP_DIR_PREFIX2 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -60863,6 +57328,169 @@ var init_ocr = __esm(() => {
     "ocrmypdf_pdf_signed",
     "ocrmypdf_pdf_invalid"
   ];
+});
+
+// src/workers/file-extraction/extractors/pdf-render.ts
+import { mkdtemp as mkdtemp3, readFile as readFile6, readdir, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { tmpdir as tmpdir4 } from "node:os";
+import { join as join37 } from "node:path";
+function parsePdfInfoPageCount(stdout) {
+  const match = /^Pages:\s*(\d+)\s*$/im.exec(stdout);
+  if (!match?.[1])
+    return;
+  const parsed = Number(match[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+function matchRenderedPageNumber(name, outputFormat) {
+  const match = outputFormat === "jpeg" ? /^page-(\d+)\.jpe?g$/i.exec(name) ?? /^page(\d+)\.jpe?g$/i.exec(name) : /^page-(\d+)\.png$/i.exec(name) ?? /^page(\d+)\.png$/i.exec(name);
+  if (!match?.[1])
+    return;
+  return Number(match[1]);
+}
+async function renderPdfPages(input) {
+  const renderCommand = input.renderCommand?.trim() || DEFAULT_PDF_RENDER_COMMAND;
+  const infoCommand = input.infoCommand?.trim() || DEFAULT_PDF_INFO_COMMAND;
+  const renderCommandRunner = input.renderCommandRunner ?? runExtractionCommand;
+  const infoCommandRunner = input.infoCommandRunner ?? renderCommandRunner;
+  const timeoutMs = input.timeoutMs ?? DEFAULT_PDF_RENDER_TIMEOUT_MS;
+  const outputFormat = input.outputFormat ?? "jpeg";
+  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  try {
+    const inputPath = join37(tempDir, "input.pdf");
+    const outputPrefix = join37(tempDir, "page");
+    await writeFile3(inputPath, input.bytes);
+    let totalPages;
+    try {
+      const info = await infoCommandRunner({
+        command: infoCommand,
+        args: [inputPath],
+        timeoutMs
+      });
+      totalPages = parsePdfInfoPageCount(info.stdout);
+    } catch {
+      totalPages = undefined;
+    }
+    const lastPage = Math.min(input.maxPages, totalPages ?? input.maxPages);
+    await renderCommandRunner({
+      command: renderCommand,
+      args: [
+        "-f",
+        "1",
+        "-l",
+        String(lastPage),
+        ...outputFormat === "jpeg" ? ["-jpeg", "-jpegopt", "quality=85"] : ["-png"],
+        "-r",
+        String(DEFAULT_PDF_RENDER_DPI),
+        inputPath,
+        outputPrefix
+      ],
+      timeoutMs
+    });
+    const entries = (await readdir(tempDir)).map((name) => {
+      const pageNumber = matchRenderedPageNumber(name, outputFormat);
+      if (pageNumber === undefined)
+        return;
+      return { name, pageNumber };
+    }).filter((value) => Boolean(value)).filter((value) => Number.isInteger(value.pageNumber) && value.pageNumber > 0).sort((left, right) => left.pageNumber - right.pageNumber).slice(0, input.maxPages);
+    if (entries.length === 0) {
+      const singleFilePath = `${outputPrefix}.${outputFormat === "jpeg" ? "jpg" : "png"}`;
+      try {
+        return {
+          pages: [{
+            pageNumber: 1,
+            bytes: new Uint8Array(await readFile6(singleFilePath)),
+            mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
+            dpi: DEFAULT_PDF_RENDER_DPI
+          }],
+          ...totalPages !== undefined ? { totalPages } : {}
+        };
+      } catch {
+        throw new Error("Local PDF rendering produced no page images.");
+      }
+    }
+    return {
+      pages: await Promise.all(entries.map(async (entry) => ({
+        pageNumber: entry.pageNumber,
+        bytes: new Uint8Array(await readFile6(join37(tempDir, entry.name))),
+        mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
+        dpi: DEFAULT_PDF_RENDER_DPI
+      }))),
+      ...totalPages !== undefined ? { totalPages } : {}
+    };
+  } finally {
+    await rm4(tempDir, { recursive: true, force: true });
+  }
+}
+async function renderSinglePdfPageForVision(input) {
+  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  try {
+    const inputPath = join37(tempDir, "input.pdf");
+    const outputPrefix = join37(tempDir, "page");
+    const outputPath = `${outputPrefix}.jpg`;
+    await writeFile3(inputPath, input.bytes);
+    await input.renderCommandRunner({
+      command: input.renderCommand,
+      args: [
+        "-f",
+        String(input.pageNumber),
+        "-l",
+        String(input.pageNumber),
+        "-singlefile",
+        "-jpeg",
+        "-jpegopt",
+        "quality=85",
+        "-r",
+        String(input.dpi),
+        inputPath,
+        outputPrefix
+      ],
+      timeoutMs: input.timeoutMs
+    });
+    return {
+      pageNumber: input.pageNumber,
+      bytes: new Uint8Array(await readFile6(outputPath)),
+      mimeType: "image/jpeg",
+      dpi: input.dpi
+    };
+  } finally {
+    await rm4(tempDir, { recursive: true, force: true });
+  }
+}
+async function renderPdfFirstPageForVision(input) {
+  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  try {
+    const inputPath = join37(tempDir, "input.pdf");
+    const outputPrefix = join37(tempDir, "page");
+    const outputPath = `${outputPrefix}.png`;
+    await writeFile3(inputPath, input.bytes);
+    await input.commandRunner({
+      command: input.command,
+      args: [
+        "-f",
+        "1",
+        "-l",
+        "1",
+        "-singlefile",
+        "-png",
+        "-r",
+        String(DEFAULT_PDF_RENDER_DPI),
+        inputPath,
+        outputPrefix
+      ],
+      timeoutMs: input.timeoutMs
+    });
+    return {
+      bytes: new Uint8Array(await readFile6(outputPath)),
+      mimeType: "image/png"
+    };
+  } finally {
+    await rm4(tempDir, { recursive: true, force: true });
+  }
+}
+var DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000, DEFAULT_PDF_RENDER_COMMAND = "pdftoppm", DEFAULT_PDF_INFO_COMMAND = "pdfinfo", DEFAULT_PDF_RENDER_DPI = 180, PDF_RENDER_DPI_STEPS, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-render-";
+var init_pdf_render = __esm(() => {
+  init_command_runner();
+  PDF_RENDER_DPI_STEPS = [180, 150, 120, 100];
 });
 
 // src/workers/file-extraction/extractors/remote-vlm.ts
@@ -61048,7 +57676,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp4, readFile as readFile7, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { extname, join as join39 } from "node:path";
+import { extname, join as join38 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -61114,8 +57742,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp4(join39(tmpdir5(), tempDirPrefix));
-          inputPath = join39(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp4(join38(tmpdir5(), tempDirPrefix));
+          inputPath = join38(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile4(inputPath, bytes);
         }
         const transcribed = await transcriber.transcribe({
@@ -62565,9 +59193,9 @@ function parseFileExtractionCorporaEnv(raw) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entries must be objects.`);
     }
     const record3 = entry;
-    const corpusId = requiredString6(record3.corpus_id, "corpus_id");
-    const provider = requiredString6(record3.provider, "provider");
-    const scopes = Array.isArray(record3.scopes) ? record3.scopes.map((scope) => requiredString6(scope, "scopes[]")) : [];
+    const corpusId = requiredString5(record3.corpus_id, "corpus_id");
+    const provider = requiredString5(record3.provider, "provider");
+    const scopes = Array.isArray(record3.scopes) ? record3.scopes.map((scope) => requiredString5(scope, "scopes[]")) : [];
     if (scopes.length === 0) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entry ${corpusId} needs at least one approved scope key.`);
     }
@@ -62691,7 +59319,7 @@ async function issueDropboxExtractionToken(broker, credentialHandle) {
 function storedTrustTier(store, item) {
   return store.localContent(item.identity.localItemId, 1)?.trustTier;
 }
-function requiredString6(value, field) {
+function requiredString5(value, field) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} ${field} must be a non-empty string.`);
   }
@@ -62819,7 +59447,7 @@ function createOpenAICompatibleAnalystModel(options) {
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) was unreachable at ${url}.`, error2 instanceof Error ? error2.message : `Check the ${providerLabel3} endpoint and network.`);
         }
         if (!response.ok) {
-          const detail = await safeText6(response);
+          const detail = await safeText3(response);
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) returned HTTP ${response.status}.`, detail || `Check the ${providerLabel3} endpoint logs and API key.`);
         }
         let data;
@@ -62866,7 +59494,7 @@ function maxTokensForChars(chars, options) {
   const boundedHeadroom = Math.max(0, Math.min(MAX_REASONING_HEADROOM_TOKENS, Math.floor(options.reasoningHeadroomTokens)));
   return Math.max(answerBudget, boundedHeadroom);
 }
-async function safeText6(response) {
+async function safeText3(response) {
   try {
     return await response.text();
   } catch {
@@ -62881,19 +59509,19 @@ var init_analyst_openai = __esm(() => {
 // src/core/venice-model-catalog.ts
 import {
   existsSync as existsSync23,
-  mkdirSync as mkdirSync23,
+  mkdirSync as mkdirSync21,
   readFileSync as readFileSync24,
   renameSync as renameSync7,
   rmSync as rmSync7,
   writeFileSync as writeFileSync9
 } from "node:fs";
 import { randomUUID as randomUUID15 } from "node:crypto";
-import { homedir as homedir31 } from "node:os";
-import { dirname as dirname27, isAbsolute as isAbsolute6, join as join40 } from "node:path";
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir31()) {
+import { homedir as homedir30 } from "node:os";
+import { dirname as dirname25, isAbsolute as isAbsolute6, join as join39 } from "node:path";
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir30()) {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join40(homeDir, ".cache");
-  return join40(cacheRoot, "olympus", "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join39(homeDir, ".cache");
+  return join39(cacheRoot, "olympus", "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -63087,7 +59715,7 @@ function readCatalogCache(path) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID15()}.tmp`;
   try {
-    mkdirSync23(dirname27(path), { recursive: true, mode: 448 });
+    mkdirSync21(dirname25(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync9(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -63570,16 +60198,15 @@ var init_openai_compatible_client = __esm(() => {
 
 // src/core/google-pilot-client.ts
 function resolveGooglePilotClientId(packaged, shipped) {
-  const substituted = packaged.trim();
-  if (substituted !== "" && substituted !== GOOGLE_PILOT_CLIENT_ID_SENTINEL)
-    return substituted;
-  const fallback = shipped.trim();
-  return fallback === "" ? undefined : fallback;
+  return packaged.trim() || shipped.trim() || undefined;
 }
 function packagedGooglePilotClientId() {
   return resolveGooglePilotClientId(PACKAGED_GOOGLE_PILOT_CLIENT_ID, DEFAULT_GOOGLE_PILOT_CLIENT_ID);
 }
-var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
+var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "", PACKAGED_GOOGLE_PILOT_CLIENT_ID;
+var init_google_pilot_client = __esm(() => {
+  PACKAGED_GOOGLE_PILOT_CLIENT_ID = typeof OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID === "undefined" ? "" : OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID;
+});
 
 // src/workers/source-index/answer-latency-log.ts
 import {
@@ -63590,8 +60217,8 @@ import {
   stat as stat4,
   unlink as unlink2
 } from "node:fs/promises";
-import { homedir as homedir32 } from "node:os";
-import { dirname as dirname28, join as join41 } from "node:path";
+import { homedir as homedir31 } from "node:os";
+import { dirname as dirname26, join as join40 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
   const audit = result.audit;
   const skipped = audit.skipped_corpora.map((skip) => ({
@@ -63696,7 +60323,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir3(dirname28(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname26(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -63749,8 +60376,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join41(homedir32(), ".local", "share");
-  return join41(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join40(homedir31(), ".local", "share");
+  return join40(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -64026,12 +60653,12 @@ class OpenClawSourceWatchDeliveryTransport {
     const result = await response.json().catch(() => {
       return;
     });
-    const record3 = asRecord13(result);
+    const record3 = asRecord10(result);
     if (record3?.status !== "sent") {
       const outcome = typeof record3?.status === "string" ? record3.status : "invalid_response";
       return { status: "failed", errorKind: safeErrorKind(`openclaw_${outcome}`) };
     }
-    const receipt = asRecord13(record3.receipt);
+    const receipt = asRecord10(record3.receipt);
     return {
       status: "delivered",
       receipt: {
@@ -64223,7 +60850,7 @@ function isWatchLifecycleRejection(error2) {
 function isDeliveryFenceRejection(error2) {
   return error2 instanceof Error && /lease fence|not actively leased|another executor|lease has expired/i.test(error2.message);
 }
-function asRecord13(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery", SOURCE_WATCH_DELIVERY_HEADLINE = "Olympus watch matched newly indexed evidence.", SOURCE_WATCH_DELIVERY_LEASE_MS, SOURCE_WATCH_DELIVERY_RETRY_MS, SOURCE_WATCH_POLICY;
@@ -65235,7 +61862,6 @@ var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashbo
 }
 `;
 var init_components = __esm(() => {
-  init_phases();
   init_theme();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from " + "`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read " + "OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste " + "it into the dashboard. Do not change any configuration.";
@@ -65778,7 +62404,7 @@ function renderBackgroundBody(view, lanes, now, options) {
   });
   if (lanes.length === 0) {
     return `${nav}
-        <div class="foot">No background lane is reporting right now.</div>${renderInformational(options)}`;
+        <div class="foot">No background lane is reporting right now.</div>${renderInformational()}`;
   }
   const banners = armLaneBanners({
     lanes: lanes.map((lane) => ({ name: lane.name, status: lane.status })),
@@ -65790,7 +62416,7 @@ function renderBackgroundBody(view, lanes, now, options) {
     renderKpis(backgroundKpis(view, lanes)),
     renderLanes(lanes),
     renderRecentRuns(view, now),
-    renderInformational(options)
+    renderInformational()
   ].filter((section) => section.length > 0).join("");
 }
 function laneHeadline(lanes) {
@@ -65908,16 +62534,12 @@ function renderStrip(strip, label) {
   const bars = strip.map((item) => `<i style="background:${STRIP_TONE_COLORS[item.tone] ?? STRIP_TONE_COLORS.idle}" title="${escapeHtml(item.label)}"></i>`).join("");
   return `<span class="lanestrip"${label ? ` role="img" aria-label="${escapeHtml(label)}"` : ""}>${bars}</span>`;
 }
-function renderInformational(options) {
-  const basePath = options?.basePath ?? DEFAULT_BASE_PATH2;
-  const separator = basePath.includes("?") ? "&" : "?";
-  const href = safeHref(`${basePath}${separator}${EMBEDDING_LEDGER_QUERY_PARAM}`);
-  const link = href === undefined ? "" : `<div class="infolink"><a href="${escapeHtml(href)}">Embedding decisions &amp; history →</a>` + `<span class="quiet"> Model changes, re-embeds, and who approved them.</span></div>`;
+function renderInformational() {
   return `
         <div class="dsect">About these lanes</div>
         <div class="info">Nothing here is on a clock. Each lane runs when the machine has room for it, and
         the overnight guard decides every minute which lane that is. A lane that is not moving says who
-        stopped it; a lane whose state cannot be read says exactly that instead of guessing.</div>${link}`;
+        stopped it; a lane whose state cannot be read says exactly that instead of guessing.</div>`;
 }
 function backgroundKpis(view, lanes) {
   const kpis = [];
@@ -66263,7 +62885,7 @@ function compactCount(value) {
 function plural2(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
 .lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
@@ -68304,390 +64926,31 @@ var init_http = __esm(() => {
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 });
 
-// src/workers/embedding-ledger.ts
-import { homedir as homedir33 } from "node:os";
-import { mkdir as mkdir4, open as open4, readFile as readFile8 } from "node:fs/promises";
-import { dirname as dirname29, join as join42 } from "node:path";
-function resolveEmbeddingLedgerPath(env = process.env) {
-  const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
-  if (configured)
-    return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join42(homedir33(), ".local", "share");
-  return join42(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
-}
-async function readEmbeddingLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile8(path, "utf8");
-  } catch (error2) {
-    if (error2?.code !== "ENOENT")
-      throw error2;
-  }
-  const parsed = parseEmbeddingLedgerJsonl(raw);
-  return {
-    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
-    skipped: parsed.skipped,
-    path
-  };
-}
-function parseEmbeddingLedgerJsonl(text) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isEmbeddingLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function mergeEmbeddingLedgerEntries(backfill, recorded) {
-  const byId = new Map;
-  const unidentified = [];
-  for (const entry of [...backfill, ...recorded]) {
-    const id = entry.entry_id?.trim();
-    if (id)
-      byId.set(id, entry);
-    else
-      unidentified.push(entry);
-  }
-  const merged = [...byId.values(), ...unidentified];
-  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-function isEmbeddingLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record3 = value;
-  if (typeof record3.recorded_at !== "string" || record3.recorded_at.trim() === "")
-    return false;
-  if (typeof record3.what !== "string" || record3.what.trim() === "")
-    return false;
-  if (!isKind(record3.kind))
-    return false;
-  if (!isApprovedBy(record3.approved_by))
-    return false;
-  if (!isStatus(record3.status))
-    return false;
-  for (const key of ["model_id", "epoch", "endpoint", "why", "entry_id"]) {
-    if (record3[key] !== undefined && typeof record3[key] !== "string")
-      return false;
-  }
-  return record3.scope === undefined || isScope(record3.scope);
-}
-function isKind(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_KIND_TEXT;
-}
-function isApprovedBy(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_APPROVAL_TEXT;
-}
-function isStatus(value) {
-  return typeof value === "string" && value in EMBEDDING_LEDGER_STATUS_TEXT;
-}
-function isScope(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const scope = value;
-  if (scope.corpora !== undefined) {
-    if (!Array.isArray(scope.corpora))
-      return false;
-    if (scope.corpora.some((name) => typeof name !== "string"))
-      return false;
-  }
-  if (scope.chunks !== undefined) {
-    if (!scope.chunks || typeof scope.chunks !== "object" || Array.isArray(scope.chunks))
-      return false;
-    if (Object.values(scope.chunks).some((count) => typeof count !== "number" || !Number.isFinite(count)))
-      return false;
-  }
-  return true;
-}
-function embeddingLedgerScopeText(scope) {
-  const corpora = scope?.corpora ?? [];
-  if (corpora.length === 0)
-    return "";
-  return corpora.map((name) => {
-    const count = scope?.chunks?.[name];
-    return typeof count === "number" && Number.isFinite(count) ? `${name} (${count.toLocaleString("en-US")} chunks)` : name;
-  }).join(", ");
-}
-var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
-var init_embedding_ledger = __esm(() => {
-  EMBEDDING_LEDGER_KIND_TEXT = {
-    model_decision: "Model decision",
-    epoch_change: "Epoch changed",
-    endpoint_change: "Endpoint changed",
-    invalidation: "Stored vectors invalidated",
-    re_embed_started: "Re-embed started",
-    re_embed_completed: "Re-embed finished",
-    note: "Note"
-  };
-  EMBEDDING_LEDGER_APPROVAL_TEXT = {
-    jamie: "Approved in advance by the owner",
-    "system-automatic": "Not approved — the system did this on its own",
-    "unattributed-historical": "Not approved — no decision is on record"
-  };
-  EMBEDDING_LEDGER_STATUS_TEXT = {
-    pending: "Pending",
-    in_progress: "In progress",
-    complete: "Complete",
-    "n/a": ""
-  };
-  WIPED_CORPORA = [
-    "dropbox",
-    "gmail-secure",
-    "drive-secure",
-    "whatsapp-live",
-    "telegram-protected"
-  ];
-  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-  EMBEDDING_LEDGER_BACKFILL = [
-    {
-      entry_id: "backfill-2026-08-20-endpoint-retarget",
-      recorded_at: "2026-08-20T02:42:00.000Z",
-      kind: "endpoint_change",
-      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
-      approved_by: "unattributed-historical",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-invalidation",
-      recorded_at: "2026-08-20T12:03:00.000Z",
-      kind: "invalidation",
-      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
-      approved_by: "system-automatic",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-re-embed",
-      recorded_at: "2026-08-20T12:04:00.000Z",
-      kind: "re_embed_started",
-      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
-      approved_by: "system-automatic",
-      status: "in_progress"
-    },
-    {
-      entry_id: "backfill-2026-08-24-model-decision",
-      recorded_at: "2026-08-24T00:00:00.000Z",
-      kind: "model_decision",
-      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-      approved_by: "jamie",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-24-drain-lane-enablement",
-      recorded_at: "2026-08-24T23:30:00.000Z",
-      kind: "note",
-      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
-      scope: {
-        corpora: LANE_ENABLEMENT_CORPORA,
-        chunks: { dropbox: 52840, "x-bookmarks": 15 }
-      },
-      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-      approved_by: "jamie",
-      status: "complete"
-    }
-  ];
-});
-
-// src/workers/dashboard/pages/embedding-ledger.ts
-function renderEmbeddingLedgerPage(ledger, options) {
-  const now = options?.now ?? new Date;
-  const basePath = options?.basePath ?? DEFAULT_BASE_PATH5;
-  return pageShell({
-    title: "Olympus",
-    crumb: "Embedding decisions",
-    basePath,
-    meta: metaLine(ledger),
-    body: renderDashboardNav("background", { basePath }) + renderEmbeddingLedgerBody(ledger, now, basePath),
-    styles: [DASHBOARD_NAV_CSS, EMBEDDING_LEDGER_CSS]
-  });
-}
-function renderEmbeddingLedgerBody(ledger, now, basePath) {
-  return [
-    renderBackLink(basePath),
-    renderBlurb(),
-    renderSkipped(ledger),
-    renderEntries(ledger.entries, now)
-  ].filter((section) => section.length > 0).join("");
-}
-function metaLine(ledger) {
-  if (ledger.entries.length === 0)
-    return "no entries recorded";
-  const entries = `${dashboardCount(ledger.entries.length)} ${plural3(ledger.entries.length, "entry", "entries")}`;
-  return `${entries} · newest first`;
-}
-function renderBackLink(basePath) {
-  const separator = basePath.includes("?") ? "&" : "?";
-  const href = safeHref(`${basePath}${separator}${BACKGROUND_QUERY_PARAM3}`);
-  if (href === undefined)
-    return "";
-  return `
-        <div class="ledgerback"><a href="${escapeHtml(href)}">← Background</a></div>`;
-}
-function renderBlurb() {
-  return `
-        <div class="blurb">Every change that affects the stored embeddings is written down here, in
-        the order it happened. A change to the model, the endpoint or the epoch, an invalidation of
-        stored vectors, and the start and finish of every re-embed. Each entry says who approved it —
-        and an entry that nobody approved says so plainly.</div>`;
-}
-function renderSkipped(ledger) {
-  if (ledger.skipped === 0)
-    return "";
-  const lines = `${dashboardCount(ledger.skipped)} ${plural3(ledger.skipped, "line", "lines")}`;
-  return `
-        <div class="ledgerwarn">${lines} in the ledger file could not be read and ${ledger.skipped === 1 ? "was" : "were"} skipped. Everything below is what remains readable, so treat this record as incomplete.</div>`;
-}
-function renderEntries(entries, now) {
-  if (entries.length === 0) {
-    return `
-        <div class="foot">Nothing has been recorded yet. That means no embedding change has been
-        logged — not that none happened.</div>`;
-  }
-  const rows = entries.map((entry) => renderEntry(entry, now)).join("");
-  return `
-        <div class="dsect">What was done to the embeddings</div>${rows}`;
-}
-function renderEntry(entry, now) {
-  const facts = [];
-  pushFact(facts, "Model", entry.model_id);
-  pushFact(facts, "Epoch", entry.epoch);
-  pushFact(facts, "Endpoint", entry.endpoint);
-  pushFact(facts, "Scope", embeddingLedgerScopeText(entry.scope));
-  pushFact(facts, "Why", entry.why);
-  const approval = EMBEDDING_LEDGER_APPROVAL_TEXT[entry.approved_by];
-  const status = EMBEDDING_LEDGER_STATUS_TEXT[entry.status];
-  return `
-        <div class="ledgerentry">
-          <div class="ledgerhead"><span class="ledgerkind">${escapeHtml(EMBEDDING_LEDGER_KIND_TEXT[entry.kind])}</span><span class="ledgerwhen">${escapeHtml(whenText(entry.recorded_at, now))}</span></div>
-          <div class="ledgerwhat">${escapeHtml(entry.what)}</div>${facts.join("")}
-          <div class="ledgerfoot"><span class="${approvalClass(entry)}">${escapeHtml(approval)}</span>${status === "" ? "" : `<span class="ledgerstatus">${escapeHtml(status)}</span>`}</div>
-        </div>`;
-}
-function pushFact(facts, label, value) {
-  const text = (value ?? "").trim();
-  if (text === "")
-    return;
-  facts.push(`
-          <div class="ledgerfact"><span class="l">${escapeHtml(label)}</span><span class="v">${escapeHtml(text)}</span></div>`);
-}
-function approvalClass(entry) {
-  if (entry.approved_by === "jamie")
-    return "ledgerapproval ok";
-  return "ledgerapproval no";
-}
-function whenText(recordedAt, now) {
-  const at = Date.parse(recordedAt);
-  if (!Number.isFinite(at))
-    return "time not recorded";
-  const relative7 = dashboardRelativeFromMs(now.getTime() - at);
-  const absolute = utcStamp(new Date(at));
-  return relative7 === "" ? absolute : `${absolute} · ${relative7}`;
-}
-function utcStamp(at) {
-  const day = at.getUTCDate();
-  const month = MONTHS[at.getUTCMonth()] ?? "";
-  const hours = String(at.getUTCHours()).padStart(2, "0");
-  const minutes = String(at.getUTCMinutes()).padStart(2, "0");
-  return `${day} ${month} ${at.getUTCFullYear()}, ${hours}:${minutes} UTC`;
-}
-function plural3(count, one, many) {
-  return count === 1 ? one : many;
-}
-var DEFAULT_BASE_PATH5 = "/dashboard", BACKGROUND_QUERY_PARAM3 = "background", MONTHS, EMBEDDING_LEDGER_CSS = `.ledgerback { margin-bottom: 10px; font-size: 12px; }
-.ledgerback a { color: var(--t3); text-decoration: none; }
-.ledgerback a:hover { color: var(--t1); }
-.ledgerwarn { background: var(--panel); border: 1px solid var(--warn); border-radius: 9px; padding: 10px 14px; margin-bottom: 10px; color: var(--warn); font-size: 12px; line-height: 1.5; }
-.ledgerentry { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 8px; }
-.ledgerhead { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 5px; }
-.ledgerkind { font-size: 13px; font-weight: 600; }
-.ledgerwhen { color: var(--t3); font-size: 11px; white-space: nowrap; }
-.ledgerwhat { font-size: 13px; line-height: 1.5; margin-bottom: 7px; }
-.ledgerfact { display: grid; grid-template-columns: 82px 1fr; gap: 10px; font-size: 12px; line-height: 1.5; margin-bottom: 2px; }
-.ledgerfact .l { color: var(--t3); }
-.ledgerfact .v { color: var(--t2); word-break: break-word; }
-.ledgerfoot { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: 12px; }
-.ledgerapproval.ok { color: var(--good); }
-.ledgerapproval.no { color: var(--bad); }
-.ledgerstatus { color: var(--t3); }
-`;
-var init_embedding_ledger2 = __esm(() => {
-  init_embedding_ledger();
-  init_nav();
-  init_components();
-  init_vocabulary();
-  MONTHS = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec"
-  ];
-});
-
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync24, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname30, join as join43 } from "node:path";
-import { homedir as homedir34 } from "node:os";
+import { mkdirSync as mkdirSync22, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname27, join as join41 } from "node:path";
+import { homedir as homedir32 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join43(env.HOME?.trim() || homedir34(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join41(env.HOME?.trim() || homedir32(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
-  return join43(guardStateDir(env), "operator-override");
+  return join41(guardStateDir(env), "operator-override");
 }
 function resolveGuardReportPath(env = process.env) {
-  return join43(guardStateDir(env), "latest.json");
+  return join41(guardStateDir(env), "latest.json");
 }
 function resolveEmbeddingDrainReportPath(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join43(dir, "source-embedding-drain-current.json");
+  return join41(dir, "source-embedding-drain-current.json");
 }
 function readEmbeddingOperatorOverride(path) {
   let raw;
@@ -68712,11 +64975,11 @@ function writeEmbeddingOperatorOverride(path, on) {
     rmSync8(path, { force: true });
     return;
   }
-  mkdirSync24(dirname30(path), { recursive: true });
+  mkdirSync22(dirname27(path), { recursive: true });
   writeFileSync10(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
-function asRecord14(value) {
+function asRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 function asStamp(value) {
@@ -68731,7 +64994,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord14(JSON.parse(readFileSync25(path, "utf8")));
+    return asRecord11(JSON.parse(readFileSync25(path, "utf8")));
   } catch {
     return;
   }
@@ -68877,14 +65140,14 @@ async function fetchBackendModel(input) {
     });
     if (!response.ok)
       return;
-    const body = asRecord14(await response.json());
+    const body = asRecord11(await response.json());
     const data = body?.data;
     if (!Array.isArray(data))
       return;
-    const entry = data.map((item) => asRecord14(item)).find((item) => item !== undefined && item.id === input.model);
+    const entry = data.map((item) => asRecord11(item)).find((item) => item !== undefined && item.id === input.model);
     if (entry === undefined)
       return;
-    const backendModel = asRecord14(entry.metadata)?.backendModel;
+    const backendModel = asRecord11(entry.metadata)?.backendModel;
     return typeof backendModel === "string" && backendModel.trim() !== "" ? backendModel.trim() : "";
   } catch {
     return;
@@ -68920,7 +65183,7 @@ var init_embedding_runtime = __esm(() => {
 
 // src/workers/dashboard/background-runtime.ts
 import { readFileSync as readFileSync26 } from "node:fs";
-import { join as join44 } from "node:path";
+import { join as join42 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
   if (explicit)
@@ -68933,12 +65196,12 @@ function resolveLaneReportDir(env = process.env) {
   }
   return REPORT_DIR_DEFAULT;
 }
-function asRecord15(value) {
+function asRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 function readJsonFile2(path) {
   try {
-    return asRecord15(JSON.parse(readFileSync26(path, "utf8")));
+    return asRecord12(JSON.parse(readFileSync26(path, "utf8")));
   } catch {
     return;
   }
@@ -68946,7 +65209,7 @@ function readJsonFile2(path) {
 function readNumber(record3, path) {
   let cursor = record3;
   for (const segment of path.split(".")) {
-    const step = asRecord15(cursor);
+    const step = asRecord12(cursor);
     if (step === undefined)
       return;
     cursor = step[segment];
@@ -69025,7 +65288,7 @@ function guardGoverning(spec, guard) {
   return;
 }
 function providerPauseGoverning(record3) {
-  const pause = asRecord15(record3.provider_pause);
+  const pause = asRecord12(record3.provider_pause);
   if (pause === undefined || pause.active !== true)
     return;
   const message = typeof pause.message === "string" && pause.message.trim() !== "" ? pause.message.trim() : undefined;
@@ -69047,7 +65310,7 @@ function readBackgroundRuntime(options = {}) {
   const guard = readGuardArbitration(resolveGuardReportPath(env));
   const lanes = [];
   for (const spec of LANE_REPORTS) {
-    const record3 = readJsonFile2(join44(dir, spec.file));
+    const record3 = readJsonFile2(join42(dir, spec.file));
     if (record3 === undefined)
       continue;
     const updatedAt = readStamp(record3.updated_at) ?? readStamp(record3.generated_at);
@@ -69588,8 +65851,8 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync13, copyFileSync, existsSync as existsSync24, lstatSync as lstatSync14, mkdirSync as mkdirSync25, readFileSync as readFileSync27 } from "node:fs";
-import { dirname as dirname31 } from "node:path";
+import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync24, lstatSync as lstatSync14, mkdirSync as mkdirSync23, readFileSync as readFileSync27 } from "node:fs";
+import { dirname as dirname28 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const sources = options.sources.map((source) => {
@@ -69700,9 +65963,9 @@ function writeSourceIngestionExclusionsFile(options) {
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync13(backupPath, 384);
+    chmodSync12(backupPath, 384);
   } else {
-    mkdirSync25(dirname31(path), { recursive: true });
+    mkdirSync23(dirname28(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -70371,15 +66634,6 @@ class GogcliEmailConnector {
   }
   async health() {
     const args = this.healthArgs();
-    if (!args) {
-      return {
-        reachable: true,
-        configured: false,
-        connector: this.name,
-        raw_email_exposed: false,
-        detail: "Set OLYMPUS_EMAIL_SOURCE_ACCOUNT when using service-account auth mode."
-      };
-    }
     const result = await this.run(args);
     if (result.code !== 0) {
       return {
@@ -70399,11 +66653,6 @@ class GogcliEmailConnector {
     };
   }
   healthArgs() {
-    if (this.authMode === "service-account") {
-      if (!this.account)
-        return;
-      return ["auth", "service-account", "status", this.account, "--json", "--no-input"];
-    }
     return ["auth", "list", "--check", "--json", "--no-input"];
   }
   async run(args) {
@@ -70470,8 +66719,8 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 // src/workers/email-source/index.ts
 import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync28, statSync as statSync9 } from "node:fs";
-import { homedir as homedir35 } from "node:os";
-import { join as join45, resolve as resolve7 } from "node:path";
+import { homedir as homedir33 } from "node:os";
+import { join as join43, resolve as resolve7 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -70501,8 +66750,6 @@ function createEmailSourceWorker(options = {}) {
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
   const fileExtraction = options.fileExtraction;
-  const dropboxEvalShardExport = options.dropboxEvalShardExport;
-  const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
   const connectorStoresByCorpusId = new Map(connectorStores.map((store) => [store.corpusId, store]));
@@ -70609,26 +66856,6 @@ function createEmailSourceWorker(options = {}) {
               throw error2;
             }
           });
-        }
-        if (request.method === "POST" && url.pathname === `${basePath}/source/export`) {
-          if (!dropboxSourceExport) {
-            throw new EmailSourceWorkerError(501, "source_export_not_supported", "Private source worker does not support source export.", "Set OLYMPUS_SOURCE_EXPORT_ENABLED=true with a configured Dropbox files index and OLYMPUS_SOURCE_EXPORT_DROPBOX_ROOTS before requesting source exports.");
-          }
-          const exportRequest = await parseDropboxSourceExportRequest(request);
-          let result;
-          try {
-            result = await dropboxSourceExport.export(exportRequest);
-          } catch (error2) {
-            if (error2 instanceof DropboxSourceExportDestinationError) {
-              throw new EmailSourceWorkerError(403, "source_export_destination_not_allowed", error2.message);
-            }
-            if (error2 instanceof DropboxSourceExportRequestError) {
-              throw new EmailSourceWorkerError(400, "invalid_request", error2.message);
-            }
-            throw error2;
-          }
-          assertNoRawEmailFields(result);
-          return json(result);
         }
         if ((request.method === "GET" || request.method === "POST") && url.pathname === `${basePath}/source/index/status`) {
           if (!sourceIndexStatus) {
@@ -70737,13 +66964,6 @@ function createEmailSourceWorker(options = {}) {
           } finally {
             runtime.close?.();
           }
-        }
-        if (request.method === "GET" && url.pathname === "/dashboard" && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM)) {
-          const ledger = await readEmbeddingLedger(resolveEmbeddingLedgerPath(process.env));
-          const ledgerBasePath = embeddingLedgerBasePath(url);
-          return html(renderEmbeddingLedgerPage(ledger, {
-            ...ledgerBasePath === undefined ? {} : { basePath: ledgerBasePath }
-          }));
         }
         if (request.method === "GET" && (url.pathname === "/dashboard" || url.pathname === "/dashboard.json")) {
           if (!sourceIndexStatus || !sourceDashboard) {
@@ -71544,15 +67764,6 @@ function createEmailSourceWorker(options = {}) {
           };
           assertNoRawEmailFields(body);
           return json(body);
-        }
-        if (request.method === "POST" && url.pathname === `${basePath}/source/index/dropbox/content/export-eval-shard`) {
-          if (!dropboxEvalShardExport) {
-            throw new EmailSourceWorkerError(501, "dropbox_eval_shard_export_not_supported", "Private source worker does not support Dropbox eval shard export.");
-          }
-          const exportRequest = await parseDropboxEvalShardExportRequest(request);
-          const result = await dropboxEvalShardExport.export(exportRequest);
-          assertNoRawEmailFields(result);
-          return json(result);
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
           const record3 = await parseObjectBody(request);
@@ -72424,71 +68635,6 @@ function sourceIndexStatusCorpusIds(connectorStores) {
     ...connectorStores.map((store) => store.corpusId)
   ];
 }
-async function parseDropboxSourceExportRequest(request) {
-  const record3 = await parseObjectBody(request);
-  const corpusId = asOptionalString(record3.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const destinationRoot = asOptionalString(record3.destination_root);
-  if (!destinationRoot) {
-    throw new EmailSourceWorkerError(400, "invalid_request", "destination_root must be a non-empty Dropbox folder path.");
-  }
-  if (!Array.isArray(record3.items) || record3.items.length === 0) {
-    throw new EmailSourceWorkerError(400, "invalid_request", "items must be a non-empty array of export items.");
-  }
-  const items = record3.items.map((item, index) => parseDropboxSourceExportItem(item, index));
-  const account = asOptionalString(record3.account);
-  const dryRun = asOptionalBoolean(record3.dry_run);
-  return {
-    ...account !== undefined ? { account } : {},
-    destination_root: destinationRoot,
-    items,
-    ...dryRun !== undefined ? { dry_run: dryRun } : {}
-  };
-}
-function parseDropboxSourceExportItem(value, index) {
-  if (typeof value === "string" && value.trim()) {
-    return { path: value.trim() };
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `items.${index} must be a path string or an object with a path.`);
-  }
-  const record3 = value;
-  const path = asOptionalString(record3.path);
-  if (!path) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `items.${index}.path must be a non-empty string.`);
-  }
-  const destSubfolder = asOptionalString(record3.dest_subfolder);
-  return {
-    path,
-    ...destSubfolder !== undefined ? { dest_subfolder: destSubfolder } : {}
-  };
-}
-async function parseDropboxEvalShardExportRequest(request) {
-  const record3 = await parseObjectBody(request);
-  const corpusId = asOptionalString(record3.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const approvedScopeKey = asOptionalString(record3.approved_scope_key);
-  const count = asOptionalNumber(record3.count);
-  const outDir = asOptionalString(record3.out_dir);
-  if (!approvedScopeKey || count === undefined || !outDir) {
-    throw new EmailSourceWorkerError(400, "invalid_request", "approved_scope_key, count, and out_dir are required for Dropbox eval shard export.");
-  }
-  const account = asOptionalString(record3.account);
-  const dryRun = asOptionalBoolean(record3.dry_run);
-  const docTypes = asOptionalStringArray(record3.doc_types, "doc_types");
-  return {
-    ...account !== undefined ? { account } : {},
-    approved_scope_key: approvedScopeKey,
-    count,
-    out_dir: outDir,
-    ...docTypes !== undefined ? { doc_types: docTypes } : {},
-    ...dryRun !== undefined ? { dry_run: dryRun } : {}
-  };
-}
 function parseSourceDispositionsSave(body, sources) {
   const requested = asOptionalString(body.source);
   const matched = requested === undefined ? undefined : sources.find((source) => source.source_id.toLowerCase() === requested.trim().toLowerCase());
@@ -73215,7 +69361,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync28(join45(homedir35(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync28(join43(homedir33(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -73412,7 +69558,7 @@ function dashboardOAuthClientIdForSource(source, clientIds) {
   return clientIds[source] ?? clientIds.google ?? clientIds.gmail ?? clientIds["google-drive"];
 }
 async function dashboardApiKeyAvailability(secretStore) {
-  const readwiseToken = await secretStore.get("readwise.personal.token") ?? (PUBLIC_RUNTIME_BUILD ? undefined : await secretStore.get("readwise.castor_runtime.token"));
+  const readwiseToken = await secretStore.get("readwise.personal.token");
   return {
     venice: Boolean(await secretStore.get("venice.api_key")),
     readwise: Boolean(readwiseToken)
@@ -73678,12 +69824,6 @@ function json(value, status = 200) {
     headers: { "Content-Type": "application/json" }
   });
 }
-function embeddingLedgerBasePath(url) {
-  const token = url.searchParams.get("token");
-  if (token === null || token === "")
-    return;
-  return `/dashboard?token=${encodeURIComponent(token)}`;
-}
 function html(value, status = 200, extraHeaders) {
   return new Response(value, {
     status,
@@ -73696,9 +69836,10 @@ function html(value, status = 200, extraHeaders) {
     }
   });
 }
-var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
+var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000;
 var init_email_source = __esm(() => {
   init_email_policy();
+  init_google_pilot_client();
   init_publisher_oauth_client();
   init_oauth_relay();
   init_connect();
@@ -73723,8 +69864,6 @@ var init_email_source = __esm(() => {
   init_corpora();
   init_dashboard();
   init_http();
-  init_embedding_ledger2();
-  init_embedding_ledger();
   init_embedding_runtime();
   init_background_runtime();
   init_source_dashboard();
@@ -73879,7 +70018,7 @@ function createAnthropicAnalystModel(options) {
         clearTimeout(timer);
       }
       if (!response.ok) {
-        const detail = await safeText7(response);
+        const detail = await safeText4(response);
         throw new OperationError("source_index_error", `Anthropic analyst (${model}) returned HTTP ${response.status}.`, detail || "Check the Anthropic endpoint logs and API key.");
       }
       let data;
@@ -73910,7 +70049,7 @@ function parseAnthropicText(data) {
 function maxTokensForChars3(chars) {
   return Math.max(256, Math.ceil(chars / 3));
 }
-async function safeText7(response) {
+async function safeText4(response) {
   try {
     return await response.text();
   } catch {
@@ -74249,6 +70388,569 @@ function unique(values) {
 var DEFAULT_MAX_ATTEMPTS = 3, DEFAULT_RETRY_DELAYS_MS, CREDENTIAL_HINT2 = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
 var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
+});
+
+// src/workers/source-scheduler-state.ts
+import { chmodSync as chmodSync13, mkdirSync as mkdirSync24 } from "node:fs";
+import { homedir as homedir34 } from "node:os";
+import { dirname as dirname29, join as join44 } from "node:path";
+import { Database as Database10 } from "bun:sqlite";
+function defaultSourceSchedulerStateDbPath(env = process.env) {
+  const dataHome = env.XDG_DATA_HOME?.trim() || join44(homedir34(), ".local", "share");
+  return join44(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
+}
+
+class LocalSourceSchedulerStateStore {
+  dbPath;
+  db;
+  constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
+    this.dbPath = dbPath;
+    if (dbPath !== ":memory:") {
+      mkdirSync24(dirname29(dbPath), { recursive: true, mode: 448 });
+    }
+    this.db = new Database10(dbPath, { create: true });
+    if (dbPath !== ":memory:")
+      chmodSync13(dbPath, 384);
+    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+    assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
+    runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
+  }
+  close() {
+    closeSqliteStore(this.db);
+  }
+  get(key) {
+    const safeKey = requireStateKey(key);
+    const row = this.db.query(`
+      SELECT *
+      FROM source_scheduler_task_state
+      WHERE source_id = ? AND corpus_id = ? AND task_id = ?
+    `).get(safeKey.sourceId, safeKey.corpusId, safeKey.taskId);
+    return row ? decodeRow(row) : undefined;
+  }
+  list() {
+    const rows = this.db.query(`
+      SELECT *
+      FROM source_scheduler_task_state
+      ORDER BY source_id, corpus_id, task_id
+    `).all();
+    return rows.map((row) => decodeRow(row)).filter((state) => state !== undefined);
+  }
+  requestUnpark(input) {
+    const sourceId = requireKeyPart2(input.sourceId, "sourceId");
+    const taskId = requireKeyPart2(input.taskId, "taskId");
+    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
+    const reason = requireStateToken(input.reason, "reason");
+    const requestedAt = requireTimestamp2(input.requestedAt, "requestedAt");
+    return this.db.transaction(() => {
+      const matches = this.db.query(`
+        SELECT source_id, corpus_id, task_id, not_before_at, attempt_in_progress
+        FROM source_scheduler_task_state
+        WHERE source_id = ? AND task_id = ?
+        ORDER BY corpus_id
+      `).all(sourceId, taskId);
+      if (matches.length === 0) {
+        throw new SourceSchedulerUnparkRefusal("task_not_found", "the selected source and task have no durable scheduler state.");
+      }
+      if (matches.length !== 1) {
+        throw new SourceSchedulerUnparkRefusal("task_identity_ambiguous", "the selected source and task do not identify exactly one scheduler row.");
+      }
+      const observed = matches[0];
+      if (observed.not_before_at !== expectedNotBeforeAt) {
+        throw new SourceSchedulerUnparkRefusal("expected_not_before_mismatch", "observed not_before_at does not match --expected-not-before.");
+      }
+      if (observed.attempt_in_progress === 1) {
+        throw new SourceSchedulerUnparkRefusal("task_attempt_in_progress", "the selected task already has an attempt in progress.");
+      }
+      const pending = this.db.query(`
+        SELECT request_id
+        FROM source_scheduler_unpark_request
+        WHERE source_id = ? AND corpus_id = ? AND task_id = ? AND status = 'pending'
+      `).get(sourceId, observed.corpus_id, taskId);
+      if (pending) {
+        throw new SourceSchedulerUnparkRefusal("unpark_already_pending", "the selected task already has a pending one-attempt unpark request.");
+      }
+      this.db.query(`
+        INSERT INTO source_scheduler_unpark_request (
+          source_id, corpus_id, task_id, expected_not_before_at,
+          reason, requested_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+      `).run(sourceId, observed.corpus_id, taskId, expectedNotBeforeAt, reason, requestedAt);
+      const receipt = {
+        kind: "source_scheduler_unpark_requested",
+        status: "pending",
+        source_id: sourceId,
+        task_id: taskId,
+        expected_not_before_at: expectedNotBeforeAt,
+        reason,
+        requested_at: requestedAt,
+        policy: {
+          task_scoped: true,
+          expected_state_guarded: true,
+          one_attempt: true,
+          configured_cadence_unchanged: true,
+          counts_only: true
+        }
+      };
+      return receipt;
+    })();
+  }
+  cancelUnpark(input) {
+    const sourceId = requireKeyPart2(input.sourceId, "sourceId");
+    const taskId = requireKeyPart2(input.taskId, "taskId");
+    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
+    const reason = requireStateToken(input.reason, "reason");
+    const cancelledAt = requireTimestamp2(input.cancelledAt, "cancelledAt");
+    return this.db.transaction(() => {
+      const matches = this.db.query(`
+        SELECT request_id, expected_not_before_at
+        FROM source_scheduler_unpark_request
+        WHERE source_id = ? AND task_id = ? AND status = 'pending'
+        ORDER BY corpus_id
+      `).all(sourceId, taskId);
+      if (matches.length === 0) {
+        throw new SourceSchedulerUnparkRefusal("pending_unpark_not_found", "the selected source and task have no pending unpark request.");
+      }
+      if (matches.length !== 1) {
+        throw new SourceSchedulerUnparkRefusal("task_identity_ambiguous", "the selected source and task do not identify exactly one pending request.");
+      }
+      const pending = matches[0];
+      if (pending.expected_not_before_at !== expectedNotBeforeAt) {
+        throw new SourceSchedulerUnparkRefusal("expected_not_before_mismatch", "the pending request does not match --expected-not-before.");
+      }
+      const cancelled = this.db.query(`
+        UPDATE source_scheduler_unpark_request
+        SET status = 'stale', resolved_at = ?
+        WHERE request_id = ? AND status = 'pending'
+      `).run(cancelledAt, pending.request_id);
+      if (cancelled.changes !== 1) {
+        throw new SourceSchedulerUnparkRefusal("pending_unpark_not_found", "the pending request was already resolved.");
+      }
+      const receipt = {
+        kind: "source_scheduler_unpark_cancelled",
+        status: "cancelled",
+        source_id: sourceId,
+        task_id: taskId,
+        expected_not_before_at: expectedNotBeforeAt,
+        reason,
+        cancelled_at: cancelledAt,
+        policy: {
+          task_scoped: true,
+          expected_request_guarded: true,
+          configured_cadence_unchanged: true,
+          counts_only: true
+        }
+      };
+      return receipt;
+    })();
+  }
+  pendingUnparks() {
+    const rows = this.db.query(`
+      SELECT request_id, source_id, corpus_id, task_id,
+             expected_not_before_at, reason, requested_at
+      FROM source_scheduler_unpark_request
+      WHERE status = 'pending'
+      ORDER BY request_id
+    `).all();
+    return rows.map((row) => ({
+      requestId: row.request_id,
+      sourceId: row.source_id,
+      corpusId: row.corpus_id,
+      taskId: row.task_id,
+      expectedNotBeforeAt: row.expected_not_before_at,
+      reason: row.reason,
+      requestedAt: row.requested_at
+    }));
+  }
+  claimUnparkAttempt(input) {
+    const key = requireStateKey(input);
+    const requestId = requirePositiveSafeInteger2(input.requestId, "requestId");
+    const expectedNotBeforeAt = requireTimestamp2(input.expectedNotBeforeAt, "expectedNotBeforeAt");
+    const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
+    return this.db.transaction(() => {
+      const state = this.db.query(`
+        SELECT not_before_at, attempt_in_progress
+        FROM source_scheduler_task_state
+        WHERE source_id = ? AND corpus_id = ? AND task_id = ?
+      `).get(key.sourceId, key.corpusId, key.taskId);
+      if (!state || state.not_before_at !== expectedNotBeforeAt || state.attempt_in_progress === 1) {
+        this.db.query(`
+          UPDATE source_scheduler_unpark_request
+          SET status = 'stale', resolved_at = ?
+          WHERE request_id = ? AND status = 'pending'
+        `).run(attemptedAt, requestId);
+        return;
+      }
+      const claimed = this.db.query(`
+        UPDATE source_scheduler_unpark_request
+        SET status = 'consumed', resolved_at = ?
+        WHERE request_id = ?
+          AND source_id = ? AND corpus_id = ? AND task_id = ?
+          AND expected_not_before_at = ?
+          AND status = 'pending'
+      `).run(attemptedAt, requestId, key.sourceId, key.corpusId, key.taskId, expectedNotBeforeAt);
+      if (claimed.changes !== 1)
+        return;
+      this.recordAttemptStatement(key, attemptedAt);
+      const recorded = this.get(key);
+      if (!recorded) {
+        throw new Error("Source scheduler unpark attempt could not be read after its atomic claim.");
+      }
+      return recorded;
+    })();
+  }
+  recordAttempt(input) {
+    const key = requireStateKey(input);
+    const attemptedAt = requireTimestamp2(input.attemptedAt, "attemptedAt");
+    return this.writeCurrentVersion(key, () => {
+      this.recordAttemptStatement(key, attemptedAt);
+    });
+  }
+  recordSuccess(input) {
+    const key = requireStateKey(input);
+    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
+    const countsJson = encodeCounts(input.counts);
+    const warningsJson = encodeWarnings(input.warnings);
+    const checkpointSupplied = Object.prototype.hasOwnProperty.call(input, "checkpoint");
+    const checkpoint = input.checkpoint === null || input.checkpoint === undefined ? null : requireCheckpoint(input.checkpoint);
+    const notBeforeAt = input.notBeforeAt === undefined ? null : requireTimestamp2(input.notBeforeAt, "notBeforeAt");
+    const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger2(input.effectiveIntervalMs, "effectiveIntervalMs");
+    const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
+    return this.writeCurrentVersion(key, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version, checkpoint,
+          last_completed_at, last_success_at, not_before_at,
+          attempt_in_progress, consecutive_failures, last_error_kind, last_error_hash,
+          last_result_status, last_counts_json, last_warnings_json,
+          effective_interval_ms, degraded_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          checkpoint = CASE WHEN ? = 1 THEN excluded.checkpoint ELSE source_scheduler_task_state.checkpoint END,
+          last_completed_at = excluded.last_completed_at,
+          last_success_at = excluded.last_success_at,
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          consecutive_failures = 0,
+          last_error_kind = NULL,
+          last_error_hash = NULL,
+          last_result_status = excluded.last_result_status,
+          last_counts_json = excluded.last_counts_json,
+          last_warnings_json = excluded.last_warnings_json,
+          effective_interval_ms = excluded.effective_interval_ms,
+          degraded_reason = excluded.degraded_reason,
+          updated_at = excluded.updated_at
+      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, checkpoint, completedAt, completedAt, notBeforeAt, input.resultStatus, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, checkpointSupplied ? 1 : 0);
+    });
+  }
+  adoptExternalSuccess(input) {
+    const key = requireStateKey(input);
+    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
+    const countsJson = encodeCounts(input.counts);
+    const warningsJson = encodeWarnings(input.warnings);
+    return this.writeCurrentVersion(key, () => {
+      const existing = this.get(key);
+      const newestActivity = Math.max(...[existing?.lastAttemptAt, existing?.lastCompletedAt, existing?.lastSuccessAt].map((value) => value ? Date.parse(value) : Number.NEGATIVE_INFINITY));
+      if (existing && Date.parse(completedAt) <= newestActivity)
+        return;
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          last_completed_at, last_success_at, attempt_in_progress,
+          consecutive_failures, last_error_kind, last_error_hash,
+          last_result_status, last_counts_json, last_warnings_json,
+          not_before_at, effective_interval_ms, degraded_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          last_completed_at = excluded.last_completed_at,
+          last_success_at = excluded.last_success_at,
+          attempt_in_progress = 0,
+          consecutive_failures = 0,
+          last_error_kind = NULL,
+          last_error_hash = NULL,
+          last_result_status = excluded.last_result_status,
+          last_counts_json = excluded.last_counts_json,
+          last_warnings_json = excluded.last_warnings_json,
+          not_before_at = NULL,
+          effective_interval_ms = NULL,
+          degraded_reason = NULL,
+          updated_at = excluded.updated_at
+      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, completedAt, input.resultStatus, countsJson, warningsJson, completedAt);
+    });
+  }
+  recordFailure(input) {
+    const key = requireStateKey(input);
+    const completedAt = requireTimestamp2(input.completedAt, "completedAt");
+    const notBeforeAt = requireTimestamp2(input.notBeforeAt, "notBeforeAt");
+    const errorKind = requireStateToken(input.errorKind, "errorKind");
+    const errorHash = requireHash3(input.errorHash);
+    const warningsJson = encodeWarnings(input.warnings);
+    const countsJson = encodeCounts(input.counts);
+    const effectiveIntervalSupplied = Object.prototype.hasOwnProperty.call(input, "effectiveIntervalMs");
+    const effectiveIntervalMs = input.effectiveIntervalMs === undefined ? null : requirePositiveSafeInteger2(input.effectiveIntervalMs, "effectiveIntervalMs");
+    const degradedReasonSupplied = Object.prototype.hasOwnProperty.call(input, "degradedReason");
+    const degradedReason = input.degradedReason === undefined ? null : requireStateToken(input.degradedReason, "degradedReason");
+    return this.writeCurrentVersion(key, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          last_completed_at, not_before_at, attempt_in_progress, consecutive_failures,
+          last_error_kind, last_error_hash, last_result_status,
+          last_counts_json, last_warnings_json, effective_interval_ms,
+          degraded_reason, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 'failed', ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          last_completed_at = excluded.last_completed_at,
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          consecutive_failures = source_scheduler_task_state.consecutive_failures + 1,
+          last_error_kind = excluded.last_error_kind,
+          last_error_hash = excluded.last_error_hash,
+          last_result_status = 'failed',
+          last_counts_json = excluded.last_counts_json,
+          last_warnings_json = excluded.last_warnings_json,
+          effective_interval_ms = CASE WHEN ? = 1 THEN excluded.effective_interval_ms ELSE source_scheduler_task_state.effective_interval_ms END,
+          degraded_reason = CASE WHEN ? = 1 THEN excluded.degraded_reason ELSE source_scheduler_task_state.degraded_reason END,
+          updated_at = excluded.updated_at
+      `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
+    });
+  }
+  writeCurrentVersion(key, write) {
+    return this.db.transaction(() => {
+      const existing = this.db.query(`
+        SELECT state_version
+        FROM source_scheduler_task_state
+        WHERE source_id = ? AND corpus_id = ? AND task_id = ?
+      `).get(key.sourceId, key.corpusId, key.taskId);
+      if (existing && existing.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION) {
+        throw new Error("Source scheduler task state uses an unsupported state_version.");
+      }
+      write();
+      const state = this.get(key);
+      if (!state)
+        throw new Error("Source scheduler task state could not be read after its atomic update.");
+      return state;
+    })();
+  }
+  recordAttemptStatement(key, attemptedAt) {
+    this.db.query(`
+      INSERT INTO source_scheduler_task_state (
+        source_id, corpus_id, task_id, state_version,
+        last_attempt_at, attempt_in_progress, consecutive_failures, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+      ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+        last_attempt_at = excluded.last_attempt_at,
+        attempt_in_progress = 1,
+        updated_at = excluded.updated_at
+    `).run(key.sourceId, key.corpusId, key.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, attemptedAt, attemptedAt);
+  }
+}
+function sourceSchedulerStateMigrations() {
+  return [
+    {
+      version: 1,
+      name: "create_source_scheduler_task_state",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS source_scheduler_task_state (
+            source_id TEXT NOT NULL,
+            corpus_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            state_version INTEGER NOT NULL DEFAULT 1,
+            attempt_in_progress INTEGER NOT NULL DEFAULT 0 CHECK(attempt_in_progress IN (0, 1)),
+            checkpoint TEXT,
+            last_attempt_at TEXT,
+            last_completed_at TEXT,
+            last_success_at TEXT,
+            not_before_at TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_error_kind TEXT,
+            last_error_hash TEXT,
+            last_result_status TEXT CHECK(last_result_status IN ('progress','idle','failed')),
+            last_counts_json TEXT,
+            last_warnings_json TEXT,
+            effective_interval_ms INTEGER,
+            degraded_reason TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(source_id, corpus_id, task_id)
+          );
+        `);
+      }
+    },
+    {
+      version: 2,
+      name: "add_guarded_scheduler_unpark_requests",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS source_scheduler_unpark_request (
+            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            corpus_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            expected_not_before_at TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending','consumed','stale')),
+            resolved_at TEXT
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS source_scheduler_unpark_request_pending
+          ON source_scheduler_unpark_request(source_id, corpus_id, task_id)
+          WHERE status = 'pending';
+        `);
+      }
+    }
+  ];
+}
+function requireStateKey(input) {
+  return {
+    sourceId: requireKeyPart2(input.sourceId, "sourceId"),
+    corpusId: requireKeyPart2(input.corpusId, "corpusId"),
+    taskId: requireKeyPart2(input.taskId, "taskId")
+  };
+}
+function requireKeyPart2(value, field) {
+  if (typeof value !== "string" || !SAFE_KEY_PART2.test(value)) {
+    throw new TypeError(`Source scheduler ${field} must be a safe identifier.`);
+  }
+  return value;
+}
+function requireTimestamp2(value, field) {
+  if (typeof value !== "string" || value.length > 64 || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError(`Source scheduler ${field} must be a valid timestamp.`);
+  }
+  return value;
+}
+function requireStateToken(value, field) {
+  if (typeof value !== "string" || !SAFE_STATE_TOKEN.test(value)) {
+    throw new TypeError(`Source scheduler ${field} must be a safe categorical token.`);
+  }
+  return value;
+}
+function requireHash3(value) {
+  if (typeof value !== "string" || !SAFE_HASH3.test(value)) {
+    throw new TypeError("Source scheduler errorHash must be a lowercase hexadecimal digest.");
+  }
+  return value;
+}
+function requireCheckpoint(value) {
+  if (!isBoundedSourceCheckpoint(value)) {
+    throw new TypeError("Source scheduler checkpoint must be a bounded non-empty string.");
+  }
+  return value;
+}
+function requirePositiveSafeInteger2(value, field) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`Source scheduler ${field} must be a positive safe integer.`);
+  }
+  return value;
+}
+function encodeCounts(counts) {
+  if (counts === undefined)
+    return null;
+  const safe = {};
+  for (const key of Object.keys(counts).sort()) {
+    if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(counts[key]) || counts[key] < 0) {
+      throw new TypeError("Source scheduler counts must use safe keys and non-negative safe integers.");
+    }
+    safe[key] = counts[key];
+  }
+  return JSON.stringify(safe);
+}
+function encodeWarnings(warnings) {
+  if (warnings === undefined)
+    return null;
+  const safe = [...new Set(warnings.map((warning) => requireStateToken(warning, "warning")))];
+  return JSON.stringify(safe);
+}
+function decodeRow(row) {
+  if (row.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION)
+    return;
+  if (!SAFE_KEY_PART2.test(row.source_id) || !SAFE_KEY_PART2.test(row.corpus_id) || !SAFE_KEY_PART2.test(row.task_id)) {
+    return;
+  }
+  const updatedAt = safeTimestamp(row.updated_at);
+  if (!updatedAt)
+    return;
+  const lastResultStatus = safeResultStatus(row.last_result_status);
+  const lastCounts = decodeCounts(row.last_counts_json);
+  const lastWarnings = decodeWarnings(row.last_warnings_json);
+  const checkpoint = isBoundedSourceCheckpoint(row.checkpoint) ? row.checkpoint : undefined;
+  const effectiveIntervalMs = typeof row.effective_interval_ms === "number" && Number.isSafeInteger(row.effective_interval_ms) && row.effective_interval_ms > 0 ? row.effective_interval_ms : undefined;
+  const degradedReason = typeof row.degraded_reason === "string" && SAFE_STATE_TOKEN.test(row.degraded_reason) ? row.degraded_reason : undefined;
+  const lastErrorKind = typeof row.last_error_kind === "string" && SAFE_STATE_TOKEN.test(row.last_error_kind) ? row.last_error_kind : undefined;
+  const lastErrorHash = typeof row.last_error_hash === "string" && SAFE_HASH3.test(row.last_error_hash) ? row.last_error_hash : undefined;
+  return {
+    sourceId: row.source_id,
+    corpusId: row.corpus_id,
+    taskId: row.task_id,
+    stateVersion: SOURCE_SCHEDULER_TASK_STATE_VERSION,
+    attemptPending: row.attempt_in_progress === 1,
+    ...checkpoint ? { checkpoint } : {},
+    ...safeTimestamp(row.last_attempt_at) ? { lastAttemptAt: safeTimestamp(row.last_attempt_at) } : {},
+    ...safeTimestamp(row.last_completed_at) ? { lastCompletedAt: safeTimestamp(row.last_completed_at) } : {},
+    ...safeTimestamp(row.last_success_at) ? { lastSuccessAt: safeTimestamp(row.last_success_at) } : {},
+    ...safeTimestamp(row.not_before_at) ? { notBeforeAt: safeTimestamp(row.not_before_at) } : {},
+    consecutiveFailures: Number.isSafeInteger(row.consecutive_failures) && row.consecutive_failures >= 0 ? row.consecutive_failures : 0,
+    ...lastErrorKind ? { lastErrorKind } : {},
+    ...lastErrorHash ? { lastErrorHash } : {},
+    ...lastResultStatus ? { lastResultStatus } : {},
+    ...lastCounts ? { lastCounts } : {},
+    ...lastWarnings ? { lastWarnings } : {},
+    ...effectiveIntervalMs ? { effectiveIntervalMs } : {},
+    ...degradedReason ? { degradedReason } : {},
+    updatedAt
+  };
+}
+function safeTimestamp(value) {
+  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+function safeResultStatus(value) {
+  return value === "progress" || value === "idle" || value === "failed" ? value : undefined;
+}
+function decodeCounts(value) {
+  if (value === null)
+    return;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return;
+    const safe = {};
+    for (const [key, count] of Object.entries(parsed)) {
+      if (!SAFE_STATE_TOKEN.test(key) || !Number.isSafeInteger(count) || count < 0)
+        return;
+      safe[key] = count;
+    }
+    return safe;
+  } catch {
+    return;
+  }
+}
+function decodeWarnings(value) {
+  if (value === null)
+    return;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.some((warning) => typeof warning !== "string" || !SAFE_STATE_TOKEN.test(warning))) {
+      return;
+    }
+    return [...new Set(parsed)];
+  } catch {
+    return;
+  }
+}
+var SOURCE_SCHEDULER_STATE_STORE_ID = "source-scheduler-state", SOURCE_SCHEDULER_STATE_SCHEMA_VERSION = 2, SOURCE_SCHEDULER_TASK_STATE_VERSION = 1, SAFE_STATE_TOKEN, SAFE_KEY_PART2, SAFE_HASH3, SourceSchedulerUnparkRefusal;
+var init_source_scheduler_state = __esm(() => {
+  init_sqlite_migrations();
+  SAFE_STATE_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
+  SAFE_KEY_PART2 = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+  SAFE_HASH3 = /^[a-f0-9]{16,128}$/;
+  SourceSchedulerUnparkRefusal = class SourceSchedulerUnparkRefusal extends Error {
+    code;
+    constructor(code, message) {
+      super(`Source scheduler unpark refused (${code}): ${message}`);
+      this.name = "SourceSchedulerUnparkRefusal";
+      this.code = code;
+    }
+  };
 });
 
 // src/workers/source-scheduler.ts
@@ -75725,8 +72427,7 @@ function registerConnectorStoreEmbeddingLane(options) {
 function createEmailSourceConnectorFromEnv(env = process.env) {
   return env.OLYMPUS_EMAIL_SOURCE_CONNECTOR === "gogcli" ? new GogcliEmailConnector({
     ...env.OLYMPUS_EMAIL_SOURCE_GOG_COMMAND ? { command: env.OLYMPUS_EMAIL_SOURCE_GOG_COMMAND } : {},
-    ...env.OLYMPUS_EMAIL_SOURCE_ACCOUNT ? { account: env.OLYMPUS_EMAIL_SOURCE_ACCOUNT } : {},
-    ...env.OLYMPUS_EMAIL_SOURCE_AUTH_MODE === "service-account" ? { authMode: "service-account" } : {}
+    ...env.OLYMPUS_EMAIL_SOURCE_ACCOUNT ? { account: env.OLYMPUS_EMAIL_SOURCE_ACCOUNT } : {}
   }) : undefined;
 }
 function requireSourceEmbeddingDimension(options) {
@@ -76325,7 +73026,7 @@ async function main() {
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
   const authToken = workerAuthTokenFromEnv(process.env);
   const olympusConfig = loadConfig();
-  const sourceCorpusRegistry2 = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
+  const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
@@ -76623,7 +73324,7 @@ async function main() {
     defineInternalTelegramMessagesCorpus(),
     defineProtectedTelegramMessagesCorpus()
   ];
-  const registeredCorpusDefinitions = new Map(sourceCorpusRegistry2.definitions().map((definition) => [definition.corpusId, definition]));
+  const registeredCorpusDefinitions = new Map(sourceCorpusRegistry.definitions().map((definition) => [definition.corpusId, definition]));
   const fullyDefinedCorpusIds = new Set(fullCorpusDefinitions.map((definition) => definition.corpusId));
   for (const store of connectorStores) {
     if (fullyDefinedCorpusIds.has(store.corpusId))
@@ -76794,7 +73495,7 @@ async function main() {
           });
         };
         return {
-          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions)),
+          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry.definitions("answer", fullCorpusDefinitions)),
           adapters: {
             ...Object.fromEntries(readConnectorStores.flatMap((store) => {
               const adapter = connectorStoreAdapter(store);
@@ -76827,7 +73528,7 @@ async function main() {
     })
   } : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
-    corpusDefinitions: sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions),
+    corpusDefinitions: sourceCorpusRegistry.definitions("status", fullCorpusDefinitions),
     connectorStores,
     retrievalAvailability,
     ...fileExtractionRuntime ? { readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs) } : {}
@@ -76973,7 +73674,7 @@ async function main() {
         const status = await sourceIndexStatus.status({ include_items: false });
         sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
           schedulerStatus,
-          sourceCorpusRegistry: sourceCorpusRegistry2,
+          sourceCorpusRegistry,
           safeForCastor: true
         }));
       }
@@ -77005,7 +73706,7 @@ async function main() {
     ...sourceIndexReadEnabled ? {
       sourceDashboard: {
         sovereigntyEngine,
-        corpusRegistry: sourceCorpusRegistry2,
+        corpusRegistry: sourceCorpusRegistry,
         registryPath: handleRegistryPathFromEnv(process.env, true),
         ...sourceDashboardHistory ? { history: sourceDashboardHistory } : {},
         ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
@@ -77568,7 +74269,6 @@ import { randomBytes as randomBytes6 } from "node:crypto";
 import { readFileSync as readFileSync29 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve8 } from "node:path";
 
 // src/data-lifecycle.ts
 init_atomic_file();
@@ -77601,7 +74301,7 @@ import {
   statSync as statSync7
 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
-import { basename as basename4, dirname as dirname16, join as join24, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname16, join as join23, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -77672,29 +74372,14 @@ function lifecycleSourceSpecs() {
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
       connectorStorePaths: (context) => [defaultWhatsAppConnectorStoreDbPath(envForContext(context))],
       rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context))
-    },
-    {
-      sourceId: "reflect.notes",
-      label: "Reflect notes connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "reflect-notes.sqlite")]
-    },
-    {
-      sourceId: "roam.notes",
-      label: "Roam notes connector store",
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), "roam-notes.sqlite")]
     }
   ];
-}
-function mountedConnectorStoreDbPath(env, fileName) {
-  return olympusSharedDataFile(env, fileName);
 }
 function legacySourceIndexPath(env, overrideKey, fileName) {
   return env[overrideKey]?.trim() || olympusSharedDataFile(env, fileName);
 }
 function olympusSharedDataFile(env, fileName) {
-  return join24(env.XDG_DATA_HOME?.trim() || join24(homedir21(), ".local", "share"), "openclaw", "olympus", fileName);
+  return join23(env.XDG_DATA_HOME?.trim() || join23(homedir21(), ".local", "share"), "openclaw", "olympus", fileName);
 }
 function whatsappStateDir2(env) {
   return whatsappStateDir({ env });
@@ -77702,22 +74387,22 @@ function whatsappStateDir2(env) {
 function whatsappRawStatePaths(env) {
   const stateDir = whatsappStateDir2(env);
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join24(transcribeStateDir, "media") : undefined);
+  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join23(transcribeStateDir, "media") : undefined);
   return [...new Set([
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join24(stateDir, "spool"),
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join23(stateDir, "spool"),
     ...whatsappPairingSessionPaths({ env }),
-    join24(stateDir, "media"),
+    join23(stateDir, "media"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ])];
 }
 function telegramPreservationOnlyPaths(env) {
   const home = env.HOME?.trim() || homedir21();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join24(home, ".local", "share");
-  const stateHome = env.XDG_STATE_HOME?.trim() || join24(home, ".local", "state");
-  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join24(dataHome, "olympus", "telegram-capture", "spool");
-  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join24(stateHome, "olympus", "telegram-capture-gateway");
-  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join24(stateHome, "olympus", "telegram-spool-drain");
-  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join24(drainStateDir, "cursor.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(home, ".local", "share");
+  const stateHome = env.XDG_STATE_HOME?.trim() || join23(home, ".local", "state");
+  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join23(dataHome, "olympus", "telegram-capture", "spool");
+  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join23(stateHome, "olympus", "telegram-capture-gateway");
+  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join23(stateHome, "olympus", "telegram-spool-drain");
+  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join23(drainStateDir, "cursor.json");
   return [...new Set([
     spoolDir,
     cursorPath,
@@ -77730,13 +74415,13 @@ function exportOlympusData(options) {
   const selected = selectSources(options.sourceId);
   const durabilityBoundary = exportDurabilityBoundary(destination);
   makeDurableDirectory(destination, durabilityBoundary);
-  rmSync4(join24(destination, "manifest.json"), { force: true });
+  rmSync4(join23(destination, "manifest.json"), { force: true });
   syncDirectorySync2(destination);
   const files = [];
   const skipped = [];
   const artifacts = [];
   for (const source of selected) {
-    const sourceRoot = join24(destination, "sources", safePathSegment(source.sourceId));
+    const sourceRoot = join23(destination, "sources", safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
     const legacyIndexPath = source.sqlitePath?.(options);
     if (legacyIndexPath) {
@@ -77766,7 +74451,7 @@ function exportOlympusData(options) {
       });
     }
     for (const policyPath of source.policyPaths?.(options) ?? []) {
-      const destinationPath = join24(sourceRoot, basename4(policyPath));
+      const destinationPath = join23(sourceRoot, basename4(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
         artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
       }
@@ -77776,17 +74461,17 @@ function exportOlympusData(options) {
     for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
       skipped.push(statePath);
   }
-  const configRoot = join24(destination, "config");
+  const configRoot = join23(destination, "config");
   makeDurableDirectory(configRoot, durabilityBoundary);
   for (const [sourcePath, destinationPath] of [
-    [join24(resolveHome(options.homeDir), ".olympus", "config.json"), join24(configRoot, "config.json")],
-    [defaultSovereigntyConfigPathForHome(options.homeDir), join24(configRoot, "sovereignty.json")]
+    [join23(resolveHome(options.homeDir), ".olympus", "config.json"), join23(configRoot, "config.json")],
+    [defaultSovereigntyConfigPathForHome(options.homeDir), join23(configRoot, "sovereignty.json")]
   ]) {
     if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
       artifacts.push(fileArtifact(destination, destinationPath, "olympus.config", "sanitized_config"));
     }
   }
-  writePrivateFileAtomicSync(join24(destination, "manifest.json"), JSON.stringify({
+  writePrivateFileAtomicSync(join23(destination, "manifest.json"), JSON.stringify({
     kind: "olympus_data_export",
     version: 2,
     exported_at: new Date().toISOString(),
@@ -77796,12 +74481,12 @@ function exportOlympusData(options) {
     skipped,
     artifacts
   }, null, 2));
-  files.push(join24(destination, "manifest.json"));
+  files.push(join23(destination, "manifest.json"));
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
   const destination = resolve5(requirePath(options.destination, "--input"));
-  const manifestPath = join24(destination, "manifest.json");
+  const manifestPath = join23(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync15(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
     throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
@@ -77929,8 +74614,8 @@ function allDeleteTargets(context) {
     })),
     serviceUnitTarget(workerServicePaths("darwin", home).unitPath),
     serviceUnitTarget(workerServicePaths("linux", home).unitPath),
-    ...globExisting(join24(home, "Library", "LaunchAgents"), /^(?:com|org)\.openclaw\.olympus.*\.plist$/).map(serviceUnitTarget),
-    ...globExisting(join24(home, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
+    ...globExisting(join23(home, "Library", "LaunchAgents"), /^(?:com|org)\.openclaw\.olympus.*\.plist$/).map(serviceUnitTarget),
+    ...globExisting(join23(home, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
   ];
 }
 function sourceDeleteTargets(source, context) {
@@ -78003,7 +74688,7 @@ function exportSqliteStore(options) {
       skipped.push(path);
     return;
   }
-  const destination = join24(destinationRoot, basename4(sqlitePath));
+  const destination = join23(destinationRoot, basename4(sqlitePath));
   const staging = `${destination}.${randomUUID10()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
@@ -78203,7 +74888,7 @@ function containsPrivateKeyBlock(value) {
 function globExisting(root, pattern) {
   if (!existsSync14(root))
     return [];
-  return readdirSync3(root).map((entry) => join24(root, entry)).filter((path) => {
+  return readdirSync3(root).map((entry) => join23(root, entry)).filter((path) => {
     const name = basename4(path);
     return pattern.test(name) && statSync7(path).isFile();
   });
@@ -78277,20 +74962,20 @@ function isSameOrInsidePath(path, root) {
 function defaultSovereigntyConfigPathForHome(homeDir) {
   if (!homeDir)
     return defaultSovereigntyConfigPath();
-  return join24(homeDir, ".olympus", "sovereignty.json");
+  return join23(homeDir, ".olympus", "sovereignty.json");
 }
 function defaultDropboxIngestionPolicyPathForHome(homeDir) {
   if (!homeDir)
     return defaultDropboxIngestionPolicyPath();
-  return join24(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
+  return join23(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
 }
 function envForHome(homeDir) {
   if (!homeDir)
     return process.env;
   return {
     HOME: homeDir,
-    XDG_DATA_HOME: join24(homeDir, ".local", "share"),
-    XDG_STATE_HOME: join24(homeDir, ".local", "state")
+    XDG_DATA_HOME: join23(homeDir, ".local", "share"),
+    XDG_STATE_HOME: join23(homeDir, ".local", "state")
   };
 }
 function envForContext(context) {
@@ -78333,9 +75018,9 @@ init_version();
 init_atomic_file();
 import { createHash as createHash26 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync19, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
-import { dirname as dirname24, isAbsolute as isAbsolute5, join as join34 } from "node:path";
+import { dirname as dirname23, isAbsolute as isAbsolute5, join as join33 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
@@ -78357,8 +75042,8 @@ import {
   statSync as statSync8,
   writeFileSync as writeFileSync8
 } from "node:fs";
-import { tmpdir as tmpdir2 } from "node:os";
-import { basename as basename5, isAbsolute as isAbsolute4, join as join32 } from "node:path";
+import { tmpdir } from "node:os";
+import { basename as basename5, isAbsolute as isAbsolute4, join as join31 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -78369,8 +75054,8 @@ function prepareWorkerUpgradeArtifact(options) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
   const artifactSha256 = createHash25("sha256").update(artifactBytes).digest("hex");
-  const snapshotDir = mkdtempSync(join32(tmpdir2(), ".olympus-artifact-snapshot-"));
-  const artifactPath = join32(snapshotDir, "artifact.tgz");
+  const snapshotDir = mkdtempSync(join31(tmpdir(), ".olympus-artifact-snapshot-"));
+  const artifactPath = join31(snapshotDir, "artifact.tgz");
   const descriptor = openSync6(artifactPath, "wx", 384);
   try {
     writeFileSync8(descriptor, artifactBytes);
@@ -78381,13 +75066,13 @@ function prepareWorkerUpgradeArtifact(options) {
   syncDirectorySync(snapshotDir);
   try {
     inspectArchive(artifactPath);
-    const versionsDir = join32(options.homeDir, ".local", "share", "olympus", "versions");
-    const workingDirectory = join32(versionsDir, artifactSha256);
+    const versionsDir = join31(options.homeDir, ".local", "share", "olympus", "versions");
+    const workingDirectory = join31(versionsDir, artifactSha256);
     assertVersionParentSafety(options.homeDir, workingDirectory);
-    const stagingParent = options.dryRun ? tmpdir2() : versionsDir;
+    const stagingParent = options.dryRun ? tmpdir() : versionsDir;
     if (!options.dryRun)
       ensurePrivateDirectoryTreeSync(options.homeDir, versionsDir);
-    const staging = mkdtempSync(join32(stagingParent, ".olympus-upgrade-"));
+    const staging = mkdtempSync(join31(stagingParent, ".olympus-upgrade-"));
     try {
       extractArchive(artifactPath, staging);
       assertRegularTree(staging);
@@ -78399,7 +75084,7 @@ function prepareWorkerUpgradeArtifact(options) {
       }
       if (options.dryRun)
         return { artifactSha256, packageVersion, workingDirectory };
-      const metadataPath = join32(staging, ".olympus-artifact-v1.json");
+      const metadataPath = join31(staging, ".olympus-artifact-v1.json");
       writePrivateFileAtomicSync(metadataPath, `${JSON.stringify({
         schema_version: 1,
         artifact_sha256: artifactSha256,
@@ -78523,7 +75208,7 @@ function runTar(args, action) {
 }
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join32(root, entry.name);
+    const path = join31(root, entry.name);
     const stats = lstatSync11(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
@@ -78539,9 +75224,9 @@ function assertRegularTree(root, budget = { bytes: 0 }) {
   }
 }
 function validateExtractedPackage(root, bunBin, executePreflight) {
-  const packageJson = readJsonRecord(join32(root, "package.json"), "package.json");
-  const manifest2 = readJsonRecord(join32(root, "openclaw.plugin.json"), "openclaw.plugin.json");
-  const cliPath = join32(root, "dist", "cli.js");
+  const packageJson = readJsonRecord(join31(root, "package.json"), "package.json");
+  const manifest2 = readJsonRecord(join31(root, "openclaw.plugin.json"), "openclaw.plugin.json");
+  const cliPath = join31(root, "dist", "cli.js");
   assertRegularFile(cliPath, "dist/cli.js");
   const version = typeof packageJson.version === "string" ? packageJson.version.trim() : "";
   if (packageJson.name !== "olympus" || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -78586,7 +75271,7 @@ function assertRegularFile(path, label) {
 }
 function makeVersionTreeReadOnly(root) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join32(root, entry.name);
+    const path = join31(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
       chmodSync10(path, 365);
@@ -78600,7 +75285,7 @@ function makeVersionTreeReadOnly(root) {
 }
 function syncVersionTree(root) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join32(root, entry.name);
+    const path = join31(root, entry.name);
     if (entry.isDirectory()) {
       syncVersionTree(path);
       continue;
@@ -78623,7 +75308,7 @@ function hashVersionTree(root, relativeRoot, digest) {
   const entries = readdirSync4(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
-    const path = join32(root, entry.name);
+    const path = join31(root, entry.name);
     const stats = lstatSync11(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
@@ -78640,7 +75325,7 @@ function hashVersionTree(root, relativeRoot, digest) {
 function publishVersionTree(staging, workingDirectory, versionsDir) {
   let replacedPath;
   if (existsSync20(workingDirectory)) {
-    replacedPath = join32(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
+    replacedPath = join31(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
     renameSync6(workingDirectory, replacedPath);
     syncDirectorySync(versionsDir);
   }
@@ -78663,7 +75348,7 @@ function removeStagingTree(root) {
   chmodSync10(root, 448);
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
     if (entry.isDirectory())
-      removeStagingTree(join32(root, entry.name));
+      removeStagingTree(join31(root, entry.name));
   }
   rmSync6(root, { recursive: true, force: true });
 }
@@ -78674,10 +75359,10 @@ init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID13 } from "node:crypto";
 import { existsSync as existsSync21, linkSync, lstatSync as lstatSync12, readFileSync as readFileSync22 } from "node:fs";
-import { join as join33 } from "node:path";
+import { join as join32 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
-  const dir = join33(homeDir, ".local", "state", "olympus", "lifecycle");
-  const lockPath = join33(dir, "mutation-v1.lock");
+  const dir = join32(homeDir, ".local", "state", "olympus", "lifecycle");
+  const lockPath = join32(dir, "mutation-v1.lock");
   ensurePrivateDirectoryTreeSync(homeDir, dir);
   const ownerProcessInstance = processInstanceIdentity(process.pid);
   if (!ownerProcessInstance) {
@@ -78692,7 +75377,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       action,
       started_at: now().toISOString()
     };
-    const candidate = join33(dir, `mutation-owner-${owner.nonce}.tmp`);
+    const candidate = join32(dir, `mutation-owner-${owner.nonce}.tmp`);
     writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner, null, 2)}
 `);
     try {
@@ -78708,14 +75393,14 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       if (!isAlreadyExists(error))
         throw error;
       let activeOwner;
-      withFileLeaseSync(join33(dir, "mutation-v1-recovery"), () => {
+      withFileLeaseSync(join32(dir, "mutation-v1-recovery"), () => {
         const current = readLifecycleMutationOwner(lockPath);
         if (recordedProcessOwnerIsAlive(current.pid, current.process_instance)) {
           activeOwner = current;
           return;
         }
         removeFileDurablySync(lockPath);
-        const staleCandidate = join33(dir, `mutation-owner-${current.nonce}.tmp`);
+        const staleCandidate = join32(dir, `mutation-owner-${current.nonce}.tmp`);
         if (existsSync21(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
@@ -79172,8 +75857,8 @@ function readTransaction(options) {
     throw new OperationError("config_error", "The Olympus lifecycle transaction does not match this installation; refusing recovery.");
   }
   if (transaction.action === "upgrade") {
-    const expectedVersionsDir = join34(homeDir, ".local", "share", "olympus", "versions");
-    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join34(expectedVersionsDir, transaction.artifact_sha256)) {
+    const expectedVersionsDir = join33(homeDir, ".local", "share", "olympus", "versions");
+    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join33(expectedVersionsDir, transaction.artifact_sha256)) {
       throw new OperationError("config_error", "The Olympus upgrade transaction is not bound to valid managed artifact bytes.");
     }
   }
@@ -79220,21 +75905,21 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
-    ensurePrivateDirectoryTreeSync(homeDir, dirname24(path));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname23(path));
   else
-    mkdirSync20(dirname24(path), { recursive: true });
+    mkdirSync19(dirname23(path), { recursive: true });
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
   return typeof value === "string" && value.trim() !== "" && isAbsolute5(value) && !/[\0\r\n]/.test(value);
 }
 function transactionPaths(homeDir) {
-  const dir = join34(homeDir, ".local", "state", "olympus", "lifecycle");
+  const dir = join33(homeDir, ".local", "state", "olympus", "lifecycle");
   return {
     dir,
-    transaction: join34(dir, "transaction-v1.json"),
-    unitBackup: join34(dir, "worker-unit.backup"),
-    envBackup: join34(dir, "worker-env.backup")
+    transaction: join33(dir, "transaction-v1.json"),
+    unitBackup: join33(dir, "worker-unit.backup"),
+    envBackup: join33(dir, "worker-env.backup")
   };
 }
 function assertTransactionParentSafety(homeDir, paths) {
@@ -79410,165 +76095,6 @@ function sha2563(value) {
 // src/cli.ts
 init_public_source_capabilities();
 init_connect();
-
-// src/core/calendar-agenda.ts
-init_credential_broker();
-var GOOGLE_CALENDAR_AGENDA_HANDLE = "google_calendar.personal.delegated";
-var GOOGLE_CALENDAR_AGENDA_CAPABILITY = "google_calendar.events.read";
-var GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3";
-var DEFAULT_DAYS = 7;
-var MAX_DAYS = 62;
-var DEFAULT_MAX_EVENTS = 50;
-var MAX_MAX_EVENTS = 250;
-var DELEGATION_HINT = "If this is unauthorized_client or access_denied, the " + "calendar.readonly scope is not delegated to the service-account client: " + "add https://www.googleapis.com/auth/calendar.readonly to the client in " + "Google Admin console -> Security -> API controls -> Domain-wide delegation.";
-
-class CalendarAgendaError extends Error {
-  code;
-  constructor(code, message) {
-    super(message);
-    this.name = "CalendarAgendaError";
-    this.code = code;
-  }
-}
-function parseCalendarAgendaArgs(args) {
-  const options = {
-    days: DEFAULT_DAYS,
-    maxEvents: DEFAULT_MAX_EVENTS,
-    calendarId: "primary",
-    json: false
-  };
-  for (let index = 0;index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--json") {
-      options.json = true;
-      continue;
-    }
-    if (argument === "--days" || argument === "--max-events" || argument === "--calendar") {
-      const value = args[index + 1];
-      if (value === undefined) {
-        throw new CalendarAgendaError("missing_value", `${argument} requires a value`);
-      }
-      index += 1;
-      if (argument === "--calendar") {
-        options.calendarId = value;
-        continue;
-      }
-      const parsed = Number.parseInt(value, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        throw new CalendarAgendaError("invalid_value", `${argument} requires a positive integer, got ${JSON.stringify(value)}`);
-      }
-      if (argument === "--days")
-        options.days = Math.min(parsed, MAX_DAYS);
-      else
-        options.maxEvents = Math.min(parsed, MAX_MAX_EVENTS);
-      continue;
-    }
-    throw new CalendarAgendaError("unknown_argument", `unknown argument ${JSON.stringify(argument)}`);
-  }
-  return options;
-}
-async function runCalendarAgenda(options) {
-  const now = options.now ? options.now() : new Date;
-  const fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
-  const windowStart = now.toISOString();
-  const windowEnd = new Date(now.getTime() + options.agenda.days * 24 * 60 * 60 * 1000).toISOString();
-  let session;
-  try {
-    session = requireBearerTokenCredentialSession(await options.broker.issueSession({
-      handle: GOOGLE_CALENDAR_AGENDA_HANDLE,
-      provider: "google_calendar",
-      capability: GOOGLE_CALENDAR_AGENDA_CAPABILITY,
-      trustDomain: "secure_local"
-    }), GOOGLE_CALENDAR_AGENDA_HANDLE);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new CalendarAgendaError("credential_session_failed", `could not obtain a calendar session for ${GOOGLE_CALENDAR_AGENDA_HANDLE}: ${detail}. ${DELEGATION_HINT}`);
-  }
-  const url = new URL(`${GOOGLE_CALENDAR_API_BASE_URL}/calendars/${encodeURIComponent(options.agenda.calendarId)}/events`);
-  url.searchParams.set("timeMin", windowStart);
-  url.searchParams.set("timeMax", windowEnd);
-  url.searchParams.set("singleEvents", "true");
-  url.searchParams.set("orderBy", "startTime");
-  url.searchParams.set("maxResults", String(options.agenda.maxEvents));
-  const response = await fetchImpl(url, {
-    headers: { Authorization: `Bearer ${session.token}` }
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    const bounded = body.slice(0, 300);
-    const hint = response.status === 403 || response.status === 401 ? ` ${DELEGATION_HINT}` : "";
-    throw new CalendarAgendaError("calendar_api_error", `calendar API returned ${response.status} for ${options.agenda.calendarId}: ${bounded}${hint}`);
-  }
-  const payload = await response.json();
-  const items = Array.isArray(payload.items) ? payload.items : [];
-  const events = [];
-  for (const item of items) {
-    if (item.status === "cancelled")
-      continue;
-    const start = item.start?.dateTime ?? item.start?.date;
-    const end = item.end?.dateTime ?? item.end?.date;
-    if (!start || !end)
-      continue;
-    events.push({
-      start,
-      end,
-      allDay: !item.start?.dateTime,
-      summary: item.summary?.trim() || "(no title)",
-      ...item.location?.trim() ? { location: item.location.trim() } : {}
-    });
-  }
-  return {
-    calendarId: options.agenda.calendarId,
-    windowStart,
-    windowEnd,
-    events,
-    truncated: Boolean(payload.nextPageToken)
-  };
-}
-var DAY_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  weekday: "short",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit"
-});
-var TIME_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false
-});
-function dayKey(event) {
-  if (event.allDay)
-    return event.start;
-  return DAY_FORMAT.format(new Date(event.start));
-}
-function formatCalendarAgenda(result) {
-  if (result.events.length === 0) {
-    return `No events on ${result.calendarId} between ${result.windowStart} and ${result.windowEnd}.`;
-  }
-  const lines = [];
-  let currentDay = "";
-  for (const event of result.events) {
-    const day = dayKey(event);
-    if (day !== currentDay) {
-      currentDay = day;
-      lines.push(`${day}`);
-    }
-    const where = event.location ? ` @ ${event.location}` : "";
-    if (event.allDay) {
-      lines.push(`  all-day  ${event.summary}${where}`);
-    } else {
-      lines.push(`  ${TIME_FORMAT.format(new Date(event.start))}-${TIME_FORMAT.format(new Date(event.end))}  ${event.summary}${where}`);
-    }
-  }
-  if (result.truncated) {
-    lines.push(`(more events exist past the first ${result.events.length}; raise --max-events)`);
-  }
-  return lines.join(`
-`);
-}
-
-// src/cli.ts
-init_credential_broker();
 init_connected_handles();
 init_secret_store();
 init_sovereignty();
@@ -79830,12 +76356,6 @@ function shellQuote2(value) {
 
 // src/cli.ts
 init_worker_auth();
-init_source_ingestion_ledger();
-init_reconcile_state();
-init_source_scheduler_state();
-init_request_budget();
-init_gmail();
-init_drive();
 init_public_surface();
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -79968,149 +76488,6 @@ async function main2() {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "calendar" && args[1] === "agenda") {
-    try {
-      const agenda = parseCalendarAgendaArgs(args.slice(2));
-      const result = await runCalendarAgenda({ broker: createEnvCredentialBroker(), agenda });
-      console.log(agenda.json ? JSON.stringify(result, null, 2) : formatCalendarAgenda(result));
-    } catch (error2) {
-      if (error2 instanceof CalendarAgendaError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "source" && args[1] === "scheduler" && args[2] === "unpark") {
-    try {
-      const cancelling = args[3] === "cancel";
-      const options = parseSourceSchedulerUnparkArgs(args.slice(cancelling ? 4 : 3));
-      console.log(JSON.stringify(cancelling ? runSourceSchedulerUnparkCancel(options) : runSourceSchedulerUnpark(options), null, 2));
-    } catch (error2) {
-      if (error2 instanceof SourceSchedulerUnparkRefusal) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "source" && args[1] === "request-budget" && args[2] === "recover-future") {
-    try {
-      console.log(JSON.stringify(runGoogleRequestBudgetFutureRecovery(parseGoogleRequestBudgetFutureRecoveryArgs(args.slice(3))), null, 2));
-    } catch (error2) {
-      if (error2 instanceof GoogleRequestBudgetRecoveryRefusal) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      if (error2 instanceof GoogleRequestBudgetError) {
-        console.error(`Error [${error2.reason}]: ${error2.message}`);
-        process.exit(1);
-      }
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "status") {
-    const json2 = args.includes("--json");
-    const result = await collectLocalSourceIngestionLedger({ config: loadConfig() });
-    console.log(json2 ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "requalify") {
-    try {
-      const result = await runTerminalContentRequalify(parseTerminalContentRequalifyArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        if (error2.suggestion)
-          console.error(`Fix: ${error2.suggestion}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "retarget-queued") {
-    try {
-      const result = await runQueuedContentRetarget(parseQueuedContentRetargetArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        if (error2.suggestion)
-          console.error(`Fix: ${error2.suggestion}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "export-eval-shard") {
-    try {
-      const result = await runEvalShardExport(parseEvalShardExportArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        if (error2.suggestion)
-          console.error(`Fix: ${error2.suggestion}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "apply-tier-overrides") {
-    try {
-      const result = await runOwnerTierOverride(parseOwnerTierOverrideArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        if (error2.suggestion)
-          console.error(`Fix: ${error2.suggestion}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "x" && args[1] === "reconcile" && args[2] === "recover") {
-    try {
-      console.log(JSON.stringify(runXReconcileRecovery(parseXReconcileRecoveryArgs(args.slice(3))), null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === "x" && args[1] === "content" && args[2] === "recover") {
-    try {
-      const options = parseXContentRecoveryArgs(args.slice(3));
-      console.log(JSON.stringify(await makeContext2().email.xBookmarksContentRecovery(options), null, 2));
-    } catch (error2) {
-      if (error2 instanceof OperationError) {
-        console.error(`Error [${error2.code}]: ${error2.message}`);
-        process.exit(1);
-      }
-      throw error2;
-    }
-    return;
-  }
   if (args[0] === "data") {
     try {
       const result = await runDataCommand(args.slice(1));
@@ -80144,7 +76521,7 @@ async function main2() {
     validateRequired(operation, params);
     const ctx = makeContext2();
     if (!shouldExposeOperation(operation, { config: ctx.config, surface: "cli" })) {
-      throw new OperationError("invalid_params", `Olympus operation is not available on this CLI surface: ${operation.cliHints.name}`, "Enable the appropriate proof gate and, for private/admin email tools, use an approved local/private model surface.");
+      throw new OperationError("invalid_params", `Olympus operation is not available on this CLI surface: ${operation.cliHints.name}`, "Enable the matching product configuration for this Olympus surface.");
     }
     const result = await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
@@ -80292,316 +76669,6 @@ function makeContext2() {
     email: new EmailClient(config2, createEmailTransport(config2))
   };
 }
-function parseTerminalContentRequalifyArgs(args) {
-  const values = new Map;
-  let noLimit = false;
-  let includeSuperseded = false;
-  let execute = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--no-limit") {
-      noLimit = true;
-      continue;
-    }
-    if (arg === "--include-superseded") {
-      includeSuperseded = true;
-      continue;
-    }
-    if (arg === "--execute") {
-      execute = true;
-      continue;
-    }
-    if (arg === "--dry-run")
-      continue;
-    if (!arg.startsWith("--"))
-      throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (![
-      "scope",
-      "account",
-      "source-kind",
-      "source-version",
-      "statuses",
-      "target-kind",
-      "target-version",
-      "limit",
-      "reason"
-    ].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown terminal-requalify option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith("--"))
-      throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-  const scope = values.get("scope")?.trim();
-  const sourceKind = values.get("source-kind")?.trim();
-  const targetKind = values.get("target-kind")?.trim();
-  const targetVersion = values.get("target-version")?.trim();
-  if (!scope)
-    throw new OperationError("invalid_params", "Terminal requalify requires an explicit --scope.");
-  if (!sourceKind)
-    throw new OperationError("invalid_params", "Terminal requalify requires --source-kind.");
-  if (!targetKind)
-    throw new OperationError("invalid_params", "Terminal requalify requires --target-kind.");
-  if (!targetVersion)
-    throw new OperationError("invalid_params", "Terminal requalify requires --target-version.");
-  const account = values.get("account")?.trim() || "personal";
-  const approvedScopeKey = scope.startsWith("/") ? `dropbox.${account}:${scope}` : scope;
-  const limitValue = values.get("limit");
-  if (limitValue === undefined === !noLimit) {
-    throw new OperationError("invalid_params", "Terminal requalify requires exactly one of --limit N or --no-limit.");
-  }
-  let limit;
-  if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      throw new OperationError("invalid_params", "--limit must be a positive integer.");
-    }
-  }
-  const statusesValue = values.get("statuses");
-  const statuses = statusesValue?.split(",").map((status) => status.trim()).filter(Boolean);
-  const allowedStatuses = new Set(["failed_terminal", "metadata_only"]);
-  if (statusesValue !== undefined && (!statuses || statuses.length === 0 || statuses.some((status) => !allowedStatuses.has(status)))) {
-    throw new OperationError("invalid_params", "--statuses must be a comma-separated subset of failed_terminal,metadata_only.");
-  }
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    source_extractor_kind: sourceKind,
-    ...values.get("source-version")?.trim() ? { source_extractor_version: values.get("source-version").trim() } : {},
-    ...statuses ? { source_statuses: [...new Set(statuses)] } : {},
-    target_extractor_kind: targetKind,
-    target_extractor_version: targetVersion,
-    ...limit !== undefined ? { limit } : {},
-    ...noLimit ? { no_limit: true } : {},
-    ...includeSuperseded ? { include_superseded: true } : {},
-    ...values.get("reason")?.trim() ? { reason: values.get("reason").trim() } : {},
-    dry_run: !execute
-  };
-}
-async function runTerminalContentRequalify(options) {
-  const config2 = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(options)
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError("source_index_error", `Terminal requalify worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
-  }
-  return body ? JSON.parse(body) : {};
-}
-function parseQueuedContentRetargetArgs(args) {
-  const values = new Map;
-  let noLimit = false;
-  let execute = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--no-limit") {
-      noLimit = true;
-      continue;
-    }
-    if (arg === "--execute") {
-      execute = true;
-      continue;
-    }
-    if (arg === "--dry-run")
-      continue;
-    if (!arg.startsWith("--"))
-      throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["scope", "account", "source-kind", "target-kind", "target-version", "limit"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown queued-retarget option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith("--"))
-      throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-  const scope = values.get("scope")?.trim();
-  const sourceKind = values.get("source-kind")?.trim();
-  const targetKind = values.get("target-kind")?.trim();
-  const targetVersion = values.get("target-version")?.trim();
-  if (!scope)
-    throw new OperationError("invalid_params", "Queued retarget requires an explicit --scope.");
-  if (!sourceKind)
-    throw new OperationError("invalid_params", "Queued retarget requires --source-kind.");
-  if (!targetKind)
-    throw new OperationError("invalid_params", "Queued retarget requires --target-kind.");
-  if (!targetVersion)
-    throw new OperationError("invalid_params", "Queued retarget requires --target-version.");
-  const account = values.get("account")?.trim() || "personal";
-  const approvedScopeKey = scope.startsWith("/") ? `dropbox.${account}:${scope}` : scope;
-  const limitValue = values.get("limit");
-  if (limitValue === undefined === !noLimit) {
-    throw new OperationError("invalid_params", "Queued retarget requires exactly one of --limit N or --no-limit.");
-  }
-  let limit;
-  if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      throw new OperationError("invalid_params", "--limit must be a positive integer.");
-    }
-  }
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    source_extractor_kind: sourceKind,
-    target_extractor_kind: targetKind,
-    target_extractor_version: targetVersion,
-    ...limit !== undefined ? { limit } : {},
-    ...noLimit ? { no_limit: true } : {},
-    dry_run: !execute
-  };
-}
-async function runQueuedContentRetarget(options) {
-  const config2 = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(options)
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError("source_index_error", `Queued retarget worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
-  }
-  return body ? JSON.parse(body) : {};
-}
-function parseEvalShardExportArgs(args) {
-  const values = new Map;
-  let execute = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--execute") {
-      execute = true;
-      continue;
-    }
-    if (arg === "--dry-run")
-      continue;
-    if (!arg.startsWith("--"))
-      throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["scope", "account", "count", "out", "doc-types"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown eval-shard export option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith("--"))
-      throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-  const scope = values.get("scope")?.trim();
-  if (!scope)
-    throw new OperationError("invalid_params", "Eval shard export requires an explicit --scope.");
-  const count = Number(values.get("count"));
-  if (!Number.isSafeInteger(count) || count <= 0) {
-    throw new OperationError("invalid_params", "Eval shard export requires --count N as a positive integer.");
-  }
-  const out = values.get("out")?.trim();
-  if (!out)
-    throw new OperationError("invalid_params", "Eval shard export requires --out DIR.");
-  const account = values.get("account")?.trim() || "personal";
-  const approvedScopeKey = scope.startsWith("/") ? `dropbox.${account}:${scope}` : scope;
-  const docTypes = values.get("doc-types")?.split(",").map((value) => value.trim()).filter(Boolean);
-  if (values.has("doc-types") && (!docTypes || docTypes.length === 0)) {
-    throw new OperationError("invalid_params", "--doc-types requires a comma-separated type list.");
-  }
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    count,
-    out_dir: resolve8(out),
-    ...docTypes ? { doc_types: docTypes } : {},
-    dry_run: !execute
-  };
-}
-async function runEvalShardExport(options) {
-  const config2 = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(options)
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError("source_index_error", `Eval shard export worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
-  }
-  return body ? JSON.parse(body) : {};
-}
-function parseOwnerTierOverrideArgs(args) {
-  const values = new Map;
-  let execute = false;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--apply" || arg === "--execute") {
-      execute = true;
-      continue;
-    }
-    if (arg === "--dry-run")
-      continue;
-    if (!arg.startsWith("--"))
-      throw new OperationError("invalid_params", `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!["input", "reason"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown apply-tier-overrides option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith("--"))
-      throw new OperationError("invalid_params", `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-  const input2 = values.get("input")?.trim();
-  if (!input2)
-    throw new OperationError("invalid_params", "Owner tier override requires --input <file.json>.");
-  const reason = values.get("reason")?.trim();
-  if (!reason)
-    throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
-  let raw;
-  try {
-    raw = readFileSync29(resolve8(input2), "utf8");
-  } catch (error2) {
-    throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error2) {
-    throw new OperationError("invalid_params", `Owner tier override --input file is not valid JSON: ${error2.message}`);
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new OperationError("invalid_params", "Owner tier override --input file must be a JSON object mapping review keys to trust tiers.");
-  }
-  const overrides = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (typeof value !== "string") {
-      throw new OperationError("invalid_params", `Owner tier override --input value for ${JSON.stringify(key)} must be a trust-tier string.`);
-    }
-    overrides[key] = value;
-  }
-  return { overrides, reason, dry_run: !execute };
-}
-async function runOwnerTierOverride(options) {
-  const config2 = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config2);
-  const response = await fetch(`${config2.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(options)
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError("source_index_error", `Owner tier override worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
-  }
-  return body ? JSON.parse(body) : {};
-}
 function toToolsJson(config2) {
   return exposedOperations(operations, { config: config2, surface: "cli" }).map((operation) => ({
     name: operation.name,
@@ -80734,82 +76801,6 @@ var COMMAND_GROUP_HELP = {
     "  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]"
   ]
 };
-function parseXContentRecoveryArgs(args) {
-  let execute = false;
-  let limit;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--execute")
-      execute = true;
-    else if (arg === "--limit")
-      limit = Number(requireOptionValue(args, index += 1, arg));
-    else if (arg?.startsWith("--limit="))
-      limit = Number(arg.slice("--limit=".length));
-    else
-      throw new OperationError("invalid_params", `Unknown X content recovery option: ${arg}`);
-  }
-  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
-    throw new OperationError("invalid_params", "X content recovery limit must be between 1 and 100.");
-  }
-  return { execute, ...limit !== undefined ? { limit } : {} };
-}
-function parseXReconcileRecoveryArgs(args) {
-  let account = "personal";
-  let stateDbPath;
-  let execute = false;
-  let expectedStagedDigestSha256;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--account")
-      account = requireOptionValue(args, index += 1, arg);
-    else if (arg?.startsWith("--account="))
-      account = arg.slice("--account=".length);
-    else if (arg === "--state-db")
-      stateDbPath = requireOptionValue(args, index += 1, arg);
-    else if (arg?.startsWith("--state-db="))
-      stateDbPath = arg.slice("--state-db=".length);
-    else if (arg === "--expected-staged-digest") {
-      expectedStagedDigestSha256 = requireOptionValue(args, index += 1, arg);
-    } else if (arg?.startsWith("--expected-staged-digest=")) {
-      expectedStagedDigestSha256 = arg.slice("--expected-staged-digest=".length);
-    } else if (arg === "--execute")
-      execute = true;
-    else
-      throw new OperationError("invalid_params", `Unknown X reconcile recovery option: ${arg}`);
-  }
-  account = account.trim();
-  if (!account)
-    throw new OperationError("invalid_params", "X reconcile recovery account must be non-empty.");
-  if (stateDbPath !== undefined && !stateDbPath.trim()) {
-    throw new OperationError("invalid_params", "X reconcile recovery state DB path must be non-empty.");
-  }
-  if (expectedStagedDigestSha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedStagedDigestSha256)) {
-    throw new OperationError("invalid_params", "X reconcile recovery expected staged digest must be lowercase SHA-256.");
-  }
-  if (execute && !expectedStagedDigestSha256) {
-    throw new OperationError("invalid_params", "X reconcile recovery --execute requires --expected-staged-digest from a fresh inspection.");
-  }
-  return {
-    account,
-    ...stateDbPath ? { stateDbPath: resolve8(stateDbPath) } : {},
-    execute,
-    ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
-  };
-}
-function runXReconcileRecovery(options) {
-  const store = new LocalXBookmarksReconcileStateStore(options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath());
-  try {
-    if (!options.execute)
-      return store.stagedRecoveryStatus(options.account);
-    return store.recoverStagedRun({
-      account: options.account,
-      expectedStagedDigestSha256: options.expectedStagedDigestSha256,
-      mode: "operator"
-    });
-  } finally {
-    store.close();
-  }
-}
 function isHelpFlag(value) {
   return value === "--help" || value === "-h";
 }
@@ -80824,130 +76815,6 @@ function printCommandGroupHelp(path) {
   console.log(lines.join(`
 `));
   return true;
-}
-var SAFE_SOURCE_SCHEDULER_KEY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-var SAFE_SOURCE_SCHEDULER_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-var UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
-function parseSourceSchedulerUnparkArgs(args) {
-  const values = new Map;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--help" || arg === "-h") {
-      console.log("Usage: olympus source scheduler unpark --source <source> --task <task> --expected-not-before <ISO> --reason <reason>");
-      process.exit(0);
-    }
-    if (!arg?.startsWith("--")) {
-      throw new OperationError("invalid_params", `Unexpected source scheduler unpark argument: ${arg}`);
-    }
-    const equals = arg.indexOf("=");
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!["source", "task", "expected-not-before", "reason"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown source scheduler unpark option: --${key}`);
-    }
-    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key}`) : arg.slice(equals + 1);
-    if (!value.trim()) {
-      throw new OperationError("invalid_params", `--${key} requires a non-empty value.`);
-    }
-    values.set(key, value.trim());
-  }
-  const source = values.get("source");
-  const task = values.get("task");
-  const expectedNotBefore = values.get("expected-not-before");
-  const reason = values.get("reason");
-  if (!source || !task || !expectedNotBefore || !reason) {
-    throw new OperationError("invalid_params", "Source scheduler unpark requires --source, --task, --expected-not-before, and --reason.");
-  }
-  if (!Number.isFinite(Date.parse(expectedNotBefore))) {
-    throw new OperationError("invalid_params", "--expected-not-before must be a valid ISO timestamp.");
-  }
-  if (!SAFE_SOURCE_SCHEDULER_KEY.test(source)) {
-    throw new OperationError("invalid_params", "--source must be a safe scheduler identifier.");
-  }
-  if (!SAFE_SOURCE_SCHEDULER_KEY.test(task)) {
-    throw new OperationError("invalid_params", "--task must be a safe scheduler identifier.");
-  }
-  if (!SAFE_SOURCE_SCHEDULER_TOKEN.test(reason)) {
-    throw new OperationError("invalid_params", "--reason must be a safe categorical token.");
-  }
-  return {
-    source,
-    task,
-    expectedNotBefore,
-    reason
-  };
-}
-function runSourceSchedulerUnpark(options) {
-  const store = new LocalSourceSchedulerStateStore;
-  try {
-    return store.requestUnpark({
-      sourceId: options.source,
-      taskId: options.task,
-      expectedNotBeforeAt: options.expectedNotBefore,
-      reason: options.reason,
-      requestedAt: new Date().toISOString()
-    });
-  } finally {
-    store.close();
-  }
-}
-function runSourceSchedulerUnparkCancel(options) {
-  const store = new LocalSourceSchedulerStateStore;
-  try {
-    return store.cancelUnpark({
-      sourceId: options.source,
-      taskId: options.task,
-      expectedNotBeforeAt: options.expectedNotBefore,
-      reason: options.reason,
-      cancelledAt: new Date().toISOString()
-    });
-  } finally {
-    store.close();
-  }
-}
-function parseGoogleRequestBudgetFutureRecoveryArgs(args) {
-  const values = new Map;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--help" || arg === "-h") {
-      console.log("Usage: olympus source request-budget recover-future --provider gmail|google-drive --expected-future-day <YYYY-MM-DD> --reason <reason>");
-      process.exit(0);
-    }
-    if (!arg?.startsWith("--")) {
-      throw new OperationError("invalid_params", `Unexpected request-budget recovery argument: ${arg}`);
-    }
-    const equals = arg.indexOf("=");
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!["provider", "expected-future-day", "reason"].includes(key)) {
-      throw new OperationError("invalid_params", `Unknown request-budget recovery option: --${key}`);
-    }
-    const value = equals === -1 ? requireOptionValue(args, index += 1, `--${key}`) : arg.slice(equals + 1);
-    values.set(key, value.trim());
-  }
-  const provider = values.get("provider");
-  const expectedFutureDay = values.get("expected-future-day");
-  const reason = values.get("reason");
-  if (provider !== "gmail" && provider !== "google-drive" || !expectedFutureDay || !reason) {
-    throw new OperationError("invalid_params", "Request-budget recovery requires --provider gmail|google-drive, --expected-future-day, and --reason.");
-  }
-  if (!UTC_DAY.test(expectedFutureDay) || new Date(`${expectedFutureDay}T00:00:00.000Z`).toISOString().slice(0, 10) !== expectedFutureDay) {
-    throw new OperationError("invalid_params", "--expected-future-day must be a valid UTC day.");
-  }
-  if (!SAFE_SOURCE_SCHEDULER_TOKEN.test(reason)) {
-    throw new OperationError("invalid_params", "--reason must be a safe categorical token.");
-  }
-  return { provider, expectedFutureDay, reason };
-}
-function runGoogleRequestBudgetFutureRecovery(options) {
-  const gmail = options.provider === "gmail";
-  const budget = new GoogleDailyRequestBudget({
-    provider: gmail ? "Gmail" : "Google Drive",
-    dailyRequestBudget: 1,
-    statePath: gmail ? defaultGmailRequestBudgetStatePath(process.env) : defaultGoogleDriveRequestBudgetStatePath(process.env)
-  });
-  return budget.recoverFutureUtcDay({
-    expectedFutureUtcDay: options.expectedFutureDay,
-    reason: options.reason
-  });
 }
 async function runWorkerCommand(args) {
   const command = args[0];
@@ -81034,8 +76901,8 @@ async function readWorkerHttpState() {
   }
 }
 function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
-  const root = asRecord16(workerHttp);
-  const dashboard = asRecord16(root?.source_dashboard);
+  const root = asRecord13(workerHttp);
+  const dashboard = asRecord13(root?.source_dashboard);
   const sources = Array.isArray(dashboard?.sources) ? dashboard.sources : [];
   const capabilities = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((item) => [item.source_id, item]));
   const signals = [];
@@ -81046,17 +76913,17 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     }
   };
   for (const raw of sources) {
-    const source = asRecord16(raw);
+    const source = asRecord13(raw);
     if (!source)
       continue;
     const sourceId = typeof source.source_id === "string" && capabilities.has(source.source_id) ? source.source_id : undefined;
     if (!sourceId)
       continue;
     const capability = capabilities.get(sourceId);
-    const connection = asRecord16(source.connection);
+    const connection = asRecord13(source.connection);
     const connectionState = typeof connection?.state === "string" ? connection.state : "";
-    const answerReadiness = asRecord16(source.answer_readiness);
-    const queue = asRecord16(source.queue_health);
+    const answerReadiness = asRecord13(source.answer_readiness);
+    const queue = asRecord13(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
     const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
     if (source.configured !== true && !inFlight)
@@ -81086,7 +76953,7 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
   }
   return signals;
 }
-function asRecord16(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function fetchJson(url, init) {
@@ -81716,20 +77583,8 @@ function formatCliFatalError(error2) {
 }
 export {
   v04PublicCliCommandName,
-  runXReconcileRecovery,
-  runSourceSchedulerUnparkCancel,
-  runSourceSchedulerUnpark,
-  runGoogleRequestBudgetFutureRecovery,
   runDashboardTokenCommand,
   resolveCliOperation,
-  parseXReconcileRecoveryArgs,
-  parseXContentRecoveryArgs,
-  parseTerminalContentRequalifyArgs,
-  parseSourceSchedulerUnparkArgs,
-  parseQueuedContentRetargetArgs,
-  parseOwnerTierOverrideArgs,
-  parseGoogleRequestBudgetFutureRecoveryArgs,
-  parseEvalShardExportArgs,
   parseArgs,
   lifecycleRecoverySignalsFromWorkerHttpState,
   isV04PublicCliInvocation,

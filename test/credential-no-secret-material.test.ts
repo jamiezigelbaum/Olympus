@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { connectApiKeySource, connectGuidedSession } from '../src/core/connect.ts';
+import { connectPublicApiKeySource, connectGuidedSession } from '../src/core/connect.ts';
 import { EncryptedFileSecretStore } from '../src/core/secret-store.ts';
 import { createEnvCredentialBroker } from '../src/workers/credential-broker/index.ts';
 
@@ -16,24 +16,24 @@ describe('credential onboarding no-secret-material guard', () => {
     });
     const fixtures = [
       'readwise-token-fixture-secret',
-      'notion-token-fixture-secret',
+      'venice-token-fixture-secret',
       'telegram-session-path-fixture-secret',
       'missing-refresh-token-fixture-secret',
     ];
     try {
-      const readwise = await connectApiKeySource({
+      const readwise = await connectPublicApiKeySource({
         source: 'readwise',
         apiKey: fixtures[0]!,
         registryPath,
         secretStore: store,
         fetch: async () => new Response('', { status: 204 }),
       });
-      const notion = await connectApiKeySource({
-        source: 'notion',
+      const venice = await connectPublicApiKeySource({
+        source: 'venice',
         apiKey: fixtures[1]!,
         registryPath,
         secretStore: store,
-        fetch: async () => new Response(JSON.stringify({ object: 'user' }), { status: 200 }),
+        fetch: async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
       });
       const telegram = await connectGuidedSession({
         source: 'telegram',
@@ -47,7 +47,6 @@ describe('credential onboarding no-secret-material guard', () => {
         secretStore: store,
       });
       const status = await broker.status?.('readwise.personal');
-      const notionStatus = await broker.status?.('notion.personal');
       let errorText = '';
       try {
         await broker.issueSession({
@@ -61,11 +60,10 @@ describe('credential onboarding no-secret-material guard', () => {
       }
       const inspected = [
         JSON.stringify(readwise),
-        JSON.stringify(notion),
+        JSON.stringify(venice),
         JSON.stringify(telegram),
         readFileSync(registryPath, 'utf8'),
         JSON.stringify(status),
-        JSON.stringify(notionStatus),
         errorText,
       ].join('\n');
 

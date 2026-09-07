@@ -9,7 +9,6 @@ import {
   DASHBOARD_CONTROL_GATE_ID,
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT,
   dashboardPageSignature,
-  dashboardSignature,
   donutGlyph,
   dotGlyph,
   escapeHtml,
@@ -753,50 +752,6 @@ describe('dashboardPageSignature', () => {
     // is put back by key after the swap.
     expect(script).toContain('Date.now() - deferredSince < 120000');
     expect(script).toContain('findByFocusKey(focused)');
-  });
-});
-
-describe('dashboardSignature', () => {
-  test('changes with custody, the embedding lane state, and a working row\'s minute of age', () => {
-    const card = fixtureCard();
-    const now = new Date('2026-07-02T12:00:00.000Z');
-    // Locked and unlocked renders of the same sources must not share a
-    // signature, or an expired session leaves a page reading "unlocked".
-    expect(dashboardSignature([card], { now, controlSession: true }))
-      .not.toBe(dashboardSignature([card], { now, controlSession: false }));
-    // The embedding lane's own run state is rendered, so it is signed.
-    const running = { state: 'running', stateLine: 'Embeddings: running now' } as never;
-    const parked = { state: 'parked', stateLine: 'Embeddings: parked' } as never;
-    expect(dashboardSignature([card], { now, embeddingRuntime: running }))
-      .not.toBe(dashboardSignature([card], { now, embeddingRuntime: parked }));
-    // A row that moved forty seconds ago and one that moved ninety seconds ago
-    // print different ages; an hour later the same row prints Stalled.
-    const moving = {
-      ...card,
-      coverage: { ...card.coverage, content_ready_items: Math.max(1, card.coverage.indexed_items - 1) },
-      movement: { extraction_at: '2026-07-02T11:59:20.000Z' },
-    };
-    const olderMove = { ...moving, movement: { extraction_at: '2026-07-02T11:58:30.000Z' } };
-    expect(dashboardSignature([moving], { now })).not.toBe(dashboardSignature([olderMove], { now }));
-    const anHourOn = new Date('2026-07-02T13:00:30.000Z');
-    expect(dashboardSignature([moving], { now })).not.toBe(dashboardSignature([moving], { now: anHourOn }));
-  });
-
-  test('is stable for the same cards and moves when a count moves', () => {
-    const card = fixtureCard();
-    expect(dashboardSignature([card])).toBe(dashboardSignature([fixtureCard()]));
-    const moved = fixtureCard({
-      coverage: { ...card.coverage, indexed_items: card.coverage.indexed_items + 1 },
-    });
-    expect(dashboardSignature([moved])).not.toBe(dashboardSignature([card]));
-  });
-
-  test('moves when a connection state changes without any count changing', () => {
-    const card = fixtureCard();
-    const reauth = fixtureCard({
-      connection: { ...card.connection, state: 'reauth_required', label: 'reauth required' },
-    });
-    expect(dashboardSignature([reauth])).not.toBe(dashboardSignature([card]));
   });
 });
 

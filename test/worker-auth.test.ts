@@ -2,33 +2,20 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { configFromPluginConfig, defaultConfig } from '../src/core/config.ts';
-import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
-import {
-  createDomainExpertTransport,
-  DirectHttpDomainExpertTransport,
-  domainExpertAuthTokenFromConfig,
-} from '../src/core/domain-expert-client.ts';
+import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport } from '../src/core/email.ts';
-import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
   unquoteEnvValue,
   workerAuthTokenFromConfig,
 } from '../src/core/worker-auth.ts';
-import { createCastorWorkspaceWorker } from '../src/workers/castor-workspace/index.ts';
-import { resolveCastorWorkspaceBindHostFromEnv } from '../src/workers/castor-workspace/server.ts';
-import { createDomainExpertWorker } from '../src/workers/domain-expert/index.ts';
-import { resolveDomainExpertBindHostFromEnv } from '../src/workers/domain-expert/server.ts';
 import {
   createEmailSourceWorker,
   type EmailSourceConnector,
   type EmailSourceHealth,
 } from '../src/workers/email-source/index.ts';
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
-import { createFileDeliveryWorker, type FileDeliveryRootPolicy } from '../src/workers/file-delivery/index.ts';
-import { resolveFileDeliveryBindHostFromEnv } from '../src/workers/file-delivery/server.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   warnIfWorkerAuthDisabled,
@@ -40,9 +27,6 @@ describe('worker HTTP bind and auth', () => {
   test('every worker server binds loopback by default and honors the shared override', () => {
     const resolvers = [
       resolveEmailSourceBindHostFromEnv,
-      resolveFileDeliveryBindHostFromEnv,
-      resolveCastorWorkspaceBindHostFromEnv,
-      resolveDomainExpertBindHostFromEnv,
     ];
 
     for (const resolve of resolvers) {
@@ -454,20 +438,7 @@ describe('worker HTTP bind and auth', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: 'hello' }),
     });
-    await new DirectHttpFileDeliveryTransport(fetchImpl, token).requestJson('http://file.test/v1/file/deliver', {
-      method: 'POST',
-      body: '{}',
-    });
-    await new DirectHttpCastorWorkspaceTransport(fetchImpl, token).requestJson('http://workspace.test/v1/workspace', {
-      method: 'POST',
-      body: '{}',
-    });
-    await new DirectHttpDomainExpertTransport(fetchImpl, token).requestJson('http://domain.test/v1/domain', {
-      method: 'POST',
-      body: '{}',
-    });
-
-    expect(captured).toHaveLength(4);
+    expect(captured).toHaveLength(1);
     for (const request of captured) {
       expect(request.headers.get('Authorization')).toBe('Bearer client-secret');
       expect(await request.text()).not.toContain('client-secret');
@@ -607,16 +578,6 @@ function workerCases(): Array<{
   request: (token?: string) => Request;
   cleanup?: () => void;
 }> {
-  const fileRoot = mkdtempSync(join(tmpdir(), 'olympus-worker-auth-file-'));
-  const filePolicy: FileDeliveryRootPolicy = {
-    rootId: 'safe',
-    path: fileRoot,
-    allowedTrustDomains: ['internal'],
-    maxBytes: 1024,
-    allowParentCreate: true,
-    allowDotfiles: false,
-    allowOverwrite: false,
-  };
   const emailConnector = fakeEmailConnector();
   return [
     {
@@ -626,53 +587,7 @@ function workerCases(): Array<{
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       }),
     },
-    {
-      name: 'file-delivery',
-      fetch: createFileDeliveryWorker({ roots: [filePolicy] }).fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/file/deliver', {
-        root_id: 'safe',
-        relative_path: 'note.md',
-        content: 'hello',
-        write_mode: 'dry_run',
-        trust_domain: 'internal',
-        idempotency_key: 'auth-test',
-      }, token),
-      cleanup: () => rmSync(fileRoot, { recursive: true, force: true }),
-    },
-    {
-      name: 'castor-workspace',
-      fetch: createCastorWorkspaceWorker().fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/workspace', {
-        action: 'health',
-      }, token),
-    },
-    {
-      name: 'domain-expert',
-      fetch: createDomainExpertWorker({
-        enabled: true,
-        liveToolsEnabled: true,
-      }).fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/domain', {
-        tool: 'domain_agent',
-        params: {
-          action: 'bootstrap',
-          domain_id: 'governance',
-          dry_run: true,
-        },
-      }, token),
-    },
   ];
-}
-
-function jsonRequest(url: string, body: unknown, token?: string): Request {
-  return new Request(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
 }
 
 function fakeEmailConnector(): EmailSourceConnector {
@@ -722,176 +637,6 @@ describe('dashboard query-token exception', () => {
   test('OAuth callback route is allowed for provider redirects', async () => {
     const callback = await handler(new Request('http://127.0.0.1:8010/oauth/callback/dropbox?code=code&state=state'));
     expect(callback.status).toBe(200);
-  });
-});
-
-describe('domain expert bearer scope', () => {
-  const FLEET_TOKEN = 'fleet-wide-worker-bearer-token';
-  const EXPERT_TOKEN = 'domain-expert-only-bearer-token';
-
-  function pluginConfig(domainExpert: Record<string, unknown>): unknown {
-    return {
-      worker: { authToken: FLEET_TOKEN },
-      domainExpert: {
-        enabled: true,
-        baseUrl: 'http://127.0.0.1:8040/v1',
-        ...domainExpert,
-      },
-    };
-  }
-
-  /** Drives the real transport against a stub fetch and returns the Authorization header it sent. */
-  async function capturedAuthorization(pluginConfigValue: unknown): Promise<string | null> {
-    const config = configFromPluginConfig(pluginConfigValue);
-    const originalFetch = globalThis.fetch;
-    let seen: string | null = null;
-    globalThis.fetch = (async (_url: string, init: RequestInit) => {
-      seen = new Headers(init.headers).get('Authorization');
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }) as typeof globalThis.fetch;
-    try {
-      await createDomainExpertTransport(config).requestJson('http://127.0.0.1:8040/v1/domain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-    return seen;
-  }
-
-  test('a configured domainExpert.authToken survives plugin config parsing', () => {
-    // The parser copies domainExpert fields one by one, so an unhandled field is
-    // dropped silently rather than rejected. This asserts the field is handled.
-    expect(configFromPluginConfig(pluginConfig({ authToken: EXPERT_TOKEN })).domainExpert.authToken)
-      .toBe(EXPERT_TOKEN);
-  });
-
-  test('the domain expert bearer is sent instead of the fleet-wide worker token', async () => {
-    expect(await capturedAuthorization(pluginConfig({ authToken: EXPERT_TOKEN })))
-      .toBe(`Bearer ${EXPERT_TOKEN}`);
-  });
-
-  test('the fleet-wide worker token is used when no domain expert bearer is configured', async () => {
-    expect(await capturedAuthorization(pluginConfig({}))).toBe(`Bearer ${FLEET_TOKEN}`);
-  });
-
-  test('a placeholder domain expert bearer falls back rather than authenticating as the placeholder', async () => {
-    expect(await capturedAuthorization(pluginConfig({ authToken: 'change-me' })))
-      .toBe(`Bearer ${FLEET_TOKEN}`);
-  });
-
-  async function capturedBody(pluginConfigValue: unknown, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const config = configFromPluginConfig(pluginConfigValue);
-    const originalFetch = globalThis.fetch;
-    let seen: Record<string, unknown> = {};
-    globalThis.fetch = (async (_url: string, init: RequestInit) => {
-      seen = JSON.parse(String(init.body));
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }) as typeof globalThis.fetch;
-    try {
-      const { DomainExpertClient } = await import('../src/core/domain-expert-client.ts');
-      await new DomainExpertClient(config, createDomainExpertTransport(config))
-        .run('domain_ask', params).catch(() => undefined);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-    return (seen.params ?? {}) as Record<string, unknown>;
-  }
-
-  test('an omitted domain_id gains the configured default, an explicit one is never overridden', async () => {
-    // The legacy worker forgave omission by defaulting to governance on the
-    // serving path; the Expert-Agents worker refuses its own default domain.
-    // The tenant default is this deployment's fact, injected client-side.
-    const withDefault = pluginConfig({ defaultDomainId: 'governance' });
-    expect(await capturedBody(withDefault, { question: 'q' }))
-      .toMatchObject({ domain_id: 'governance' });
-    expect(await capturedBody(withDefault, { question: 'q', domain_id: 'guru' }))
-      .toMatchObject({ domain_id: 'guru' });
-    expect((await capturedBody(pluginConfig({}), { question: 'q' })).domain_id)
-      .toBeUndefined();
-  });
-
-  async function runAgainstPolicy(policy: Record<string, unknown>): Promise<void> {
-    const config = configFromPluginConfig(pluginConfig({}));
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => new Response(
-      JSON.stringify({ policy }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    )) as unknown as typeof globalThis.fetch;
-    try {
-      const { DomainExpertClient } = await import('../src/core/domain-expert-client.ts');
-      await new DomainExpertClient(config, createDomainExpertTransport(config))
-        .run('domain_ask', { question: 'q', domain_id: 'governance' });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  }
-
-  test('accepts both spellings of the control-plane contract, refuses neither', async () => {
-    // The first real gateway request after the 3A flip failed here: the
-    // tenant-neutral worker emits expert_agents_control_plane_only, the client
-    // demanded the olympus branding, and every direct-to-worker proof missed
-    // it because this assertion lives only in the client.
-    await expect(runAgainstPolicy({
-      expert_agents_control_plane_only: true,
-      raw_runtime_secrets_exposed: false,
-    })).resolves.toBeUndefined();
-    await expect(runAgainstPolicy({
-      olympus_control_plane_only: true,
-      raw_runtime_secrets_exposed: false,
-    })).resolves.toBeUndefined();
-    await expect(runAgainstPolicy({ raw_runtime_secrets_exposed: false }))
-      .rejects.toThrow('bounded policy contract');
-    await expect(runAgainstPolicy({
-      expert_agents_control_plane_only: true,
-      raw_runtime_secrets_exposed: true,
-    })).rejects.toThrow('bounded policy contract');
-  });
-
-  test('a blank default domain id is dropped at validation', () => {
-    expect(configFromPluginConfig(pluginConfig({ defaultDomainId: '  ' })).domainExpert.defaultDomainId)
-      .toBeUndefined();
-    expect(configFromPluginConfig(pluginConfig({ defaultDomainId: 'governance' })).domainExpert.defaultDomainId)
-      .toBe('governance');
-  });
-
-  test('a blank domain expert bearer is dropped at validation', () => {
-    expect(configFromPluginConfig(pluginConfig({ authToken: '   ' })).domainExpert.authToken)
-      .toBeUndefined();
-  });
-
-  test('the domain expert bearer can be delivered by environment or worker.env, never only by live config', () => {
-    // Delivery matters as much as selection: the gateway resolves plugin config
-    // without reading env, so a config-only field could be supplied only by
-    // writing the secret into openclaw.json. These are the routes that avoid it.
-    const config = configFromPluginConfig(pluginConfig({}));
-    const home = mkdtempSync(join(tmpdir(), 'olympus-domain-expert-bearer-'));
-    const envPath = join(home, '.config', 'olympus', 'worker.env');
-    try {
-      expect(domainExpertAuthTokenFromConfig(config, { env: {}, homeDir: home }))
-        .toBe(FLEET_TOKEN);
-
-      expect(domainExpertAuthTokenFromConfig(config, {
-        env: { OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN: EXPERT_TOKEN },
-        homeDir: home,
-      })).toBe(EXPERT_TOKEN);
-
-      mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
-      writeFileSync(envPath, `OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN=${EXPERT_TOKEN}\n`, { mode: 0o600 });
-      chmodSync(envPath, 0o600);
-      expect(domainExpertAuthTokenFromConfig(config, { env: {}, homeDir: home }))
-        .toBe(EXPERT_TOKEN);
-
-      const configured = configFromPluginConfig(pluginConfig({ authToken: 'config-wins-token' }));
-      expect(domainExpertAuthTokenFromConfig(configured, {
-        env: { OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN: EXPERT_TOKEN },
-        homeDir: home,
-      })).toBe('config-wins-token');
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
   });
 });
 

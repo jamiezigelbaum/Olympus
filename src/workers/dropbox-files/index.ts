@@ -70,45 +70,6 @@ export {
 } from './dropbox-content-hash.ts';
 
 export {
-  DropboxApiCopyClient,
-  DropboxSourceExportDestinationError,
-  DropboxSourceExportRequestError,
-  createDropboxCopyClientFromBroker,
-  createDropboxSourceExportHandler,
-  parseDropboxSourceExportRootsFromEnv,
-  type DropboxApiCopyClientOptions,
-  type DropboxCopyClient,
-  type DropboxCopyClientBrokerOptions,
-  type DropboxCopyOutcome,
-  type DropboxCopyRequest,
-  type DropboxSourceExportHandler,
-  type DropboxSourceExportHandlerOptions,
-  type DropboxSourceExportStore,
-  type DropboxSourceExportItemRequest,
-  type DropboxSourceExportItemResult,
-  type DropboxSourceExportItemStatus,
-  type DropboxSourceExportRequest,
-  type DropboxSourceExportResult,
-} from '../source-export/dropbox.ts';
-
-export {
-  createDropboxConnectorStoreEvalShardSource,
-  createDropboxEvalShardExportHandler,
-  type DropboxContentExtractionRetargetTier,
-  type DropboxEvalShardCandidate,
-  type DropboxEvalShardCandidateRequest,
-  type DropboxEvalShardExportHandler,
-  type DropboxEvalShardExportHandlerOptions,
-  type DropboxEvalShardConnectorStore,
-  type DropboxEvalShardIndex,
-  type DropboxEvalShardExportRequest,
-  type DropboxEvalShardManifest,
-  type DropboxEvalShardManifestItem,
-  type DropboxEvalShardSidecar,
-  type DropboxEvalShardSkippedDocument,
-} from '../source-eval-shard/dropbox.ts';
-
-export {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_FILES_SOURCE_ID,
   defineDropboxFilesCorpus,

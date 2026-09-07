@@ -33,6 +33,26 @@
 
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 
+// Stored evidence vocabulary, distinct from the extraction queue's job state.
+export type FileExtractionStatus =
+  | 'metadata_only'
+  | 'extracted'
+  | 'skipped_unsupported'
+  | 'skipped_too_large'
+  | 'blocked_policy'
+  | 'failed';
+
+/**
+ * Partial evidence contains indexed pages but also unread page gaps.
+ * Truncation instead means a continuous text cut by an evidence budget.
+ */
+export type FileExtractionCompleteness =
+  | 'complete'
+  | 'truncated'
+  | 'partial'
+  | 'metadata_only'
+  | 'failed';
+
 // --- Seam 1: the source ----------------------------------------------------
 
 /**

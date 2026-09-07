@@ -2223,42 +2223,6 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
-  if (env.OLYMPUS_FILE_DELIVERY_ENABLED) {
-    config.fileDelivery.enabled = parseBoolean(env.OLYMPUS_FILE_DELIVERY_ENABLED, "OLYMPUS_FILE_DELIVERY_ENABLED");
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_BASE_URL) {
-    config.fileDelivery.baseUrl = trimTrailingSlash(env.OLYMPUS_FILE_DELIVERY_BASE_URL);
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS) {
-    config.fileDelivery.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_ENABLED) {
-    config.castorWorkspace.enabled = parseBoolean(env.OLYMPUS_CASTOR_WORKSPACE_ENABLED, "OLYMPUS_CASTOR_WORKSPACE_ENABLED");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL) {
-    config.castorWorkspace.baseUrl = trimTrailingSlash(env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL);
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS) {
-    config.castorWorkspace.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_ENABLED) {
-    config.domainExpert.enabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_ENABLED, "OLYMPUS_DOMAIN_EXPERT_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED) {
-    config.domainExpert.liveToolsEnabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED, "OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_BASE_URL) {
-    config.domainExpert.baseUrl = trimTrailingSlash(env.OLYMPUS_DOMAIN_EXPERT_BASE_URL);
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS) {
-    config.domainExpert.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) {
-    config.domainExpert.authToken = env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN.trim();
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
-    config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
-  }
 }
 function configFromPluginConfig(pluginConfig) {
   const config = defaultConfig();
@@ -2269,9 +2233,6 @@ function configFromPluginConfig(pluginConfig) {
   const argus = asRecord4(root?.argus);
   const email = asRecord4(root?.email);
   const sourceIndex = asRecord4(root?.sourceIndex);
-  const fileDelivery = asRecord4(root?.fileDelivery);
-  const castorWorkspace = asRecord4(root?.castorWorkspace);
-  const domainExpert = asRecord4(root?.domainExpert);
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -2418,42 +2379,6 @@ function configFromPluginConfig(pluginConfig) {
     } else if (dropboxPersonal.schemaVersion === 1) {
       config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(dropboxPersonal, "sourceIndex.ingestionPolicies.dropboxPersonal");
     }
-  }
-  if (typeof fileDelivery?.enabled === "boolean") {
-    config.fileDelivery.enabled = fileDelivery.enabled;
-  }
-  if (typeof fileDelivery?.baseUrl === "string" && fileDelivery.baseUrl.trim()) {
-    config.fileDelivery.baseUrl = trimTrailingSlash(fileDelivery.baseUrl.trim());
-  }
-  if (typeof fileDelivery?.requestTimeoutSeconds === "number") {
-    config.fileDelivery.requestTimeoutSeconds = fileDelivery.requestTimeoutSeconds;
-  }
-  if (typeof castorWorkspace?.enabled === "boolean") {
-    config.castorWorkspace.enabled = castorWorkspace.enabled;
-  }
-  if (typeof castorWorkspace?.baseUrl === "string" && castorWorkspace.baseUrl.trim()) {
-    config.castorWorkspace.baseUrl = trimTrailingSlash(castorWorkspace.baseUrl.trim());
-  }
-  if (typeof castorWorkspace?.requestTimeoutSeconds === "number") {
-    config.castorWorkspace.requestTimeoutSeconds = castorWorkspace.requestTimeoutSeconds;
-  }
-  if (typeof domainExpert?.enabled === "boolean") {
-    config.domainExpert.enabled = domainExpert.enabled;
-  }
-  if (typeof domainExpert?.liveToolsEnabled === "boolean") {
-    config.domainExpert.liveToolsEnabled = domainExpert.liveToolsEnabled;
-  }
-  if (typeof domainExpert?.baseUrl === "string" && domainExpert.baseUrl.trim()) {
-    config.domainExpert.baseUrl = trimTrailingSlash(domainExpert.baseUrl.trim());
-  }
-  if (typeof domainExpert?.requestTimeoutSeconds === "number") {
-    config.domainExpert.requestTimeoutSeconds = domainExpert.requestTimeoutSeconds;
-  }
-  if (typeof domainExpert?.authToken === "string" && domainExpert.authToken.trim()) {
-    config.domainExpert.authToken = domainExpert.authToken.trim();
-  }
-  if (typeof domainExpert?.defaultDomainId === "string" && domainExpert.defaultDomainId.trim()) {
-    config.domainExpert.defaultDomainId = domainExpert.defaultDomainId.trim();
   }
   validateConfig(config);
   return config;
@@ -2610,59 +2535,12 @@ function validateConfig(config) {
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policy !== undefined) {
     config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(config.sourceIndex.ingestionPolicies.dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
   }
-  assertBoolean(config.fileDelivery.enabled, "fileDelivery.enabled");
-  assertBoolean(config.castorWorkspace.enabled, "castorWorkspace.enabled");
-  if (config.domainExpert.defaultDomainId !== undefined) {
-    if (typeof config.domainExpert.defaultDomainId !== "string") {
-      throw new OperationError("config_error", "domainExpert.defaultDomainId must be a string.");
-    }
-    const trimmed = config.domainExpert.defaultDomainId.trim();
-    if (trimmed) {
-      config.domainExpert.defaultDomainId = trimmed;
-    } else {
-      delete config.domainExpert.defaultDomainId;
-    }
-  }
-  if (config.domainExpert.authToken !== undefined) {
-    if (typeof config.domainExpert.authToken !== "string") {
-      throw new OperationError("config_error", "domainExpert.authToken must be a string.");
-    }
-    const trimmed = config.domainExpert.authToken.trim();
-    if (trimmed) {
-      config.domainExpert.authToken = trimmed;
-    } else {
-      delete config.domainExpert.authToken;
-    }
-  }
-  assertBoolean(config.domainExpert.enabled, "domainExpert.enabled");
-  assertBoolean(config.domainExpert.liveToolsEnabled, "domainExpert.liveToolsEnabled");
   if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
     throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
   }
   config.email.baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
-  if (typeof config.fileDelivery.baseUrl !== "string" || !config.fileDelivery.baseUrl.startsWith("http://") && !config.fileDelivery.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "fileDelivery.baseUrl must be an HTTP(S) URL.");
-  }
-  config.fileDelivery.baseUrl = trimTrailingSlash(config.fileDelivery.baseUrl);
-  if (typeof config.castorWorkspace.baseUrl !== "string" || !config.castorWorkspace.baseUrl.startsWith("http://") && !config.castorWorkspace.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "castorWorkspace.baseUrl must be an HTTP(S) URL.");
-  }
-  config.castorWorkspace.baseUrl = trimTrailingSlash(config.castorWorkspace.baseUrl);
-  if (typeof config.domainExpert.baseUrl !== "string" || !config.domainExpert.baseUrl.startsWith("http://") && !config.domainExpert.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "domainExpert.baseUrl must be an HTTP(S) URL.");
-  }
-  config.domainExpert.baseUrl = trimTrailingSlash(config.domainExpert.baseUrl);
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.fileDelivery.requestTimeoutSeconds !== "number" || !Number.isFinite(config.fileDelivery.requestTimeoutSeconds) || config.fileDelivery.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "fileDelivery.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.castorWorkspace.requestTimeoutSeconds !== "number" || !Number.isFinite(config.castorWorkspace.requestTimeoutSeconds) || config.castorWorkspace.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "castorWorkspace.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.domainExpert.requestTimeoutSeconds !== "number" || !Number.isFinite(config.domainExpert.requestTimeoutSeconds) || config.domainExpert.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "domainExpert.requestTimeoutSeconds must be greater than zero.");
   }
 }
 function parseSchedulerSourceIds(value) {
@@ -2845,22 +2723,6 @@ var init_config = __esm(() => {
       answerDevEnabled: false,
       corpusRegistry: defaultSourceCorpusRegistryConfig(),
       ingestionPolicies: {}
-    },
-    fileDelivery: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8020/v1",
-      requestTimeoutSeconds: 30
-    },
-    castorWorkspace: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8030/v1",
-      requestTimeoutSeconds: 300
-    },
-    domainExpert: {
-      enabled: false,
-      liveToolsEnabled: false,
-      baseUrl: "http://127.0.0.1:8040/v1",
-      requestTimeoutSeconds: 600
     }
   };
   ARGUS_MODEL_PROFILES = [
@@ -3440,11 +3302,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord9(record.retrieval);
-  const trustDomainsRecord = asRecord9(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord6(record.retrieval);
+  const trustDomainsRecord = asRecord6(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord9(trustDomainsRecord?.[domain]);
+    const policy = asRecord6(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3456,19 +3318,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord9(value);
-  if (record?.sovereignty && asRecord9(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord6(value);
+  if (record?.sovereignty && asRecord6(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord6(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord9(item);
+    const profile = asRecord6(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3491,16 +3353,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord6(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord9(record[domain]);
+    const route = asRecord6(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord9(route.pool);
+    const poolRecord = asRecord6(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3710,7 +3572,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord9(value) {
+function asRecord6(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -3763,98 +3625,6 @@ var init_sovereignty = __esm(() => {
   };
 });
 
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
-
-// src/core/google-service-account.ts
-import { createSign } from "node:crypto";
-function parseGoogleServiceAccountKey(rawCredential, options = {}) {
-  if (!rawCredential?.trim())
-    throw new Error("Google service-account credential is empty.");
-  let parsed;
-  try {
-    parsed = JSON.parse(rawCredential);
-  } catch {
-    throw new Error("Google service-account credential is not valid JSON.");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Google service-account credential must be a JSON object.");
-  }
-  const credential = parsed;
-  if (credential.type !== "service_account") {
-    throw new Error("Google credential JSON must be a service_account key.");
-  }
-  if (typeof credential.client_email !== "string" || !credential.client_email.trim()) {
-    throw new Error("Google service-account credential JSON is missing client_email.");
-  }
-  if (options.expectedClientEmail && credential.client_email !== options.expectedClientEmail) {
-    throw new Error(`GCP credential client_email does not match ${options.expectedClientEmail}.`);
-  }
-  if (typeof credential.private_key !== "string" || !credential.private_key.includes("PRIVATE KEY")) {
-    throw new Error("Google service-account credential JSON is missing private_key.");
-  }
-  if (typeof credential.project_id !== "string" || !credential.project_id.trim()) {
-    throw new Error("Google service-account credential JSON is missing project_id.");
-  }
-  if (credential.token_uri !== undefined && (typeof credential.token_uri !== "string" || !/^https:\/\//.test(credential.token_uri))) {
-    throw new Error("Google service-account credential token_uri must be an https URL.");
-  }
-  return {
-    type: "service_account",
-    project_id: credential.project_id,
-    private_key: credential.private_key,
-    client_email: credential.client_email,
-    ...typeof credential.private_key_id === "string" ? { private_key_id: credential.private_key_id } : {},
-    ...credential.token_uri ? { token_uri: credential.token_uri } : {}
-  };
-}
-function googleServiceAccountTokenUrl(credential) {
-  return credential.token_uri || GOOGLE_OAUTH_TOKEN_URL;
-}
-function signGoogleServiceAccountJwt(options) {
-  const scope = normalizedScopeClaim(options.scopes);
-  const subject = options.subject?.trim();
-  if (options.subject !== undefined && !subject) {
-    throw new Error("Google service-account impersonated subject must be non-empty.");
-  }
-  const nowSeconds = Math.floor((options.now?.getTime() ?? Date.now()) / 1000);
-  const lifetimeSeconds = normalizedLifetimeSeconds(options.lifetimeSeconds);
-  const header = { alg: "RS256", typ: "JWT" };
-  const claims = {
-    iss: options.credential.client_email,
-    scope,
-    aud: googleServiceAccountTokenUrl(options.credential),
-    iat: nowSeconds,
-    exp: nowSeconds + lifetimeSeconds,
-    ...subject ? { sub: subject } : {}
-  };
-  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
-  const signature = createSign("RSA-SHA256").update(unsigned).sign(options.credential.private_key);
-  return `${unsigned}.${base64Url(signature)}`;
-}
-function normalizedScopeClaim(scopes) {
-  const normalized = [...new Set(scopes.map((scope) => scope.trim()).filter(Boolean))];
-  if (normalized.length === 0)
-    throw new Error("Google service-account assertion requires at least one scope.");
-  return normalized.join(" ");
-}
-function normalizedLifetimeSeconds(lifetimeSeconds) {
-  if (lifetimeSeconds === undefined)
-    return DEFAULT_ASSERTION_LIFETIME_SECONDS;
-  if (!Number.isFinite(lifetimeSeconds) || lifetimeSeconds <= 0) {
-    throw new Error("Google service-account assertion lifetime must be positive.");
-  }
-  return Math.min(Math.floor(lifetimeSeconds), MAX_ASSERTION_LIFETIME_SECONDS);
-}
-function base64UrlJson(value) {
-  return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
-}
-function base64Url(value) {
-  return value.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer", DEFAULT_ASSERTION_LIFETIME_SECONDS = 3600, MAX_ASSERTION_LIFETIME_SECONDS = 3600;
-var init_google_service_account = () => {};
-
 // src/core/oauth-relay.ts
 function googlePublisherExchangeUrl(env = process.env) {
   const override = env.OLYMPUS_GOOGLE_PUBLISHER_EXCHANGE_URL?.trim();
@@ -3902,27 +3672,6 @@ import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
 import { dirname as dirname5 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
-}
-function delegatedGoogleHandle(options) {
-  return {
-    handle: options.handle,
-    provider: options.provider,
-    accountRole: options.accountRole,
-    trustDomain: options.trustDomain,
-    allowedCapabilities: [options.capability],
-    scopes: [...options.scopes],
-    tokenEnvNames: [],
-    serviceAccountJwt: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      credentialJsonEnvNames: [
-        ...options.credentialJsonEnvNames,
-        GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME
-      ],
-      impersonatedSubjectEnvNames: [...options.impersonatedSubjectEnvNames],
-      scopes: [...options.scopes]
-    },
-    expiresInSeconds: 3600
-  };
 }
 
 class JsonCredentialOAuth2StateStore {
@@ -4113,9 +3862,6 @@ class EnvCredentialBroker {
     if (definition.oauth2Refresh) {
       return this.issueOAuth2RefreshSession(definition, request.capability);
     }
-    if (definition.serviceAccountJwt) {
-      return this.issueServiceAccountJwtSession(definition, request.capability);
-    }
     throw missingCredentialError(request.handle, request.capability);
   }
   async status(handle) {
@@ -4139,9 +3885,6 @@ class EnvCredentialBroker {
   }
   issueOAuth2RefreshSession(definition, capability) {
     return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshOAuth2RefreshSession(definition, capability, cacheKey));
-  }
-  issueServiceAccountJwtSession(definition, capability) {
-    return this.mintCachedBearerSession(definition, capability, (cacheKey) => this.issueFreshServiceAccountJwtSession(definition, capability, cacheKey));
   }
   async mintCachedBearerSession(definition, capability, mint) {
     const cacheKey = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability);
@@ -4332,78 +4075,6 @@ class EnvCredentialBroker {
     this.markRegistryHandleReauthRequired(definition.handle, now);
     throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} rotated its refresh token but ${reason}; the handle must be reauthorized.`, { handle: definition.handle, capability });
   }
-  async issueFreshServiceAccountJwtSession(definition, capability, cacheKey) {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount)
-      throw missingCredentialError(definition.handle, capability);
-    const now = this.now();
-    const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
-    if (!rawCredential)
-      throw missingCredentialError(definition.handle, capability);
-    const impersonatedSubject = firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames);
-    if (!impersonatedSubject)
-      throw missingCredentialError(definition.handle, capability);
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    if (storedState?.status === "reauth_required") {
-      throw serviceAccountDelegationError(definition.handle, capability);
-    }
-    const requestedScopes = serviceAccount.scopes?.length ? serviceAccount.scopes : definition.scopes ?? [];
-    let credential;
-    try {
-      credential = parseGoogleServiceAccountKey(rawCredential);
-    } catch (error) {
-      throw new CredentialBrokerError("credential_backend_malformed", `Credential handle ${definition.handle} service-account JSON is invalid: ${errorMessage(error)}`, { handle: definition.handle, capability });
-    }
-    let assertion;
-    try {
-      assertion = signGoogleServiceAccountJwt({
-        credential,
-        scopes: requestedScopes,
-        subject: impersonatedSubject,
-        now
-      });
-    } catch {
-      throw new CredentialBrokerError("credential_backend_malformed", `Credential handle ${definition.handle} service-account assertion could not be signed.`, { handle: definition.handle, capability });
-    }
-    let tokenResponse;
-    try {
-      tokenResponse = await exchangeServiceAccountAssertion({
-        tokenUrl: serviceAccount.tokenUrl?.trim() || googleServiceAccountTokenUrl(credential),
-        assertion,
-        fetchImpl: this.fetchImpl,
-        secrets: [assertion, credential.private_key, credential.private_key_id]
-      });
-    } catch (error) {
-      if (isTerminalServiceAccountAssertionError(error)) {
-        await this.oauth2StateStore?.save(definition.handle, {
-          ...storedState,
-          status: "reauth_required",
-          updatedAt: now.toISOString()
-        });
-        this.markRegistryHandleReauthRequired(definition.handle, now);
-        throw serviceAccountDelegationError(definition.handle, capability);
-      }
-      if (error instanceof OAuth2TokenEndpointError) {
-        const brokerError = new CredentialBrokerError("credential_refresh_failed", `Credential handle ${definition.handle} service-account token mint failed (${error.status}): ${error.safeDetail}`, { handle: definition.handle, capability });
-        this.recordMintFailure(cacheKey, brokerError);
-        throw brokerError;
-      }
-      throw error;
-    }
-    const scopes = tokenResponse.scopes.length > 0 ? tokenResponse.scopes : requestedScopes;
-    const session = bearerSessionFromMintedToken({
-      definition,
-      capability,
-      accessToken: tokenResponse.accessToken,
-      scopes,
-      now,
-      expiresInSeconds: tokenResponse.expiresInSeconds
-    });
-    if (isReusableMintedSession(session, now))
-      PROCESS_MINTED_SESSION_CACHE.set(cacheKey, session);
-    PROCESS_MINT_FAILURE_BACKOFF.delete(cacheKey);
-    return session;
-  }
   recordMintFailure(cacheKey, error) {
     if (this.oauth2RefreshFailureBackoffMs <= 0)
       return;
@@ -4450,8 +4121,6 @@ class EnvCredentialBroker {
       return statusFromDefinition(definition, "available", now);
     }
     if (!definition.oauth2Refresh) {
-      if (definition.serviceAccountJwt)
-        return this.serviceAccountJwtStatus(definition, now);
       return statusFromDefinition(definition, "missing", now);
     }
     const clientId = await this.resolveFirstSecret(definition.oauth2Refresh.clientIdEnvNames, definition.oauth2Refresh.clientIdSecretRef ? [definition.oauth2Refresh.clientIdSecretRef] : []);
@@ -4459,19 +4128,6 @@ class EnvCredentialBroker {
     const refreshToken = await this.resolveFirstSecret(definition.oauth2Refresh.refreshTokenEnvNames ?? [], definition.oauth2Refresh.refreshTokenSecretRef ? [definition.oauth2Refresh.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
     const status = clientId && refreshToken ? storedState?.status === "reauth_required" ? "reauth_required" : "available" : clientId ? "reauth_required" : "missing";
     return statusFromDefinition(definition, status, now);
-  }
-  async serviceAccountJwtStatus(definition, now) {
-    const serviceAccount = definition.serviceAccountJwt;
-    if (!serviceAccount)
-      return statusFromDefinition(definition, "missing", now);
-    const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
-    if (!rawCredential)
-      return statusFromDefinition(definition, "missing", now);
-    if (!firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames)) {
-      return statusFromDefinition(definition, "missing", now);
-    }
-    const storedState = await this.oauth2StateStore?.load(definition.handle);
-    return statusFromDefinition(definition, storedState?.status === "reauth_required" ? "reauth_required" : "available", now);
   }
   async resolveDescriptorBackendState(definition, sessionKind, now) {
     const stored = await this.backendStateStore?.load(definition.handle);
@@ -4777,55 +4433,8 @@ async function refreshOAuth2AccessToken(options) {
     scopes: scopesFromValue(payload.scope)
   };
 }
-async function exchangeServiceAccountAssertion(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", GOOGLE_JWT_BEARER_GRANT_TYPE);
-  body.set("assertion", options.assertion);
-  const response = await options.fetchImpl(options.tokenUrl, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: providerErrorFromText(text),
-      safeDetail: safeCredentialText(text, options.secrets)
-    });
-  }
-  const payload = parseJsonObject(text, "Google service-account token endpoint");
-  const accessToken = optionalString2(payload.access_token);
-  if (!accessToken) {
-    throw new OAuth2TokenEndpointError({
-      status: response.status,
-      providerError: undefined,
-      safeDetail: "token endpoint did not return access_token"
-    });
-  }
-  return {
-    accessToken,
-    refreshToken: undefined,
-    expiresInSeconds: optionalNumber(payload.expires_in),
-    scopes: scopesFromValue(payload.scope)
-  };
-}
-function isTerminalServiceAccountAssertionError(error) {
-  if (!(error instanceof OAuth2TokenEndpointError))
-    return false;
-  if (error.providerError === "invalid_grant") {
-    return !ASSERTION_TIMING_REJECTED_DETAIL.test(error.safeDetail);
-  }
-  return isPermanentOAuthClientError(error.providerError);
-}
 function isPermanentOAuthClientError(providerError) {
   return providerError === "invalid_client" || providerError === "unauthorized_client" || providerError === "access_denied";
-}
-function serviceAccountDelegationError(handle, capability) {
-  return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : "unknown error";
@@ -4883,7 +4492,6 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
   if (registry.allowedCapabilities.some((capability) => !allowedByDefault.has(capability))) {
     throw new Error(`Connected credential handle capability exceeds its default: ${registry.handle}`);
   }
-  const serviceAccountJwt = fallback.serviceAccountJwt;
   const registryOwnsOAuth = registry.oauth2Refresh !== undefined;
   const oauth2Refresh = registry.oauth2Refresh ? {
     ...registry.oauth2Refresh,
@@ -4918,7 +4526,6 @@ function mergeRegistryHandleWithDefault(registry, fallback) {
     ...tokenSecretRefs?.length ? { tokenSecretRefs: [...tokenSecretRefs] } : {},
     ...statusEnvNames.length ? { statusEnvNames } : {},
     ...oauth2Refresh ? { oauth2Refresh } : {},
-    ...serviceAccountJwt ? { serviceAccountJwt } : {},
     scopes: registry.scopes?.length ? [...registry.scopes] : [...fallback.scopes ?? []],
     ...sessionKind ? { sessionKind } : {},
     ...registry.accountRole ?? fallback.accountRole ? { accountRole: registry.accountRole ?? fallback.accountRole } : {},
@@ -5139,13 +4746,13 @@ function safeCredentialText(text, secrets) {
 }
 function credentialTextVariants(secret) {
   const base64 = Buffer.from(secret).toString("base64");
-  const base64Url2 = Buffer.from(secret).toString("base64url");
+  const base64Url = Buffer.from(secret).toString("base64url");
   return uniqueStrings([
     secret,
     encodeURIComponent(secret),
     base64,
     base64.replace(/=+$/, ""),
-    base64Url2
+    base64Url
   ]);
 }
 function redactBase64CredentialTokens(text, secrets) {
@@ -5173,18 +4780,16 @@ function uniqueStrings(values) {
 function isNodeError(error) {
   return !!error && typeof error === "object" && "code" in error;
 }
-var PUBLIC_CREDENTIAL_PROVIDERS, PRIVATE_CREDENTIAL_PROVIDERS, CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON", DEFAULT_ENV_HANDLES, SERVICE_ACCOUNT_CREDENTIAL_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, ASSERTION_TIMING_REJECTED_DETAIL, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
+var CREDENTIAL_PROVIDERS, CREDENTIAL_REFRESH_BUSY_RETRY_MS = 30000, CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker", CredentialBrokerError, GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly", GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly", DEFAULT_ENV_HANDLES, PROCESS_MINTED_SESSION_CACHE, PROCESS_MINT_IN_FLIGHT, PROCESS_MINT_FAILURE_BACKOFF, GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS = 20000, OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES, OAuth2TokenEndpointError, TOKEN_UNISSUED_STATUSES, REFRESH_TOKEN_REJECTED_DETAIL;
 var init_credential_broker = __esm(() => {
   init_atomic_file();
   init_file_lease();
-  init_google_service_account();
   init_http_timeout();
   init_oauth_relay();
   init_publisher_oauth_client();
-  init_google_service_account();
   init_secret_store();
   init_connected_handles();
-  PUBLIC_CREDENTIAL_PROVIDERS = [
+  CREDENTIAL_PROVIDERS = [
     "readwise",
     "gmail",
     "google_drive",
@@ -5192,19 +4797,6 @@ var init_credential_broker = __esm(() => {
     "telegram",
     "whatsapp_personal",
     "x"
-  ];
-  PRIVATE_CREDENTIAL_PROVIDERS = [
-    "notion",
-    "google_calendar",
-    "gcp",
-    "whatsapp_business",
-    "apple_messages",
-    "reflect",
-    "roam"
-  ];
-  CREDENTIAL_PROVIDERS = [
-    ...PUBLIC_CREDENTIAL_PROVIDERS,
-    ...PUBLIC_RUNTIME_BUILD ? [] : PRIVATE_CREDENTIAL_PROVIDERS
   ];
   CredentialBrokerError = class CredentialBrokerError extends Error {
     subsystem = CREDENTIAL_BROKER_ERROR_SUBSYSTEM;
@@ -5237,62 +4829,18 @@ var init_credential_broker = __esm(() => {
       oauth2Refresh: {
         tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
         clientIdEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID"
         ],
         clientSecretEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET"
         ],
         refreshTokenEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN"
         ],
         scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
       },
       expiresInSeconds: 3600
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      delegatedGoogleHandle({
-        handle: "gmail.business_ocu",
-        provider: "gmail",
-        accountRole: "business_ocu",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-      }),
-      {
-        handle: "gmail.personal.direct",
-        provider: "gmail",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        allowedCapabilities: ["gmail.email.sync"],
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        tokenEnvNames: [],
-        oauth2Refresh: {
-          tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-          clientIdEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_ID",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"
-          ],
-          clientSecretEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_SECRET",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"
-          ],
-          refreshTokenEnvNames: [
-            "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_REFRESH_TOKEN",
-            "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"
-          ],
-          scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
-        },
-        expiresInSeconds: 3600
-      }
-    ],
     {
       handle: "google_drive.personal",
       provider: "google_drive",
@@ -5304,75 +4852,18 @@ var init_credential_broker = __esm(() => {
       oauth2Refresh: {
         tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
         clientIdEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID"
         ],
         clientSecretEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET"
         ],
         refreshTokenEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN",
-          ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN"
         ],
         scopes: [GOOGLE_DRIVE_READONLY_SCOPE]
       },
       expiresInSeconds: 3600
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      delegatedGoogleHandle({
-        handle: "gmail.personal.delegated",
-        provider: "gmail",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "gmail.business_ocu.delegated",
-        provider: "gmail",
-        accountRole: "business_ocu",
-        trustDomain: "secure_local",
-        capability: "gmail.email.sync",
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "google_drive.personal.delegated",
-        provider: "google_drive",
-        accountRole: "personal",
-        trustDomain: "internal",
-        capability: "google_drive.docs.sync",
-        scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      }),
-      delegatedGoogleHandle({
-        handle: "google_calendar.personal.delegated",
-        provider: "google_calendar",
-        accountRole: "personal",
-        trustDomain: "secure_local",
-        capability: "google_calendar.events.read",
-        scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
-        impersonatedSubjectEnvNames: [
-          "OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SUBJECT",
-          "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-        ],
-        credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SERVICE_ACCOUNT_JSON"]
-      })
-    ],
     {
       handle: "readwise.personal",
       provider: "readwise",
@@ -5382,7 +4873,6 @@ var init_credential_broker = __esm(() => {
       scopes: ["readwise.export:read", "readwise.reader:read"],
       tokenEnvNames: [
         "OLYMPUS_CREDENTIAL_READWISE_PERSONAL_TOKEN",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_READWISE_CASTOR_RUNTIME_TOKEN"],
         "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
         "READWISE_TOKEN"
       ],
@@ -5441,26 +4931,6 @@ var init_credential_broker = __esm(() => {
         backendLabel: "local_private:telegram_telethon_reader"
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      handle: "whatsapp.business",
-      provider: "whatsapp_business",
-      sessionKind: "webhook_token",
-      accountRole: "business",
-      trustDomain: "secure_local",
-      allowedCapabilities: ["whatsapp.business.messages.sync"],
-      scopes: ["whatsapp_business_messaging", "whatsapp_business_management"],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY"],
-      expiresInSeconds: 900,
-      backendState: {
-        kind: "webhook_token",
-        webhookIntegrationId: "twilio_whatsapp_business",
-        validationMode: "broker_verified_event",
-        verifierReference: "twilio_whatsapp_business_verifier",
-        leaseId: "twilio_whatsapp_business_webhook_lease",
-        backendLabel: "twilio:whatsapp_business_gateway"
-      }
-    }],
     {
       handle: "whatsapp.personal_local",
       provider: "whatsapp_personal",
@@ -5481,26 +4951,6 @@ var init_credential_broker = __esm(() => {
         backendLabel: "local_private:whatsapp_local_app_reader"
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      handle: "apple_messages.local",
-      provider: "apple_messages",
-      sessionKind: "local_app_database",
-      accountRole: "local",
-      trustDomain: "secure_local",
-      allowedCapabilities: ["apple_messages.messages.sync"],
-      scopes: [],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY"],
-      expiresInSeconds: 3600,
-      backendState: {
-        kind: "local_app_database",
-        databaseSourceId: "apple_messages_local",
-        readerWorker: "apple_messages_reader",
-        databaseRole: "messages_readonly",
-        scopeLabel: "local_messages",
-        backendLabel: "local_private:apple_messages_reader"
-      }
-    }],
     {
       handle: "x.bookmarks.personal",
       provider: "x",
@@ -5532,54 +4982,12 @@ var init_credential_broker = __esm(() => {
         scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
       },
       expiresInSeconds: 3600
-    },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        handle: "reflect.archive",
-        provider: "reflect",
-        sessionKind: "archive_path",
-        accountRole: "archive",
-        trustDomain: "internal",
-        allowedCapabilities: ["reflect.archive.import"],
-        scopes: [],
-        tokenEnvNames: [],
-        statusEnvNames: ["OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY"],
-        expiresInSeconds: 3600,
-        backendState: {
-          kind: "archive_path",
-          archiveRootAlias: "reflect_archive",
-          readerWorker: "archive_import_reader",
-          contentBounds: "approved_archive_root",
-          backendLabel: "local_private:archive_import"
-        }
-      },
-      {
-        handle: "roam.archive",
-        provider: "roam",
-        sessionKind: "archive_path",
-        accountRole: "archive",
-        trustDomain: "internal",
-        allowedCapabilities: ["roam.archive.import"],
-        scopes: [],
-        tokenEnvNames: [],
-        statusEnvNames: ["OLYMPUS_CREDENTIAL_ROAM_ARCHIVE_READY"],
-        expiresInSeconds: 3600,
-        backendState: {
-          kind: "archive_path",
-          archiveRootAlias: "roam_archive",
-          readerWorker: "archive_import_reader",
-          contentBounds: "approved_archive_root",
-          backendLabel: "local_private:archive_import"
-        }
-      }
-    ]
+    }
   ];
-  SERVICE_ACCOUNT_CREDENTIAL_HANDLES = new Set(DEFAULT_ENV_HANDLES.filter((definition) => definition.serviceAccountJwt !== undefined).map((definition) => definition.handle));
   PROCESS_MINTED_SESSION_CACHE = new Map;
   PROCESS_MINT_IN_FLIGHT = new Map;
   PROCESS_MINT_FAILURE_BACKOFF = new Map;
   OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  ASSERTION_TIMING_REJECTED_DETAIL = /(?:short-lived token|reasonable timeframe|check your iat and exp|jwt is (?:not yet valid|expired)|assertion (?:is )?expired)/i;
   OAuth2TokenEndpointError = class OAuth2TokenEndpointError extends Error {
     status;
     providerError;
@@ -6020,16 +5428,10 @@ var init_phases = __esm(() => {
 });
 
 // src/workers/credential-health.ts
-var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
+var CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS;
 var init_credential_health = __esm(() => {
-  init_atomic_file();
-  init_connected_handles();
-  init_credential_broker();
-  ROTATING_PROVIDERS = new Set(["x"]);
-  PASSIVE_EVIDENCE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
   CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS = 28 * 60 * 60 * 1000;
   CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
-  CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 
 // src/core/invocation-provenance.ts
@@ -6119,7 +5521,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord10(rawMap);
+  const root = asRecord7(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6178,11 +5580,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord7(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord10(record[tierName]);
+    const mapped = asRecord7(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6190,7 +5592,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord7(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6211,7 +5613,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord10(record.match);
+  const matchRecord = asRecord7(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6233,7 +5635,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord10(value) {
+function asRecord7(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7129,9 +6531,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord11(json, "Gmail messages list response");
+    const record = asRecord8(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord11(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord8(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7307,7 +6709,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord11(value, label) {
+function asRecord8(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7748,16 +7150,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive files list response");
+    const record = asRecord9(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord12(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord9(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive folder");
+    const record = asRecord9(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7852,7 +7254,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord12(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord9(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7880,7 +7282,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord12(value, label) {
+function asRecord9(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -8964,29 +8366,6 @@ var init_corpus_adapter3 = __esm(() => {
   init_corpus();
 });
 
-// src/workers/source-export/dropbox.ts
-var init_dropbox = __esm(() => {
-  init_credential_broker();
-  init_corpus_adapter3();
-});
-
-// src/workers/file-extraction/extractors/command-runner.ts
-var init_command_runner = () => {};
-
-// src/workers/file-extraction/extractors/pdf-render.ts
-var init_pdf_render = __esm(() => {
-  init_command_runner();
-});
-
-// src/workers/source-eval-shard/dropbox.ts
-var init_dropbox2 = __esm(() => {
-  init_corpus_adapter3();
-  init_provider_client();
-  init_pdf_render();
-  init_credential_broker();
-  init_approved_scope_filter();
-});
-
 // src/workers/dropbox-files/qualification.ts
 var init_qualification2 = __esm(() => {
   init_corpus();
@@ -9018,8 +8397,6 @@ var init_dropbox_files = __esm(() => {
   init_locator_result_projector();
   init_content_policy();
   init_dropbox_content_hash();
-  init_dropbox();
-  init_dropbox2();
   init_corpus_adapter3();
   init_qualification2();
   init_connector_store2();
@@ -10273,131 +9650,6 @@ class EmailClient {
       ...detail !== undefined ? { detail } : {}
     };
   }
-  async answer(options) {
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: options.question,
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    if (typeof data.answer !== "string" || data.answer.length === 0) {
-      throw new OperationError("email_error", "Email answer response did not include a non-empty answer.");
-    }
-    return {
-      answer: data.answer,
-      ...data.evidence !== undefined ? { evidence: data.evidence } : {},
-      ...data.audit !== undefined ? { audit: parseEmailAudit(data.audit) } : {},
-      policy: {
-        raw_email_exposed: false,
-        reasoning_lane: "delphi_local"
-      }
-    };
-  }
-  async search(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email source packets require an approved local/private session.", "OpenClaw native tools do not currently provide trustworthy active model/provider metadata to Olympus. Keep source packets disabled unless using the explicit local development proof gate.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before using local-only email source packets.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.question ? { question: options.question } : {},
-        ...options.query ? { query: options.query } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.includeSanitizedText !== undefined ? { include_sanitized_text: options.includeSanitizedText } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
-  async indexSync(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before syncing the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.newerThanDays !== undefined ? { newer_than_days: options.newerThanDays } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.query ? { query: options.query } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexEmbed(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index embedding requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before embedding the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.modelId ? { model_id: options.modelId } : {},
-        ...options.force !== undefined ? { force: options.force } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexSearch(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email index source packets require an approved local/private session.", "Keep local email index packets disabled unless the active caller is an approved Olympus local model session.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before searching the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.label ? { label: options.label } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
@@ -10576,31 +9828,6 @@ class EmailClient {
       includeLocators: options.includeLocators === true
     });
   }
-  async sourceExport(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source export requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        destination_root: options.destinationRoot,
-        items: options.items.map((item) => ({
-          path: item.path,
-          ...item.destSubfolder ? { dest_subfolder: item.destSubfolder } : {}
-        })),
-        ...options.account ? { account: options.account } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
   async sourceTranscribe(options) {
     if (!this.config.sourceIndex.answerDevEnabled) {
       throw new OperationError("source_index_answer_dev_required", "Source transcription requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
@@ -10648,116 +9875,6 @@ class EmailClient {
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return data;
-  }
-  async sourceIndexPromotionCandidates(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion candidates require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-candidates`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.corpusId ? { corpus_id: options.corpusId } : {},
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionCandidatesResult(data);
-  }
-  async sourceIndexPromotionProposal(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposals require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        classification_ids: options.classificationIds,
-        canonical_type: options.canonicalType,
-        target_surface: options.targetSurface,
-        reason_code: options.reasonCode,
-        ...options.proposedBy ? { proposed_by: options.proposedBy } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalResult(data);
-  }
-  async sourceIndexPromotionProposals(options = {}) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal listing requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/list`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.status ? { status: options.status } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalsResult(data);
-  }
-  async sourceIndexPromotionProposalDetail(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal details require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/get`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalDetailResult(data);
-  }
-  async sourceIndexPromotionDecision(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion decisions require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-decisions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId,
-        decision: options.decision,
-        ...options.decidedBy ? { decided_by: options.decidedBy } : {},
-        ...options.reasonCode ? { reason_code: options.reasonCode } : {}
-      })
-    });
-    const data = asRecord5(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionDecisionResult(data);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -10993,36 +10110,6 @@ function asRecord5(value) {
   }
   return value;
 }
-function parseEmailAudit(value) {
-  const audit = asRecord5(value);
-  const parsed = {
-    request_id: requiredString3(audit.request_id, "audit.request_id"),
-    queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-    metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-    evidence_count: requiredNumber(audit.evidence_count, "audit.evidence_count"),
-    reasoner_ms: requiredNumber(audit.reasoner_ms, "audit.reasoner_ms"),
-    fallback_used: requiredBoolean(audit.fallback_used, "audit.fallback_used")
-  };
-  if (audit.planner_used !== undefined) {
-    parsed.planner_used = requiredBoolean(audit.planner_used, "audit.planner_used");
-  }
-  if (audit.planner_fallback_used !== undefined) {
-    parsed.planner_fallback_used = requiredBoolean(audit.planner_fallback_used, "audit.planner_fallback_used");
-  }
-  if (audit.planned_search_count !== undefined) {
-    parsed.planned_search_count = requiredNumber(audit.planned_search_count, "audit.planned_search_count");
-  }
-  if (audit.planner_failure_reason !== undefined) {
-    parsed.planner_failure_reason = requiredPlannerFailureReason(audit.planner_failure_reason);
-  }
-  if (audit.retrieval_searches_attempted !== undefined) {
-    parsed.retrieval_searches_attempted = requiredNumber(audit.retrieval_searches_attempted, "audit.retrieval_searches_attempted");
-  }
-  if (audit.retrieval_search_summaries !== undefined) {
-    parsed.retrieval_search_summaries = parseRetrievalSearchSummaries(audit.retrieval_search_summaries);
-  }
-  return parsed;
-}
 function requiredString3(value, name) {
   if (typeof value !== "string" || value.length === 0) {
     throw new OperationError("email_error", `${name} must be a non-empty string.`);
@@ -11041,121 +10128,6 @@ function requiredNonNegativeNumber(value, name) {
     throw new OperationError("email_error", `${name} must be non-negative.`);
   }
   return number;
-}
-function requiredBoolean(value, name) {
-  if (typeof value !== "boolean") {
-    throw new OperationError("email_error", `${name} must be a boolean.`);
-  }
-  return value;
-}
-function requiredPlannerFailureReason(value) {
-  if (value === "timeout" || value === "http_error" || value === "invalid_json" || value === "invalid_plan" || value === "empty_plan" || value === "error") {
-    return value;
-  }
-  throw new OperationError("email_error", "audit.planner_failure_reason must be a known safe planner failure reason.");
-}
-function parseRetrievalSearchSummaries(value) {
-  if (!Array.isArray(value)) {
-    throw new OperationError("email_error", "audit.retrieval_search_summaries must be an array.");
-  }
-  return value.map((item, index) => {
-    const summary = asRecord5(item);
-    const source = summary.source;
-    if (source !== "baseline" && source !== "planner") {
-      throw new OperationError("email_error", `audit.retrieval_search_summaries.${index}.source must be safe.`);
-    }
-    return {
-      source,
-      index: requiredNumber(summary.index, `audit.retrieval_search_summaries.${index}.index`),
-      hits: requiredNumber(summary.hits, `audit.retrieval_search_summaries.${index}.hits`),
-      new_candidates_after_dedupe: requiredNumber(summary.new_candidates_after_dedupe, `audit.retrieval_search_summaries.${index}.new_candidates_after_dedupe`),
-      capped: requiredBoolean(summary.capped, `audit.retrieval_search_summaries.${index}.capped`)
-    };
-  });
-}
-function parseEmailSourcePacketResult(value) {
-  const packet = asRecord5(value.packet);
-  const audit = asRecord5(value.audit);
-  const policy = asRecord5(value.policy);
-  if (packet.kind !== "email_source_packet") {
-    throw new OperationError("email_error", "email_search response packet.kind must be email_source_packet.");
-  }
-  if (packet.source !== "gmail") {
-    throw new OperationError("email_error", "email_search response packet.source must be gmail.");
-  }
-  if (!Array.isArray(packet.items)) {
-    throw new OperationError("email_error", "email_search response packet.items must be an array.");
-  }
-  if (policy.raw_email_exposed !== false || policy.local_only !== true || policy.requires_local_session !== true) {
-    throw new OperationError("email_error", "email_search response policy must be local-only and raw-email-safe.");
-  }
-  if (audit.local_packet !== true || audit.raw_email_exposed !== false) {
-    throw new OperationError("email_error", "email_search response audit must be local packet and raw-email-safe.");
-  }
-  return {
-    packet: {
-      kind: "email_source_packet",
-      packet_id: requiredString3(packet.packet_id, "packet.packet_id"),
-      source: "gmail",
-      ...typeof packet.account === "string" ? { account: packet.account } : {},
-      items: packet.items.map(parseEmailSourcePacketItem)
-    },
-    audit: {
-      request_id: requiredString3(audit.request_id, "audit.request_id"),
-      queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-      metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-      items_returned: requiredNumber(audit.items_returned, "audit.items_returned"),
-      sanitized_reads_attempted: requiredNumber(audit.sanitized_reads_attempted, "audit.sanitized_reads_attempted"),
-      sanitized_reads_succeeded: requiredNumber(audit.sanitized_reads_succeeded, "audit.sanitized_reads_succeeded"),
-      truncated: requiredBoolean(audit.truncated, "audit.truncated"),
-      local_packet: true,
-      raw_email_exposed: false,
-      ...audit.retrieval_source === "local_index" ? { retrieval_source: "local_index" } : {},
-      ...audit.retrieval_mode === "keyword" || audit.retrieval_mode === "hybrid" ? { retrieval_mode: audit.retrieval_mode } : {},
-      ...audit.requested_retrieval_mode === "keyword" || audit.requested_retrieval_mode === "hybrid" ? { requested_retrieval_mode: audit.requested_retrieval_mode } : {},
-      ...typeof audit.keyword_candidates === "number" ? { keyword_candidates: audit.keyword_candidates } : {},
-      ...typeof audit.vector_candidates === "number" ? { vector_candidates: audit.vector_candidates } : {},
-      ...typeof audit.fused_candidates === "number" ? { fused_candidates: audit.fused_candidates } : {},
-      ...typeof audit.semantic_skipped_reason === "string" ? { semantic_skipped_reason: audit.semantic_skipped_reason } : {},
-      ...typeof audit.embedding_model_id === "string" ? { embedding_model_id: audit.embedding_model_id } : {},
-      ...audit.vector_backend === "exact_scan" ? { vector_backend: "exact_scan" } : {},
-      ...typeof audit.latency_ms === "number" ? { latency_ms: audit.latency_ms } : {},
-      ...typeof audit.threads_returned === "number" ? { threads_returned: audit.threads_returned } : {}
-    },
-    policy: {
-      raw_email_exposed: false,
-      local_only: true,
-      requires_local_session: true
-    }
-  };
-}
-function parseEmailSourcePacketItem(value) {
-  const item = asRecord5(value);
-  const provenance = asRecord5(item.provenance);
-  if (provenance.source !== "gmail" && provenance.provider !== "gmail") {
-    throw new OperationError("email_error", "packet item provenance provider/source must be gmail.");
-  }
-  return {
-    ...typeof item.item_id === "string" ? { item_id: item.item_id } : {},
-    ...typeof item.thread_id === "string" ? { thread_id: item.thread_id } : {},
-    ...typeof item.subject === "string" ? { subject: item.subject } : {},
-    ...typeof item.from === "string" ? { from: item.from } : {},
-    ...typeof item.to === "string" ? { to: item.to } : {},
-    ...typeof item.date === "string" ? { date: item.date } : {},
-    ...typeof item.sanitized_text === "string" ? { sanitized_text: item.sanitized_text } : {},
-    provenance: {
-      ...provenance.source === "gmail" ? { source: "gmail" } : {},
-      ...provenance.provider === "gmail" ? { provider: "gmail" } : {},
-      ...typeof provenance.account === "string" ? { account: provenance.account } : {},
-      ...typeof provenance.message_id === "string" ? { message_id: provenance.message_id } : {},
-      ...typeof provenance.thread_id === "string" ? { thread_id: provenance.thread_id } : {},
-      ...typeof provenance.local_message_id === "string" ? { local_message_id: provenance.local_message_id } : {},
-      ...Array.isArray(provenance.chunk_ids) ? { chunk_ids: provenance.chunk_ids.filter((id) => typeof id === "string") } : {},
-      ...typeof provenance.sync_run_id === "string" ? { sync_run_id: provenance.sync_run_id } : {},
-      ...typeof provenance.checkpoint_id === "string" ? { checkpoint_id: provenance.checkpoint_id } : {},
-      ...typeof provenance.source_version === "string" ? { source_version: provenance.source_version } : {}
-    }
-  };
 }
 function parseSourceIndexAnswerResult(value) {
   const answer = requiredString3(value.answer, "answer");
@@ -11455,212 +10427,6 @@ function parseSourceWatchResult(value, kind) {
     policy: safePolicy
   };
 }
-function parseSourceIndexPromotionCandidatesResult(value) {
-  if (value.kind !== "dropbox_content_promotion_candidates") {
-    throw new OperationError("email_error", "source index promotion candidates result must have kind=dropbox_content_promotion_candidates.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion candidates returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.candidates)) {
-    throw new OperationError("email_error", "source index promotion candidates must include a candidates array.");
-  }
-  const policy = asRecord5(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.promotion_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion candidates policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_candidates",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString3(value.account, "account"),
-    scope_key_hash: requiredString3(value.scope_key_hash, "scope_key_hash"),
-    candidates: value.candidates,
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      promotion_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal") {
-    throw new OperationError("email_error", "source index promotion proposal result must have kind=dropbox_content_promotion_proposal.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal returned an unsupported corpus.");
-  }
-  const policy = asRecord5(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.proposal_only !== true) {
-    throw new OperationError("email_error", "source index promotion proposal policy must describe a local proposal-only write.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString3(value.account, "account"),
-    scope_key_hash: requiredString3(value.scope_key_hash, "scope_key_hash"),
-    proposal_id: requiredString3(value.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString3(value.proposal_revision_id, "proposal_revision_id"),
-    status: "proposed",
-    canonical_type: requiredString3(value.canonical_type, "canonical_type"),
-    target_surface: requiredString3(value.target_surface, "target_surface"),
-    reason_code: requiredString3(value.reason_code, "reason_code"),
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    trust_domain: "secure_local",
-    trust_tiers: Array.isArray(value.trust_tiers) ? value.trust_tiers.map(String) : [],
-    policy_decisions: Array.isArray(value.policy_decisions) ? value.policy_decisions.map(String) : [],
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      proposal_only: true
-    }
-  };
-}
-function parseSourceIndexPromotionProposalsResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposals") {
-    throw new OperationError("email_error", "source index promotion proposals result must have kind=dropbox_content_promotion_proposals.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposals returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.proposals)) {
-    throw new OperationError("email_error", "source index promotion proposals must include a proposals array.");
-  }
-  const policy = asRecord5(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposals policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposals",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposals: value.proposals.map((proposal) => parseSourceIndexPromotionProposalSummary(asRecord5(proposal))),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalDetailResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal_detail") {
-    throw new OperationError("email_error", "source index promotion proposal detail result must have kind=dropbox_content_promotion_proposal_detail.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal detail returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.evidence) || !Array.isArray(value.decisions)) {
-    throw new OperationError("email_error", "source index promotion proposal detail must include evidence and decisions arrays.");
-  }
-  const policy = asRecord5(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal detail policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal_detail",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal: parseSourceIndexPromotionProposalSummary(asRecord5(value.proposal)),
-    evidence: value.evidence.map((item) => {
-      const record = asRecord5(item);
-      return {
-        classification_id: requiredString3(record.classification_id, "classification_id"),
-        evidence_ordinal: requiredNumber(record.evidence_ordinal, "evidence_ordinal"),
-        target_kind: requiredString3(record.target_kind, "target_kind"),
-        source_content_hash: requiredString3(record.source_content_hash, "source_content_hash"),
-        provider_file_id_hash: requiredString3(record.provider_file_id_hash, "provider_file_id_hash"),
-        ...record.revision_hash !== undefined ? { revision_hash: requiredString3(record.revision_hash, "revision_hash") } : {},
-        ...record.content_hash !== undefined ? { content_hash: requiredString3(record.content_hash, "content_hash") } : {},
-        ...record.structural_ref_hash !== undefined ? { structural_ref_hash: requiredString3(record.structural_ref_hash, "structural_ref_hash") } : {},
-        trust_tier: requiredString3(record.trust_tier, "trust_tier"),
-        trust_domain: "secure_local",
-        policy_decision: requiredString3(record.policy_decision, "policy_decision"),
-        review_status_at_proposal: requiredString3(record.review_status_at_proposal, "review_status_at_proposal"),
-        finding_count: requiredNumber(record.finding_count, "finding_count")
-      };
-    }),
-    decisions: value.decisions.map((item) => {
-      const record = asRecord5(item);
-      if (record.resource_write_performed !== false || record.execution_performed !== false) {
-        throw new OperationError("email_error", "source index promotion decisions must not report external writes or executions.");
-      }
-      return {
-        decision_id: requiredString3(record.decision_id, "decision_id"),
-        decision: requiredString3(record.decision, "decision"),
-        ...record.reason_code !== undefined ? { reason_code: requiredString3(record.reason_code, "reason_code") } : {},
-        decided_at: requiredString3(record.decided_at, "decided_at"),
-        resource_write_performed: false,
-        execution_performed: false
-      };
-    }),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalSummary(record) {
-  if (record.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal summaries must not report external resource writes.");
-  }
-  return {
-    proposal_id: requiredString3(record.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString3(record.proposal_revision_id, "proposal_revision_id"),
-    account: requiredString3(record.account, "account"),
-    scope_key_hash: requiredString3(record.scope_key_hash, "scope_key_hash"),
-    canonical_type: requiredString3(record.canonical_type, "canonical_type"),
-    target_surface: requiredString3(record.target_surface, "target_surface"),
-    reason_code: requiredString3(record.reason_code, "reason_code"),
-    status: requiredString3(record.status, "status"),
-    evidence_count: requiredNumber(record.evidence_count, "evidence_count"),
-    decision_count: requiredNumber(record.decision_count, "decision_count"),
-    resource_write_performed: false,
-    created_at: requiredString3(record.created_at, "created_at"),
-    updated_at: requiredString3(record.updated_at, "updated_at")
-  };
-}
-function parseSourceIndexPromotionDecisionResult(value) {
-  if (value.kind !== "dropbox_content_promotion_decision") {
-    throw new OperationError("email_error", "source index promotion decision result must have kind=dropbox_content_promotion_decision.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion decision returned an unsupported corpus.");
-  }
-  const policy = asRecord5(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.execution_performed !== false) {
-    throw new OperationError("email_error", "source index promotion decision policy must describe a local review-ledger write only.");
-  }
-  const decision = requiredString3(value.decision, "decision");
-  return {
-    kind: "dropbox_content_promotion_decision",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal_id: requiredString3(value.proposal_id, "proposal_id"),
-    decision_id: requiredString3(value.decision_id, "decision_id"),
-    decision,
-    status: decision,
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      execution_performed: false
-    }
-  };
-}
 function optionalRetrievalMode(value) {
   return value === "keyword" || value === "hybrid" ? value : undefined;
 }
@@ -11824,438 +10590,6 @@ async function safeText2(response) {
   }
 }
 
-// src/core/file-delivery.ts
-init_http_timeout();
-init_operation_error();
-class FileDeliveryClient {
-  config;
-  transport;
-  constructor(config, transport = createFileDeliveryTransport(config)) {
-    this.config = config;
-    this.transport = transport;
-  }
-  async health() {
-    if (!this.config.fileDelivery.enabled) {
-      return {
-        reachable: false,
-        configured: false,
-        base_url: this.config.fileDelivery.baseUrl,
-        policy: {
-          bounded_file_delivery: true,
-          shell_used: false,
-          absolute_path_exposed: false
-        },
-        detail: "File delivery is disabled. Configure a bounded Xanthos delivery worker before exposing the tool."
-      };
-    }
-    const startedAt = performance.now();
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/health`, {
-      method: "GET"
-    });
-    const data = asRecord6(response);
-    assertNoHostPathLeakFields(data);
-    const policy = asRecord6(data.policy);
-    if (policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-      throw new OperationError("file_delivery_error", "File delivery health policy was not bounded and path-safe.");
-    }
-    return {
-      reachable: true,
-      configured: typeof data.configured === "boolean" ? data.configured : true,
-      base_url: this.config.fileDelivery.baseUrl,
-      latency_ms: Math.round(performance.now() - startedAt),
-      ...Array.isArray(data.roots) ? { roots: data.roots } : {},
-      policy: {
-        bounded_file_delivery: true,
-        shell_used: false,
-        absolute_path_exposed: false
-      },
-      ...typeof data.detail === "string" ? { detail: data.detail } : {}
-    };
-  }
-  async deliver(options) {
-    if (!this.config.fileDelivery.enabled) {
-      throw new OperationError("file_delivery_not_configured", "File delivery is disabled.", "Configure the bounded Xanthos file-delivery worker before using file writes.");
-    }
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/file/deliver`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        root_id: options.rootId,
-        relative_path: options.relativePath,
-        content: options.content,
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        write_mode: options.writeMode,
-        trust_domain: options.trustDomain,
-        ...options.sourceProvenance ? { source_provenance: options.sourceProvenance } : {},
-        idempotency_key: options.idempotencyKey,
-        ...options.approvalId ? { approval_id: options.approvalId } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {},
-        ...options.modelProvider ? { model_provider: options.modelProvider } : {},
-        ...options.modelId ? { model_id: options.modelId } : {}
-      })
-    });
-    const data = asRecord6(response);
-    assertNoHostPathLeakFields(data);
-    return parseFileDeliveryResult(data);
-  }
-}
-function createFileDeliveryTransport(config) {
-  return new DirectHttpFileDeliveryTransport(fetch, workerAuthTokenFromConfig(config), config.fileDelivery.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpFileDeliveryTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error) {
-      if (isAbortError2(error)) {
-        throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker timed out at ${url} after ${this.timeoutMs}ms.`, "The file-delivery worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Xanthos file-delivery worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText3(response);
-      throw new OperationError("file_delivery_error", `Bounded file-delivery worker returned HTTP ${response.status}.`, body || "Check the Xanthos file-delivery worker logs.");
-    }
-    return response.json();
-  }
-}
-function parseFileDeliveryResult(value) {
-  const policy = asRecord6(value.policy);
-  if (value.kind !== "file_delivery_result" || policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("file_delivery_error", "File delivery result did not include bounded path-safe policy.");
-  }
-  const writeMode = requiredWriteMode(value.write_mode, "write_mode");
-  const approvalStatus = requiredApprovalStatus(value.approval_status, "approval_status");
-  return {
-    kind: "file_delivery_result",
-    delivery_id: requiredString4(value.delivery_id, "delivery_id"),
-    root_id: requiredString4(value.root_id, "root_id"),
-    relative_path: requiredString4(value.relative_path, "relative_path"),
-    bytes_written: requiredNumber2(value.bytes_written, "bytes_written"),
-    content_sha256: requiredString4(value.content_sha256, "content_sha256"),
-    write_mode: writeMode,
-    created_at: requiredString4(value.created_at, "created_at"),
-    approval_status: approvalStatus,
-    audit_ref: requiredString4(value.audit_ref, "audit_ref"),
-    ...typeof value.idempotent_replay === "boolean" ? { idempotent_replay: value.idempotent_replay } : {},
-    policy: {
-      bounded_file_delivery: true,
-      shell_used: false,
-      absolute_path_exposed: false
-    }
-  };
-}
-function assertNoHostPathLeakFields(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("file_delivery_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields(nested, [...path, key]);
-  }
-}
-function asRecord6(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("file_delivery_error", "File delivery response was not a JSON object.");
-  }
-  return value;
-}
-function requiredString4(value, name) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new OperationError("file_delivery_error", `${name} must be a non-empty string.`);
-  }
-  return value;
-}
-function requiredNumber2(value, name) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new OperationError("file_delivery_error", `${name} must be a finite number.`);
-  }
-  return value;
-}
-function requiredWriteMode(value, name) {
-  if (value === "dry_run" || value === "create_new" || value === "overwrite_with_approval")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported write mode.`);
-}
-function requiredApprovalStatus(value, name) {
-  if (value === "dry_run" || value === "not_required" || value === "approved")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported approval status.`);
-}
-async function safeText3(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-
-// src/core/castor-workspace.ts
-init_http_timeout();
-init_operation_error();
-class CastorWorkspaceClient {
-  config;
-  transport;
-  constructor(config, transport = createCastorWorkspaceTransport(config)) {
-    this.config = config;
-    this.transport = transport;
-  }
-  async run(options) {
-    if (!this.config.castorWorkspace.enabled) {
-      throw new OperationError("castor_workspace_not_configured", "Delegated workspace is disabled.", "Configure the bounded delegated workspace worker before exposing delegated filesystem access.");
-    }
-    const response = await this.transport.requestJson(`${this.config.castorWorkspace.baseUrl}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: options.action,
-        ...options.rootId ? { root_id: options.rootId } : {},
-        ...options.relativePath !== undefined ? { relative_path: options.relativePath } : {},
-        ...options.content !== undefined ? { content: options.content } : {},
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        ...options.destinationUri ? { destination_uri: options.destinationUri } : {},
-        ...options.recursive !== undefined ? { recursive: options.recursive } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {},
-        ...options.includeMedia !== undefined ? { include_media: options.includeMedia } : {},
-        ...options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {}
-      })
-    });
-    const data = asRecord7(response);
-    assertWorkspacePolicy(data);
-    assertNoHostPathLeakFields2(data);
-    return data;
-  }
-}
-function createCastorWorkspaceTransport(config) {
-  return new DirectHttpCastorWorkspaceTransport(fetch, workerAuthTokenFromConfig(config), config.castorWorkspace.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpCastorWorkspaceTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error) {
-      if (isAbortError2(error)) {
-        throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker timed out at ${url} after ${this.timeoutMs}ms.`, "The delegated workspace worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Xanthos delegated workspace worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText4(response);
-      throw new OperationError("castor_workspace_error", `Delegated workspace worker returned HTTP ${response.status}.`, body || "Check the Xanthos delegated workspace worker logs.");
-    }
-    return response.json();
-  }
-}
-function assertWorkspacePolicy(value) {
-  const policy = asRecord7(value.policy);
-  if (policy.castor_workspace_delegated !== true || policy.shell_exposed_to_agent !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response did not include bounded delegated policy.");
-  }
-}
-function assertNoHostPathLeakFields2(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields2(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("castor_workspace_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields2(nested, [...path, key]);
-  }
-}
-async function safeText4(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-function asRecord7(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response was not an object.");
-  }
-  return value;
-}
-
-// src/core/domain-expert-client.ts
-init_http_timeout();
-init_operation_error();
-var MAX_WORKER_ERROR_BODY_BYTES = 8 * 1024;
-var MAX_WORKER_ERROR_CODE_LENGTH = 64;
-var MAX_WORKER_ERROR_MESSAGE_LENGTH = 512;
-var MAX_WORKER_ERROR_SUGGESTION_LENGTH = 512;
-var GENERIC_WORKER_ERROR_SUGGESTION = "Check the Olympus domain expert worker logs.";
-var PASSTHROUGH_WORKER_ERROR_CODES = Object.freeze({
-  invalid_params: "invalid_params",
-  domain_expert_not_configured: "domain_expert_not_configured",
-  annas_archive_not_configured: "annas_archive_not_configured"
-});
-
-class DomainExpertClient {
-  config;
-  transport;
-  constructor(config, transport = createDomainExpertTransport(config)) {
-    this.config = config;
-    this.transport = transport;
-  }
-  async run(tool, params) {
-    if (!this.config.domainExpert.enabled) {
-      throw new OperationError("domain_expert_not_configured", "Domain expert worker is disabled.", "Configure the bounded domain expert worker before live Google/Gemini/Docs/Anna actions.");
-    }
-    const defaultDomainId = this.config.domainExpert.defaultDomainId;
-    const requestParams = defaultDomainId && params.domain_id === undefined ? { ...params, domain_id: defaultDomainId } : params;
-    const response = await this.transport.requestJson(`${this.config.domainExpert.baseUrl}/domain`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool, params: requestParams })
-    });
-    assertDomainExpertPolicy(response);
-    return response;
-  }
-}
-function domainExpertAuthTokenFromConfig(config, options = {}) {
-  return normalizeWorkerAuthToken(config.domainExpert.authToken) ?? normalizeWorkerAuthToken((options.env ?? process.env).OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? normalizeWorkerAuthToken(readWorkerSetupEnv(options)?.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? workerAuthTokenFromConfig(config, options);
-}
-function createDomainExpertTransport(config) {
-  return new DirectHttpDomainExpertTransport(fetch, domainExpertAuthTokenFromConfig(config), config.domainExpert.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpDomainExpertTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error) {
-      if (isAbortError2(error)) {
-        throw new OperationError("domain_expert_unreachable", `Domain expert worker timed out at ${url} after ${this.timeoutMs}ms.`, "The domain expert worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("domain_expert_unreachable", `Domain expert worker is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Olympus domain expert worker is running.");
-    }
-    if (!response.ok) {
-      const workerError = response.status === 403 ? undefined : parseWorkerError(await safeText5(response));
-      throw new OperationError(response.status === 403 ? "domain_expert_policy_violation" : workerError?.code ?? "domain_expert_error", workerError?.message ?? `Domain expert worker returned HTTP ${response.status}.`, workerError?.suggestion ?? GENERIC_WORKER_ERROR_SUGGESTION);
-    }
-    return response.json();
-  }
-}
-function assertDomainExpertPolicy(value) {
-  const record = asRecord8(value);
-  const policy = asRecord8(record.policy);
-  const controlPlaneOnly = policy.olympus_control_plane_only === true || policy.expert_agents_control_plane_only === true;
-  if (!controlPlaneOnly || policy.raw_runtime_secrets_exposed !== false) {
-    throw new OperationError("domain_expert_error", "Domain expert response did not include the bounded policy contract.");
-  }
-}
-async function safeText5(response) {
-  const reader = response.body?.getReader();
-  if (!reader)
-    return "";
-  const chunks = [];
-  let byteLength = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      byteLength += value.byteLength;
-      if (byteLength > MAX_WORKER_ERROR_BODY_BYTES) {
-        await reader.cancel();
-        return "";
-      }
-      chunks.push(value);
-    }
-    const body = new Uint8Array(byteLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      body.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(body);
-  } catch {
-    return "";
-  } finally {
-    reader.releaseLock();
-  }
-}
-function parseWorkerError(body) {
-  try {
-    const parsed = JSON.parse(body);
-    const error = optionalRecord(optionalRecord(parsed)?.error);
-    const code = boundedWorkerErrorString(error?.code, MAX_WORKER_ERROR_CODE_LENGTH);
-    const message = boundedWorkerErrorString(error?.message, MAX_WORKER_ERROR_MESSAGE_LENGTH);
-    if (!code || !message)
-      return;
-    const typedCode = PASSTHROUGH_WORKER_ERROR_CODES[code];
-    if (!typedCode)
-      return;
-    const suggestionValue = error?.suggestion;
-    const suggestion = suggestionValue === undefined ? undefined : boundedWorkerErrorString(suggestionValue, MAX_WORKER_ERROR_SUGGESTION_LENGTH);
-    if (suggestionValue !== undefined && !suggestion)
-      return;
-    return {
-      code: typedCode,
-      message,
-      ...suggestion ? { suggestion } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function optionalRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function boundedWorkerErrorString(value, maxLength) {
-  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u001f\u007f-\u009f]/u.test(value))
-    return;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-function asRecord8(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("domain_expert_error", "Domain expert response was not an object.");
-  }
-  return value;
-}
-
 // src/core/operation-exposure.ts
 init_config();
 init_public_surface();
@@ -12268,9 +10602,6 @@ function shouldExposeOperation(operation, context) {
   }
   if (operation.requiresOpenClawSessionRoute && context.surface !== "native") {
     return false;
-  }
-  if (operation.nativeExposure === "sourceIndexAnswerDevOnly") {
-    return context.config.sourceIndex.answerDevEnabled;
   }
   if (operation.nativeExposure === "sourceIndexEnabledOnly") {
     return isSourceIndexReadSurfaceEnabled(context.config);
@@ -12561,6 +10892,7 @@ init_source_ingestion_ledger();
 init_source_dashboard();
 init_ingestion_throughput();
 init_public_source_capabilities();
+init_source_corpus_registry();
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.";
 var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
@@ -12840,7 +11172,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord13(await response.json());
+  const health = asRecord10(await response.json());
   const configured = typeof health.configured === "boolean" ? health.configured : true;
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
@@ -12887,7 +11219,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord10(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -12895,7 +11227,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord13(entry);
+    const corpus = asRecord10(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -12909,8 +11241,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord13(corpus.counts);
-    const embeddingParity = asRecord13(corpus.embedding_parity);
+    const counts = asRecord10(corpus.counts);
+    const embeddingParity = asRecord10(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -12970,7 +11302,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord10(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -13015,7 +11347,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord10(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -13027,8 +11359,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord13(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord13(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord10(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord10(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -13085,7 +11417,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord13(value);
+  const record = asRecord10(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -13098,7 +11430,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord13(entry);
+    const credential = asRecord10(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -13150,7 +11482,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord10(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -13178,7 +11510,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord13(entry);
+    const source = asRecord10(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -13188,7 +11520,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord13(taskEntry);
+      const task = asRecord10(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -13324,7 +11656,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord13(await response.json());
+    return asRecord10(await response.json());
   } catch {
     return;
   }
@@ -13334,7 +11666,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord13(await response.json());
+    const status = asRecord10(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -13343,7 +11675,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord13(status.ingestion_ledger);
+  const ledger = asRecord10(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -13375,12 +11707,12 @@ function readIngestionHealthState(path) {
     if (!existsSync9(path))
       return;
     const parsed = JSON.parse(readFileSync9(path, "utf8"));
-    const record = asRecord13(parsed);
-    const sources = asRecord13(record.sources);
+    const record = asRecord10(parsed);
+    const sources = asRecord10(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord13(sourceValue);
-      const terminal = asRecord13(source.failed_terminal_by_class);
+      const source = asRecord10(sourceValue);
+      const terminal = asRecord10(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -13408,9 +11740,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord13(await response.json());
+    const status = asRecord10(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord13(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord10(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -13551,7 +11883,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord10(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -13566,25 +11898,21 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord10(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord13(corpus.last_sync);
+  const lastSync = asRecord10(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord13(corpus.counts);
+  const counts = asRecord10(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
+  const registry = createPublicSourceCorpusRegistry(deps.config.sourceIndex.corpusRegistry);
   return corpora.filter((entry) => {
-    const corpus = asRecord13(entry);
-    const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "";
-    return !isDomainCorpus(corpusId) || deps.config.domainExpert.enabled === true;
+    const corpusId = asRecord10(entry).corpus_id;
+    return typeof corpusId === "string" && registry.has(corpusId, "status");
   });
-  return corpora;
-}
-function isDomainCorpus(corpusId) {
-  return corpusId.startsWith("internal.solon.") || corpusId.startsWith("secure_local.solon.");
 }
 function staleTaskAttempt(task, deps) {
   const attemptedAt = typeof task.last_attempt_at === "string" ? task.last_attempt_at : undefined;
@@ -13614,7 +11942,7 @@ function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord13(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -13626,35 +11954,6 @@ function errorDetail(error) {
 
 // src/core/operations.ts
 init_config();
-
-// src/core/domain-expert.ts
-init_operation_error();
-var DOMAIN_AGENT_ACTIONS = ["bootstrap", "status"];
-var DOMAIN_SOURCE_ACTIONS = ["add", "list", "status", "remove"];
-var RAG_CORPUS_ACTIONS = ["create", "import", "stage_import", "web_import", "notion_import", "list_files", "delete_file", "status", "refresh"];
-var DOMAIN_DOC_ACTIONS = [
-  "read",
-  "comment",
-  "visual_insert",
-  "visual_replace",
-  "accept_visual_edits",
-  "reject_visual_edits"
-];
-var DOMAIN_SOURCE_KINDS = [
-  "book",
-  "pdf",
-  "epub",
-  "google_doc",
-  "blog_post",
-  "transcript",
-  "note",
-  "dataset",
-  "web_page",
-  "unknown"
-];
-var ANNAS_ARCHIVE_FORMATS = ["pdf", "epub", "mobi", "azw3", "djvu", "unknown"];
-
-// src/core/operations.ts
 init_config();
 init_operation_error();
 
@@ -13713,13 +12012,6 @@ function normalizeSelectedItemField(key) {
 // src/core/operations.ts
 init_source_corpus_registry();
 init_venice_models();
-init_public_surface();
-var SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS = ["secure_local.dropbox.files"];
-var SOURCE_INDEX_PROMOTION_CANONICAL_TYPES = ["project", "project_work_item", "area", "person", "organization", "resource", "topic", "fact", "secure_companion", "resource_wiki_page"];
-var SOURCE_INDEX_PROMOTION_TARGET_SURFACES = ["review_queue", "source_index", "secure_companion", "obsidian", "resource_wiki"];
-var SOURCE_INDEX_PROMOTION_REASON_CODES = ["manual_review", "high_signal", "recurring_reference", "project_material", "decision_evidence", "resource_candidate"];
-var SOURCE_INDEX_PROMOTION_DECISIONS = ["approved", "rejected", "deferred", "needs_changes"];
-var SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES = ["proposed", ...SOURCE_INDEX_PROMOTION_DECISIONS];
 var ARGUS_PROFILE_ENUM = [
   "default_chat",
   "source_answer",
@@ -13850,47 +12142,6 @@ var operations = [
         ...maxTokens !== undefined ? { maxTokens } : {}
       };
       return ctx.delphi.complete(completeOptions);
-    }
-  },
-  {
-    name: "email_ping",
-    description: "Check whether the private email source worker is configured and reachable.",
-    params: {},
-    mutating: false,
-    cliHints: { name: "email ping" },
-    handler: async (ctx) => ctx.email.ping()
-  },
-  {
-    name: "email_answer",
-    description: "Ask the configured local/private model lane a bounded question about email without returning raw messages.",
-    params: {
-      question: { type: "string", required: true, description: "Bounded question to answer over email inside the private lane." },
-      account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-      after: { type: "string", description: "Optional lower date/time bound." },
-      before: { type: "string", description: "Optional upper date/time bound." },
-      from: { type: "string", description: "Optional sender constraint." },
-      to: { type: "string", description: "Optional recipient constraint." },
-      max_messages: { type: "number", description: "Optional maximum messages the private lane may inspect." }
-    },
-    mutating: false,
-    cliHints: { name: "email answer", positional: ["question"], stdin: "question" },
-    handler: async (ctx, params) => {
-      const question = asString(params.question, "question");
-      const account = optionalString4(params.account);
-      const after = optionalString4(params.after);
-      const before = optionalString4(params.before);
-      const from = optionalString4(params.from);
-      const to = optionalString4(params.to);
-      const maxMessages = optionalNumber2(params.max_messages, "max_messages");
-      return ctx.email.answer({
-        question,
-        ...account !== undefined ? { account } : {},
-        ...after !== undefined ? { after } : {},
-        ...before !== undefined ? { before } : {},
-        ...from !== undefined ? { from } : {},
-        ...to !== undefined ? { to } : {},
-        ...maxMessages !== undefined ? { maxMessages } : {}
-      });
     }
   },
   {
@@ -14035,72 +12286,6 @@ var operations = [
       });
     }
   },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [{
-    name: "source_index_sync",
-    description: [
-      "Run a deliberate bounded source-index sync through the private source worker.",
-      "Dropbox sync requires an approved folder/root scope; Telegram sync requires an approved chat scope.",
-      "X bookmarks supports a lightweight head check, complete reconciliation, a bounded content-free window diagnostic, folder-facet representation refresh, or read-only preservation re-attestation through mode.",
-      "This does not browse raw files or perform provider writes."
-    ].join(" "),
-    params: {
-      corpus_id: { type: "string", required: true, description: "Source-index corpus to sync." },
-      mode: { type: "string", enum: ["head", "reconcile", "window_diagnostic", "folder_facet_refresh", "preservation-reattest"], description: "X bookmarks only: run the bounded incremental head check, complete daily reconciliation, the four-probe content-free window diagnostic, folder-facet representation refresh, or post-reconcile read-only preservation re-attestation." },
-      account: { type: "string", description: "Optional source account identity. For Dropbox, omit unless deliberately narrowing to personal; do not pass credential handles such as dropbox.personal or aliases such as dropbox.primary." },
-      approved_scope_key: { type: "string", description: "Dropbox approved folder/root scope key, for example dropbox.personal:/Approved." },
-      folder_path: { type: "string", description: "Approved Dropbox folder path for metadata sync." },
-      folder_id: { type: "string", description: "Approved Dropbox folder id for metadata sync." },
-      recursive: { type: "boolean", description: "Whether Dropbox metadata sync should recurse. Defaults true in the private worker." },
-      max_entries: { type: "number", description: "Maximum Dropbox metadata entries to observe; capped by the private worker." },
-      max_pages: { type: "number", description: "Maximum Dropbox metadata pages to read; capped by the private worker." },
-      chat_scope: { type: "string", description: "Telegram approved chat scope for bounded read sync." },
-      trust_domain: { type: "string", enum: ["internal", "secure_local"], description: "Optional Telegram chat classification for the sync batch. Ordinary approved chats default internal; protected chats must use secure_local." },
-      max_messages: { type: "number", description: "Maximum Telegram messages to read; capped by the private worker." },
-      provider_cursor: { type: "string", description: "Opaque provider cursor for continuation. The worker stores/returns only safe cursor hashes." },
-      sync_direction: { type: "string", enum: ["forward", "backfill"], description: "Telegram sync direction. Defaults to forward freshness; use backfill only for explicit historical drain work." },
-      coverage_start: { type: "string", description: "Optional Telegram coverage start timestamp for currentness tracking." },
-      coverage_end: { type: "string", description: "Optional Telegram coverage end timestamp for currentness tracking." }
-    },
-    mutating: true,
-    nativeExposure: "emailIndexAdminDevOnly",
-    cliHints: { name: "source index sync" },
-    handler: async (ctx, params) => {
-      const corpusId = asSourceIndexSyncCorpusId(params.corpus_id, ctx.config);
-      const mode = optionalXBookmarksSyncMode(params.mode, corpusId);
-      const account = optionalSourceAccount(params.account, corpusId);
-      const approvedScopeKey = optionalString4(params.approved_scope_key);
-      const folderPath = optionalString4(params.folder_path);
-      const folderId = optionalString4(params.folder_id);
-      const recursive = optionalBoolean(params.recursive, "recursive");
-      const maxEntries = optionalNumber2(params.max_entries, "max_entries");
-      const maxPages = optionalNumber2(params.max_pages, "max_pages");
-      const chatScope = optionalString4(params.chat_scope);
-      const trustDomain = optionalTelegramTrustDomain(params.trust_domain);
-      const maxMessages = optionalNumber2(params.max_messages, "max_messages");
-      const providerCursor = optionalString4(params.provider_cursor);
-      const syncDirection = optionalTelegramSyncDirection(params.sync_direction);
-      const coverageStart = optionalString4(params.coverage_start);
-      const coverageEnd = optionalString4(params.coverage_end);
-      return ctx.email.sourceIndexSync({
-        corpusId,
-        ...mode !== undefined ? { mode } : {},
-        ...account !== undefined ? { account } : {},
-        ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-        ...folderPath !== undefined ? { folderPath } : {},
-        ...folderId !== undefined ? { folderId } : {},
-        ...recursive !== undefined ? { recursive } : {},
-        ...maxEntries !== undefined ? { maxEntries } : {},
-        ...maxPages !== undefined ? { maxPages } : {},
-        ...chatScope !== undefined ? { chatScope } : {},
-        ...trustDomain !== undefined ? { trustDomain } : {},
-        ...maxMessages !== undefined ? { maxMessages } : {},
-        ...providerCursor !== undefined ? { providerCursor } : {},
-        ...syncDirection !== undefined ? { syncDirection } : {},
-        ...coverageStart !== undefined ? { coverageStart } : {},
-        ...coverageEnd !== undefined ? { coverageEnd } : {}
-      });
-    }
-  }],
   {
     name: "source_index_search",
     description: [
@@ -14161,250 +12346,6 @@ var operations = [
       });
     }
   },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      name: "source_export",
-      description: [
-        "Materialize already-cited Dropbox source items into a user-owned Dropbox destination folder via a verified server-side provider copy.",
-        "Pass locators (paths) exactly as returned in source citations plus a destination root; the private worker verifies each path against the local Dropbox index and copies inside the user's own Dropbox, so file bytes never leave Dropbox and content never enters any model context.",
-        "Destinations are restricted to the approved export allowlist, S5-classified items are always skipped, existing destination files are skipped rather than overwritten, and the result returns path-level statuses and counts only."
-      ].join(" "),
-      params: {
-        destination_root: { type: "string", required: true, description: "Destination Dropbox folder path, for example /Olympus Exports/Otter Transcripts. Must fall under an allowed export root." },
-        items: { type: "string", required: true, description: 'JSON array of export items. Each item is a source Dropbox path string or an object like {"path":"/2 Areas/Otter/Standup.txt","dest_subfolder":"Standups"}. Paths must be locators already returned by source citations.' },
-        account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." },
-        dry_run: { type: "boolean", description: "Validate the destination and per-item statuses without performing any copy." }
-      },
-      mutating: true,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source export", positional: ["destination_root"] },
-      handler: async (ctx, params) => {
-        const destinationRoot = asString(params.destination_root, "destination_root");
-        const items = asSourceExportItems(params.items);
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        const dryRun = optionalBoolean(params.dry_run, "dry_run");
-        return ctx.email.sourceExport({
-          destinationRoot,
-          items,
-          ...account !== undefined ? { account } : {},
-          ...dryRun !== undefined ? { dryRun } : {}
-        });
-      }
-    },
-    {
-      name: "source_transcribe",
-      description: [
-        "Queue indexed Dropbox audio files (voice memos, brainstorms, meeting recordings) for LOCAL transcription so their transcripts become searchable through the normal source pipeline.",
-        "Pass items with explicit Dropbox path locators to transcribe exactly those files, or omit items to let the planner queue untranscribed audio under the approved scope; mode=status returns calling-assistant-safe job counts without queueing anything.",
-        "Transcription runs on local infrastructure only via a separate drain worker — no audio bytes or transcript text are returned here, and curated exclude fences always apply. The result carries counts and path-level statuses only."
-      ].join(" "),
-      params: {
-        approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-        items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox audio file paths (locators as returned by source search/citations). When given, exactly those paths are queued." },
-        include_path_prefixes: { type: "string", description: "Optional comma-separated path prefixes to narrow the planner to one subtree, for example /2 Areas/Brainstorms." },
-        limit: { type: "number", description: "Maximum audio files the planner may queue in this call. Capped by the private source worker." },
-        mode: { type: "string", enum: ["enqueue", "status"], description: "enqueue (default) queues transcription jobs; status returns calling-assistant-safe transcription job counts without mutating anything." },
-        account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-      },
-      mutating: true,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source transcribe" },
-      handler: async (ctx, params) => {
-        const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-        const mode = optionalSourceTranscribeMode(params.mode);
-        const items = params.items !== undefined ? asSourceTranscribeItems(params.items) : undefined;
-        const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-        const limit = optionalNumber2(params.limit, "limit");
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        return ctx.email.sourceTranscribe({
-          approvedScopeKey,
-          ...mode !== undefined ? { mode } : {},
-          ...items !== undefined ? { items } : {},
-          ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-          ...limit !== undefined ? { limit } : {},
-          ...account !== undefined ? { account } : {}
-        });
-      }
-    },
-    {
-      name: "source_media_ingest",
-      description: [
-        "Queue explicitly requested Dropbox photos or image folders for local VLM extraction.",
-        "This is the deliberate on-demand media lane: ordinary broad Dropbox photos/videos stay metadata-only by default, while passed items or include_path_prefixes queue image-like files for local processing.",
-        "No file bytes or extracted text are returned here; the result returns calling-assistant-safe counts plus path-level statuses for explicit items."
-      ].join(" "),
-      params: {
-        approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-        items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox image file paths. When given, exactly those paths are queued." },
-        include_path_prefixes: { type: "string", description: "Optional comma-separated Dropbox folder/path prefixes; image-like files under those prefixes are queued." },
-        limit: { type: "number", description: "Maximum image files the planner may queue in this call. Capped by the private source worker." },
-        max_bytes_per_file: { type: "number", description: "Optional per-file byte cap for local VLM extraction." },
-        account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-      },
-      mutating: true,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source media ingest" },
-      handler: async (ctx, params) => {
-        const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-        const items = params.items !== undefined ? asSourceMediaIngestItems(params.items) : undefined;
-        const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-        if ((items?.length ?? 0) === 0 && (includePathPrefixes?.length ?? 0) === 0) {
-          throw new OperationError("invalid_params", "source_media_ingest requires items or include_path_prefixes.");
-        }
-        const limit = optionalNumber2(params.limit, "limit");
-        const maxBytesPerFile = optionalNumber2(params.max_bytes_per_file, "max_bytes_per_file");
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        return ctx.email.sourceMediaIngest({
-          approvedScopeKey,
-          ...items !== undefined ? { items } : {},
-          ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-          ...limit !== undefined ? { limit } : {},
-          ...maxBytesPerFile !== undefined ? { maxBytesPerFile } : {},
-          ...account !== undefined ? { account } : {}
-        });
-      }
-    },
-    {
-      name: "source_index_promotion_candidates",
-      description: [
-        "List safe Dropbox evidence candidates for promotion/review without writing to Obsidian or Resource Wiki.",
-        "This returns hashed provenance and review metadata only: no file paths, raw text, source packets, scope keys, vectors, or credentials."
-      ].join(" "),
-      params: {
-        corpus_id: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS], description: "Promotion-candidate corpus. Currently only secure_local.dropbox.files." },
-        account: { type: "string", description: "Optional account scope." },
-        approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-        max_results: { type: "number", description: "Maximum safe candidate rows to return. Capped by the private source worker." }
-      },
-      mutating: false,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source index promotion candidates" },
-      handler: async (ctx, params) => {
-        const corpusId = optionalSourceIndexPromotionCandidateCorpusId(params.corpus_id, ctx.config);
-        const account = optionalSourceAccount(params.account, corpusId);
-        const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-        const maxResults = optionalNumber2(params.max_results, "max_results");
-        return ctx.email.sourceIndexPromotionCandidates({
-          ...corpusId !== undefined ? { corpusId } : {},
-          ...account !== undefined ? { account } : {},
-          approvedScopeKey,
-          ...maxResults !== undefined ? { maxResults } : {}
-        });
-      }
-    },
-    {
-      name: "source_index_promotion_propose",
-      description: [
-        "Create a local Dropbox promotion proposal from safe candidate handles without exposing source text or writing Resource Wiki/Obsidian.",
-        "This records append-only review intent over hashed evidence provenance only."
-      ].join(" "),
-      params: {
-        account: { type: "string", description: "Optional account scope." },
-        approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker stores and returns only a scope hash." },
-        classification_ids: { type: "string", required: true, description: "Comma-separated or JSON-array candidate classification handles returned by source_index_promotion_candidates." },
-        canonical_type: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_CANONICAL_TYPES], description: "Typed destination shape for the proposed durable knowledge." },
-        target_surface: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_TARGET_SURFACES], description: "Intended review/write surface. This operation records intent only and performs no surface write." },
-        reason_code: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Typed reason this evidence is being proposed." },
-        proposed_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." }
-      },
-      mutating: true,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source index promotion propose" },
-      handler: async (ctx, params) => {
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-        const classificationIds = asStringList(params.classification_ids, "classification_ids");
-        const canonicalType = asPromotionCanonicalType(params.canonical_type);
-        const targetSurface = asPromotionTargetSurface(params.target_surface);
-        const reasonCode = asPromotionReasonCode(params.reason_code);
-        const proposedBy = optionalString4(params.proposed_by);
-        return ctx.email.sourceIndexPromotionProposal({
-          ...account !== undefined ? { account } : {},
-          approvedScopeKey,
-          classificationIds,
-          canonicalType,
-          targetSurface,
-          reasonCode,
-          ...proposedBy !== undefined ? { proposedBy } : {}
-        });
-      }
-    },
-    {
-      name: "source_index_promotion_proposals",
-      description: [
-        "List local Dropbox promotion proposals for review without exposing source text or writing Resource Wiki/Obsidian.",
-        "This returns proposal metadata and hashed scope only."
-      ].join(" "),
-      params: {
-        account: { type: "string", description: "Optional account scope." },
-        approved_scope_key: { type: "string", description: "Optional Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-        status: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES], description: "Optional proposal status filter." },
-        max_results: { type: "number", description: "Maximum safe proposal rows to return. Capped by the private source worker." }
-      },
-      mutating: false,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source index promotion proposals" },
-      handler: async (ctx, params) => {
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        const approvedScopeKey = optionalString4(params.approved_scope_key);
-        const status = optionalPromotionProposalStatus(params.status);
-        const maxResults = optionalNumber2(params.max_results, "max_results");
-        return ctx.email.sourceIndexPromotionProposals({
-          ...account !== undefined ? { account } : {},
-          ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-          ...status !== undefined ? { status } : {},
-          ...maxResults !== undefined ? { maxResults } : {}
-        });
-      }
-    },
-    {
-      name: "source_index_promotion_proposal",
-      description: [
-        "Read one local Dropbox promotion proposal detail without exposing source text or writing Resource Wiki/Obsidian.",
-        "This returns hashed evidence metadata and local review decisions only."
-      ].join(" "),
-      params: {
-        proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose or source_index_promotion_proposals." }
-      },
-      mutating: false,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source index promotion proposal" },
-      handler: async (ctx, params) => {
-        const proposalId = asString(params.proposal_id, "proposal_id");
-        return ctx.email.sourceIndexPromotionProposalDetail({
-          proposalId
-        });
-      }
-    },
-    {
-      name: "source_index_promotion_decide",
-      description: [
-        "Record a local review decision on a Dropbox promotion proposal without executing any Resource Wiki, Obsidian, or Dropbox write.",
-        "This is a review-ledger mutation only."
-      ].join(" "),
-      params: {
-        proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose." },
-        decision: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_DECISIONS], description: "Review decision to record." },
-        decided_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." },
-        reason_code: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Optional typed reason for the decision." }
-      },
-      mutating: true,
-      nativeExposure: "sourceIndexAnswerDevOnly",
-      cliHints: { name: "source index promotion decide" },
-      handler: async (ctx, params) => {
-        const proposalId = asString(params.proposal_id, "proposal_id");
-        const decision = asPromotionDecision(params.decision);
-        const decidedBy = optionalString4(params.decided_by);
-        const reasonCode = optionalPromotionReasonCode(params.reason_code);
-        return ctx.email.sourceIndexPromotionDecision({
-          proposalId,
-          decision,
-          ...decidedBy !== undefined ? { decidedBy } : {},
-          ...reasonCode !== undefined ? { reasonCode } : {}
-        });
-      }
-    }
-  ],
   {
     name: "source_watch_create",
     description: [
@@ -14476,471 +12417,6 @@ var operations = [
       });
     }
   },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      name: "xanthos_file_deliver",
-      description: [
-        "Deliver a UTF-8 or base64 file to an approved Xanthos logical root through the bounded file-delivery worker.",
-        "This tool accepts only logical root IDs and relative paths, uses no shell, exposes no absolute host paths, denies overwrites by default, and returns an audit reference."
-      ].join(" "),
-      params: {
-        root_id: { type: "string", required: true, description: "Approved logical destination root, for example olympus_smoke or growth_fleur." },
-        relative_path: { type: "string", required: true, description: "Relative file path below the approved root. Absolute paths and traversal are denied." },
-        content: { type: "string", required: true, description: "File content as UTF-8 text or base64 bytes." },
-        content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding. Defaults to utf8." },
-        write_mode: { type: "string", required: true, enum: ["dry_run", "create_new", "overwrite_with_approval"], description: "dry_run validates only; create_new refuses existing files; overwrite requires explicit approval." },
-        trust_domain: { type: "string", required: true, enum: ["public_safe", "internal", "secure_local"], description: "Trust domain of the content being delivered." },
-        source_provenance: { type: "string", description: "Optional safe provenance for generated content." },
-        idempotency_key: { type: "string", required: true, description: "Stable key for safe retries of the same delivery request." },
-        approval_id: { type: "string", description: "Explicit approval reference required for overwrite_with_approval." },
-        actor_id: { type: "string", description: "Optional caller or agent identity for audit." },
-        session_id: { type: "string", description: "Optional session identity for audit." },
-        model_provider: { type: "string", description: "Optional model/provider identity for audit." },
-        model_id: { type: "string", description: "Optional model identity for audit." }
-      },
-      mutating: true,
-      nativeExposure: "fileDeliveryEnabledOnly",
-      cliHints: { name: "xanthos file deliver" },
-      handler: async (ctx, params) => {
-        if (!ctx.fileDelivery) {
-          throw new OperationError("file_delivery_not_configured", "File delivery client is not configured in this Olympus runtime.");
-        }
-        const rootId = asString(params.root_id, "root_id");
-        const relativePath = asString(params.relative_path, "relative_path");
-        const content = asString(params.content, "content");
-        const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-        const writeMode = asFileDeliveryWriteMode(params.write_mode);
-        const trustDomain = asFileDeliveryTrustDomain(params.trust_domain);
-        const sourceProvenance = optionalString4(params.source_provenance);
-        const idempotencyKey = asString(params.idempotency_key, "idempotency_key");
-        const approvalId = optionalString4(params.approval_id);
-        const actorId = optionalString4(params.actor_id);
-        const sessionId = optionalString4(params.session_id);
-        const modelProvider = optionalString4(params.model_provider);
-        const modelId = optionalString4(params.model_id);
-        return ctx.fileDelivery.deliver({
-          rootId,
-          relativePath,
-          content,
-          ...contentEncoding !== undefined ? { contentEncoding } : {},
-          writeMode,
-          trustDomain,
-          ...sourceProvenance !== undefined ? { sourceProvenance } : {},
-          idempotencyKey,
-          ...approvalId !== undefined ? { approvalId } : {},
-          ...actorId !== undefined ? { actorId } : {},
-          ...sessionId !== undefined ? { sessionId } : {},
-          ...modelProvider !== undefined ? { modelProvider } : {},
-          ...modelId !== undefined ? { modelId } : {}
-        });
-      }
-    },
-    {
-      name: "castor_workspace",
-      description: [
-        "Use {{ownerName}} delegated assistant workfiles through a bounded Xanthos worker.",
-        "Anything inside the approved assistant workfiles root is intentionally delegated to {{assistantName}} for read, write, delete, and export through implemented destination actions without extra S4 approval gating.",
-        "Finder/macOS aliases inside the workspace may be read, listed, and exported; alias targets are not writable or deletable through this tool.",
-        "Use only logical root IDs and relative paths; the tool exposes no absolute host paths and does not grant shell access."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: ["health", "list", "read", "write", "delete", "export_gcs"], description: "Workspace action." },
-        root_id: { type: "string", description: "Approved workspace root id. Use castor_workspace for the configured delegated workfiles root." },
-        relative_path: { type: "string", description: "Relative path inside the workspace root. Empty path means the root." },
-        content: { type: "string", description: "UTF-8 or base64 content for write." },
-        content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding for write. Defaults to utf8." },
-        destination_uri: { type: "string", description: "Allowlisted gs:// destination for export_gcs." },
-        recursive: { type: "boolean", description: "Required for deleting directories; export_gcs is always recursive for directories." },
-        dry_run: { type: "boolean", description: "For export_gcs, defaults true. Set false to perform the upload after inspecting a dry-run." },
-        include_media: { type: "boolean", description: "For directory export_gcs, include media extensions in addition to md/txt/pdf/html. Defaults false." },
-        idempotency_key: { type: "string", description: "Optional stable key for audit/retry correlation." },
-        actor_id: { type: "string", description: "Optional caller identity for audit." },
-        session_id: { type: "string", description: "Optional session identity for audit." }
-      },
-      mutating: true,
-      nativeExposure: "castorWorkspaceEnabledOnly",
-      cliHints: { name: "castor workspace" },
-      handler: async (ctx, params) => {
-        if (!ctx.castorWorkspace) {
-          throw new OperationError("castor_workspace_not_configured", "Delegated workspace client is not configured in this Olympus runtime.");
-        }
-        const action = asCastorWorkspaceAction(params.action);
-        const rootId = optionalString4(params.root_id);
-        const relativePath = typeof params.relative_path === "string" ? params.relative_path : undefined;
-        const content = typeof params.content === "string" ? params.content : undefined;
-        const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-        const destinationUri = optionalString4(params.destination_uri);
-        const recursive = optionalBoolean(params.recursive, "recursive");
-        const dryRun = optionalBoolean(params.dry_run, "dry_run");
-        const includeMedia = optionalBoolean(params.include_media, "include_media");
-        const idempotencyKey = optionalString4(params.idempotency_key);
-        const actorId = optionalString4(params.actor_id);
-        const sessionId = optionalString4(params.session_id);
-        return ctx.castorWorkspace.run({
-          action,
-          ...rootId !== undefined ? { rootId } : {},
-          ...relativePath !== undefined ? { relativePath } : {},
-          ...content !== undefined ? { content } : {},
-          ...contentEncoding !== undefined ? { contentEncoding } : {},
-          ...destinationUri !== undefined ? { destinationUri } : {},
-          ...recursive !== undefined ? { recursive } : {},
-          ...dryRun !== undefined ? { dryRun } : {},
-          ...includeMedia !== undefined ? { includeMedia } : {},
-          ...idempotencyKey !== undefined ? { idempotencyKey } : {},
-          ...actorId !== undefined ? { actorId } : {},
-          ...sessionId !== undefined ? { sessionId } : {}
-        });
-      }
-    },
-    {
-      name: "domain_agent",
-      description: [
-        "Create or inspect a reusable domain expert agent workspace, persona, library, and corpus setup through the configured domain-expert backend.",
-        "Use this when the owner asks to create a governance, dating, trading, or other domain-specific researcher.",
-        "dry_run=true asks the runtime worker for a non-mutating scaffold."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_AGENT_ACTIONS], description: "Domain-agent lifecycle action." },
-        domain_id: { type: "string", description: "Stable domain id. Defaults to governance." },
-        display_name: { type: "string", description: "Optional human name for the domain researcher." },
-        dry_run: { type: "boolean", description: "Defaults true. Live execution is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain agent" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_agent", params)
-    },
-    {
-      name: "domain_ask",
-      description: [
-        "Return a grounded domain-expert answer over a domain library using Gemini Enterprise RAG Engine Cross-Corpus Retrieval.",
-        "This is the public/internal domain-expert lane, separate from the frozen secure-local source_answer pipeline.",
-        "This tool is available only while its live retrieval backend is enabled."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        question: { type: "string", required: true, description: "Question for the domain expert to answer from its curated library." },
-        corpus_id: { type: "string", description: "Optional single Vertex RAG corpus id or manifest display name. Defaults to all corpora in the domain manifest." },
-        corpora: { type: "array", description: "Optional corpus ids or manifest display names. Defaults to all corpora in the domain manifest." },
-        max_results: { type: "number", description: "Optional retrieval result target. Defaults to 12." }
-      },
-      mutating: false,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain ask", positional: ["question"], stdin: "question" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_ask", params)
-    },
-    {
-      name: "domain_source",
-      description: [
-        "Manage source intake for a domain expert library from files, Google Docs, PDFs, books, blog posts, or web links.",
-        "Worker-backed list/status are read-only registry reads; remove appends an audit tombstone; add keeps the existing intake record path.",
-        "The source record is domain-agnostic and flows into classification, dedupe, staging, Gemini Enterprise import, and source-registry updates.",
-        "dry_run=true asks the configured runtime worker for a non-mutating intake plan."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_SOURCE_ACTIONS], description: "Source lifecycle action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        source_id: { type: "string", description: "Required for status/remove; optional stable id for add." },
-        kind: { type: "string", enum: [...DOMAIN_SOURCE_KINDS], description: "Source kind." },
-        title: { type: "string", description: "Optional source title." },
-        author: { type: "string", description: "Optional source author." },
-        url: { type: "string", description: "Canonical URL or provider locator for link intake." },
-        relative_path: { type: "string", description: "Path inside the domain workspace or delegated alias for folder intake." },
-        corpus_id: { type: "string", description: "Optional target corpus id." },
-        trust_posture: { type: "string", description: "Optional trust/source-review posture." },
-        copyright_posture: { type: "string", description: "Explicit source copyright/import posture when known." },
-        include_history: { type: "boolean", description: "For list, include every registry record per source instead of only current records." },
-        include_removed: { type: "boolean", description: "For list, include sources whose latest record is a removed tombstone." },
-        dry_run: { type: "boolean", description: "Defaults true. Live intake is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain source" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_source", params)
-    },
-    {
-      name: "rag_corpus",
-      description: [
-        "Plan Gemini Enterprise RAG Engine corpus create, import, stage_import, web_import, notion_import, status, or refresh actions for a domain expert.",
-        "The operation enforces the domain manifest GCS allowlist and keeps Olympus as the control plane.",
-        "Live corpus mutations run in the OpenClaw runtime with credentials resolved through SecretRef; dry_run=true returns an operator-reviewable plan."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...RAG_CORPUS_ACTIONS], description: "Corpus lifecycle action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        corpus_id: { type: "string", description: "Target corpus id. Defaults to a domain manifest corpus." },
-        rag_file_name: { type: "string", description: "For delete_file, full Vertex ragFiles resource name under the resolved corpus." },
-        page_token: { type: "string", description: "For list_files, Vertex pageToken passthrough." },
-        source_id: { type: "string", description: "Optional source registry id to import or inspect." },
-        gcs_uri: { type: "string", description: "Optional staged gs:// URI. Must be under the domain allowlist." },
-        drive_file_id: { type: "string", description: "Optional Google Drive file id for future direct import paths." },
-        workspace_relative_path: { type: "string", description: "For stage_import, path inside the domain workspace root to recursively stage." },
-        batch_id: { type: "string", description: "Optional deterministic staging batch id. Generated by the worker when omitted." },
-        urls: { type: "array", description: "For web_import, HTTPS URLs to fetch and derive into importable documents; for notion_import, Notion URLs to import through the official API. 1 to 200 entries." },
-        page_ids: { type: "array", description: "For notion_import, raw Notion page ids to import." },
-        database_ids: { type: "array", description: "For notion_import, raw Notion database ids to query and import." },
-        include_media: { type: "boolean", description: "For stage_import or web_import, include media files. Audio/video media is staged raw and transcribed to markdown when live. Defaults false." },
-        transcript_mode: { type: "string", enum: ["auto", "captions", "asr"], description: "For web_import YouTube URLs: auto uses captions then ASR, captions never falls through to ASR, asr skips caption tiers. Defaults auto." },
-        dry_run: { type: "boolean", description: "Defaults true. Live corpus mutation is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "rag corpus" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "rag_corpus", params)
-    },
-    {
-      name: "domain_doc",
-      description: [
-        "Plan Google Docs collaboration for a domain expert service account: read, comment, visually marked insert/replace, accept, or reject.",
-        "Google Docs API suggestion-mode creation is not treated as available; the supported review path is comments plus approved direct edits in a visible domain-agent style.",
-        "Phase 0 is dry-run only and records the service-account, approval, and visual review contract."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_DOC_ACTIONS], description: "Google Docs collaboration action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        document_id: { type: "string", required: true, description: "Google Docs document id." },
-        text: { type: "string", description: "Text for visual_insert or visual_replace." },
-        comment: { type: "string", description: "Comment text or edit rationale." },
-        range_start: { type: "number", description: "Optional Docs structural index/range start for edit actions." },
-        range_end: { type: "number", description: "Optional Docs structural index/range end for visual_replace." },
-        approval_id: { type: "string", description: "Explicit approval reference required for live direct edits." },
-        edit_batch_id: { type: "string", description: "Stable id for later accept/reject cleanup." },
-        dry_run: { type: "boolean", description: "Defaults true. Live Docs mutation is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain doc" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_doc", params)
-    },
-    {
-      name: "annas_archive_search",
-      description: [
-        "Search Anna Archive through the Castor runtime secret and return ranked candidate book/file metadata for approval.",
-        "The API key is never exposed to the agent; this tool is available only while the runtime worker is enabled."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        query: { type: "string", description: "Search query." },
-        topic: { type: "string", description: "Optional topic for top-N book discovery, such as evolutionary biology." },
-        title: { type: "string", description: "Optional title search." },
-        author: { type: "string", description: "Optional author search." },
-        language: { type: "string", description: "Optional preferred language filter or ranking hint." },
-        max_results: { type: "number", description: "Maximum candidate metadata results. Defaults to 10." },
-        top_n: { type: "number", description: "Number of top candidates to rank and present for approval. Defaults to max_results." },
-        format_preference: { type: "string", enum: ["auto", "text_rag", "layout"], description: "Prefer EPUB/text for text-first RAG, PDF for layout-heavy books, or auto." }
-      },
-      mutating: false,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "annas archive search" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_search", params)
-    },
-    {
-      name: "annas_archive_import",
-      description: [
-        "Plan or run an approved Anna Archive PDF/EPUB/etc. download into the owner's Xanthos books folder.",
-        "Requires explicit copyright posture and approval for live execution; RAG ingest is optional and requires an explicit corpus_id."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        annas_archive_id: { type: "string", description: "Anna Archive item id or md5-like locator." },
-        url: { type: "string", description: "Optional Anna Archive URL locator." },
-        format: { type: "string", enum: [...ANNAS_ARCHIVE_FORMATS], description: "Desired or observed file format." },
-        corpus_id: { type: "string", description: "Optional explicit target domain corpus id for RAG ingest." },
-        title: { type: "string", description: "Candidate title, used for deterministic folder naming and audit." },
-        author: { type: "string", description: "Candidate author, used for deterministic folder naming and audit." },
-        year: { type: "string", description: "Candidate publication year, used for deterministic folder naming and audit." },
-        topic: { type: "string", description: "Topic folder under the Xanthos books root." },
-        language: { type: "string", description: "Candidate language metadata." },
-        file_name: { type: "string", description: "Optional original filename from the candidate metadata." },
-        md5: { type: "string", description: "Optional stable Anna/hash locator for duplicate detection." },
-        file_size_bytes: { type: "number", description: "Optional expected file size from candidate metadata." },
-        ingest: { type: "boolean", description: "Also attempt RAG ingest after saving. Requires explicit corpus_id or returns needs_corpus_decision." },
-        copyright_posture: { type: "string", required: true, description: "Explicit copyright/import posture for this item." },
-        approval_id: { type: "string", description: "Explicit approval reference required for live download/import." },
-        dry_run: { type: "boolean", description: "Defaults true. Live download is blocked until approval_id is provided." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "annas archive import" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_import", params)
-    },
-    {
-      name: "email_search",
-      description: [
-        "Search private email and return a sanitized local-only source packet for approved local/private sessions.",
-        "Use query for Gmail search syntax when possible. Answer from returned packet items and cite safe provenance by subject/from/date/message_id.",
-        "Do not request raw Gmail payloads."
-      ].join(" "),
-      params: {
-        question: { type: "string", description: "Optional natural-language question for audit/context. It is not converted into required Gmail terms." },
-        query: { type: "string", description: "Optional Gmail query string chosen by the local model or user." },
-        account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-        after: { type: "string", description: "Optional lower date/time bound." },
-        before: { type: "string", description: "Optional upper date/time bound." },
-        from: { type: "string", description: "Optional sender constraint." },
-        to: { type: "string", description: "Optional recipient constraint." },
-        max_messages: { type: "number", description: "Optional maximum messages to retrieve; capped by the private worker." },
-        include_sanitized_text: { type: "boolean", description: "Whether to include sanitized message text. Defaults true for the local packet path." }
-      },
-      mutating: false,
-      nativeExposure: "localEmailPacketsDevOnly",
-      cliHints: { name: "email search", positional: ["query"], stdin: "query" },
-      handler: async (ctx, params) => {
-        const question = optionalString4(params.question);
-        const query = optionalString4(params.query);
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        const after = optionalString4(params.after);
-        const before = optionalString4(params.before);
-        const from = optionalString4(params.from);
-        const to = optionalString4(params.to);
-        const maxMessages = optionalNumber2(params.max_messages, "max_messages");
-        const includeSanitizedText = optionalBoolean(params.include_sanitized_text, "include_sanitized_text");
-        return ctx.email.search({
-          ...question !== undefined ? { question } : {},
-          ...query !== undefined ? { query } : {},
-          ...account !== undefined ? { account } : {},
-          ...after !== undefined ? { after } : {},
-          ...before !== undefined ? { before } : {},
-          ...from !== undefined ? { from } : {},
-          ...to !== undefined ? { to } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...includeSanitizedText !== undefined ? { includeSanitizedText } : {}
-        });
-      }
-    },
-    {
-      name: "email_index_sync",
-      description: "Explicitly seed or rescan the bounded local Gmail source index without returning private content.",
-      params: {
-        account: { type: "string", description: "Optional Google account to scope the bounded seed." },
-        newer_than_days: { type: "number", description: "Bounded recency window. Defaults to 14 days." },
-        max_messages: { type: "number", description: "Maximum Gmail messages to index; capped by the private worker." },
-        query: { type: "string", description: "Optional Gmail query for a bounded proof seed." }
-      },
-      mutating: true,
-      nativeExposure: "emailIndexAdminDevOnly",
-      cliHints: { name: "email index sync" },
-      handler: async (ctx, params) => {
-        const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-        const newerThanDays = optionalNumber2(params.newer_than_days, "newer_than_days");
-        const maxMessages = optionalNumber2(params.max_messages, "max_messages");
-        const query = optionalString4(params.query);
-        return ctx.email.indexSync({
-          ...account !== undefined ? { account } : {},
-          ...newerThanDays !== undefined ? { newerThanDays } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...query !== undefined ? { query } : {}
-        });
-      }
-    },
-    {
-      name: "email_index_embed",
-      description: "Explicitly build local/private embedding artifacts for the bounded Gmail source index without returning private content or vectors.",
-      params: {
-        account: { type: "string", description: "Optional account filter for the embedding build." },
-        model_id: { type: "string", description: "Optional local embedding model ID to require from the configured worker provider." },
-        force: { type: "boolean", description: "Rebuild embeddings even when chunk content hashes are unchanged." }
-      },
-      mutating: true,
-      nativeExposure: "emailIndexAdminDevOnly",
-      cliHints: { name: "email index embed" },
-      handler: async (ctx, params) => {
-        const account = optionalString4(params.account);
-        const modelId = optionalString4(params.model_id);
-        const force = optionalBoolean(params.force, "force");
-        return ctx.email.indexEmbed({
-          ...account !== undefined ? { account } : {},
-          ...modelId !== undefined ? { modelId } : {},
-          ...force !== undefined ? { force } : {}
-        });
-      }
-    },
-    {
-      name: "email_index_search",
-      description: [
-        "Search the local private email source index and return an Argus-only sanitized source packet with row and provider provenance.",
-        "Use retrieval_mode=hybrid for conceptual aliases when local/private semantic artifacts are available; keyword remains the default exact/FTS path."
-      ].join(" "),
-      params: {
-        query: { type: "string", required: true, description: "Keyword/FTS query for the local email index." },
-        retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Retrieval mode. Defaults to keyword unless hybrid is explicitly requested and semantic artifacts/config are available." },
-        account: { type: "string", description: "Optional account filter." },
-        after: { type: "string", description: "Optional lower date/time bound." },
-        before: { type: "string", description: "Optional upper date/time bound." },
-        from: { type: "string", description: "Optional sender filter." },
-        to: { type: "string", description: "Optional recipient filter." },
-        label: { type: "string", description: "Optional Gmail label filter." },
-        max_messages: { type: "number", description: "Maximum packet items to return; capped by the private worker." }
-      },
-      mutating: false,
-      nativeExposure: "localEmailPacketsDevOnly",
-      cliHints: { name: "email index search", positional: ["query"], stdin: "query" },
-      handler: async (ctx, params) => {
-        const query = asString(params.query, "query");
-        const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
-        const account = optionalString4(params.account);
-        const after = optionalString4(params.after);
-        const before = optionalString4(params.before);
-        const from = optionalString4(params.from);
-        const to = optionalString4(params.to);
-        const label = optionalString4(params.label);
-        const maxMessages = optionalNumber2(params.max_messages, "max_messages");
-        return ctx.email.indexSearch({
-          query,
-          ...retrievalMode !== undefined ? { retrievalMode } : {},
-          ...account !== undefined ? { account } : {},
-          ...after !== undefined ? { after } : {},
-          ...before !== undefined ? { before } : {},
-          ...from !== undefined ? { from } : {},
-          ...to !== undefined ? { to } : {},
-          ...label !== undefined ? { label } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {}
-        });
-      }
-    },
-    {
-      name: "expert_hire",
-      description: "Hire a pinned external consultant through the contained Hire Broker. New or drifted counterparties require trusted owner confirmation; all briefs pass the Release Gate before any payment or dispatch.",
-      params: {
-        listing: { type: "object", required: true, description: "Counterparty listing with name, HTTPS endpoint, and optional erc8004 identity claim." },
-        brief: { type: "string", required: true, description: "Self-contained shape-only brief. Never include S4+ content, identifiers, secrets, URLs, or filesystem paths." },
-        budget: { type: "object", required: true, description: "Maximum payment object with positive amount and currency." },
-        owner_confirmed: { type: "boolean", description: "Set only after the owner explicitly approves the exact new or drifted counterparty prompt." }
-      },
-      mutating: true,
-      nativeExposure: "hireBrokerEnabledOnly",
-      cliHints: { name: "expert hire" },
-      handler: async (ctx, params) => {
-        if (!ctx.hireBroker) {
-          throw new OperationError("config_error", "Hire Broker is not configured.");
-        }
-        const ownerConfirmed = params.owner_confirmed === true;
-        return ctx.hireBroker.hire({
-          listing: params.listing,
-          brief: asString(params.brief, "brief"),
-          budget: params.budget,
-          ...ownerConfirmed ? { ownerConfirmed: true } : {},
-          ...ownerConfirmed && ctx.hireBrokerAuthority?.senderIsOwner === true ? { ownerAuthorized: true } : {}
-        });
-      }
-    },
-    {
-      name: "expert_report",
-      description: "Read a consultant result through the hostile-input membrane. Returns only a bounded summary, instruction flags, provenance, and spend; raw report text is never exposed by this tool.",
-      params: {
-        handle: { type: "string", required: true, description: "Opaque Hire Broker handle returned by expert_hire." }
-      },
-      mutating: false,
-      nativeExposure: "hireBrokerEnabledOnly",
-      cliHints: { name: "expert report", positional: ["handle"] },
-      handler: async (ctx, params) => {
-        if (!ctx.hireBroker) {
-          throw new OperationError("config_error", "Hire Broker is not configured.");
-        }
-        return ctx.hireBroker.report(asString(params.handle, "handle"));
-      }
-    }
-  ],
   {
     name: "olympus_doctor",
     description: [
@@ -14974,19 +12450,9 @@ function optionalSourceIndexStatusCorpusId(value, config) {
     return;
   return publicSourceCorpusRegistry(config).require(corpusId, "status");
 }
-function asSourceIndexSyncCorpusId(value, config) {
-  const corpusId = asString(value, "corpus_id");
-  return sourceCorpusRegistry(config).require(corpusId, "sync");
-}
 function asSourceIndexSearchCorpusId(value, config) {
   const corpusId = asString(value, "corpus_id");
   return publicSourceCorpusRegistry(config).require(corpusId, "search");
-}
-function optionalSourceIndexPromotionCandidateCorpusId(value, config) {
-  const corpusId = optionalString4(value);
-  if (corpusId === undefined)
-    return;
-  return sourceCorpusRegistry(config).require(corpusId, "promotion_candidates");
 }
 function optionalSourceWatchMode(value) {
   const mode = optionalString4(value);
@@ -14999,137 +12465,6 @@ function requireSourceWatchRoute(ctx) {
     throw new OperationError("source_index_policy_violation", "Durable watch management requires an authenticated OpenClaw owner and delivery route.", "Create and manage watches from an owner-authenticated OpenClaw channel session.");
   }
   return ctx.sourceWatchRoute;
-}
-function asPromotionCanonicalType(value) {
-  const canonicalType = asString(value, "canonical_type");
-  if (includesString(SOURCE_INDEX_PROMOTION_CANONICAL_TYPES, canonicalType))
-    return canonicalType;
-  throw new OperationError("invalid_params", "canonical_type is not supported.");
-}
-function asPromotionTargetSurface(value) {
-  const targetSurface = asString(value, "target_surface");
-  if (includesString(SOURCE_INDEX_PROMOTION_TARGET_SURFACES, targetSurface))
-    return targetSurface;
-  throw new OperationError("invalid_params", "target_surface is not supported.");
-}
-function asPromotionReasonCode(value) {
-  const reasonCode = asString(value, "reason_code");
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionReasonCode(value) {
-  const reasonCode = optionalString4(value);
-  if (reasonCode === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionProposalStatus(value) {
-  const status = optionalString4(value);
-  if (status === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES, status))
-    return status;
-  throw new OperationError("invalid_params", "status is not supported.");
-}
-function asPromotionDecision(value) {
-  const decision = asString(value, "decision");
-  if (includesString(SOURCE_INDEX_PROMOTION_DECISIONS, decision))
-    return decision;
-  throw new OperationError("invalid_params", "decision is not supported.");
-}
-function includesString(values, value) {
-  return values.includes(value);
-}
-function optionalSourceTranscribeMode(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "enqueue" || value === "status")
-    return value;
-  throw new OperationError("invalid_params", "mode must be enqueue or status.");
-}
-function asSourceTranscribeItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString4(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox audio file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox audio file path.");
-  }
-  return items;
-}
-function asSourceMediaIngestItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString4(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox image file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox image file path.");
-  }
-  return items;
-}
-function asSourceExportItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => sourceExportItemFromEntry(entry, index));
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one export item.");
-  }
-  return items;
-}
-function sourceExportItemEntries(value) {
-  if (Array.isArray(value))
-    return value;
-  if (typeof value === "string" && value.trim()) {
-    const text = value.trim();
-    if (text.startsWith("[")) {
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        throw new OperationError("invalid_params", "items must be valid JSON when passed as a JSON array string.");
-      }
-      if (!Array.isArray(parsed)) {
-        throw new OperationError("invalid_params", "items must be a JSON array of export items.");
-      }
-      return parsed;
-    }
-    return text.split(",").map((item) => item.trim()).filter(Boolean);
-  }
-  throw new OperationError("invalid_params", "items must be a JSON array of export items or a comma-separated list of source paths.");
-}
-function sourceExportItemFromEntry(entry, index) {
-  if (typeof entry === "string" && entry.trim()) {
-    return { path: entry.trim() };
-  }
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    const record = entry;
-    const path = optionalString4(record.path);
-    if (!path) {
-      throw new OperationError("invalid_params", `items.${index}.path must be a non-empty string.`);
-    }
-    const destSubfolder = optionalString4(record.dest_subfolder);
-    return {
-      path,
-      ...destSubfolder !== undefined ? { destSubfolder } : {}
-    };
-  }
-  throw new OperationError("invalid_params", `items.${index} must be a source path string or an object with a path.`);
 }
 function operationDescription(operation, options = {}) {
   return renderIdentityTemplate(operation.description, options.config);
@@ -15161,9 +12496,7 @@ function parameterEnum(operation, paramName, param, options) {
   const config = options.config ?? defaultConfig();
   const capability = sourceCorpusCapabilityForParameter(operation.name, paramName);
   if (capability) {
-    const publicOperation = V0_4_PUBLIC_NATIVE_TOOLS.includes(operation.name);
-    const registry = publicOperation ? publicSourceCorpusRegistry(config) : sourceCorpusRegistry(config);
-    return { enum: registry.ids(capability) };
+    return { enum: publicSourceCorpusRegistry(config).ids(capability) };
   }
   return param.enum ? { enum: param.enum } : {};
 }
@@ -15174,18 +12507,11 @@ function sourceCorpusCapabilityForParameter(operationName, paramName) {
     return "answer";
   if (operationName === "source_index_status")
     return "status";
-  if (operationName === "source_index_sync")
-    return "sync";
   if (operationName === "source_index_search")
     return "search";
   if (operationName === "source_watch_create")
     return "search";
-  if (operationName === "source_index_promotion_candidates")
-    return "promotion_candidates";
   return;
-}
-function sourceCorpusRegistry(config) {
-  return createSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
 }
 function publicSourceCorpusRegistry(config) {
   return createPublicSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
@@ -15193,15 +12519,6 @@ function publicSourceCorpusRegistry(config) {
 function renderIdentityTemplate(value, config) {
   const identity = config?.identity ?? { ownerName: "the owner", assistantName: "the calling assistant" };
   return value.replace(/\{\{ownerName\}\}/g, identity.ownerName).replace(/\{\{assistantName\}\}/g, identity.assistantName);
-}
-async function runDomainExpert(ctx, tool, rawParams) {
-  if (ctx.domainExpert && ctx.config.domainExpert.enabled && ctx.config.domainExpert.liveToolsEnabled) {
-    return ctx.domainExpert.run(tool, rawParams);
-  }
-  throw new OperationError("domain_expert_not_configured", `${tool} is unavailable because the live domain-expert backend is not enabled in this Olympus runtime.`, "Enable both domainExpert.enabled and domainExpert.liveToolsEnabled after configuring the runtime worker.");
-}
-function domainExpertToolsAvailable(config) {
-  return config.domainExpert.enabled && config.domainExpert.liveToolsEnabled;
 }
 function asString(value, name) {
   if (typeof value !== "string" || value.length === 0) {
@@ -15245,7 +12562,7 @@ function optionalExactNarrowingString(value, name) {
 function optionalTrustDomainConsistency(value, corpusId, config) {
   if (value === undefined)
     return;
-  const selectedCorpus = sourceCorpusRegistry(config).list("search").find((corpus) => corpus.corpusId === corpusId);
+  const selectedCorpus = publicSourceCorpusRegistry(config).list("search").find((corpus) => corpus.corpusId === corpusId);
   if (!selectedCorpus) {
     throw new OperationError("invalid_request", "The selected corpus trust domain is unavailable.");
   }
@@ -15386,57 +12703,6 @@ function optionalAnalystModel(value, name, analystProvider) {
   }
   return normalized;
 }
-function optionalTelegramTrustDomain(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "internal" || value === "secure_local")
-    return value;
-  throw new OperationError("invalid_params", "trust_domain must be internal or secure_local.");
-}
-function optionalTelegramSyncDirection(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "forward" || value === "backfill")
-    return value;
-  throw new OperationError("invalid_params", "sync_direction must be forward or backfill.");
-}
-function optionalXBookmarksSyncMode(value, corpusId) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (corpusId !== "internal.x.bookmarks") {
-    throw new OperationError("invalid_params", "mode is supported only for internal.x.bookmarks source-index sync.");
-  }
-  if (value === "head" || value === "reconcile" || value === "folder_facet_refresh" || value === "window_diagnostic" || value === "preservation-reattest")
-    return value;
-  throw new OperationError("invalid_params", "mode must be head, reconcile, window_diagnostic, folder_facet_refresh, or preservation-reattest for X bookmarks source-index sync.");
-}
-function asFileDeliveryWriteMode(value) {
-  const writeMode = asString(value, "write_mode");
-  if (writeMode === "dry_run" || writeMode === "create_new" || writeMode === "overwrite_with_approval") {
-    return writeMode;
-  }
-  throw new OperationError("invalid_params", "write_mode must be dry_run, create_new, or overwrite_with_approval.");
-}
-function asFileDeliveryTrustDomain(value) {
-  const trustDomain = asString(value, "trust_domain");
-  if (trustDomain === "public_safe" || trustDomain === "internal" || trustDomain === "secure_local") {
-    return trustDomain;
-  }
-  throw new OperationError("invalid_params", "trust_domain must be public_safe, internal, or secure_local.");
-}
-function optionalFileContentEncoding(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "utf8" || value === "base64")
-    return value;
-  throw new OperationError("invalid_params", "content_encoding must be utf8 or base64.");
-}
-function asCastorWorkspaceAction(value) {
-  if (value === "health" || value === "list" || value === "read" || value === "write" || value === "delete" || value === "export_gcs") {
-    return value;
-  }
-  throw new OperationError("invalid_params", "action must be health, list, read, write, delete, or export_gcs.");
-}
 function optionalAttachmentType(value) {
   if (value === undefined || value === null || value === "")
     return;
@@ -15446,163 +12712,6 @@ function optionalAttachmentType(value) {
 }
 
 // src/native-plugin.ts
-init_public_surface();
-
-// src/private-extension-contract.ts
-import { existsSync as existsSync10, readFileSync as readFileSync10 } from "node:fs";
-import { createRequire as createRequire2 } from "node:module";
-import { basename, dirname as dirname11, join as join10 } from "node:path";
-import { fileURLToPath } from "node:url";
-var OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION = 1;
-var PRIVATE_EXTENSION_MODULE_BASENAMES = [
-  "private-extensions.cjs",
-  "private-extensions.ts"
-];
-
-class OlympusPrivateExtensionError extends Error {
-}
-function assertPrivateExtensionContract(moduleNamespace, source) {
-  const namespace = asRecord14(moduleNamespace);
-  if (!namespace) {
-    throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} did not export a module namespace.`);
-  }
-  const candidate = asRecord14(namespace.default) ?? namespace;
-  const contractVersion = candidate.contractVersion;
-  if (typeof contractVersion !== "number" || !Number.isInteger(contractVersion)) {
-    throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} must export an integer contractVersion. ` + `This build implements contract version ${OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION}.`);
-  }
-  if (contractVersion !== OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION) {
-    throw new OlympusPrivateExtensionError(`Olympus private extension contract mismatch at ${source}: the module declares contract ` + `version ${contractVersion} and this build implements ` + `${OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION}. Rebuild the private overlay against this ` + "Olympus revision, or install the Olympus revision the overlay was built for. The plugin " + "refuses to load rather than register a partial private surface.");
-  }
-  if (typeof candidate.id !== "string" || candidate.id.trim() === "") {
-    throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} must export a non-empty id.`);
-  }
-  for (const hook of ["configFragments", "runtimeExpectations"]) {
-    if (typeof candidate[hook] !== "function") {
-      throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} must implement ${hook}().`);
-    }
-  }
-  for (const hook of ["extendOperationContext", "register", "contractTools", "skillDirs"]) {
-    if (candidate[hook] !== undefined && typeof candidate[hook] !== "function") {
-      throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} declared ${hook} but it is not a function.`);
-    }
-  }
-  return candidate;
-}
-var PRIVATE_EXTENSION_MANIFEST_BASENAME = "openclaw.plugin.json";
-var PRIVATE_EXTENSION_BUILT_MODULE_BASENAME = "private-extensions.cjs";
-var PRIVATE_EXTENSION_SOURCE_MODULE_BASENAME = "private-extensions.ts";
-var PRIVATE_EXTENSION_MANIFEST_NAMESPACE = "olympus";
-var PRIVATE_EXTENSION_MANIFEST_KEY = "privateExtensions";
-var PRIVATE_EXTENSION_MARKER_FIELDS = ["required", "contractVersion", "module"];
-var SOURCE_CHECKOUT_DIRNAME = "src";
-function readPrivateExtensionRequirement(manifestPath, readFile3 = (path) => readFileSync10(path, "utf8")) {
-  let parsed;
-  try {
-    parsed = JSON.parse(readFile3(manifestPath));
-  } catch (error) {
-    throw new OlympusPrivateExtensionError(`Could not read the plugin manifest at ${manifestPath} to check for a private extension ` + `requirement: ${error instanceof Error ? error.message : String(error)}.`);
-  }
-  const refuse = (detail) => {
-    throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} declares ` + `${PRIVATE_EXTENSION_MANIFEST_NAMESPACE}.${PRIVATE_EXTENSION_MANIFEST_KEY}, but ${detail}. ` + "A malformed requirement is refused rather than read as requiring nothing. Regenerate the " + "manifest from the private extension module.");
-  };
-  const root = asRecord14(parsed);
-  if (!root) {
-    throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} is not a JSON object.`);
-  }
-  if (!Object.hasOwn(root, PRIVATE_EXTENSION_MANIFEST_NAMESPACE))
-    return;
-  const namespace = asRecord14(root[PRIVATE_EXTENSION_MANIFEST_NAMESPACE]);
-  if (!namespace) {
-    throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} has a ${PRIVATE_EXTENSION_MANIFEST_NAMESPACE} key that ` + "is not an object. Regenerate the manifest from the private extension module.");
-  }
-  if (!Object.hasOwn(namespace, PRIVATE_EXTENSION_MANIFEST_KEY))
-    return;
-  const marker = asRecord14(namespace[PRIVATE_EXTENSION_MANIFEST_KEY]);
-  if (!marker)
-    return refuse("it is not an object");
-  const unknownFields = Object.keys(marker).filter((field) => !PRIVATE_EXTENSION_MARKER_FIELDS.includes(field));
-  if (unknownFields.length > 0) {
-    return refuse(`it carries unknown field(s) ${unknownFields.join(", ")}`);
-  }
-  if (!Object.hasOwn(marker, "required"))
-    return refuse("it does not declare `required`");
-  if (typeof marker.required !== "boolean") {
-    return refuse(`\`required\` is ${typeof marker.required}, not a boolean`);
-  }
-  if (marker.required === false) {
-    const extra = Object.keys(marker).filter((field) => field !== "required");
-    if (extra.length > 0) {
-      return refuse(`\`required\` is false but it also carries ${extra.join(", ")}`);
-    }
-    return;
-  }
-  const contractVersion = marker.contractVersion;
-  if (typeof contractVersion !== "number" || !Number.isInteger(contractVersion)) {
-    return refuse("`contractVersion` is not an integer");
-  }
-  const module = marker.module;
-  if (module !== PRIVATE_EXTENSION_BUILT_MODULE_BASENAME) {
-    return refuse(`\`module\` is ${JSON.stringify(module)}; this build can only load ` + `"${PRIVATE_EXTENSION_BUILT_MODULE_BASENAME}"`);
-  }
-  return { required: true, contractVersion, module };
-}
-function permittedOverlayBasename(baseDir) {
-  return basename(baseDir) === SOURCE_CHECKOUT_DIRNAME ? PRIVATE_EXTENSION_SOURCE_MODULE_BASENAME : PRIVATE_EXTENSION_BUILT_MODULE_BASENAME;
-}
-function isSourceCheckoutLayout(baseDir) {
-  return basename(baseDir) === SOURCE_CHECKOUT_DIRNAME;
-}
-function resolveSiblingManifestPath(baseDir, fileExists) {
-  const candidate = join10(baseDir, "..", PRIVATE_EXTENSION_MANIFEST_BASENAME);
-  return fileExists(candidate) ? candidate : undefined;
-}
-var requireFromThisModule = createRequire2(import.meta.url);
-function loadPrivateExtensions(options = {}) {
-  const baseDir = options.baseDir ?? dirname11(fileURLToPath(import.meta.url));
-  const fileExists = options.fileExists ?? existsSync10;
-  const loadModule = options.loadModule ?? requireFromThisModule;
-  const readFile3 = options.readFile ?? ((path) => readFileSync10(path, "utf8"));
-  const sourceCheckout = isSourceCheckoutLayout(baseDir);
-  const permitted = permittedOverlayBasename(baseDir);
-  for (const candidate of PRIVATE_EXTENSION_MODULE_BASENAMES) {
-    if (candidate === permitted)
-      continue;
-    if (!fileExists(join10(baseDir, candidate)))
-      continue;
-    throw new OlympusPrivateExtensionError(`${candidate} is present in ${baseDir}, but ${sourceCheckout ? "a source checkout" : "an installed plugin"} ` + `may only load ${permitted}. Remove it, or install the overlay this layout expects. The ` + "plugin refuses to load rather than run an overlay this layout would never ship.");
-  }
-  const permittedPath = join10(baseDir, permitted);
-  const overlayPresent = fileExists(permittedPath);
-  const evaluateOverlay = () => assertPrivateExtensionContract(loadModule(permittedPath), permittedPath);
-  const manifestPath = resolveSiblingManifestPath(baseDir, fileExists);
-  if (!manifestPath) {
-    if (!sourceCheckout) {
-      throw new OlympusPrivateExtensionError(`No ${PRIVATE_EXTENSION_MANIFEST_BASENAME} was found above ${baseDir}. An installed plugin ` + "always has one — the host reads it to load the plugin at all — so this tree has been " + "taken apart, and whether the private surface is required cannot be determined. The " + "plugin refuses to load rather than guess that it is public.");
-    }
-    return overlayPresent ? evaluateOverlay() : undefined;
-  }
-  const requirement = readPrivateExtensionRequirement(manifestPath, readFile3);
-  if (!requirement) {
-    if (overlayPresent && !sourceCheckout) {
-      throw new OlympusPrivateExtensionError(`An overlay module is installed in ${baseDir}, but the manifest at ${manifestPath} does not ` + "require private extensions. An installed plugin's manifest and overlay must agree: " + "install the private manifest, or remove the overlay. The plugin refuses to load — " + "without evaluating the overlay — rather than run private lanes under a manifest that " + "rejects their configuration.");
-    }
-    return overlayPresent ? evaluateOverlay() : undefined;
-  }
-  if (requirement.contractVersion !== OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION) {
-    throw new OlympusPrivateExtensionError(`Olympus private extension contract mismatch: the manifest at ${manifestPath} requires ` + `contract version ${requirement.contractVersion} and this build implements ` + `${OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION}. Regenerate the manifest and rebuild the ` + "overlay against this Olympus revision, or install the revision the overlay was built for. " + "The overlay is not evaluated.");
-  }
-  if (!overlayPresent) {
-    throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} declares required private extensions ` + `(module "${requirement.module}", contract version ${requirement.contractVersion}), but no ` + `overlay module is present in ${baseDir}. This layout accepts only ${permitted}; note that ` + ".js and .mjs are never accepted. Build the overlay bundle next to this module and " + "reinstall. The plugin refuses to load rather than come up with the public surface while " + "this manifest accepts private configuration keys.");
-  }
-  return evaluateOverlay();
-}
-function asRecord14(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-
-// src/native-plugin.ts
-var privateExtensions = loadPrivateExtensions();
 function operationResult(operation, payload) {
   return {
     content: [
@@ -15623,13 +12732,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord15(payload);
+  const result = asRecord11(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord15(result.audit);
-  const policy = asRecord15(result.policy);
-  const synthesis = asRecord15(audit?.answer_synthesis);
-  const timings = asRecord15(audit?.phase_timings);
+  const audit = asRecord11(result.audit);
+  const policy = asRecord11(result.policy);
+  const synthesis = asRecord11(audit?.answer_synthesis);
+  const timings = asRecord11(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -15639,7 +12748,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord15(item);
+    const record = asRecord11(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -15650,7 +12759,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord15(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord11(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -15702,7 +12811,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord15(value) {
+function asRecord11(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -15712,30 +12821,20 @@ var plugin = {
   id: "olympus",
   name: "Olympus",
   description: "Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.",
-  register(api, registrationContext) {
+  register(api) {
     const config = configFromPluginConfig(api.pluginConfig);
-    const activeModel = activeModelFromNativeContext(api, registrationContext);
     const ctx = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
-      email: new EmailClient(config, createEmailTransport(config)),
-      ...PUBLIC_RUNTIME_BUILD ? {} : {
-        fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
-        castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-        domainExpert: new DomainExpertClient(config, createDomainExpertTransport(config))
-      },
-      ...privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}
+      email: new EmailClient(config, createEmailTransport(config))
     };
     registerSourceWatchDeliveryRoute(api, config);
-    const registeredToolNames = [];
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, {
         config,
-        surface: "native",
-        activeModel
+        surface: "native"
       }))
         continue;
-      registeredToolNames.push(operation.name);
       if (isSourceWatchOperation(operation)) {
         api.registerTool((toolContext) => {
           const sourceWatchRoute = sourceWatchRouteFromToolContext(toolContext);
@@ -15748,37 +12847,6 @@ var plugin = {
         api.registerTool(nativeToolFromOperation(operation, ctx));
       }
     }
-    if (!privateExtensions?.register)
-      return;
-    const registerOperationTool = (operation, options) => {
-      if (!operations.includes(operation)) {
-        throw new Error(`Private extension ${privateExtensions.id} registered an unknown operation.`);
-      }
-      if (isV04PublicOperation("native", operation.name) || registeredToolNames.includes(operation.name)) {
-        throw new Error(`Private extension ${privateExtensions.id} may not register the already-registered or public ` + `tool ${operation.name}.`);
-      }
-      registeredToolNames.push(operation.name);
-      const extendToolContext = options?.toolContextExtension;
-      if (!extendToolContext) {
-        api.registerTool(nativeToolFromOperation(operation, ctx));
-        return;
-      }
-      api.registerTool((toolContext) => nativeToolFromOperation(operation, {
-        ...ctx,
-        ...extendToolContext(toolContext)
-      }));
-    };
-    privateExtensions.register({
-      api,
-      pluginConfig: api.pluginConfig,
-      config,
-      activeModel,
-      operations,
-      context: ctx,
-      registeredToolNames,
-      isPublicNativeOperation: (operationName) => isV04PublicOperation("native", operationName),
-      registerOperationTool
-    });
   }
 };
 
@@ -15962,7 +13030,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord15(value);
+  const record = asRecord11(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
@@ -16021,9 +13089,6 @@ function sourceWatchRouteFromToolContext(context) {
     };
   }
   return;
-}
-function activeModelFromNativeContext(api, registrationContext) {
-  return api.activeModel ?? api.context?.activeModel ?? api.toolContext?.activeModel ?? registrationContext?.activeModel;
 }
 var native_plugin_default = plugin;
 export {

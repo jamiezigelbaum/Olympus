@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
-import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
+
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
@@ -101,15 +101,6 @@ import {
   DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC,
-  DropboxSourceExportDestinationError,
-  DropboxSourceExportRequestError,
-  type DropboxEvalShardExportHandler,
-  type DropboxEvalShardExportRequest,
-  type DropboxEvalShardManifest,
-  type DropboxSourceExportHandler,
-  type DropboxSourceExportItemRequest,
-  type DropboxSourceExportRequest,
-  type DropboxSourceExportResult,
 } from '../dropbox-files/index.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -137,10 +128,7 @@ import {
 } from '../google-connectors/corpora.ts';
 import { renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER } from '../http.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { renderEmbeddingLedgerPage } from '../dashboard/pages/embedding-ledger.ts';
-import { readEmbeddingLedger, resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
 import {
   readEmbeddingRuntime,
   resolveEmbeddingOverridePath,
@@ -359,8 +347,6 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
-  dropboxEvalShardExport?: DropboxEvalShardExportHandler;
-  dropboxSourceExport?: DropboxSourceExportHandler;
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
@@ -585,8 +571,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
   const fileExtraction = options.fileExtraction;
-  const dropboxEvalShardExport = options.dropboxEvalShardExport;
-  const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
   const connectorStoresByCorpusId = new Map(connectorStores.map((store) => [store.corpusId, store]));
@@ -746,32 +730,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
-        if (request.method === 'POST' && url.pathname === `${basePath}/source/export`) {
-          if (!dropboxSourceExport) {
-            throw new EmailSourceWorkerError(
-              501,
-              'source_export_not_supported',
-              'Private source worker does not support source export.',
-              'Set OLYMPUS_SOURCE_EXPORT_ENABLED=true with a configured Dropbox files index and OLYMPUS_SOURCE_EXPORT_DROPBOX_ROOTS before requesting source exports.',
-            );
-          }
-          const exportRequest = await parseDropboxSourceExportRequest(request);
-          let result: DropboxSourceExportResult;
-          try {
-            result = await dropboxSourceExport.export(exportRequest);
-          } catch (error) {
-            if (error instanceof DropboxSourceExportDestinationError) {
-              throw new EmailSourceWorkerError(403, 'source_export_destination_not_allowed', error.message);
-            }
-            if (error instanceof DropboxSourceExportRequestError) {
-              throw new EmailSourceWorkerError(400, 'invalid_request', error.message);
-            }
-            throw error;
-          }
-          assertNoRawEmailFields(result);
-          return json(result);
-        }
-
         if ((request.method === 'GET' || request.method === 'POST') && url.pathname === `${basePath}/source/index/status`) {
           if (!sourceIndexStatus) {
             throw new EmailSourceWorkerError(
@@ -914,31 +872,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             runtime.close?.();
           }
         }
-
-        // The embedding decision ledger. A query parameter on /dashboard rather
-        // than a path of its own, for the same reason ?background is one: the
-        // read-only dash_ token is allowlisted by PATHNAME in workers/http.ts,
-        // so a /dashboard/embedding-ledger path would 401 for exactly the
-        // reader this page is for. Sitting on /dashboard gives it the same auth
-        // as every other dashboard page with no auth code of its own.
-        //
-        // It is matched ahead of the /dashboard block below and returns without
-        // falling through, because it needs none of what that block builds — no
-        // view model, no registry, no secret store, no OAuth pruning. This page
-        // reads one file. It also stays reachable when the source dashboard is
-        // not configured at all, which matters: "what happened to the
-        // embeddings" is a question that outlives any particular worker's setup.
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-        if (request.method === 'GET'
-          && url.pathname === '/dashboard'
-          && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM)) {
-          const ledger = await readEmbeddingLedger(resolveEmbeddingLedgerPath(process.env));
-          const ledgerBasePath = embeddingLedgerBasePath(url);
-          return html(renderEmbeddingLedgerPage(ledger, {
-            ...(ledgerBasePath === undefined ? {} : { basePath: ledgerBasePath }),
-          }));
-        }
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
         if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json')) {
           if (!sourceIndexStatus || !sourceDashboard) {
@@ -2252,20 +2185,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json(body);
         }
 
-        if (request.method === 'POST' && url.pathname === `${basePath}/source/index/dropbox/content/export-eval-shard`) {
-          if (!dropboxEvalShardExport) {
-            throw new EmailSourceWorkerError(
-              501,
-              'dropbox_eval_shard_export_not_supported',
-              'Private source worker does not support Dropbox eval shard export.',
-            );
-          }
-          const exportRequest = await parseDropboxEvalShardExportRequest(request);
-          const result: DropboxEvalShardManifest = await dropboxEvalShardExport.export(exportRequest);
-          assertNoRawEmailFields(result);
-          return json(result);
-        }
-
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
           const record = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
@@ -3016,11 +2935,6 @@ function recordFromSearchParams(params: URLSearchParams): Record<string, unknown
   return record;
 }
 
-
-
-
-
-
 function xBookmarksLiveAdminResult(
   mode: 'head' | 'reconcile' | 'window_diagnostic',
   result: XBookmarksLiveSyncResult,
@@ -3191,20 +3105,11 @@ function xBookmarksLiveAdminResult(
   };
 }
 
-
-
-
 function assertSourceIndexSearchQuery(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'query must be a non-empty string.');
   }
 }
-
-
-
-
-
-
 
 function parseConnectorStoreIndexSearchRequestRecord(
   record: Record<string, unknown>,
@@ -3519,109 +3424,6 @@ function sourceIndexStatusCorpusIds(connectorStores: readonly LocalConnectorStor
   ];
 }
 
-
-
-
-async function parseDropboxSourceExportRequest(request: Request): Promise<DropboxSourceExportRequest> {
-  const record = await parseObjectBody(request);
-  const corpusId = asOptionalString(record.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const destinationRoot = asOptionalString(record.destination_root);
-  if (!destinationRoot) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'destination_root must be a non-empty Dropbox folder path.');
-  }
-  if (!Array.isArray(record.items) || record.items.length === 0) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'items must be a non-empty array of export items.');
-  }
-  const items = record.items.map((item, index) => parseDropboxSourceExportItem(item, index));
-  const account = asOptionalString(record.account);
-  const dryRun = asOptionalBoolean(record.dry_run);
-  return {
-    ...(account !== undefined ? { account } : {}),
-    destination_root: destinationRoot,
-    items,
-    ...(dryRun !== undefined ? { dry_run: dryRun } : {}),
-  };
-}
-
-function parseDropboxSourceExportItem(value: unknown, index: number): DropboxSourceExportItemRequest {
-  if (typeof value === 'string' && value.trim()) {
-    return { path: value.trim() };
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `items.${index} must be a path string or an object with a path.`);
-  }
-  const record = value as Record<string, unknown>;
-  const path = asOptionalString(record.path);
-  if (!path) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `items.${index}.path must be a non-empty string.`);
-  }
-  const destSubfolder = asOptionalString(record.dest_subfolder);
-  return {
-    path,
-    ...(destSubfolder !== undefined ? { dest_subfolder: destSubfolder } : {}),
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-async function parseDropboxEvalShardExportRequest(request: Request): Promise<DropboxEvalShardExportRequest> {
-  const record = await parseObjectBody(request);
-  const corpusId = asOptionalString(record.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const approvedScopeKey = asOptionalString(record.approved_scope_key);
-  const count = asOptionalNumber(record.count);
-  const outDir = asOptionalString(record.out_dir);
-  if (!approvedScopeKey || count === undefined || !outDir) {
-    throw new EmailSourceWorkerError(
-      400,
-      'invalid_request',
-      'approved_scope_key, count, and out_dir are required for Dropbox eval shard export.',
-    );
-  }
-  const account = asOptionalString(record.account);
-  const dryRun = asOptionalBoolean(record.dry_run);
-  const docTypes = asOptionalStringArray(record.doc_types, 'doc_types');
-  return {
-    ...(account !== undefined ? { account } : {}),
-    approved_scope_key: approvedScopeKey,
-    count,
-    out_dir: outDir,
-    ...(docTypes !== undefined ? { doc_types: docTypes } : {}),
-    ...(dryRun !== undefined ? { dry_run: dryRun } : {}),
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const SOURCE_DISPOSITION_STATES: readonly SourceDispositionState[] = ['ingest', 'metadata_only', 'exclude'];
 
 /**
@@ -3774,12 +3576,7 @@ interface FileExtractionRouteAlias {
  * caller never had to name — the two things the generic route needs that the
  * family-scoped one carried in its path instead of its body.
  *
- * Four family-scoped extraction paths have NO generic twin here on purpose:
- * `retarget-queued`, `requalify-terminal` and `retire-jobs` are operations the
- * factory's job store does not implement, and `on-demand-media`,
- * `apply-tier-overrides`, `export-eval-shard` and the promotion routes were
- * already out of scope for the factory. Aliasing a path onto an operation that
- * does not exist would be worse than leaving it legacy.
+ * Only paths with an equivalent shared factory operation are retained.
  */
 const FILE_EXTRACTION_ROUTE_ALIASES: ReadonlyMap<string, FileExtractionRouteAlias> = new Map([
   ['/source/index/dropbox/content/extract', {
@@ -4074,8 +3871,6 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
     'Private source worker does not have the durable watch control plane configured.',
   );
 }
-
-
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
@@ -5378,8 +5173,7 @@ function dashboardOAuthClientIdForSource(
 }
 
 async function dashboardApiKeyAvailability(secretStore: SecretStore): Promise<Partial<Record<DashboardApiKeySource, boolean>>> {
-  const readwiseToken = await secretStore.get('readwise.personal.token')
-    ?? (PUBLIC_RUNTIME_BUILD ? undefined : await secretStore.get('readwise.castor_runtime.token'));
+  const readwiseToken = await secretStore.get('readwise.personal.token');
   return {
     venice: Boolean(await secretStore.get('venice.api_key')),
     readwise: Boolean(readwiseToken),
@@ -5520,14 +5314,12 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-
 function asOptionalNumber(value: unknown, name = 'numeric field'): number | undefined {
   if (value === undefined || value === null) return undefined;
   const number = typeof value === 'number' ? value : Number(value);
   if (Number.isFinite(number)) return number;
   throw new EmailSourceWorkerError(400, 'invalid_request', `${name} must be numeric when provided.`);
 }
-
 
 function asOptionalBoolean(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
@@ -5670,9 +5462,6 @@ function asOptionalAnalystModel(
   return normalized;
 }
 
-
-
-
 function normalizeBasePath(basePath: string): string {
   const trimmed = basePath.replace(/\/+$/, '');
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
@@ -5774,28 +5563,9 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-/** ?embedding-ledger serves the embedding decision ledger. Same path, same auth. */
-const DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = 'embedding-ledger';
-
-/**
- * The prefix the ledger page builds its own links from.
- *
- * A browser reaches this page with a dash_ token in the query string, because
- * an address bar cannot send an Authorization header. Its one link — back to
- * Background — has to carry that token or the first click dead-ends on a 401.
- * This mirrors withTokenBasePath in dashboard/index.ts, which does the same job
- * for the pages that route through there; undefined means no token was
- * presented, and the page falls back to a bare /dashboard prefix.
- */
-function embeddingLedgerBasePath(url: URL): string | undefined {
-  const token = url.searchParams.get('token');
-  if (token === null || token === '') return undefined;
-  return `/dashboard?token=${encodeURIComponent(token)}`;
-}
-
 /**
  * The one place this worker emits HTML: the dashboard pages, the dispositions
- * page, the embedding ledger, and both OAuth landing pages.
+ * page, and both OAuth landing pages.
  *
  * The framing refusal is stated LAST so no caller can drop it by passing its
  * own header map. `SameSite=Strict` on the control cookie stops a cross-SITE

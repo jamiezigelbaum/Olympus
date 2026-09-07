@@ -1,10 +1,9 @@
 /**
  * Olympus v0.4 public product surface.
  *
- * Positive lists are the release contract: repository-only and private-ops
- * capabilities may continue to exist in source while they are being moved or
- * deleted, but they cannot become public merely because a registry, directory,
- * or command dispatcher grows.
+ * Positive lists are the release contract. The runtime registry is public-only,
+ * and these lists keep each supported harness from widening merely because a
+ * command dispatcher or package directory grows.
  */
 
 export const V0_4_PUBLIC_NATIVE_TOOLS = [

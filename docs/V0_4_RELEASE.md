@@ -1,6 +1,10 @@
 # Olympus 0.4 release plan
 
-Status: active
+Status in this branch: baseline reference for an unadopted parallel experiment.
+
+The current v0.4 testing continues independently on `main`. This branch follows
+[`PARALLEL_SIMPLIFICATION.md`](PARALLEL_SIMPLIFICATION.md); none of the historical
+completion receipts below qualify its different source or package bytes.
 
 Owner: Olympus product owner
 Planning authority: this document defines v0.4 scope, sequence, and completion. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
@@ -58,8 +62,9 @@ testers have exercised the normal product journey without custom engineering.
   `13ae3694953b252b6805ef2c00f08585af78d433` binds all 427 preservation rows to
   current replacement bytes and owns the separately authorized, content-free
   previous -> candidate -> previous deployment proof. The non-packaged
-  `config/private-ops-disposition.json` is the itemized deletion authority;
-  Slice 3 cannot close while its live receipt remains pending.
+  The completed itemized deletion authority and its live receipt are retained
+  in baseline Git history. This parallel branch retires that one-time verifier;
+  present package inventory, credential, and privacy checks remain active.
 - **2026-08-30 — Public distribution.** ClawHub is the v0.4 OpenClaw
   discovery and distribution channel. The release candidate is first proved
   through OpenClaw's managed `npm-pack:` installation path; the byte-identical
@@ -531,7 +536,7 @@ file edits or an agent-only repair.
 | 0. Preserve and baseline | complete | Local gate, inventory, verified preservation receipts, capability matrix, private-ops copy, worktree cleanup, honest red held-out baseline, green exact-head CI run `32990841255`, and merged PR #40 recorded in `V0_4_BASELINE.md` |
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
-| 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
+| 3. Standalone release candidate | complete at baseline | The baseline's exact commit/artifact passed 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. The historical disposition verifier is retired in this experimental branch; those receipts do not qualify its artifact. |
 | 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
