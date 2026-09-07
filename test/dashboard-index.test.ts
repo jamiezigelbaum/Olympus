@@ -208,7 +208,8 @@ describe('dashboard html route token propagation', () => {
     });
 
     expect(page.html).toContain('data-connect-kind="oauth"');
-    expect(page.html).toContain('var csrfToken = "csrf-fixture"');
+    expect(page.html).toContain('"csrfToken":"csrf-fixture"');
+    expect(page.html).toContain('function mountDashboardController');
   });
 
   test('still reads a dash_ token as read-only under a caller-set base path', () => {

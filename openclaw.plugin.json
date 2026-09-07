@@ -2,6 +2,9 @@
   "id": "olympus",
   "name": "Olympus",
   "version": "0.4.0",
+  "controlUi": {
+    "entry": "./dist/control-ui/index.js"
+  },
   "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",

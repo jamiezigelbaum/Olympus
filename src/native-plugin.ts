@@ -32,6 +32,7 @@ import {
   loadPrivateExtensions,
   type OlympusPrivateOperationToolRegistrar,
 } from './private-extension-contract.ts';
+import { registerOlympusDashboardGateway } from './core/control-ui-gateway.ts';
 
 /**
  * The private overlay is resolved once, at module scope, SYNCHRONOUSLY.
@@ -55,11 +56,26 @@ interface OpenClawPluginApi {
   context?: { activeModel?: unknown };
   toolContext?: { activeModel?: unknown };
   registerTool(tool: NativeTool): void;
+  registerGatewayMethod?(method: string, handler: (input: {
+    params: Record<string, unknown>;
+    client: { invalidated?: boolean; connect?: { scopes?: unknown } } | null;
+    respond(
+      ok: boolean,
+      payload?: unknown,
+      error?: { code: 'INVALID_REQUEST' | 'UNAVAILABLE'; message: string },
+      meta?: Record<string, unknown>,
+    ): void;
+    context?: { getRuntimeConfig?: () => unknown };
+    signal?: AbortSignal;
+  }) => Promise<void> | void, options?: {
+    scope?: 'operator.read' | 'operator.write';
+    profileAccess?: 'independent' | 'required';
+  }): void;
   registerHttpRoute?(route: {
     path: string;
     auth: 'plugin';
     match: 'exact';
-    handler(request: IncomingMessage, response: ServerResponse): Promise<void>;
+    handler(request: IncomingMessage, response: ServerResponse): Promise<boolean | void> | boolean | void;
   }): void;
 }
 
@@ -247,6 +263,7 @@ const plugin = {
     };
 
     registerSourceWatchDeliveryRoute(api, config);
+    registerOlympusDashboardGateway(api, config);
 
     const registeredToolNames: string[] = [];
     for (const operation of operations) {

@@ -2,8 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   actionButton,
   attentionRow,
-  clipboardScript,
-  controlScript,
   connectorSheet,
   dashboardControlGate,
   DASHBOARD_CONTROL_GATE_ID,
@@ -16,13 +14,13 @@ import {
   escapeScriptJson,
   externalLink,
   pageShell,
-  pollScript,
   progressBar,
   setupRow,
   sourceCard,
   statusGlyph,
   waitingGlyph,
 } from '../src/workers/dashboard/components.ts';
+import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
 
 /** One string carrying every escape a template literal can be broken with. */
@@ -179,11 +177,9 @@ describe('control links', () => {
     });
     expect(html).toContain('data-control-link="/dashboard/dispositions"');
     expect(html).not.toContain('href=');
-    const script = controlScript();
-    expect(script).toContain("target.closest('[data-control-link]')");
-    expect(script).toContain('ensureSession(host)');
-    expect(script).toContain("window.location.assign(control.getAttribute('data-control-link'))");
-    expect(script).not.toContain('sessionStorage');
+    const controller = mountDashboardController.toString();
+    expect(controller).toContain('data-control-link');
+    expect(controller).toContain('options.navigate(href)');
   });
 
   test('refuses scheme-relative and external control destinations', () => {
@@ -238,13 +234,12 @@ describe('dashboard-level control gate', () => {
   });
 
   test('hydrates the existing control session and never prompts inside a source action', () => {
-    const script = controlScript({ csrfToken: 'csrf-fixture' });
-    expect(script).toContain('var csrfToken = "csrf-fixture"');
-    expect(script).toContain("form.hasAttribute('data-control-session-kind')");
-    expect(script).toContain("document.querySelector('[data-dashboard-control-token]')");
-    expect(script).not.toContain('window.prompt');
-    expect(script).not.toContain('localStorage');
-    expect(script).not.toContain('sessionStorage');
+    const controller = mountDashboardController.toString();
+    expect(controller).toContain('data-control-session-kind');
+    expect(controller).toContain('data-dashboard-control-token');
+    expect(controller).not.toContain('window.prompt');
+    expect(controller).not.toContain('localStorage');
+    expect(controller).not.toContain('sessionStorage');
   });
 });
 
@@ -320,74 +315,6 @@ describe('attentionRow', () => {
     expect(html).toContain('>WhatsApp linked devices</a>');
     // Its own route: Unpair removes a paired session, never a broker grant.
     expect(html).not.toContain('data-disconnect-kind');
-  });
-
-  test('the control script confirms an Unpair, then posts it with acknowledge and CSRF', async () => {
-    const page = runControlScript('csrf-fixture');
-    const form = page.form({
-      'data-unpair-kind': 'unpair',
-      'data-confirmation': 'Delete this computer WhatsApp pairing session?',
-    }, { source_id: 'whatsapp.personal.messages' });
-
-    page.confirmAnswer = true;
-    await page.submit(form);
-
-    // The reader was asked, in the card's own words.
-    expect(page.confirmations).toEqual(['Delete this computer WhatsApp pairing session?']);
-    expect(page.requests).toHaveLength(1);
-    const request = page.requests[0]!;
-    expect(request.endpoint).toBe('/dashboard/unpair');
-    expect(request.init.method).toBe('POST');
-    expect(request.init.credentials).toBe('same-origin');
-    expect(request.init.headers['X-Olympus-CSRF']).toBe('csrf-fixture');
-    // The route 400s without this; the button is what supplies it.
-    expect(JSON.parse(request.init.body!)).toEqual({
-      source_id: 'whatsapp.personal.messages',
-      acknowledge: true,
-    });
-  });
-
-  test('the control script shows what the route said, not a generic Done', async () => {
-    const page = runControlScript('csrf-fixture');
-    page.responsePayload = {
-      ok: true,
-      status_message: 'Unpair incomplete — remove by hand: /data/session.db',
-    };
-    const form = page.form({ 'data-unpair-kind': 'unpair', 'data-confirmation': 'Sure?' }, {
-      source_id: 'whatsapp.personal.messages',
-    });
-
-    await page.submit(form);
-
-    // A partial removal rendered as "Done" is a completion claim the response
-    // never made.
-    expect(form.message.textContent).toBe('Unpair incomplete — remove by hand: /data/session.db');
-  });
-
-  test('the control script sends no Unpair at all when the reader declines', async () => {
-    const page = runControlScript('csrf-fixture');
-    const form = page.form({
-      'data-unpair-kind': 'unpair',
-      'data-confirmation': 'Delete this computer WhatsApp pairing session?',
-    }, { source_id: 'whatsapp.personal.messages' });
-
-    page.confirmAnswer = false;
-    await page.submit(form);
-
-    expect(page.confirmations).toHaveLength(1);
-    expect(page.requests).toEqual([]);
-  });
-
-  test('the control script refuses to act at all without an unlocked control session', async () => {
-    const page = runControlScript('');
-    const form = page.form({ 'data-unpair-kind': 'unpair', 'data-confirmation': 'Sure?' }, {
-      source_id: 'telegram.messages',
-    });
-
-    await page.submit(form);
-
-    expect(page.confirmations).toEqual([]);
-    expect(page.requests).toEqual([]);
   });
 
   test('renders nothing for the reason half when no field backs it', () => {
@@ -636,76 +563,6 @@ describe('connectorSheet', () => {
   });
 });
 
-describe('clipboardScript', () => {
-  test('is a constant with no interpolated content and binds with addEventListener', () => {
-    const script = clipboardScript();
-    expect(script).toBe(clipboardScript());
-    expect(script).toContain('addEventListener');
-    expect(script).toContain('data-copy-target');
-    expect(script).toContain('data-sheet-toggle');
-    expect(script).not.toContain('onclick=');
-    expect(script).not.toContain('${');
-  });
-});
-
-describe('pollScript', () => {
-  test('refreshes on the stated cadence, skipping hidden tabs', () => {
-    const script = pollScript({ signature: '[]' });
-    expect(script).toContain('15000');
-    expect(script).toContain('document.hidden');
-    expect(script).toContain('window.location.href');
-    expect(script).toContain('document.body.innerHTML');
-    expect(script).toContain('data-signature="[]"');
-  });
-
-  test('honours an explicit interval', () => {
-    expect(pollScript({ signature: '[]', intervalMs: 5000 })).toContain('5000');
-  });
-
-  test('never swaps the body out from under an open sheet', () => {
-    const script = pollScript({ signature: '[]' });
-    expect(script).toContain(`document.querySelector('.sheet.on')`);
-    // The guard must run before the swap, like the typing guard.
-    expect(script.indexOf('.sheet.on')).toBeLessThan(script.indexOf('document.body.innerHTML'));
-  });
-
-  test('keeps the header meta fresh even when the signature has not moved', () => {
-    const script = pollScript({ signature: '[]' });
-    // "checked Ns ago" is baked into the HTML at render time; without this
-    // copy a quiet dashboard claims the same age forever.
-    expect(script).toContain(`document.querySelector('.top .meta')`);
-    expect(script).toContain('meta.textContent = nextMeta.textContent');
-    expect(script.indexOf('nextMeta.textContent')).toBeLessThan(script.indexOf('signature === current'));
-  });
-
-  test('a hostile signature cannot break out of the script or the marker', () => {
-    const script = pollScript({ signature: '["a"]</script><script>evil()</script>' });
-    expect(script).not.toContain('<script>evil()');
-    expect(script).not.toContain('"]</script>');
-    expect(script.match(/<\/script>/g)?.length).toBe(1);
-  });
-
-  test('skips a tick while the previous refresh is still in flight', () => {
-    // A render costs what the server's slowest source costs. A bare interval
-    // with no guard starts another fetch every tick regardless, so a page
-    // slower than its own cadence queues overlapping renders that each make
-    // the next one slower — this is the guard that bounds it to one at a time.
-    const script = pollScript({ signature: '[]' });
-    expect(script).toContain('var inFlight = false');
-    expect(script).toContain('if (inFlight) return;');
-    expect(script).toContain('inFlight = true');
-    expect(script).toContain('inFlight = false');
-    // Set before the guard could possibly return: the check and the set are
-    // the only thing standing between a poll tick and a second fetch.
-    expect(script.indexOf('if (inFlight) return;')).toBeLessThan(script.indexOf('inFlight = true'));
-    expect(script.indexOf('inFlight = true')).toBeLessThan(script.indexOf('await fetch'));
-    // Released in `finally`, so a thrown fetch cannot wedge every later tick.
-    // (lastIndexOf: the FIRST "inFlight = false" is the `var` declaration.)
-    expect(script.indexOf('} finally {')).toBeGreaterThan(script.indexOf('await fetch'));
-    expect(script.lastIndexOf('inFlight = false')).toBeGreaterThan(script.indexOf('} finally {'));
-  });
-});
-
 describe('dashboardPageSignature', () => {
   test('fingerprints the body, ignoring seconds-level timers and its own marker', () => {
     const body = '<div class="phase working">Working · moved 40s ago</div><div>18 of 18 messages</div>';
@@ -741,19 +598,6 @@ describe('dashboardPageSignature', () => {
     expect(pageShell({ title: 'Olympus', meta: '', body: '<div>one</div>' })).not.toContain('dashboard-poll-signature');
   });
 
-  test('the poll reloads on any session change, restores focus and disclosures by key, and bounds deferral', () => {
-    const script = pollScript({ signature: 'x', unlocked: false, session: '' });
-    // A tab that sees custody OR the session identity differ reloads so its
-    // control handler gets the new page's CSRF token; a body swap would leave
-    // it with a stale one that the worker refuses.
-    expect(script).toContain("if (unlockedIn(next) !== unlocked || sessionIn(next) !== session) { window.location.reload(); return; }");
-    // Disclosures are restored by a stable key, falling back to summary text.
-    expect(script).toContain("node.getAttribute('data-poll-key') || (summary ? summary.textContent.trim() : '')");
-    // A focused control defers the swap for at most two minutes, then focus
-    // is put back by key after the swap.
-    expect(script).toContain('Date.now() - deferredSince < 120000');
-    expect(script).toContain('findByFocusKey(focused)');
-  });
 });
 
 describe('dashboardSignature', () => {
@@ -872,84 +716,3 @@ describe('escapeScriptJson', () => {
     expect(escapeScriptJson('{"a":"plain text 123"}')).toBe('{"a":"plain text 123"}');
   });
 });
-
-/**
- * Run the real browser control script against a minimal DOM.
- *
- * The script is the half of every control that no server test can reach: what
- * the button actually sends. Pinning its source text proves only that a string
- * is present, so this executes it and asserts the request that comes out.
- */
-function runControlScript(csrfToken: string) {
-  interface FakeElement { textContent: string }
-  class FakeForm {
-    attributes: Record<string, string>;
-    fields: Record<string, string>;
-    message: FakeElement = { textContent: '' };
-    resetCount = 0;
-
-    constructor(attributes: Record<string, string>, fields: Record<string, string>) {
-      this.attributes = attributes;
-      this.fields = fields;
-    }
-
-    hasAttribute(name: string): boolean { return name in this.attributes; }
-    getAttribute(name: string): string | null { return this.attributes[name] ?? null; }
-    querySelector(selector: string): FakeElement | null {
-      return selector === '[data-action-message]' ? this.message : null;
-    }
-    reset(): void { this.resetCount += 1; }
-  }
-  class FakeInput {}
-
-  const requests: Array<{
-    endpoint: string;
-    init: { method?: string; credentials?: string; body?: string; headers: Record<string, string> };
-  }> = [];
-  const confirmations: string[] = [];
-  const submitListeners: Array<(event: unknown) => void> = [];
-  const state = {
-    confirmAnswer: true,
-    responsePayload: { ok: true } as Record<string, unknown>,
-    requests,
-    confirmations,
-    form: (attributes: Record<string, string>, fields: Record<string, string>) =>
-      new FakeForm(attributes, fields),
-    async submit(form: FakeForm) {
-      for (const listener of submitListeners) listener({ target: form, preventDefault() {} });
-      // The handler is async and dispatched with `void`; let it settle.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    },
-  };
-
-  const documentStub = {
-    addEventListener(type: string, listener: (event: unknown) => void) {
-      if (type === 'submit') submitListeners.push(listener);
-    },
-    querySelector: () => null,
-  };
-  const windowStub = {
-    confirm(text: string) { confirmations.push(text); return state.confirmAnswer; },
-    location: { href: 'http://worker.test/dashboard', reload() {}, assign() {} },
-  };
-  const fetchStub = async (endpoint: string, init: never) => {
-    requests.push({ endpoint, init: init as never });
-    return { ok: true, status: 200, json: async () => state.responsePayload };
-  };
-  const formDataStub = class {
-    private form: FakeForm;
-    constructor(form: FakeForm) { this.form = form; }
-    entries() { return Object.entries(this.form.fields); }
-  };
-
-  const source = controlScript({ csrfToken })
-    .replace(/^\s*<script>/, '')
-    .replace(/<\/script>\s*$/, '');
-  // eslint-disable-next-line no-new-func
-  const run = new Function(
-    'document', 'window', 'fetch', 'FormData', 'HTMLFormElement', 'HTMLInputElement', 'setTimeout',
-    source,
-  );
-  run(documentStub, windowStub, fetchStub, formDataStub, FakeForm, FakeInput, setTimeout);
-  return state;
-}

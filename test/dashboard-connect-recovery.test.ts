@@ -17,6 +17,10 @@ import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  withWorkerBearerAuth,
+} from '../src/workers/http.ts';
+import {
   upsertConnectedHandle,
   type ConnectedCredentialHandle,
 } from '../src/workers/credential-broker/connected-handles.ts';
@@ -26,6 +30,49 @@ const dirs: string[] = [];
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('native OpenClaw dashboard worker route', () => {
+  test('requires the worker bearer and renders inert controls with the trusted Gateway callback origin', async () => {
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: { async status() { return fixtureStatus(); } },
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        registryPath: fixtureRegistryPath(),
+        secretStore: memorySecretStore({}),
+      },
+    });
+    const guarded = withWorkerBearerAuth(worker.fetch, { authToken: 'worker-secret' });
+    const path = 'http://worker.test/dashboard/ui?native=1&view=setup&can_write=1';
+
+    expect((await guarded(new Request(path))).status).toBe(401);
+    expect((await guarded(new Request(`${path}&token=dash_forged`))).status).toBe(401);
+
+    const response = await guarded(new Request(path, {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+    expect(response.status).toBe(200);
+    const result = await response.json() as {
+      status: number;
+      body: string;
+      can_write: boolean;
+      controller: string;
+    };
+    expect(result).toMatchObject({ status: 200, can_write: true, controller: 'dashboard' });
+    expect(result.body).toContain('https://gateway.example/oauth/callback/dropbox');
+    expect(result.body).not.toMatch(/<(?:script|style)\b/i);
+    expect(result.body).not.toContain('worker-secret');
+
+    const missingOrigin = await guarded(new Request(path, {
+      headers: { Authorization: 'Bearer worker-secret' },
+    }));
+    const missingOriginResult = await missingOrigin.json() as { body: string };
+    expect(missingOriginResult.body).toContain('OAuth connections are unavailable until the Gateway has a trusted public origin.');
+    expect(missingOriginResult.body).not.toContain('http://worker.test/oauth/callback/');
+  });
 });
 
 describe('the dashboard renders over an unreadable handle registry', () => {
