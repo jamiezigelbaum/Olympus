@@ -135,7 +135,7 @@ describe('source ingestion ledger', () => {
     expect(JSON.stringify(status.ingestion_ledger)).not.toContain('path_display');
   });
 
-  test('records latest ledger rows and dashboard samples in source-dashboard.sqlite', () => {
+  test('records all seven source samples and no retired ledger tables in source-dashboard.sqlite', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-'));
     const dbPath = join(dir, 'source-dashboard.sqlite');
     const store = new SqliteSourceIngestionLedgerStore(dbPath);
@@ -149,14 +149,151 @@ describe('source ingestion ledger', () => {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
-        expect((db.query('SELECT COUNT(*) AS count FROM source_ingestion_ledger').get() as { count: number }).count).toBe(7);
-        expect((db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count: number }).count).toBe(7);
-        expect(db.query('SELECT items, content_indexed, coverage_percent, ingestion_health_json FROM source_ingestion_ledger WHERE source_id = ?').get('dropbox')).toMatchObject({
-          items: 20,
-          content_indexed: 4,
-          coverage_percent: 20,
-          ingestion_health_json: expect.stringContaining('coverage_percent'),
-        });
+        expect(db.query(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name IN (
+            'source_ingestion_ledger', 'source_ingestion_unreadable_content'
+          )
+          ORDER BY name
+        `).all()).toEqual([]);
+        expect(db.query(`
+          SELECT source_id, corpus_id, sampled_at, indexed_items, content_ready_items,
+                 queue_waiting, queue_active, queue_attention
+          FROM source_dashboard_samples
+          ORDER BY source_id
+        `).all()).toEqual([
+          {
+            source_id: 'dropbox',
+            corpus_id: 'secure_local.dropbox.files',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 20,
+            content_ready_items: 4,
+            queue_waiting: 3,
+            queue_active: 1,
+            queue_attention: 4,
+          },
+          {
+            source_id: 'email',
+            corpus_id: 'secure_local.email.private',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 10,
+            content_ready_items: 8,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+          {
+            source_id: 'google_drive',
+            corpus_id: 'internal.drive.docs',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 1,
+            content_ready_items: 0,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+          {
+            source_id: 'readwise',
+            corpus_id: 'internal.readwise.library',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 1,
+            content_ready_items: 0,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+          {
+            source_id: 'telegram',
+            corpus_id: 'internal.telegram.messages',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 1,
+            content_ready_items: 0,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+          {
+            source_id: 'whatsapp',
+            corpus_id: 'secure_local.whatsapp.messages',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 0,
+            content_ready_items: 0,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+          {
+            source_id: 'x',
+            corpus_id: 'internal.x.bookmarks',
+            sampled_at: '2026-07-08T20:00:00.000Z',
+            indexed_items: 1,
+            content_ready_items: 0,
+            queue_waiting: 0,
+            queue_active: 0,
+            queue_attention: 0,
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not write pre-existing retired ledger tables while updating dashboard history', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-retired-'));
+    const dbPath = join(dir, 'source-dashboard.sqlite');
+    const seed = new Database(dbPath);
+    seed.exec(`
+      CREATE TABLE source_ingestion_ledger (
+        source_id TEXT PRIMARY KEY,
+        sentinel TEXT NOT NULL
+      );
+      CREATE TABLE source_ingestion_unreadable_content (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sentinel TEXT NOT NULL
+      );
+      INSERT INTO source_ingestion_ledger (source_id, sentinel)
+      VALUES ('sentinel-source', 'ledger untouched');
+      INSERT INTO source_ingestion_unreadable_content (sentinel)
+      VALUES ('unreadable untouched');
+    `);
+    seed.close();
+
+    const store = new SqliteSourceIngestionLedgerStore(dbPath);
+    try {
+      store.record(buildSourceIngestionLedgerSnapshot(fixtureStatus(), {
+        now: new Date('2026-07-08T20:00:00.000Z'),
+        unreadableContent: [{
+          name: 'sentinel.pdf',
+          status: 'failed_retryable',
+          extractor_kind: 'local_ocr_tesseract',
+          updated_at: '2026-07-08T19:00:00.000Z',
+        }],
+      }));
+    } finally {
+      store.close();
+    }
+
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        expect(db.query(
+          'SELECT source_id, sentinel FROM source_ingestion_ledger',
+        ).all()).toEqual([{
+          source_id: 'sentinel-source',
+          sentinel: 'ledger untouched',
+        }]);
+        expect(db.query(
+          'SELECT id, sentinel FROM source_ingestion_unreadable_content',
+        ).all()).toEqual([{
+          id: 1,
+          sentinel: 'unreadable untouched',
+        }]);
+        expect((db.query(
+          'SELECT COUNT(*) AS count FROM source_dashboard_samples',
+        ).get() as { count: number }).count).toBe(7);
       } finally {
         db.close();
       }
