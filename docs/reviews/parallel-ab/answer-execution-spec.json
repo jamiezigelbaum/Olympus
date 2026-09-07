@@ -1,0 +1,105 @@
+{
+  "kind": "olympus_real_model_synthetic_ab_spec",
+  "version": 1,
+  "frozenAt": "2026-09-07T23:20:19.710Z",
+  "corpusSha256": "0ff72eb926c9556e8fafa7e334d2221c59dac1e79a968640dc372f6740aafcc8",
+  "questionsSha256": "db198b3cc853614648a0ddbdf1258a18bb8294a88b0befed177996300b53da36",
+  "questionCount": 16,
+  "scriptSha256": "4b8d7e005539618ca965e85d7ea2a9e7c9da4ce5ce40162d7f8ce94af7894726",
+  "bindings": {
+    "main": {
+      "expectedRevision": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+      "gitSha": null,
+      "sourceTreeSha256": "d05389222dbdf3b467cd50bc59a0e78f2774cbbf344b54628c2b435e17163bee",
+      "sourceFiles": 250
+    },
+    "parallel": {
+      "expectedRevision": "7aac1040d7235574925ddf94002dd1b42f8591ed",
+      "gitSha": null,
+      "sourceTreeSha256": "4a685576d459f20ec303cdcaa7620c2ac9cd821f12a6b4b2ea85964a915c995b",
+      "sourceFiles": 214
+    }
+  },
+  "snapshots": {
+    "gmail": {
+      "corpusId": "public.gmail",
+      "family": "email",
+      "sha256": "248a68a2f4e10a513afd9f8f7294c369d256666a7b1efcf49b3f9e1633b250aa",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "google_drive": {
+      "corpusId": "public.google_drive",
+      "family": "file",
+      "sha256": "be7a100ff1268c7e2e9e718fd64a70d090ee6e97f421fcc740defd23dfe70987",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "dropbox": {
+      "corpusId": "public.dropbox",
+      "family": "file",
+      "sha256": "a15a339437f65608b36c78bfc81ae880537e2d04cd980ee867adbca48fbec423",
+      "items": 5,
+      "unreadableIds": [
+        "dropbox-atlas-addendum-unreadable",
+        "dropbox-beacon-invoice-unreadable"
+      ]
+    },
+    "telegram": {
+      "corpusId": "public.telegram",
+      "family": "chat",
+      "sha256": "d80de42d55e7e42846ce2240f1f6398e3e7f203d0f999eec86b7d400541d3954",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "whatsapp_personal": {
+      "corpusId": "public.whatsapp_personal",
+      "family": "chat",
+      "sha256": "a70436bbed002e4f71bbe40f8319d7c6f9c098d486e9446e8367653fca17586f",
+      "items": 4,
+      "unreadableIds": []
+    },
+    "x": {
+      "corpusId": "public.x",
+      "family": "x",
+      "sha256": "98719112be4469ea1fad8790d2c4132b85cbfed5ebe78e500cc9cf71fbb41038",
+      "items": 4,
+      "unreadableIds": []
+    },
+    "readwise": {
+      "corpusId": "public.readwise",
+      "family": "readwise",
+      "sha256": "2c3a1198a05326cf743bd2f91bebd57b969ad1d00d5d4d095033e23818b3261f",
+      "items": 4,
+      "unreadableIds": []
+    }
+  },
+  "model": "gemini-2.5-flash",
+  "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  "limits": {
+    "requests": 62,
+    "bodyUtf8Bytes": 40000,
+    "maxTokens": 1024,
+    "requestTimeoutMs": 45000,
+    "maxResults": 12,
+    "maxCharsPerCandidate": 800,
+    "maxOutputChars": 3072
+  },
+  "requestsAlreadyUsedOutsideHarness": 2,
+  "absoluteTotalRequestCeiling": 64,
+  "options": {
+    "analyst_provider": "cloud",
+    "retrieval_mode": "keyword",
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "serviceTier": false,
+    "queryPlanner": false,
+    "selfHeal": false,
+    "analystAudit": false,
+    "localSQLiteCloudQueryApproved": false
+  },
+  "order": "Even zero-based question: main then parallel; odd: parallel then main",
+  "projection": "S0/public_safe only. Retrieval stays in local SQLite with cloudQueryApproved:false; cloud synthesis is explicitly selected separately. Frozen extractionStatus=unreadable records are metadata-only PDFs; their descriptive text is not fabricated extracted content.",
+  "grading": "Each revision uses its actual runSourceQualificationEval/gradeAnswer. True content-provider coverage gaps captured during actual retrieval only. No expected labels are passed to the model. Pending privacy is not accepted as privacy proof.",
+  "comparison": "Different prose alone is not failure. Compare frozen grades, evidence identities, true coverage, policy and prompt hashes. Identical prompts with different outcomes require repeated inference before attribution."
+}

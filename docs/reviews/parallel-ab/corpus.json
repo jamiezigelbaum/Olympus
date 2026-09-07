@@ -1,0 +1,465 @@
+[
+  {
+    "id": "gmail-atlas-kickoff",
+    "provider": "gmail",
+    "title": "Atlas migration kickoff proposal",
+    "text": "Atlas kickoff proposal dated 2026-01-05. The initial target launch is 2026-04-30 and the initial delivery budget is EUR 48,000. The plan calls for a small pilot before general launch.",
+    "authoredAt": "2026-01-05T09:00:00Z",
+    "url": "https://example.invalid/records/gmail-atlas-kickoff",
+    "metadata": {
+      "corpusId": "public.gmail",
+      "project": "Atlas",
+      "kind": "email",
+      "revision": "initial"
+    }
+  },
+  {
+    "id": "gmail-atlas-stakeholder-thread",
+    "provider": "gmail",
+    "title": "Re: Atlas launch readiness",
+    "text": "Stakeholder thread from 2026-01-20: the team is cautiously optimistic about Atlas, but wants pilot evidence and vendor QA before launch. The thread does not select a launch city.",
+    "authoredAt": "2026-01-20T16:30:00Z",
+    "url": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+    "metadata": {
+      "corpusId": "public.gmail",
+      "project": "Atlas",
+      "kind": "email_thread",
+      "sentiment": "cautiously optimistic"
+    }
+  },
+  {
+    "id": "gmail-atlas-budget-correction",
+    "provider": "gmail",
+    "title": "Atlas estimate correction",
+    "text": "Correction sent 2026-02-04: the EUR 48,000 Atlas estimate omitted vendor QA. The revised working budget is EUR 52,500, pending the signed statement of work.",
+    "authoredAt": "2026-02-04T10:15:00Z",
+    "url": "https://example.invalid/records/gmail-atlas-budget-correction",
+    "metadata": {
+      "corpusId": "public.gmail",
+      "project": "Atlas",
+      "kind": "correction",
+      "revision": "budget-correction"
+    }
+  },
+  {
+    "id": "gmail-beacon-consulting-quote",
+    "provider": "gmail",
+    "title": "Beacon consulting quote",
+    "text": "Beacon consulting quote BC-2026-02 dated 2026-02-11: consulting services are quoted at USD 8,750. Hardware is quoted separately in the Beacon Dropbox record.",
+    "authoredAt": "2026-02-11T11:00:00Z",
+    "url": "https://example.invalid/records/gmail-beacon-consulting-quote",
+    "metadata": {
+      "corpusId": "public.gmail",
+      "project": "Beacon",
+      "kind": "quote",
+      "amount": 8750,
+      "currency": "USD"
+    }
+  },
+  {
+    "id": "gmail-lighthouse-status",
+    "provider": "gmail",
+    "title": "Lighthouse accessibility review status",
+    "text": "Lighthouse accessibility review on 2026-03-12: twelve of twelve checks passed. The remaining work is to publish the public checklist.",
+    "authoredAt": "2026-03-12T14:00:00Z",
+    "url": "https://example.invalid/records/gmail-lighthouse-status",
+    "metadata": {
+      "corpusId": "public.gmail",
+      "project": "Lighthouse",
+      "kind": "status"
+    }
+  },
+  {
+    "id": "drive-atlas-plan-v1",
+    "provider": "google_drive",
+    "title": "Atlas migration plan v1",
+    "text": "Atlas migration plan v1, authored 2026-01-10. Initial schedule: launch on 2026-04-30. Initial budget: EUR 48,000. The plan has a discovery phase followed by a pilot.",
+    "authoredAt": "2026-01-10T08:00:00Z",
+    "url": "https://example.invalid/records/drive-atlas-plan-v1",
+    "metadata": {
+      "corpusId": "public.google_drive",
+      "project": "Atlas",
+      "kind": "plan",
+      "path": "/Projects/Atlas/plans/atlas-plan-v1.md",
+      "revision": "v1"
+    }
+  },
+  {
+    "id": "drive-atlas-plan-v2",
+    "provider": "google_drive",
+    "title": "Atlas migration plan v2",
+    "text": "Atlas migration plan v2, authored 2026-02-03. After vendor QA was added, the target launch moved to 2026-05-15 and the budget became EUR 52,500. Three pilot sites are approved for the staged rollout.",
+    "authoredAt": "2026-02-03T09:30:00Z",
+    "url": "https://example.invalid/records/drive-atlas-plan-v2",
+    "metadata": {
+      "corpusId": "public.google_drive",
+      "project": "Atlas",
+      "kind": "plan",
+      "path": "/Projects/Atlas/plans/atlas-plan-v2.md",
+      "revision": "v2"
+    }
+  },
+  {
+    "id": "drive-beacon-decision",
+    "provider": "google_drive",
+    "title": "Beacon pilot decision record",
+    "text": "Beacon decision record dated 2026-02-13: approve the pilot. Mira Chen owns the next action. The field test is scheduled to start on 2026-03-01 and complete on 2026-03-08. Acceptance requires zero critical defects.",
+    "authoredAt": "2026-02-13T13:00:00Z",
+    "url": "https://example.invalid/records/drive-beacon-decision",
+    "metadata": {
+      "corpusId": "public.google_drive",
+      "project": "Beacon",
+      "kind": "decision",
+      "path": "/Projects/Beacon/decisions/pilot-approval.md",
+      "owner": "Mira Chen"
+    }
+  },
+  {
+    "id": "drive-beacon-acceptance-criteria",
+    "provider": "google_drive",
+    "title": "Beacon acceptance criteria",
+    "text": "Beacon acceptance criteria, revision 2, dated 2026-02-20: test all four scenarios, record critical defects, and have Mira Chen publish the result. This document does not name a legal approver.",
+    "authoredAt": "2026-02-20T10:00:00Z",
+    "url": "https://example.invalid/records/drive-beacon-acceptance-criteria",
+    "metadata": {
+      "corpusId": "public.google_drive",
+      "project": "Beacon",
+      "kind": "criteria",
+      "path": "/Projects/Beacon/quality/acceptance-criteria-v2.md",
+      "revision": "v2"
+    }
+  },
+  {
+    "id": "drive-lighthouse-charter",
+    "provider": "google_drive",
+    "title": "Lighthouse public checklist charter",
+    "text": "Lighthouse charter dated 2026-02-18: publish a public accessibility checklist with twelve checks and an owner review by 2026-03-20.",
+    "authoredAt": "2026-02-18T15:00:00Z",
+    "url": "https://example.invalid/records/drive-lighthouse-charter",
+    "metadata": {
+      "corpusId": "public.google_drive",
+      "project": "Lighthouse",
+      "kind": "charter",
+      "path": "/Projects/Lighthouse/charter.md"
+    }
+  },
+  {
+    "id": "dropbox-atlas-sow-v1",
+    "provider": "dropbox",
+    "title": "Atlas statement of work v1",
+    "text": "Atlas statement of work v1, signed 2026-01-15: total contract value EUR 48,000 and target launch 2026-04-30. This version predates the vendor QA correction.",
+    "authoredAt": "2026-01-15T12:00:00Z",
+    "url": "https://example.invalid/records/dropbox-atlas-sow-v1",
+    "metadata": {
+      "corpusId": "public.dropbox",
+      "project": "Atlas",
+      "kind": "contract",
+      "path": "/Projects/Atlas/contracts/atlas-sow-v1.pdf",
+      "revision": "v1"
+    }
+  },
+  {
+    "id": "dropbox-atlas-sow-v2",
+    "provider": "dropbox",
+    "title": "Atlas statement of work v2 signed",
+    "text": "Atlas statement of work v2, signed 2026-02-05: final contract value EUR 52,500, target launch 2026-05-15, and three pilot sites. This is the current signed SOW.",
+    "authoredAt": "2026-02-05T17:00:00Z",
+    "url": "https://example.invalid/records/dropbox-atlas-sow-v2",
+    "metadata": {
+      "corpusId": "public.dropbox",
+      "project": "Atlas",
+      "kind": "contract",
+      "path": "/Projects/Atlas/contracts/atlas-sow-v2.pdf",
+      "revision": "v2",
+      "status": "signed"
+    }
+  },
+  {
+    "id": "dropbox-atlas-addendum-unreadable",
+    "provider": "dropbox",
+    "title": "Atlas vendor addendum scan",
+    "text": "Atlas vendor addendum metadata dated 2026-02-06. The scanned document is present, but extraction failed and the exact penalty clause is unreadable. No clause text is available in this record.",
+    "authoredAt": "2026-02-06T09:00:00Z",
+    "url": "https://example.invalid/records/dropbox-atlas-addendum-unreadable",
+    "metadata": {
+      "corpusId": "public.dropbox",
+      "project": "Atlas",
+      "kind": "document",
+      "path": "/Projects/Atlas/contracts/vendor-addendum-scan.pdf",
+      "extractionStatus": "unreadable"
+    }
+  },
+  {
+    "id": "dropbox-beacon-hardware-quote",
+    "provider": "dropbox",
+    "title": "Beacon hardware quote",
+    "text": "Beacon hardware quote dated 2026-02-10: hardware subtotal is USD 12,400. The quote covers the four field-test kits and excludes consulting services.",
+    "authoredAt": "2026-02-10T11:30:00Z",
+    "url": "https://example.invalid/records/dropbox-beacon-hardware-quote",
+    "metadata": {
+      "corpusId": "public.dropbox",
+      "project": "Beacon",
+      "kind": "quote",
+      "path": "/Projects/Beacon/finance/hardware-quote.pdf",
+      "amount": 12400,
+      "currency": "USD"
+    }
+  },
+  {
+    "id": "dropbox-beacon-invoice-unreadable",
+    "provider": "dropbox",
+    "title": "Beacon scanned invoice",
+    "text": "Beacon invoice metadata dated 2026-03-05. The scanned invoice is present, but the unit price line is unreadable after extraction. The exact unit price cannot be determined from this record.",
+    "authoredAt": "2026-03-05T09:45:00Z",
+    "url": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+    "metadata": {
+      "corpusId": "public.dropbox",
+      "project": "Beacon",
+      "kind": "invoice",
+      "path": "/Projects/Beacon/finance/scanned-invoice.pdf",
+      "extractionStatus": "unreadable"
+    }
+  },
+  {
+    "id": "telegram-atlas-revision",
+    "provider": "telegram",
+    "title": "Atlas decision update",
+    "text": "Atlas decision update in the project channel on 2026-02-02: move the launch from 2026-04-30 to 2026-05-15, approve three pilot sites, and set a EUR 52,500 budget ceiling.",
+    "authoredAt": "2026-02-02T18:00:00Z",
+    "url": "https://example.invalid/records/telegram-atlas-revision",
+    "metadata": {
+      "corpusId": "public.telegram",
+      "project": "Atlas",
+      "kind": "chat_message",
+      "channel": "atlas-delivery"
+    }
+  },
+  {
+    "id": "telegram-atlas-sentiment",
+    "provider": "telegram",
+    "title": "Atlas launch thread",
+    "text": "Atlas launch thread on 2026-02-02: the group is cautiously optimistic after the QA plan was added, while still concerned about schedule pressure. The agreed next step is the three-site pilot.",
+    "authoredAt": "2026-02-02T18:20:00Z",
+    "url": "https://example.invalid/records/telegram-atlas-sentiment",
+    "metadata": {
+      "corpusId": "public.telegram",
+      "project": "Atlas",
+      "kind": "chat_thread",
+      "channel": "atlas-delivery",
+      "sentiment": "cautiously optimistic"
+    }
+  },
+  {
+    "id": "telegram-beacon-status",
+    "provider": "telegram",
+    "title": "Beacon field test started",
+    "text": "Beacon status message on 2026-03-01: the field test started on schedule. Four acceptance scenarios are in progress and the expected completion date is 2026-03-08.",
+    "authoredAt": "2026-03-01T09:00:00Z",
+    "url": "https://example.invalid/records/telegram-beacon-status",
+    "metadata": {
+      "corpusId": "public.telegram",
+      "project": "Beacon",
+      "kind": "chat_message",
+      "channel": "beacon-pilot",
+      "scenarioCount": 4
+    }
+  },
+  {
+    "id": "telegram-beacon-acceptance",
+    "provider": "telegram",
+    "title": "Beacon field test accepted",
+    "text": "Beacon acceptance message on 2026-03-08: all four scenarios passed with zero critical defects. Mira Chen published the accepted result and closed the pilot.",
+    "authoredAt": "2026-03-08T16:00:00Z",
+    "url": "https://example.invalid/records/telegram-beacon-acceptance",
+    "metadata": {
+      "corpusId": "public.telegram",
+      "project": "Beacon",
+      "kind": "chat_message",
+      "channel": "beacon-pilot",
+      "status": "accepted"
+    }
+  },
+  {
+    "id": "telegram-atlas-count-correction",
+    "provider": "telegram",
+    "title": "Atlas pilot count correction",
+    "text": "Correction in the Atlas channel on 2026-02-07: an earlier note said two pilot sites, but the approved decision and current SOW both confirm three pilot sites.",
+    "authoredAt": "2026-02-07T12:00:00Z",
+    "url": "https://example.invalid/records/telegram-atlas-count-correction",
+    "metadata": {
+      "corpusId": "public.telegram",
+      "project": "Atlas",
+      "kind": "correction",
+      "channel": "atlas-delivery",
+      "revision": "count-correction"
+    }
+  },
+  {
+    "id": "whatsapp-atlas-vendor-pilot",
+    "provider": "whatsapp_personal",
+    "title": "Atlas vendor pilot confirmation",
+    "text": "Vendor message on 2026-02-04: Atlas will run a 14-day pilot at three sites. The rate is EUR 3,200 per site, for a pilot services subtotal of EUR 9,600.",
+    "authoredAt": "2026-02-04T08:45:00Z",
+    "url": "https://example.invalid/records/whatsapp-atlas-vendor-pilot",
+    "metadata": {
+      "corpusId": "public.whatsapp_personal",
+      "project": "Atlas",
+      "kind": "chat_message",
+      "conversation": "Atlas vendor",
+      "siteCount": 3,
+      "amount": 9600,
+      "currency": "EUR"
+    }
+  },
+  {
+    "id": "whatsapp-atlas-pilot-sites",
+    "provider": "whatsapp_personal",
+    "title": "Atlas pilot site list",
+    "text": "Atlas vendor follow-up on 2026-02-10 names the approved pilot sites as North, Central, and Harbor. The message repeats the 2026-05-15 general launch target.",
+    "authoredAt": "2026-02-10T15:15:00Z",
+    "url": "https://example.invalid/records/whatsapp-atlas-pilot-sites",
+    "metadata": {
+      "corpusId": "public.whatsapp_personal",
+      "project": "Atlas",
+      "kind": "chat_message",
+      "conversation": "Atlas vendor",
+      "siteCount": 3
+    }
+  },
+  {
+    "id": "whatsapp-beacon-field-test",
+    "provider": "whatsapp_personal",
+    "title": "Beacon field test handoff",
+    "text": "Beacon handoff message on 2026-02-28: Mira Chen will start the field test on 2026-03-01 and collect the four acceptance scenarios for the 2026-03-08 decision.",
+    "authoredAt": "2026-02-28T17:00:00Z",
+    "url": "https://example.invalid/records/whatsapp-beacon-field-test",
+    "metadata": {
+      "corpusId": "public.whatsapp_personal",
+      "project": "Beacon",
+      "kind": "chat_message",
+      "conversation": "Beacon pilot",
+      "owner": "Mira Chen"
+    }
+  },
+  {
+    "id": "whatsapp-beacon-delivery",
+    "provider": "whatsapp_personal",
+    "title": "Beacon kit delivery update",
+    "text": "Beacon vendor message on 2026-03-04: the vendor is concerned about delivery timing because kit delivery slipped by two days, but the team still expects to finish the field test and publish acceptance on 2026-03-08.",
+    "authoredAt": "2026-03-04T10:30:00Z",
+    "url": "https://example.invalid/records/whatsapp-beacon-delivery",
+    "metadata": {
+      "corpusId": "public.whatsapp_personal",
+      "project": "Beacon",
+      "kind": "chat_message",
+      "conversation": "Beacon pilot",
+      "status": "at_risk"
+    }
+  },
+  {
+    "id": "x-atlas-public-update",
+    "provider": "x",
+    "title": "Atlas public pilot update",
+    "text": "Public Atlas update posted 2026-02-08: the pilot is underway at two sites and the team is targeting a spring launch. This post was later corrected.",
+    "authoredAt": "2026-02-08T12:00:00Z",
+    "url": "https://example.invalid/records/x-atlas-public-update",
+    "metadata": {
+      "corpusId": "public.x",
+      "project": "Atlas",
+      "kind": "public_post",
+      "revision": "earlier-count"
+    }
+  },
+  {
+    "id": "x-atlas-correction",
+    "provider": "x",
+    "title": "Atlas public pilot correction",
+    "text": "Correction posted publicly on 2026-02-09: Atlas has three pilot sites, not two, and the current target launch is 2026-05-15.",
+    "authoredAt": "2026-02-09T09:00:00Z",
+    "url": "https://example.invalid/records/x-atlas-correction",
+    "metadata": {
+      "corpusId": "public.x",
+      "project": "Atlas",
+      "kind": "correction",
+      "revision": "later-count"
+    }
+  },
+  {
+    "id": "x-beacon-public-update",
+    "provider": "x",
+    "title": "Beacon field test public update",
+    "text": "Public Beacon update posted 2026-03-02: the field test is in progress and the team is checking four scenarios before the acceptance decision.",
+    "authoredAt": "2026-03-02T12:00:00Z",
+    "url": "https://example.invalid/records/x-beacon-public-update",
+    "metadata": {
+      "corpusId": "public.x",
+      "project": "Beacon",
+      "kind": "public_post"
+    }
+  },
+  {
+    "id": "x-lighthouse-post",
+    "provider": "x",
+    "title": "Lighthouse checklist announcement",
+    "text": "Lighthouse public post on 2026-03-15: the accessibility checklist will be published after the final twelve-check review.",
+    "authoredAt": "2026-03-15T10:00:00Z",
+    "url": "https://example.invalid/records/x-lighthouse-post",
+    "metadata": {
+      "corpusId": "public.x",
+      "project": "Lighthouse",
+      "kind": "public_post"
+    }
+  },
+  {
+    "id": "readwise-atlas-principles",
+    "provider": "readwise",
+    "title": "Research note: staged migration pilots",
+    "text": "Readwise note saved 2026-01-12: successful migrations stage a small pilot before general launch, then publish a dated decision and budget correction.",
+    "authoredAt": "2026-01-12T07:30:00Z",
+    "url": "https://example.invalid/records/readwise-atlas-principles",
+    "metadata": {
+      "corpusId": "public.readwise",
+      "project": "Atlas",
+      "kind": "research_note"
+    }
+  },
+  {
+    "id": "readwise-beacon-research",
+    "provider": "readwise",
+    "title": "Research note: pilot acceptance",
+    "text": "Readwise note saved 2026-02-01: a useful pilot acceptance record names an owner, counts scenarios, and records critical defects explicitly.",
+    "authoredAt": "2026-02-01T07:45:00Z",
+    "url": "https://example.invalid/records/readwise-beacon-research",
+    "metadata": {
+      "corpusId": "public.readwise",
+      "project": "Beacon",
+      "kind": "research_note"
+    }
+  },
+  {
+    "id": "readwise-atlas-retrospective",
+    "provider": "readwise",
+    "title": "Atlas retrospective",
+    "text": "Retrospective saved 2026-03-20: Atlas used a three-site pilot, corrected its first budget, and kept the later 2026-05-15 launch target visible across the decision trail.",
+    "authoredAt": "2026-03-20T08:00:00Z",
+    "url": "https://example.invalid/records/readwise-atlas-retrospective",
+    "metadata": {
+      "corpusId": "public.readwise",
+      "project": "Atlas",
+      "kind": "retrospective"
+    }
+  },
+  {
+    "id": "readwise-vendor-contract-notes",
+    "provider": "readwise",
+    "title": "Vendor contract reading notes",
+    "text": "Reading notes saved 2026-01-18: contract revisions should preserve the original amount, the corrected amount, and the date of the signed version for later audit.",
+    "authoredAt": "2026-01-18T08:15:00Z",
+    "url": "https://example.invalid/records/readwise-vendor-contract-notes",
+    "metadata": {
+      "corpusId": "public.readwise",
+      "project": "Atlas",
+      "kind": "research_note"
+    }
+  }
+]

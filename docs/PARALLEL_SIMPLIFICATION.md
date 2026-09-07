@@ -141,6 +141,32 @@ partial/full ingestion, source detail, background work, OAuth walkthroughs,
 publisher setup, and unlocked controls. The [comparison receipt](reviews/parallel-dashboard-parity.json)
 does not replace the existing pending owner acceptance of the dashboard.
 
+## Additional A/B testing (2026-09-08)
+
+Both artifacts passed actual installation, plugin loading, worker health,
+Gateway tool calls and independent foreground restarts in isolated disposable
+OpenClaw profiles on one macOS host. Both also passed the real SQLite/process
+kill/resume comparison: 32 fictional records across seven sources,
+32 title queries per arm, and identical ranked results, provenance and content.
+A shared pre-existing metadata-only change-counter overcount remains disclosed.
+
+A real Gemini comparison then ran the same 16 frozen questions against identical
+read-only data and settings. Retrieval, hydration and complete model request
+bodies matched in all 16 pairs. The strict rubric scored main **5/16** and the
+alternative **4/16**. The only score difference was one citation omission; three
+additional pairs with exact original request bodies passed **2/3 in each build**,
+with the pass direction reversing in one pair. This supports model variability,
+not a code-caused regression. The raw scores are preserved. Several shared
+failures are brittle wording/citation expectations; two metadata questions are
+incomplete in the generic fixture and do not establish live-provider behavior.
+
+These results strengthen the case for the simpler maintenance surface, while
+leaving real-provider/private-corpus qualification and answer-quality superiority
+unproven. Full evidence, test corrections, interpretation and reproduction are
+in the [A/B report](reviews/parallel-ab/README.md). No runtime source changed
+while testing; no adoption or merge occurred. Current main advanced only in
+restart-script/protocol surfaces, with the evaluated runtime inputs unchanged.
+
 ## Parallel build and test
 
 Use this branch's dedicated worktree. Run `bun install --frozen-lockfile` and
