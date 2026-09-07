@@ -418,6 +418,7 @@ var init_public_surface = __esm(() => {
   V0_4_PUBLIC_DASHBOARD_ROUTES = [
     { method: "GET", path: "/dashboard" },
     { method: "GET", path: "/dashboard.json" },
+    { method: "GET", path: "/dashboard/ui" },
     { method: "GET", path: "/dashboard/auth-check" },
     { method: "POST", path: "/dashboard/control/session" },
     { method: "GET", path: "/dashboard/dispositions" },
@@ -11791,8 +11792,8 @@ var init_local_index = __esm(() => {
       const maxWindows = normalizeLocatorIdentityConvergenceWindows(options.maxWindows);
       let state = this.locatorIdentityIndexState();
       let scannedItems = 0;
-      for (let window = 0;!state.completed && window < maxWindows; window += 1) {
-        if (window > 0)
+      for (let window2 = 0;!state.completed && window2 < maxWindows; window2 += 1) {
+        if (window2 > 0)
           await yieldConnectorSyncTurn();
         scannedItems += this.advanceLocatorIdentityIndexWindow(state.cursorItemPk, maxItems);
         state = this.locatorIdentityIndexState();
@@ -12486,7 +12487,7 @@ var init_local_index = __esm(() => {
       const relinquishedLocalItemIds = [];
       let identitiesScanned = 0;
       let itemsRelinquished = 0;
-      for (let window = 0;!position.complete && window < maxWindows; window += 1) {
+      for (let window2 = 0;!position.complete && window2 < maxWindows; window2 += 1) {
         const page = options.stricter.activeItemIdentities({
           afterItemPk: position.cursorItemPk,
           maxItems
@@ -22421,8 +22422,8 @@ function createReadwiseSourceConnector(options) {
           withRawSourceUrl: true
         });
         const fetchedAt = validDate2(now()).toISOString();
-        const available = dedupeItems(page.results.flatMap((document) => {
-          const item = rawItemFromReaderDocument(document, account, fetchedAt);
+        const available = dedupeItems(page.results.flatMap((document2) => {
+          const item = rawItemFromReaderDocument(document2, account, fetchedAt);
           return item ? [item] : [];
         })).slice(offset);
         const items = available.slice(0, remaining);
@@ -22522,23 +22523,23 @@ function readwiseDailyRequestBudgetFromEnv(env = process.env) {
   }
   return parsed;
 }
-function rawItemFromReaderDocument(document, account, fetchedAt) {
-  const providerItemId = optionalId(document.id);
+function rawItemFromReaderDocument(document2, account, fetchedAt) {
+  const providerItemId = optionalId(document2.id);
   if (!providerItemId)
     return;
   const documentId = providerItemId;
-  const title = optionalString6(document.title) ?? `Readwise document ${providerItemId}`;
-  const author = optionalString6(document.author);
-  const tags = tagNames(document.tags);
-  const sourceUrl = optionalString6(document.source_url) ?? optionalString6(document.url);
-  const readwiseUrl = optionalString6(document.readwise_url);
+  const title = optionalString6(document2.title) ?? `Readwise document ${providerItemId}`;
+  const author = optionalString6(document2.author);
+  const tags = tagNames(document2.tags);
+  const sourceUrl = optionalString6(document2.source_url) ?? optionalString6(document2.url);
+  const readwiseUrl = optionalString6(document2.readwise_url);
   const locatorUri = sourceUrl ?? readwiseUrl;
-  const authoredAt = optionalString6(document.created_at);
-  const updatedAt = optionalString6(document.updated_at);
+  const authoredAt = optionalString6(document2.created_at);
+  const updatedAt = optionalString6(document2.updated_at);
   const text = joinText([
-    optionalString6(document.summary),
-    optionalString6(document.notes) ?? optionalString6(document.document_note),
-    optionalString6(document.html_content)
+    optionalString6(document2.summary),
+    optionalString6(document2.notes) ?? optionalString6(document2.document_note),
+    optionalString6(document2.html_content)
   ]);
   return rawItem({
     account,
@@ -22554,8 +22555,8 @@ function rawItemFromReaderDocument(document, account, fetchedAt) {
     text,
     fetchedAt,
     metadata: {
-      ...optionalString6(document.category) ? { category: optionalString6(document.category) } : {},
-      ...optionalString6(document.location) ? { location: optionalString6(document.location) } : {}
+      ...optionalString6(document2.category) ? { category: optionalString6(document2.category) } : {},
+      ...optionalString6(document2.location) ? { location: optionalString6(document2.location) } : {}
     }
   });
 }
@@ -64243,6 +64244,1078 @@ var init_source_watch_runtime = __esm(() => {
   });
 });
 
+// src/workers/dashboard/static-styles.ts
+var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; color: inherit; text-decoration: none; }
+.bgrow .bgl { display: grid; grid-template-columns: 110px 1fr 64px; gap: 12px; align-items: center; padding: 3px 0; }
+.bgrow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
+.bgrow .fx { color: var(--t3); font-size: 12px; }
+.bgrow .go { position: absolute; right: 14px; top: 10px; color: var(--t4); font-size: 13px; }
+.bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
+.bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
+.minibar { display: block; width: 64px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; justify-self: end; }
+.minibar i { display: block; height: 100%; background: var(--t3); }
+.lanerow { display: grid; grid-template-columns: 110px 64px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+.lanerow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
+.lanerow .st { color: var(--t3); font-size: 12px; }
+.lanerow .minibar { justify-self: start; }
+.lanestrip { display: flex; gap: 2px; }
+.lanestrip i { display: block; width: 7px; height: 20px; border-radius: 2px; }
+.disp { font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .04em; }
+.disp.heal { color: var(--good); }
+.disp.attn { color: var(--warn); }
+@media (max-width: 700px) {
+  .lanerow { grid-template-columns: 110px 1fr; }
+  .lanerow .minibar, .lanerow .lanestrip { display: none; }
+  /* The go arrow is absolutely positioned at the right edge, so the facts
+     column keeps clear of it rather than running underneath. */
+  .bgrow .bgl { grid-template-columns: 1fr auto; padding-right: 18px; }
+}
+`, DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
+.phase .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.phase .pn { font-size: 12.5px; font-weight: 600; color: var(--t2); }
+.phase .pv { font-size: 12px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
+.phase .bar { max-width: none; margin-top: 6px; height: 5px; border-radius: 3px; }
+.phase .pv .st { display: inline-block; margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); font-weight: 600; color: var(--t2); }
+.phase.done .pv .st { color: var(--good); }
+.phase.working .pv .st { color: var(--run); }
+.phase.stalled .pv .st { color: var(--warn); }
+.phase.waiting .pv .st { color: var(--t4); }
+.phase.waiting .bar { background: var(--line2); }
+.phase.waiting .bar i { display: none; }
+.bar.indet.working { position: relative; }
+.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
+@keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
+.settled { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; color: var(--t2); font-size: 13px; max-width: 520px; }
+.banner { margin-bottom: 6px; }
+.advanced { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 4px; }
+.advanced > summary { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); cursor: pointer; padding: 12px 0; list-style: none; }
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before { content: '\\25B8 '; display: inline-block; transition: transform .12s ease; }
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
+}
+`, DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+.catrow .name { font-weight: 600; color: var(--t2); }
+.catrow .what { color: var(--t4); font-size: 12px; }
+.catrow .tier { color: var(--t3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
+.scoperow .rid { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--t2); }
+.scoperow .what { color: var(--t3); font-size: 12.5px; }
+.sect.gap { margin-top: 44px; }
+.quiet { color: var(--t4); font-size: 12px; margin: -2px 0 10px; max-width: 66ch; }
+.quiet.after { margin: 8px 0 0; }
+.tiersnote { color: var(--t3); font-size: 12.5px; margin: 0 0 12px; max-width: 66ch; }
+.tiernote { font-size: 12.5px; margin-top: 10px; }
+.pm { color: var(--t4); }
+.pm.yes { color: var(--good); }
+.tname { color: var(--t1); font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: 12px; }
+.chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+@media (max-width: 700px) {
+  .catrow { grid-template-columns: 1fr; gap: 4px; }
+}
+`, DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
+.dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
+.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: 12.5px; padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.dnav .dnavlink:hover { color: var(--link); }
+.dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
+.dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
+`, SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
+.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
+.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
+.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
+.pilotnote b { color: var(--warn); }
+@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
+.lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
+.lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.lane .lfacts { color: var(--t2); font-size: 12.5px; margin-top: 5px; font-variant-numeric: tabular-nums; }
+.lane .lmove { color: var(--t3); font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.lane .lreason { color: var(--warn); font-size: 12px; margin-top: 5px; max-width: 74ch; }
+.lane .lreason.stuck { color: var(--bad); }
+.lane .lreason.unknown { color: var(--t3); }
+.lane .lbar { margin-top: 8px; }
+.lane .lbar .minibar { width: 100%; max-width: 340px; }
+.lane .lanestrip { margin-top: 8px; }
+.lane .lqueue { margin-top: 8px; border-top: 1px solid var(--line2); padding-top: 7px; }
+.lane .lq { color: var(--t3); font-size: 12px; line-height: 1.55; }
+.lane .lq b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.lane.quiet { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 14px; }
+.lane.quiet .lquiet { color: var(--t4); font-size: 12px; }
+.info { color: var(--t3); font-size: 12.5px; line-height: 1.6; max-width: 74ch; }
+.infolink { margin-top: 8px; font-size: 12.5px; }
+.embblock { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin: -3px 0 7px; }
+.embblock .embstate { font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+.embblock .embline { color: var(--t3); font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
+.embblock .embline.warn { color: var(--warn); }
+.embblock .rowform { margin: 8px 0 6px; }
+@media (max-width: 700px) {
+  .lane .lanehd { flex-wrap: wrap; }
+}
+`, DISPOSITIONS_CSS = `
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1c2523;
+        background: #f6f7f5;
+        --accent: #2f7d67;
+        --accent-strong: #276a57;
+        --accent-soft: #e7f0ec;
+        --warn: #9a6b1f;
+        --warn-soft: #f7efdd;
+        --danger: #b04a38;
+        --border: #e0e5e1;
+        --muted: #4d5955;
+        --faint: #616e69;
+        --card: #ffffff;
+        --radius-card: 10px;
+        --radius-control: 8px;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-size: 14px; line-height: 1.55; }
+      main { max-width: 880px; margin: 0 auto; padding: 40px 24px 72px; }
+      header { margin-bottom: 24px; display: grid; gap: 8px; }
+      h1 { font-size: 24px; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+      h2 { font-size: 16px; font-weight: 600; margin: 0; }
+      h3 { font-size: 14px; font-weight: 600; margin: 0; }
+      p { margin: 0; color: var(--muted); max-width: 72ch; }
+      .eyebrow { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .subtle { color: var(--muted); font-size: 13px; }
+      code { background: #f0f3f1; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+
+      .warn-note { background: var(--warn-soft); border: 1px solid #e2c888; border-radius: var(--radius-card); padding: 11px 14px; color: #6f551f; font-size: 13px; }
+      .warn-note strong { color: #59410f; }
+
+      .auth { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; margin-bottom: 16px; }
+      .auth-status { font-size: 13px; }
+      .auth-status.authorized { color: var(--accent); font-weight: 500; }
+
+      .source-dispositions { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 12px; margin-bottom: 16px; }
+      .source-head { display: grid; gap: 3px; }
+
+      .tree { display: grid; gap: 2px; }
+      .node { border-top: 1px solid var(--border); padding: 8px 0 8px 0; }
+      .node > .children { margin-left: 18px; border-left: 1px solid var(--border); padding-left: 12px; }
+      .node-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; cursor: default; }
+      /* A flex summary drops the native disclosure triangle in every engine, so
+         the affordance is drawn here. Without it a folder with children looks
+         exactly like one without, and the whole tree reads as flat. */
+      details.node > summary.node-head { cursor: pointer; list-style: none; }
+      details.node > summary.node-head::-webkit-details-marker { display: none; }
+      details.node > summary.node-head::before { content: "\\25B8"; color: var(--faint); font-size: 11px; width: 10px; }
+      details.node[open] > summary.node-head::before { content: "\\25BE"; }
+      .node.leaf > .node-head::before { content: ""; width: 10px; }
+      .node-name { font-weight: 500; }
+      .node-counts { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+      /* Explicit and inherited are the distinction this page exists to draw, so
+         they are separated by fill, weight and a note — never by colour alone,
+         which a reader with low colour vision would not see at all. */
+      .chip { display: inline-flex; align-items: baseline; gap: 5px; border-radius: 999px; font-size: 12px; padding: 1px 9px; border: 1px solid var(--border); }
+      .chip-note { font-size: 11px; opacity: 0.85; }
+      .chip.explicit { font-weight: 600; }
+      .chip.explicit.exclude { background: #f6e2de; border-color: #dcb0a6; color: #7d2f20; }
+      .chip.explicit.metadata_only { background: var(--warn-soft); border-color: #d9c9a3; color: #6f551f; }
+      .chip.explicit.ingest { background: var(--accent-soft); border-color: #b6d3c8; color: var(--accent-strong); }
+      .chip.inherited { background: transparent; border-style: dashed; color: var(--faint); font-weight: 400; }
+      .chip.default { background: transparent; color: var(--faint); }
+      .mixed { font-size: 11.5px; color: var(--warn); border: 1px dotted #d9c9a3; border-radius: 999px; padding: 0 8px; }
+
+      .control { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0 0; font-size: 13px; }
+      .control label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
+      .control label.locked { opacity: 0.5; }
+      .control-locked { font-size: 12.5px; color: var(--faint); margin: 6px 0 0; max-width: 70ch; }
+
+      .media-rules { background: #fbfcfb; border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; }
+      .media-rules ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+      .media-rules li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+      .rule-criterion { font-size: 12.5px; color: #2a3733; }
+
+      .cleanup { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 10px; margin-bottom: 16px; }
+      .copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+      label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
+      input[readonly] { background: #f6f8f6; color: #2a3733; }
+      input { border: 1px solid #ccd5d1; border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: 13.5px; min-width: 0; }
+      button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; justify-self: start; }
+      button.secondary { background: transparent; color: var(--accent); }
+      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      form { display: grid; gap: 10px; }
+      .action-message { color: var(--muted); font-size: 13px; min-height: 18px; }
+
+      @media (max-width: 720px) {
+        main { padding: 28px 16px 48px; }
+        .node > .children { margin-left: 8px; padding-left: 8px; }
+      }
+
+      /* Finder-style Olympus picker. These rules intentionally override the
+         retired light form above while the underlying save contract remains
+         unchanged. */
+      :root {
+        color-scheme: dark;
+        color: var(--t1);
+        background: #0B0B0E;
+        --accent: var(--link);
+        --accent-strong: var(--link);
+        --accent-soft: var(--panel2);
+        --border: var(--line);
+        --muted: var(--t3);
+        --faint: var(--t4);
+        --card: var(--bg);
+      }
+      body { background: #0B0B0E; color: var(--t1); }
+      .picker-page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 72px; }
+      .picker-header { margin: 0 0 18px; display: grid; gap: 5px; }
+      .picker-header h1 { color: var(--t1); font-size: 22px; }
+      .picker-header p { color: var(--t3); }
+      .picker-header strong { color: var(--t2); }
+      .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
+      .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
+      .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
+      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
+      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: 12.5px; }
+      .location.selected { background: var(--panel2); color: var(--t1); }
+      .location .folder-icon { color: var(--link); font-size: 10px; }
+      .finder-browser { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); }
+      .finder-toolbar { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
+      .finder-toolbar h2 { color: var(--t1); font-size: 15px; }
+      .finder-toolbar p { color: var(--t4); font-size: 11.5px; margin-top: 2px; }
+      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: 12px; }
+      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
+      .tree { height: 468px; overflow: auto; display: block; padding: 6px; }
+      /* Under the tree, not inside it: these count folders and items the tree
+         does not list, so a reader who scrolls to the bottom of the tree has
+         not seen them. */
+      .tree-notes { padding: 8px 14px 10px; border-top: 1px solid var(--line2); display: grid; gap: 4px; }
+      .tree-notes .subtle { color: var(--t4); font-size: 11.5px; }
+      .node { border: 0; padding: 0; }
+      .node > .children { margin-left: 18px; padding-left: 0; border-left: 1px solid var(--line2); }
+      details.node > summary.folder-row { list-style: none; }
+      details.node > summary.folder-row::-webkit-details-marker { display: none; }
+      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: 10px; }
+      details.node[open] > summary.folder-row::before { content: "\\25BE"; }
+      .folder-row { min-height: 31px; display: grid; grid-template-columns: 12px 15px minmax(150px, 1fr) 64px 128px; gap: 7px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: default; color: var(--t2); }
+      .folder-row:hover { background: rgba(255,255,255,.035); }
+      .folder-row.selected { background: var(--link-line); color: var(--t1); }
+      .folder-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+      .node.leaf .folder-row .disclosure { width: 12px; }
+      .folder-icon { color: var(--link); font-size: 11px; }
+      .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+      .node-counts, .node-state { color: var(--t3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+      .folder-row.selected .node-counts, .folder-row.selected .node-state { color: var(--t1); }
+      .stored-controls { display: none; }
+      .finder-inspector { grid-column: 3; grid-row: 1; padding: 22px 18px; background: rgba(255,255,255,.015); }
+      .finder-inspector [data-inspector-empty] { padding-top: 120px; text-align: center; color: var(--t4); }
+      .inspector-folder { color: var(--link); font-size: 30px; margin-bottom: 10px; }
+      .finder-inspector h3 { color: var(--t1); font-size: 15px; margin-bottom: 4px; }
+      .inspector-path { color: var(--t4); font-size: 11px; overflow-wrap: anywhere; }
+      .inspector-count { color: var(--t3); font-size: 12px; margin: 9px 0 18px; }
+      .choice-stack { display: grid; gap: 7px; }
+      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: 12.5px; }
+      .choice-stack button span { color: var(--t4); font-size: 10.5px; font-weight: 400; }
+      .choice-stack button.on { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
+      .choice-stack button:disabled { opacity: .38; cursor: not-allowed; }
+      .inspector-note { color: var(--t4); font-size: 11px; margin-top: 12px; }
+      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 11.5px; }
+      .footer-actions { display: flex; gap: 8px; }
+      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
+      .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
+      .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
+      .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
+      @media (max-width: 860px) {
+        .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
+        .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
+        .finder-footer { grid-row: 3; }
+      }
+`;
+
+// src/control-ui/browser-controller.ts
+function mountDashboardController(options) {
+  let canWrite = options.canWrite;
+  let csrfToken = options.csrfToken || "";
+  let signature = options.signature || "";
+  let pollIntervalMs = options.pollIntervalMs || 15000;
+  let interval;
+  let inFlight = false;
+  let disposed = false;
+  let deferredSince = 0;
+  let presented = options.presented !== false;
+  const root = options.root;
+  function query(selector) {
+    return root.querySelector(selector);
+  }
+  function queryAll(selector) {
+    return Array.from(root.querySelectorAll(selector));
+  }
+  function say(form, message) {
+    const slot = form.querySelector("[data-action-message]");
+    if (slot)
+      slot.textContent = message;
+  }
+  function errorMessage3(result) {
+    const error2 = result.body.error;
+    if (error2 && typeof error2 === "object" && !Array.isArray(error2)) {
+      const message = error2.message;
+      if (typeof message === "string" && message.trim() !== "")
+        return message;
+    }
+    return "Request failed.";
+  }
+  function applyWriteCapability() {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind]").forEach((form) => {
+      form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
+        if (control.dataset.olympusOriginallyDisabled === undefined) {
+          control.dataset.olympusOriginallyDisabled = control.disabled ? "true" : "false";
+        }
+        const oauthUnavailable = form.hasAttribute("data-native-oauth-unavailable");
+        if (!canWrite || oauthUnavailable) {
+          control.disabled = true;
+          control.setAttribute("aria-disabled", "true");
+        } else {
+          control.disabled = control.dataset.olympusOriginallyDisabled === "true";
+          if (!control.disabled)
+            control.removeAttribute("aria-disabled");
+        }
+      });
+    });
+  }
+  function clearAuthorizationFallback(form) {
+    const slot = form.querySelector("[data-authorization-fallback]");
+    if (slot)
+      slot.textContent = "";
+  }
+  function showAuthorizationFallback(form, url) {
+    const slot = form.querySelector("[data-authorization-fallback]");
+    if (!slot || !url.startsWith("https://"))
+      return;
+    slot.textContent = "";
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.className = "hint";
+    link.textContent = "If a new tab didn't open, open it here";
+    slot.appendChild(link);
+  }
+  function openAuthorizationTab() {
+    let tab = null;
+    try {
+      tab = window.open("", "_blank");
+    } catch {
+      tab = null;
+    }
+    if (tab) {
+      try {
+        tab.opener = null;
+      } catch {}
+    }
+    return tab;
+  }
+  function closeAuthorizationTab(tab) {
+    if (!tab)
+      return;
+    try {
+      tab.close();
+    } catch {}
+  }
+  function formRecord(form) {
+    return Object.fromEntries(Array.from(new FormData(form).entries()).filter((entry) => typeof entry[1] === "string"));
+  }
+  function controlParams(form) {
+    const body = formRecord(form);
+    const connect = form.dataset.connectKind;
+    if (connect === "oauth") {
+      return {
+        action: "start_oauth",
+        source: body.source,
+        ...body.client_id ? { client_id: body.client_id } : {},
+        ...body.client_secret ? { client_secret: body.client_secret } : {}
+      };
+    }
+    if (connect === "oauth_cancel") {
+      return {
+        action: "cancel_oauth",
+        source: body.source
+      };
+    }
+    if (connect === "api_key") {
+      return {
+        action: "connect_api_key",
+        source: body.source,
+        api_key: body.api_key || ""
+      };
+    }
+    if (form.hasAttribute("data-sync-kind")) {
+      return {
+        action: "sync_now",
+        source: body.source
+      };
+    }
+    if (form.hasAttribute("data-embedding-kind")) {
+      return { action: "set_embedding_priority", on: body.on === "true" };
+    }
+    if (form.hasAttribute("data-disconnect-kind")) {
+      return {
+        action: "disconnect",
+        source_id: body.source_id,
+        acknowledge: true
+      };
+    }
+    if (form.hasAttribute("data-unpair-kind")) {
+      return {
+        action: "unpair",
+        source_id: body.source_id,
+        acknowledge: true
+      };
+    }
+    return;
+  }
+  async function unlock(form) {
+    const field = form.querySelector("[data-dashboard-control-token]");
+    const pasted = field?.value.trim() || "";
+    if (!pasted) {
+      say(form, "Paste the worker bearer token.");
+      field?.focus();
+      return;
+    }
+    if (pasted.startsWith("dash_")) {
+      say(form, "That is the read-only view token; use the worker bearer token from setup.");
+      field.value = "";
+      field?.focus();
+      return;
+    }
+    if (!options.transport.unlock)
+      return;
+    say(form, "Unlocking…");
+    const result = await options.transport.unlock(pasted);
+    field.value = "";
+    if (!result.ok || !result.csrf_token) {
+      say(form, "That token was not accepted.");
+      return;
+    }
+    csrfToken = result.csrf_token;
+    canWrite = true;
+    applyWriteCapability();
+    await refreshNow(true);
+  }
+  async function lock(form) {
+    if (!options.transport.lock)
+      return;
+    say(form, "Locking…");
+    if (!await options.transport.lock()) {
+      say(form, "Could not lock.");
+      return;
+    }
+    csrfToken = "";
+    canWrite = false;
+    applyWriteCapability();
+    await refreshNow(true);
+  }
+  async function submitControl(form, authorizationTab) {
+    if (!canWrite && !csrfToken) {
+      closeAuthorizationTab(authorizationTab);
+      say(form, "Your OpenClaw connection has read-only access.");
+      return;
+    }
+    const params = controlParams(form);
+    if (!params) {
+      closeAuthorizationTab(authorizationTab);
+      return;
+    }
+    if (params.action === "disconnect" || params.action === "unpair") {
+      const fallback = params.action === "unpair" ? "Unpair this source?" : "Disconnect this source?";
+      if (!window.confirm(form.dataset.confirmation || fallback)) {
+        closeAuthorizationTab(authorizationTab);
+        return;
+      }
+    }
+    if (params.action === "start_oauth")
+      clearAuthorizationFallback(form);
+    say(form, "Starting…");
+    try {
+      const result = await options.transport.control(params);
+      if (result.status === 401 || result.status === 403) {
+        closeAuthorizationTab(authorizationTab);
+        if (options.authority === "worker-session") {
+          csrfToken = "";
+          say(form, "The control session expired — unlock controls in Setup, then try again.");
+        } else {
+          canWrite = false;
+          applyWriteCapability();
+          say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+        }
+        return;
+      }
+      const authorizationUrl = result.body.authorization_url;
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        closeAuthorizationTab(authorizationTab);
+        say(form, errorMessage3(result));
+        return;
+      }
+      if (typeof authorizationUrl === "string" && authorizationUrl.startsWith("https://")) {
+        if (authorizationTab) {
+          authorizationTab.location.href = authorizationUrl;
+          say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus.");
+        } else {
+          say(form, "Open the authorization page to continue.");
+          showAuthorizationFallback(form, authorizationUrl);
+        }
+        return;
+      }
+      closeAuthorizationTab(authorizationTab);
+      form.reset();
+      const statusMessage = result.body.status_message;
+      say(form, typeof statusMessage === "string" ? statusMessage : "Done. Waiting for the next refresh.");
+      await refreshNow(false);
+    } catch {
+      closeAuthorizationTab(authorizationTab);
+      say(form, "Could not reach Olympus.");
+    }
+  }
+  function copyText(node) {
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
+      return node.value;
+    return node.innerText || node.textContent || "";
+  }
+  function announceCopy(button, message) {
+    const status = button.parentElement?.querySelector("[data-copy-status]");
+    if (status)
+      status.textContent = message;
+  }
+  function focusKey(node) {
+    if (!node || node === root)
+      return "";
+    if (node.id)
+      return `#${node.id}`;
+    const action = node.getAttribute("data-connect-kind") || node.getAttribute("data-sync-kind") || node.getAttribute("data-embedding-kind") || node.getAttribute("data-disconnect-kind") || node.getAttribute("data-unpair-kind");
+    if (action)
+      return `${node.tagName}:${action}`;
+    return node.textContent?.trim().slice(0, 120) || "";
+  }
+  function findByFocusKey(key) {
+    if (!key)
+      return null;
+    if (key.startsWith("#"))
+      return query(`#${CSS.escape(key.slice(1))}`);
+    return queryAll("a,button,summary,[tabindex]").find((node) => focusKey(node) === key) || null;
+  }
+  function activeElement() {
+    const tree = root.getRootNode();
+    if (tree instanceof ShadowRoot)
+      return tree.activeElement;
+    return root.ownerDocument.activeElement;
+  }
+  function hasDirtyInput() {
+    return queryAll('input:not([type="hidden"]),textarea,select').some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
+  }
+  function hasFocusedControl() {
+    const active = activeElement();
+    return active !== null && root.contains(active);
+  }
+  function replaceBody(result, force) {
+    canWrite = result.can_write;
+    if (!force && result.signature === signature) {
+      const next = document.createElement("template");
+      next.innerHTML = result.body;
+      const meta2 = query(".top .meta");
+      const nextMeta = next.content.querySelector(".top .meta");
+      if (meta2 && nextMeta)
+        meta2.textContent = nextMeta.textContent;
+      applyWriteCapability();
+      return;
+    }
+    const open4 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
+    const active = activeElement();
+    const focused = focusKey(active);
+    if (options.replaceHtml)
+      options.replaceHtml(root, result.body);
+    else
+      root.innerHTML = result.body;
+    queryAll("details").forEach((node) => {
+      const key = node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || "";
+      if (open4.has(key))
+        node.open = true;
+    });
+    findByFocusKey(focused)?.focus();
+    signature = result.signature;
+    pollIntervalMs = result.poll_interval_ms;
+    deferredSince = 0;
+    applyWriteCapability();
+  }
+  async function refreshNow(force, requested = false) {
+    if (disposed || inFlight || options.signal.aborted || !force && !presented)
+      return;
+    const ownerDocument = root.ownerDocument;
+    if (!force && !requested && ownerDocument.visibilityState === "hidden")
+      return;
+    if (!force && query(".sheet.on"))
+      return;
+    if (!force && hasDirtyInput())
+      return;
+    if (!force && hasFocusedControl()) {
+      if (deferredSince === 0)
+        deferredSince = Date.now();
+      if (Date.now() - deferredSince < 120000)
+        return;
+    }
+    inFlight = true;
+    try {
+      const result = await options.refresh();
+      if (!result || disposed || options.signal.aborted)
+        return;
+      replaceBody(result, force);
+    } catch {} finally {
+      inFlight = false;
+    }
+  }
+  function restartPoll() {
+    if (interval)
+      clearInterval(interval);
+    interval = pollIntervalMs > 0 ? setInterval(() => {
+      refreshNow(false);
+    }, pollIntervalMs) : undefined;
+  }
+  function onSubmit(event) {
+    const form = event.target instanceof HTMLFormElement ? event.target : null;
+    if (!form || !root.contains(form))
+      return;
+    if (form.hasAttribute("data-control-session-kind")) {
+      event.preventDefault();
+      if (form.dataset.controlSessionKind === "lock")
+        lock(form);
+      else
+        unlock(form);
+      return;
+    }
+    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind]"))
+      return;
+    event.preventDefault();
+    const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
+    submitControl(form, tab);
+  }
+  function onClick(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || !root.contains(target))
+      return;
+    const toggle = target.closest("[data-sheet-toggle]");
+    if (toggle) {
+      const selector = toggle.dataset.sheetToggle;
+      const sheet = selector ? query(selector) : null;
+      if (!sheet)
+        return;
+      const open4 = sheet.classList.toggle("on");
+      sheet.setAttribute("aria-hidden", open4 ? "false" : "true");
+      toggle.setAttribute("aria-expanded", open4 ? "true" : "false");
+      return;
+    }
+    const copy = target.closest("[data-copy-target]");
+    if (copy) {
+      const selector = copy.dataset.copyTarget;
+      const source = selector ? query(selector) : null;
+      if (!source)
+        return;
+      const label = copy.textContent || "";
+      if (!navigator.clipboard) {
+        announceCopy(copy, "Clipboard unavailable — select the text and copy it with your keyboard.");
+        return;
+      }
+      navigator.clipboard.writeText(copyText(source)).then(() => {
+        copy.textContent = "Copied";
+        announceCopy(copy, "Copied to the clipboard.");
+        setTimeout(() => {
+          if (!disposed)
+            copy.textContent = label;
+        }, 1600);
+      }).catch(() => {
+        announceCopy(copy, "Clipboard unavailable — select the text and copy it with your keyboard.");
+      });
+      return;
+    }
+    const controlLink = target.closest("[data-control-link]");
+    if (controlLink) {
+      event.preventDefault();
+      if (!canWrite && !csrfToken) {
+        say(controlLink.closest(".rowlink") || controlLink, "Your OpenClaw connection has read-only access.");
+        return;
+      }
+      const href2 = controlLink.dataset.controlLink;
+      if (href2)
+        options.navigate(href2);
+      return;
+    }
+    const anchor = target.closest("a[href]");
+    if (!anchor)
+      return;
+    const href = anchor.dataset.olympusNav || anchor.getAttribute("href") || "";
+    const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+    if (href.startsWith("/dashboard") && !modified) {
+      event.preventDefault();
+      options.navigate(href);
+    }
+  }
+  root.addEventListener("submit", onSubmit);
+  root.addEventListener("click", onClick);
+  applyWriteCapability();
+  restartPoll();
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    if (interval)
+      clearInterval(interval);
+    root.removeEventListener("submit", onSubmit);
+    root.removeEventListener("click", onClick);
+  };
+  options.signal.addEventListener("abort", dispose, { once: true });
+  return {
+    refresh: () => refreshNow(false, true),
+    update(input) {
+      canWrite = input.canWrite;
+      if (input.presented !== undefined)
+        presented = input.presented;
+      if (input.signature !== undefined)
+        signature = input.signature;
+      if (input.pollIntervalMs !== undefined && input.pollIntervalMs !== pollIntervalMs) {
+        pollIntervalMs = input.pollIntervalMs;
+        restartPoll();
+      }
+      applyWriteCapability();
+    },
+    dispose
+  };
+}
+function mountDispositionsController(options) {
+  let canWrite = options.canWrite;
+  let signature = options.signature || "";
+  let disposed = false;
+  let dirty = false;
+  let inFlight = false;
+  let presented = options.presented !== false;
+  let interval;
+  let renewalInterval;
+  let lastActivityMs = 0;
+  let lastRenewalMs = Date.now();
+  let appliedCanWrite;
+  const root = options.root;
+  const labels = {
+    ingest: "Full ingestion",
+    metadata_only: "Metadata only",
+    exclude: "No ingestion"
+  };
+  function query(selector) {
+    return root.querySelector(selector);
+  }
+  function selectFolder(row) {
+    const form = row.closest("form[data-dispositions-source]");
+    if (!form)
+      return;
+    form.querySelectorAll(".folder-row.selected").forEach((item) => item.classList.remove("selected"));
+    row.classList.add("selected");
+    form.dataset.selectedPath = row.dataset.path || "";
+    const inspector = form.querySelector(".finder-inspector");
+    if (!inspector)
+      return;
+    const empty = inspector.querySelector("[data-inspector-empty]");
+    const content = inspector.querySelector("[data-inspector-content]");
+    if (empty)
+      empty.hidden = true;
+    if (content)
+      content.hidden = false;
+    const name = inspector.querySelector("[data-inspector-name]");
+    const path = inspector.querySelector("[data-inspector-path]");
+    const count = inspector.querySelector("[data-inspector-count]");
+    const note = inspector.querySelector("[data-inspector-note]");
+    if (name)
+      name.textContent = row.dataset.name || "";
+    if (path)
+      path.textContent = row.dataset.path || "";
+    if (count)
+      count.textContent = row.dataset.counts || "";
+    if (note) {
+      note.textContent = row.dataset.locked || form.dataset.locked || (row.dataset.origin === "default" ? "Uses the Full ingestion default until you choose otherwise." : row.dataset.origin === "inherited" ? "Inherited from the nearest folder choice above." : "This folder has its own choice.");
+    }
+    const selectable = new Set((row.dataset.selectable || "").split(",").filter(Boolean));
+    inspector.querySelectorAll("button[data-picker-state]").forEach((button) => {
+      const state = button.dataset.pickerState || "";
+      button.disabled = !canWrite || !selectable.has(state);
+      button.classList.toggle("on", row.dataset.state === state);
+    });
+  }
+  function message(text) {
+    const slot = query("#save-message");
+    if (slot)
+      slot.textContent = text;
+  }
+  function applyWriteCapability() {
+    if (appliedCanWrite === canWrite)
+      return;
+    appliedCanWrite = canWrite;
+    root.querySelectorAll('form[data-dispositions-source] button[type="submit"]').forEach((button) => {
+      if (button.dataset.olympusOriginallyDisabled === undefined) {
+        button.dataset.olympusOriginallyDisabled = button.disabled ? "true" : "false";
+      }
+      button.disabled = !canWrite || button.dataset.olympusOriginallyDisabled === "true";
+    });
+    const selected = query(".folder-row.selected");
+    if (selected)
+      selectFolder(selected);
+  }
+  async function save(form) {
+    if (!canWrite) {
+      message("Your OpenClaw connection has read-only access. Your folder choices are still here.");
+      return;
+    }
+    const edits = [];
+    form.querySelectorAll('input[type="radio"]:checked').forEach((input) => {
+      if (input.value === input.dataset.initial)
+        return;
+      if (input.value !== "ingest" && input.value !== "metadata_only" && input.value !== "exclude")
+        return;
+      edits.push({ path: input.dataset.path || "", state: input.value });
+    });
+    if (edits.length === 0) {
+      message("Nothing changed.");
+      return;
+    }
+    message(`Saving ${edits.length} change(s)…`);
+    try {
+      const result = await options.transport.control({
+        action: "save_dispositions",
+        source: form.dataset.dispositionsSource || "",
+        edits
+      });
+      if (result.status === 401 || result.status === 403) {
+        if (options.authority === "worker-session") {
+          message("The control session expired. Your folder choices are still here — unlock controls on the dashboard, then reopen this picker to save them.");
+        } else {
+          canWrite = false;
+          applyWriteCapability();
+          message("Your write access expired. Your folder choices are still here — reconnect with operator.write access to save them.");
+        }
+        return;
+      }
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        const error2 = result.body.error;
+        const reason = error2 && typeof error2 === "object" && !Array.isArray(error2) ? error2.message : undefined;
+        message(typeof reason === "string" ? reason : "Save failed.");
+        return;
+      }
+      const resultBody = result.body.result;
+      const refused = resultBody && typeof resultBody === "object" && !Array.isArray(resultBody) ? resultBody.refused : undefined;
+      if (Array.isArray(refused) && refused.length > 0) {
+        message(refused.map((entry) => {
+          const record3 = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+          return `${String(record3.path || "")}: ${String(record3.message || "refused")}`;
+        }).join(" "));
+        return;
+      }
+      dirty = false;
+      message("Saved. Reloading…");
+      await refreshNow(true);
+    } catch (error2) {
+      message(error2 instanceof Error ? error2.message : "Save failed.");
+    }
+  }
+  function onClick(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || !root.contains(target))
+      return;
+    const row = target.closest(".folder-row");
+    if (row) {
+      selectFolder(row);
+      return;
+    }
+    const choice = target.closest("button[data-picker-state]");
+    if (choice) {
+      const form = choice.closest("form[data-dispositions-source]");
+      const path = form?.dataset.selectedPath;
+      const state = choice.dataset.pickerState;
+      if (!form || !path || !state || choice.disabled || !canWrite)
+        return;
+      const rowForPath = Array.from(form.querySelectorAll(".folder-row")).find((item) => item.dataset.path === path);
+      const radio = Array.from(form.querySelectorAll('input[type="radio"]')).find((input) => input.dataset.path === path && input.value === state);
+      if (!rowForPath || !radio)
+        return;
+      radio.checked = true;
+      rowForPath.dataset.state = state;
+      const status = rowForPath.querySelector("[data-folder-status]");
+      if (status)
+        status.textContent = labels[state] || state;
+      dirty = true;
+      selectFolder(rowForPath);
+      return;
+    }
+    if (target.closest("[data-cancel-picker]")) {
+      refreshNow(true);
+      return;
+    }
+    const copy = target.closest("[data-copy-target]");
+    if (!copy)
+      return;
+    const selector = copy.dataset.copyTarget;
+    const source = selector ? query(selector) : null;
+    if (!source || !navigator.clipboard)
+      return;
+    navigator.clipboard.writeText(source.value);
+  }
+  function onKeydown(event) {
+    if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ")
+      return;
+    const row = event.target instanceof Element ? event.target.closest(".folder-row") : null;
+    if (!row || !root.contains(row))
+      return;
+    event.preventDefault();
+    selectFolder(row);
+  }
+  function onInput(event) {
+    const input = event.target instanceof HTMLInputElement && event.target.matches("[data-folder-search]") ? event.target : null;
+    if (!input || !root.contains(input))
+      return;
+    const needle = input.value.trim().toLowerCase();
+    const form = input.closest("form[data-dispositions-source]");
+    form?.querySelectorAll(".folder-row").forEach((row) => {
+      row.hidden = needle !== "" && !(row.dataset.search || "").includes(needle);
+    });
+  }
+  function onSubmit(event) {
+    const form = event.target instanceof HTMLFormElement ? event.target : null;
+    if (!form || !root.contains(form) || !form.hasAttribute("data-dispositions-source"))
+      return;
+    event.preventDefault();
+    save(form);
+  }
+  function onActivity() {
+    lastActivityMs = Date.now();
+  }
+  async function renew() {
+    if (!options.transport.renew || lastActivityMs <= lastRenewalMs)
+      return;
+    lastRenewalMs = Date.now();
+    try {
+      await options.transport.renew();
+    } catch {}
+  }
+  async function refreshNow(force) {
+    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty))
+      return;
+    inFlight = true;
+    try {
+      const result = await options.refresh();
+      if (!result || disposed || options.signal.aborted)
+        return;
+      canWrite = result.can_write;
+      if (!force && result.signature === signature) {
+        applyWriteCapability();
+        return;
+      }
+      const searches = new Map;
+      root.querySelectorAll("[data-folder-search]").forEach((input) => {
+        const source = input.closest("form[data-dispositions-source]")?.dataset.dispositionsSource;
+        if (source)
+          searches.set(source, input.value);
+      });
+      const selected = new Map;
+      root.querySelectorAll("form[data-dispositions-source]").forEach((form) => {
+        if (form.dataset.dispositionsSource && form.dataset.selectedPath) {
+          selected.set(form.dataset.dispositionsSource, form.dataset.selectedPath);
+        }
+      });
+      const open4 = new Set(Array.from(root.querySelectorAll("details[open]")).map((node) => node.querySelector(".folder-row")?.dataset.path || ""));
+      const tree = root.getRootNode();
+      const active = tree instanceof ShadowRoot ? tree.activeElement : root.ownerDocument.activeElement;
+      const activeForm = active instanceof Element ? active.closest("form[data-dispositions-source]") : null;
+      const focus = activeForm?.dataset.dispositionsSource ? {
+        source: activeForm.dataset.dispositionsSource,
+        path: active instanceof HTMLElement && active.classList.contains("folder-row") ? active.dataset.path : activeForm.dataset.selectedPath,
+        pickerState: active instanceof HTMLElement ? active.dataset.pickerState : undefined,
+        search: active instanceof HTMLInputElement && active.matches("[data-folder-search]")
+      } : undefined;
+      if (options.replaceHtml)
+        options.replaceHtml(root, result.body);
+      else
+        root.innerHTML = result.body;
+      dirty = false;
+      signature = result.signature;
+      appliedCanWrite = undefined;
+      root.querySelectorAll("details").forEach((node) => {
+        const path = node.querySelector(".folder-row")?.dataset.path || "";
+        if (open4.has(path))
+          node.open = true;
+      });
+      root.querySelectorAll("form[data-dispositions-source]").forEach((form) => {
+        const source = form.dataset.dispositionsSource || "";
+        const search = form.querySelector("[data-folder-search]");
+        const needle = searches.get(source) || "";
+        if (search)
+          search.value = needle;
+        form.querySelectorAll(".folder-row").forEach((row2) => {
+          row2.hidden = needle.trim() !== "" && !(row2.dataset.search || "").includes(needle.trim().toLowerCase());
+        });
+        const path = selected.get(source);
+        const row = path ? Array.from(form.querySelectorAll(".folder-row")).find((entry) => entry.dataset.path === path) : undefined;
+        if (row)
+          selectFolder(row);
+        if (focus?.source === source) {
+          const restore = focus.search ? search : focus.pickerState ? form.querySelector(`[data-picker-state="${focus.pickerState}"]`) : focus.path ? Array.from(form.querySelectorAll(".folder-row")).find((entry) => entry.dataset.path === focus.path) : undefined;
+          restore?.focus();
+        }
+      });
+      applyWriteCapability();
+    } catch {} finally {
+      inFlight = false;
+    }
+  }
+  root.addEventListener("click", onClick);
+  root.addEventListener("keydown", onKeydown);
+  root.addEventListener("input", onInput);
+  root.addEventListener("submit", onSubmit);
+  root.addEventListener("pointerdown", onActivity, { passive: true });
+  root.addEventListener("keydown", onActivity, { passive: true });
+  applyWriteCapability();
+  const pollMs = options.pollIntervalMs === undefined ? 15000 : options.pollIntervalMs;
+  if (pollMs > 0)
+    interval = setInterval(() => {
+      refreshNow(false);
+    }, pollMs);
+  if (options.authority === "worker-session" && options.transport.renew) {
+    renewalInterval = setInterval(() => {
+      renew();
+    }, 4 * 60 * 1000);
+  }
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    if (interval)
+      clearInterval(interval);
+    if (renewalInterval)
+      clearInterval(renewalInterval);
+    root.removeEventListener("click", onClick);
+    root.removeEventListener("keydown", onKeydown);
+    root.removeEventListener("input", onInput);
+    root.removeEventListener("submit", onSubmit);
+    root.removeEventListener("pointerdown", onActivity);
+    root.removeEventListener("keydown", onActivity);
+  };
+  options.signal.addEventListener("abort", dispose, { once: true });
+  return {
+    refresh: () => refreshNow(false),
+    update(input) {
+      canWrite = input.canWrite;
+      if (input.presented !== undefined)
+        presented = input.presented;
+      if (input.signature !== undefined)
+        signature = input.signature;
+      applyWriteCapability();
+    },
+    dispose
+  };
+}
+
 // src/workers/dashboard/theme.ts
 var DASHBOARD_THEME_TOKENS, DASHBOARD_STATUS_COLORS, CSS_VARIABLE_NAMES, PAGE_BACKDROP = "#0B0B0E", MONO_STACK = '"Berkeley Mono","SF Mono",Menlo,Consolas,monospace', ROOT_BLOCK, DASHBOARD_THEME_CSS;
 var init_theme = __esm(() => {
@@ -64527,16 +65600,30 @@ function pageShell(input) {
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const poll = input.poll === undefined ? [] : [pollScript({
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash31("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const useController = input.controller !== undefined || input.poll !== undefined;
+  const controller = !useController ? [] : [standaloneDashboardControllerScript({
+    csrfToken: input.controller?.csrfToken ?? "",
     signature: dashboardPageSignature(input.body),
-    unlocked: input.poll.unlocked === true,
-    session: input.poll.controlSessionCsrfToken === undefined ? "" : createHash31("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24),
-    ...input.poll.intervalMs === undefined ? {} : { intervalMs: input.poll.intervalMs }
+    session: sessionMarker,
+    intervalMs: input.poll?.intervalMs ?? 15000
   })];
-  const scripts = [...input.scripts ?? [], ...poll].join(`
+  const scripts = !useController ? [...input.scripts ?? []].join(`
+    `) : controller.join(`
     `);
   const styles = [DASHBOARD_THEME_CSS, ...input.styles ?? []].join(`
 `);
+  const content = `<div class="frame">
+      <div class="page">
+      <div class="top">
+        <span class="brand">${brand}</span>${input.meta ? `
+        <span class="meta">${escapeHtml(input.meta)}</span>` : ""}
+      </div>
+      ${input.body}
+      </div>
+    </div>`;
+  if (input.format === "fragment")
+    return content;
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -64546,15 +65633,7 @@ function pageShell(input) {
     <style>${styles}</style>
   </head>
   <body>
-    <div class="frame">
-      <div class="page">
-      <div class="top">
-        <span class="brand">${brand}</span>${input.meta ? `
-        <span class="meta">${escapeHtml(input.meta)}</span>` : ""}
-      </div>
-      ${input.body}
-      </div>
-    </div>
+    <div data-olympus-dashboard-root data-signature="${escapeHtml(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml(sessionMarker)}">${content}</div>
     ${scripts}
   </body>
 </html>`;
@@ -64802,438 +65881,100 @@ function redirectUriInput(action) {
     }
   };
 }
-function controlScript(input = {}) {
-  const initialCsrfToken = escapeScriptJson(JSON.stringify(input.csrfToken ?? ""));
+function standaloneDashboardControllerScript(input) {
+  const mountSource = mountDashboardController.toString().replaceAll("</script", "<\\/script");
+  const config2 = escapeScriptJson(JSON.stringify(input));
   return `<script>
-      (function () {
-        var csrfToken = ${initialCsrfToken};
-        function say(form, text) {
-          var message = form.querySelector('[data-action-message]');
-          if (message) message.textContent = text;
-        }
-        async function mintSession(form) {
-          var field = form.querySelector('[data-dashboard-control-token]');
-          var pasted = field instanceof HTMLInputElement ? field.value.trim() : '';
-          if (!pasted) { say(form, 'Paste the worker bearer token.'); if (field) field.focus(); return false; }
-          if (pasted.indexOf('dash_') === 0) {
-            say(form, 'That is the read-only view token; use the worker bearer token from setup.');
-            field.value = '';
-            field.focus();
-            return false;
-          }
-          try {
+    (function () {
+      var config = ${config2};
+      var csrfToken = config.csrfToken;
+      var sessionMarker = config.session;
+      var root = document.querySelector('[data-olympus-dashboard-root]');
+      if (!root) return;
+      var abort = new AbortController();
+      var mount = ${mountSource};
+      function route(params) {
+        var action = params.action;
+        if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
+        if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
+        if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
+        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
+        if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
+        if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
+        if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
+        return null;
+      }
+      function withoutAction(params) {
+        var body = {};
+        Object.keys(params).forEach(function (key) { if (key !== 'action') body[key] = params[key]; });
+        return body;
+      }
+      async function json(response) {
+        try { return await response.json(); } catch (error) { return {}; }
+      }
+      var controller = mount({
+        root: root,
+        transport: {
+          async control(params) {
+            var target = route(params);
+            if (!target) return { status: 400, body: { error: { message: 'Unsupported dashboard action.' } } };
+            var response = await fetch(target[0], {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(target[1]),
+            });
+            return { status: response.status, body: await json(response) };
+          },
+          async unlock(workerToken) {
             var response = await fetch('/dashboard/control/session', {
               method: 'POST', cache: 'no-store', credentials: 'same-origin',
-              headers: { 'Authorization': 'Bearer ' + pasted },
+              headers: { 'Authorization': 'Bearer ' + workerToken },
             });
-            pasted = '';
-            field.value = '';
-            var payload = {};
-            try { payload = await response.json(); } catch (error) {}
-            if (!response.ok || !payload.csrf_token) { say(form, 'That token was not accepted.'); return false; }
-            csrfToken = payload.csrf_token;
-            window.location.reload();
-            return true;
-          } catch (error) {
-            pasted = '';
-            field.value = '';
-            say(form, 'Could not reach the worker.');
-            return false;
-          }
-        }
-        async function ensureSession(form) {
-          if (csrfToken) return true;
-          var field = document.querySelector('[data-dashboard-control-token]');
-          say(form, 'Unlock dashboard controls above first.');
-          if (field instanceof HTMLInputElement) { field.focus(); field.scrollIntoView({ block: 'center' }); }
-          return false;
-        }
-        async function lockSession(form) {
-          say(form, 'Locking…');
-          try {
+            var body = await json(response);
+            if (response.ok && typeof body.csrf_token === 'string') csrfToken = body.csrf_token;
+            return { ok: response.ok, csrf_token: body.csrf_token };
+          },
+          async lock() {
             var response = await fetch('/dashboard/control/session/lock', {
               method: 'POST', cache: 'no-store', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken },
             });
-            if (!response.ok) { say(form, 'Could not lock.'); return; }
-            csrfToken = '';
-            window.location.reload();
-          } catch (error) { say(form, 'Could not reach the worker.'); }
-        }
-        function clearFallback(form) {
-          var slot = form.querySelector('[data-authorization-fallback]');
-          if (slot) slot.textContent = '';
-        }
-        // The tab the authorization will land in, opened SYNCHRONOUSLY inside
-        // the submit event so the browser counts it as user-initiated. It
-        // cannot be opened later: /dashboard/connect/oauth/start has to be
-        // awaited first, and a window.open after that await is a popup.
-        //
-        // 'noopener' is deliberately NOT passed here. Per the HTML spec a
-        // window.open with noopener returns null even when it succeeds, so the
-        // old call could never tell a blocked tab from an opened one and every
-        // connect claimed the browser had blocked it. The opener reference is
-        // severed by hand instead, which is what noopener was there for.
-        function openAuthorizationTab() {
-          var tab = null;
-          try { tab = window.open('', '_blank'); } catch (error) { tab = null; }
-          if (tab) { try { tab.opener = null; } catch (error) {} }
-          return tab;
-        }
-        function closeAuthorizationTab(tab) {
-          if (!tab) return;
-          try { tab.close(); } catch (error) {}
-        }
-        // Where the reader goes when no tab could be pre-opened. It says only
-        // what is true — no tab opened — without asserting a cause the page
-        // cannot know. Built as a node with a checked https href, never as
-        // markup: the URL is the worker's own origin-checked authorization
-        // URL, and it is still never interpolated into HTML.
-        function showFallback(form, url) {
-          var slot = form.querySelector('[data-authorization-fallback]');
-          if (!slot || String(url).indexOf('https://') !== 0) return;
-          slot.textContent = '';
-          var link = document.createElement('a');
-          link.href = url;
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-          link.className = 'hint';
-          link.textContent = "If a new tab didn't open, open it here";
-          slot.appendChild(link);
-        }
-        async function submitControl(form, authorizationTab) {
-          if (!await ensureSession(form)) { closeAuthorizationTab(authorizationTab); return; }
-          var body = Object.fromEntries(new FormData(form).entries());
-          var connectKind = form.getAttribute('data-connect-kind');
-          var disconnectKind = form.getAttribute('data-disconnect-kind');
-          var unpairKind = form.getAttribute('data-unpair-kind');
-          if (disconnectKind || unpairKind) {
-            var fallbackConfirmation = unpairKind ? 'Unpair this source?' : 'Disconnect this source?';
-            var confirmation = form.getAttribute('data-confirmation') || fallbackConfirmation;
-            if (!window.confirm(confirmation)) return;
-            body.acknowledge = true;
-          }
-          var endpoint = unpairKind
-            ? '/dashboard/unpair'
-            : disconnectKind
-            ? '/dashboard/disconnect'
-            : connectKind
-            ? (connectKind === 'oauth'
-              ? '/dashboard/connect/oauth/start'
-              : connectKind === 'oauth_cancel'
-                ? '/dashboard/connect/oauth/cancel'
-                : '/dashboard/connect/api-key')
-            : form.hasAttribute('data-embedding-kind')
-              ? '/dashboard/embedding-priority'
-              : '/dashboard/sync-now';
-          if (connectKind === 'oauth') { body.return_to = window.location.href; clearFallback(form); }
-          say(form, 'Starting\\u2026');
-          try {
-            var response = await fetch(endpoint, {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            });
-            var payload = {};
-            try { payload = await response.json(); } catch (error) {}
-            if (response.status === 401) {
-              csrfToken = '';
-              closeAuthorizationTab(authorizationTab);
-              say(form, 'The control session expired \\u2014 submit again to unlock controls.');
-              return;
-            }
-            if (!response.ok || payload.ok !== true) {
-              closeAuthorizationTab(authorizationTab);
-              say(form, (payload && payload.error && payload.error.message) || 'Request failed.');
-              return;
-            }
-            if (payload.authorization_url) {
-              // A NEW TAB, never this one. Navigating the dashboard away lost
-              // the page the owner has to come back to, and a provider that
-              // refuses the request leaves them on the provider's error page
-              // with no way back (owner, 2026-09-03). The dashboard keeps
-              // polling here and updates when the callback lands.
-              if (authorizationTab) {
-                authorizationTab.location = payload.authorization_url;
-                say(form, 'Authorization opened in a new tab. Approve it there, then come back to this page.');
-              } else {
-                say(form, 'Open the authorization page to continue.');
-                showFallback(form, payload.authorization_url);
-              }
-              return;
-            }
-            closeAuthorizationTab(authorizationTab);
-            form.reset();
-            // The route's own words when it has any. A partial Unpair reports
-            // what is still on disk, and showing the generic "Done" over that
-            // was a completion claim the response did not make.
-            say(form, payload.status_message || 'Done. Waiting for the next refresh.');
-          } catch (error) {
-            closeAuthorizationTab(authorizationTab);
-            say(form, 'Could not reach the worker.');
-          }
-        }
-        document.addEventListener('submit', function (event) {
-          var form = event.target;
-          if (!(form instanceof HTMLFormElement)) return;
-          if (form.hasAttribute('data-control-session-kind')) {
-            event.preventDefault();
-            if (form.getAttribute('data-control-session-kind') === 'lock') void lockSession(form);
-            else void mintSession(form);
-            return;
-          }
-          if (!form.hasAttribute('data-connect-kind')
-            && !form.hasAttribute('data-sync-kind')
-            && !form.hasAttribute('data-embedding-kind')
-            && !form.hasAttribute('data-disconnect-kind')
-            && !form.hasAttribute('data-unpair-kind')) return;
-          event.preventDefault();
-          // Still inside the user gesture: the only moment a new tab may be
-          // opened without the browser treating it as a popup.
-          var authorizationTab = form.getAttribute('data-connect-kind') === 'oauth'
-            ? openAuthorizationTab()
-            : null;
-          void submitControl(form, authorizationTab);
-        });
-        document.addEventListener('click', function (event) {
-          var target = event.target instanceof Element ? event.target : null;
-          var control = target && target.closest('[data-control-link]');
-          if (!control) return;
-          event.preventDefault();
-          var host = control.closest('.rowlink') || control;
-          void ensureSession(host).then(function (ready) {
-            if (!ready) return;
-            window.location.assign(control.getAttribute('data-control-link'));
-          });
-        });
-      })();
-    </script>`;
+            if (response.ok) csrfToken = '';
+            return response.ok;
+          },
+        },
+        navigate: function (href) { window.location.assign(href); },
+        refresh: async function () {
+          var response = await fetch(window.location.href, { cache: 'no-store' });
+          if (!response.ok) return undefined;
+          var next = new DOMParser().parseFromString(await response.text(), 'text/html');
+          var nextRoot = next.querySelector('[data-olympus-dashboard-root]');
+          if (!nextRoot) return undefined;
+          var nextSession = nextRoot.getAttribute('data-session') || '';
+          if (nextSession !== sessionMarker) { window.location.reload(); return undefined; }
+          return {
+            status: response.status,
+            title: next.title,
+            body: nextRoot.innerHTML,
+            controller: 'dashboard',
+            can_write: nextRoot.getAttribute('data-unlocked') === 'true',
+            signature: nextRoot.getAttribute('data-signature') || '',
+            poll_interval_ms: config.intervalMs,
+          };
+        },
+        returnUrl: window.location.href,
+        canWrite: Boolean(csrfToken),
+        authority: 'worker-session',
+        signal: abort.signal,
+        signature: config.signature,
+        pollIntervalMs: config.intervalMs,
+        csrfToken: csrfToken,
+      });
+      window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
+    })();
+  </script>`;
 }
-function clipboardScript() {
-  return `<script>
-      (function () {
-        function copyText(node) {
-          if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) return node.value;
-          return node.innerText || node.textContent || '';
-        }
-        function announce(button, message) {
-          var status = button.parentElement && button.parentElement.querySelector('[data-copy-status]');
-          if (status) status.textContent = message;
-        }
-        document.addEventListener('click', function (event) {
-          var target = event.target instanceof Element ? event.target : null;
-          if (!target) return;
-          var toggle = target.closest('[data-sheet-toggle]');
-          if (toggle) {
-            var sheet = document.querySelector(toggle.getAttribute('data-sheet-toggle'));
-            if (!sheet) return;
-            var open = sheet.classList.toggle('on');
-            sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
-            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-            return;
-          }
-          var copy = target.closest('[data-copy-target]');
-          if (!copy) return;
-          var source = document.querySelector(copy.getAttribute('data-copy-target'));
-          if (!source) return;
-          var text = copyText(source);
-          var label = copy.textContent;
-          if (!navigator.clipboard) {
-            announce(copy, 'Clipboard unavailable — select the text and copy it with your keyboard.');
-            return;
-          }
-          navigator.clipboard.writeText(text).then(function () {
-            copy.textContent = 'Copied';
-            announce(copy, 'Copied to the clipboard.');
-            setTimeout(function () { copy.textContent = label; }, 1600);
-          }).catch(function () {
-            announce(copy, 'Clipboard unavailable — select the text and copy it with your keyboard.');
-          });
-        });
-      })();
-    </script>`;
-}
-function pollScript(input) {
-  const interval = Number.isFinite(input.intervalMs) && (input.intervalMs ?? 0) > 0 ? Math.round(input.intervalMs) : 15000;
-  const signature = escapeScriptJson(JSON.stringify(input.signature));
-  const unlocked = input.unlocked === true ? "true" : "false";
-  const session = escapeScriptJson(JSON.stringify(input.session ?? ""));
-  return `<span id="dashboard-poll-signature" data-signature="${escapeHtml(input.signature)}" data-unlocked="${unlocked}" data-session="${escapeHtml(input.session ?? "")}" style="display:none"></span>
-    <script>
-      (function () {
-        var current = ${signature};
-        var unlocked = ${unlocked};
-        var session = ${session};
-        var deferredSince = 0;
-        function signatureOf(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-signature') || '' : '';
-        }
-        function unlockedIn(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-unlocked') === 'true' : false;
-        }
-        function sessionIn(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-session') || '' : '';
-        }
-        function focusKey(node) {
-          if (!node || node === document.body || node === document.documentElement) return '';
-          return node.id ? '#' + node.id
-            : node.getAttribute && node.getAttribute('href') ? 'href:' + node.getAttribute('href')
-            : node.tagName + ':' + (node.textContent || '').trim().slice(0, 60);
-        }
-        function findByFocusKey(key) {
-          if (!key) return null;
-          if (key.charAt(0) === '#') return document.getElementById(key.slice(1));
-          var candidates = document.querySelectorAll('a, button, summary, [tabindex]');
-          for (var index = 0; index < candidates.length; index += 1) {
-            if (focusKey(candidates[index]) === key) return candidates[index];
-          }
-          return null;
-        }
-        function typing() {
-          var active = document.activeElement;
-          if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return true;
-          // A focused button or link defers a swap, but not forever: after two
-          // minutes the page refreshes and puts focus back by key, so a reader
-          // who tabbed onto a link and walked away is not left stale.
-          if (active && active !== document.body && active !== document.documentElement) {
-            if (!deferredSince) deferredSince = Date.now();
-            if (Date.now() - deferredSince < 120000) return true;
-          } else {
-            deferredSince = 0;
-          }
-          var fields = document.querySelectorAll('input:not([type=hidden]), textarea');
-          for (var index = 0; index < fields.length; index += 1) {
-            if ((fields[index].value || '').trim() !== '') return true;
-          }
-          return false;
-        }
-        var inFlight = false;
-        async function refresh() {
-          if (document.hidden) return;
-          if (typing()) return;
-          if (document.querySelector('.sheet.on')) return;
-          if (inFlight) return;
-          inFlight = true;
-          try {
-            var response = await fetch(window.location.href, { cache: 'no-store' });
-            if (!response.ok) return;
-            var next = new DOMParser().parseFromString(await response.text(), 'text/html');
-            var meta = document.querySelector('.top .meta');
-            var nextMeta = next.querySelector('.top .meta');
-            if (meta && nextMeta) meta.textContent = nextMeta.textContent;
-            // Custody changed under this tab (unlocked elsewhere, expired,
-            // rotated): swapped-in markup does not run its scripts, so the
-            // control handler would keep a stale CSRF token. Reload instead.
-            if (unlockedIn(next) !== unlocked || sessionIn(next) !== session) { window.location.reload(); return; }
-            var signature = signatureOf(next);
-            if (signature !== '' && signature === current) return;
-            current = signature;
-            // Keep the reader's open disclosures open across the swap, keyed
-            // by their summary text so a disclosure that came or went does
-            // not shift the others.
-            var open = {};
-            function disclosureKey(node) {
-              var summary = node.querySelector('summary');
-              return node.getAttribute('data-poll-key') || (summary ? summary.textContent.trim() : '');
-            }
-            Array.prototype.forEach.call(document.querySelectorAll('details'), function (node) {
-              if (node.open) open[disclosureKey(node)] = true;
-            });
-            var focused = focusKey(document.activeElement);
-            document.body.innerHTML = next.body.innerHTML;
-            Array.prototype.forEach.call(document.querySelectorAll('details'), function (node) {
-              if (open[disclosureKey(node)]) node.open = true;
-            });
-            var restore = findByFocusKey(focused);
-            if (restore && typeof restore.focus === 'function') restore.focus();
-            deferredSince = 0;
-          } catch (error) {
-          } finally {
-            inFlight = false;
-          }
-        }
-        setInterval(refresh, ${interval});
-      })();
-    </script>`;
-}
-var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls", DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; color: inherit; text-decoration: none; }
-.bgrow .bgl { display: grid; grid-template-columns: 110px 1fr 64px; gap: 12px; align-items: center; padding: 3px 0; }
-.bgrow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.bgrow .fx { color: var(--t3); font-size: 12px; }
-.bgrow .go { position: absolute; right: 14px; top: 10px; color: var(--t4); font-size: 13px; }
-.bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
-.bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.minibar { display: block; width: 64px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--t3); }
-.lanerow { display: grid; grid-template-columns: 110px 64px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lanerow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.lanerow .st { color: var(--t3); font-size: 12px; }
-.lanerow .minibar { justify-self: start; }
-.lanestrip { display: flex; gap: 2px; }
-.lanestrip i { display: block; width: 7px; height: 20px; border-radius: 2px; }
-.disp { font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .04em; }
-.disp.heal { color: var(--good); }
-.disp.attn { color: var(--warn); }
-@media (max-width: 700px) {
-  .lanerow { grid-template-columns: 110px 1fr; }
-  .lanerow .minibar, .lanerow .lanestrip { display: none; }
-  /* The go arrow is absolutely positioned at the right edge, so the facts
-     column keeps clear of it rather than running underneath. */
-  .bgrow .bgl { grid-template-columns: 1fr auto; padding-right: 18px; }
-}
-`, DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
-.phase .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.phase .pn { font-size: 12.5px; font-weight: 600; color: var(--t2); }
-.phase .pv { font-size: 12px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
-.phase .bar { max-width: none; margin-top: 6px; height: 5px; border-radius: 3px; }
-.phase .pv .st { display: inline-block; margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); font-weight: 600; color: var(--t2); }
-.phase.done .pv .st { color: var(--good); }
-.phase.working .pv .st { color: var(--run); }
-.phase.stalled .pv .st { color: var(--warn); }
-.phase.waiting .pv .st { color: var(--t4); }
-.phase.waiting .bar { background: var(--line2); }
-.phase.waiting .bar i { display: none; }
-.bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
-@keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
-.settled { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; color: var(--t2); font-size: 13px; max-width: 520px; }
-.banner { margin-bottom: 6px; }
-.advanced { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 4px; }
-.advanced > summary { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); cursor: pointer; padding: 12px 0; list-style: none; }
-.advanced > summary::-webkit-details-marker { display: none; }
-.advanced > summary::before { content: '\\25B8 '; display: inline-block; transition: transform .12s ease; }
-.advanced[open] > summary::before { transform: rotate(90deg); }
-.advanced > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-@media (prefers-reduced-motion: reduce) {
-  .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
-}
-`, DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: 12px; }
-.catrow .tier { color: var(--t3); font-size: 12px; font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
-.scoperow .rid { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--t2); }
-.scoperow .what { color: var(--t3); font-size: 12.5px; }
-.sect.gap { margin-top: 44px; }
-.quiet { color: var(--t4); font-size: 12px; margin: -2px 0 10px; max-width: 66ch; }
-.quiet.after { margin: 8px 0 0; }
-.tiersnote { color: var(--t3); font-size: 12.5px; margin: 0 0 12px; max-width: 66ch; }
-.tiernote { font-size: 12.5px; margin-top: 10px; }
-.pm { color: var(--t4); }
-.pm.yes { color: var(--good); }
-.tname { color: var(--t1); font-weight: 600; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: 12px; }
-.chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
-`;
+var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls", DASHBOARD_WORKER_TOKEN_AGENT_PROMPT;
 var init_components = __esm(() => {
   init_phases();
   init_theme();
@@ -65422,13 +66163,7 @@ function renderDashboardNav(active, options) {
   }).join("");
   return `<nav class="dnav" aria-label="Dashboard sections">${links}</nav>`;
 }
-var DEFAULT_BASE_PATH = "/dashboard", BACKGROUND_QUERY_PARAM = "background", SETUP_QUERY_PARAM = "setup", NAV_ITEMS, DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
-.dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
-.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: 12.5px; padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.dnav .dnavlink:hover { color: var(--link); }
-.dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
-.dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
-`;
+var DEFAULT_BASE_PATH = "/dashboard", BACKGROUND_QUERY_PARAM = "background", SETUP_QUERY_PARAM = "setup", NAV_ITEMS;
 var init_nav = __esm(() => {
   init_components();
   NAV_ITEMS = [
@@ -65763,13 +66498,12 @@ function renderDashboardBackgroundPage(view, options) {
     meta: checked ? `${head} · ${checked}` : head,
     body: renderBackgroundBody(view, lanes, now, options),
     styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS, BACKGROUND_CSS],
-    scripts: [
-      controlScript({ csrfToken: options?.controlSessionCsrfToken })
-    ],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 function renderBackgroundBody(view, lanes, now, options) {
@@ -65912,7 +66646,7 @@ function renderInformational(options) {
   const basePath = options?.basePath ?? DEFAULT_BASE_PATH2;
   const separator = basePath.includes("?") ? "&" : "?";
   const href = safeHref(`${basePath}${separator}${EMBEDDING_LEDGER_QUERY_PARAM}`);
-  const link = href === undefined ? "" : `<div class="infolink"><a href="${escapeHtml(href)}">Embedding decisions &amp; history →</a>` + `<span class="quiet"> Model changes, re-embeds, and who approved them.</span></div>`;
+  const link = href === undefined || options?.embeddingLedgerAvailable === false ? "" : `<div class="infolink"><a href="${escapeHtml(href)}">Embedding decisions &amp; history →</a>` + `<span class="quiet"> Model changes, re-embeds, and who approved them.</span></div>`;
   return `
         <div class="dsect">About these lanes</div>
         <div class="info">Nothing here is on a clock. Each lane runs when the machine has room for it, and
@@ -66263,34 +66997,7 @@ function compactCount(value) {
 function plural2(count, word) {
   return count === 1 ? word : `${word}s`;
 }
-var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
-.lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
-.lane .lfacts { color: var(--t2); font-size: 12.5px; margin-top: 5px; font-variant-numeric: tabular-nums; }
-.lane .lmove { color: var(--t3); font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
-.lane .lreason { color: var(--warn); font-size: 12px; margin-top: 5px; max-width: 74ch; }
-.lane .lreason.stuck { color: var(--bad); }
-.lane .lreason.unknown { color: var(--t3); }
-.lane .lbar { margin-top: 8px; }
-.lane .lbar .minibar { width: 100%; max-width: 340px; }
-.lane .lanestrip { margin-top: 8px; }
-.lane .lqueue { margin-top: 8px; border-top: 1px solid var(--line2); padding-top: 7px; }
-.lane .lq { color: var(--t3); font-size: 12px; line-height: 1.55; }
-.lane .lq b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.lane.quiet { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 14px; }
-.lane.quiet .lquiet { color: var(--t4); font-size: 12px; }
-.info { color: var(--t3); font-size: 12.5px; line-height: 1.6; max-width: 74ch; }
-.infolink { margin-top: 8px; font-size: 12.5px; }
-.embblock { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin: -3px 0 7px; }
-.embblock .embstate { font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-.embblock .embline { color: var(--t3); font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
-.embblock .embline.warn { color: var(--warn); }
-.embblock .rowform { margin: 8px 0 6px; }
-@media (max-width: 700px) {
-  .lane .lanehd { flex-wrap: wrap; }
-}
-`;
+var RECENT_RUN_LIMIT = 8, DEFAULT_BASE_PATH2 = "/dashboard", DETAIL_QUERY_PARAM = "source", EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger", SCHEDULER_SELF_PAUSE_SENTENCES, PARKED_EMBEDDING_STATES, LANE_STATE_WORDS, STRIP_TONE_COLORS;
 var init_background = __esm(() => {
   init_components();
   init_lane_state();
@@ -66346,14 +67053,12 @@ function renderDashboardHomePage(view, options) {
     ].join(`
 `),
     styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
-    scripts: [
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-      clipboardScript()
-    ],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 function renderSetupLink(options) {
@@ -66444,7 +67149,7 @@ function attentionAction(source, options) {
   const action = source.connection.action;
   const reconnecting = source.coverage.indexed_items > 0;
   if (action.kind === "needs_setup") {
-    if (options?.controlSessionCsrfToken === undefined) {
+    if (!dashboardControlsAvailable(options)) {
       return { action: lockedAction(reconnecting ? "Reauthenticate" : action.label, options?.basePath) };
     }
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
@@ -66456,7 +67161,7 @@ function attentionAction(source, options) {
   if (action.kind !== "oauth" && action.kind !== "api_key")
     return;
   const label = reconnecting && action.label === "Connect" ? "Reauthenticate" : action.label;
-  if (options?.controlSessionCsrfToken === undefined) {
+  if (!dashboardControlsAvailable(options)) {
     return { action: lockedAction(label, options?.basePath) };
   }
   if (action.kind === "oauth") {
@@ -66471,6 +67176,9 @@ function attentionAction(source, options) {
     }
   }
   return { action: { label, kind: action.kind, source: action.source, primary: true } };
+}
+function dashboardControlsAvailable(options) {
+  return options?.controlMode === "native" ? options.canWrite === true : options?.controlSessionCsrfToken !== undefined;
 }
 function lockedAction(label, basePath) {
   return { label, kind: "link", href: `${setupHref(basePath)}#${DASHBOARD_CONTROL_GATE_ID}`, hint: "unlock controls in Setup" };
@@ -66796,14 +67504,12 @@ function renderDashboardDetailPage(view, sourceId, options) {
       ...options?.embeddingRuntime === undefined ? {} : { embeddingRuntime: options.embeddingRuntime }
     }),
     styles: [DASHBOARD_POLICY_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_NAV_CSS],
-    scripts: [
-      clipboardScript(),
-      controlScript({ csrfToken: options?.controlSessionCsrfToken })
-    ],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 function renderDashboardDetailBody(source, options) {
@@ -67420,7 +68126,7 @@ function renderDashboardSetupPage(view, options) {
     renderDashboardNav("setup", {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     }),
-    dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
+    options?.controlMode === "native" ? options.canWrite === false ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>' : "" : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
     renderSetupSummary(view),
     ...pilotNote ? [pilotNote] : [],
     ...sections,
@@ -67440,15 +68146,13 @@ function renderDashboardSetupPage(view, options) {
     crumb: "Setup",
     ...options?.basePath === undefined ? {} : { basePath: options.basePath },
     body,
-    scripts: [
-      clipboardScript(),
-      controlScript({ csrfToken: options?.controlSessionCsrfToken })
-    ],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
     },
-    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS]
+    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS],
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 function renderSetupSummary(view) {
@@ -67719,13 +68423,7 @@ function formatDuration(minutes) {
   const rest = whole % 60;
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_SHEET_COPY_LABEL = "Copy prompt", CONNECTOR_ROW_LABEL = "Something else", CONNECTOR_ROW_BLURB = "Anything with an API or an export — build the connector with your agent", CONNECTOR_ROW_BUTTON_LABEL = "Build a connector", CONNECTOR_PROMPT, SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
-.pilotnote b { color: var(--warn); }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, SETUP_GROUPS;
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_SHEET_COPY_LABEL = "Copy prompt", CONNECTOR_ROW_LABEL = "Something else", CONNECTOR_ROW_BLURB = "Anything with an API or an export — build the connector with your agent", CONNECTOR_ROW_BUTTON_LABEL = "Build a connector", CONNECTOR_PROMPT, SETUP_GROUPS;
 var init_setup = __esm(() => {
   init_source_dashboard();
   init_vocabulary();
@@ -67759,10 +68457,12 @@ function renderDashboardSensitivityPage(view, options) {
     meta: checked,
     body: renderDashboardSensitivityBody(view),
     styles: [DASHBOARD_POLICY_CSS],
+    controller: { ...options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken } },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
-    }
+    },
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 function renderDashboardSensitivityBody(view) {
@@ -67842,6 +68542,60 @@ function renderDashboardHtmlRoute(input) {
   }
   return { html: renderDashboardHomePage(view, options), status: 200 };
 }
+function renderDashboardControlUi(input) {
+  if (input.params.view === "dispositions" || input.params.view === "embedding_ledger") {
+    throw new Error(`Dashboard view ${input.params.view} has its own native renderer.`);
+  }
+  const url = dashboardControlUiUrl(input.params);
+  const rendered = renderDashboardHtmlRoute({
+    url,
+    view: input.view,
+    options: {
+      ...input.options,
+      basePath: DASHBOARD_HTML_PATH,
+      format: "fragment",
+      controlMode: "native",
+      canWrite: input.canWrite,
+      readOnly: !input.canWrite
+    }
+  });
+  const body = input.options?.nativeOAuthAvailable === false ? `<div class="attncard" data-native-oauth-unavailable>OAuth connections are unavailable until the Gateway has a trusted public origin.</div>
+${rendered.html.replaceAll('data-connect-kind="oauth"', 'data-connect-kind="oauth" data-native-oauth-unavailable')}` : rendered.html;
+  return {
+    status: rendered.status,
+    title: dashboardControlUiTitle(input.params, input.view),
+    body,
+    controller: "dashboard",
+    can_write: input.canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15000
+  };
+}
+function dashboardControlUiUrl(params) {
+  const url = new URL("http://olympus.invalid/dashboard");
+  if (params.view === "source" && params.source_id)
+    url.searchParams.set("source", params.source_id);
+  else if (params.view === "setup")
+    url.searchParams.set("setup", "");
+  else if (params.view === "background")
+    url.searchParams.set("background", "");
+  else if (params.view === "sensitivity")
+    url.searchParams.set("sensitivity", "");
+  return url;
+}
+function dashboardControlUiTitle(params, view) {
+  if (params.view === "source") {
+    const source = view.sources.find((entry) => entry.source_id === params.source_id);
+    return source ? `Olympus / ${source.label}` : "Olympus / Not found";
+  }
+  if (params.view === "setup")
+    return "Olympus / Setup";
+  if (params.view === "background")
+    return "Olympus / Background";
+  if (params.view === "sensitivity")
+    return "Olympus / Sensitivity";
+  return "Olympus";
+}
 function withTokenBasePath(url, options) {
   const token = url.searchParams.get("token");
   const readOnly = token !== null && token.startsWith("dash_") && options?.controlSessionCsrfToken === undefined;
@@ -67866,7 +68620,8 @@ function renderNotFound(view, options) {
     crumb: "Not found",
     basePath,
     meta: dashboardHomeMeta(view, options),
-    body: `<div class="foot">No source by that id. <a href="${escapeHtml(basePath)}">Back to the dashboard</a></div>`
+    body: `<div class="foot">No source by that id. <a href="${escapeHtml(basePath)}">Back to the dashboard</a></div>`,
+    ...options?.format === undefined ? {} : { format: options.format }
   });
 }
 var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_DETAIL_QUERY_PARAM = "source", DASHBOARD_SETUP_QUERY_PARAM = "setup", DASHBOARD_BACKGROUND_QUERY_PARAM = "background", DASHBOARD_SENSITIVITY_QUERY_PARAM = "sensitivity";
@@ -67884,6 +68639,20 @@ var init_dashboard = __esm(() => {
   init_background();
   init_sensitivity();
   init_vocabulary();
+});
+
+// src/control-ui-contract.ts
+var OLYMPUS_DASHBOARD_VIEWS;
+var init_control_ui_contract = __esm(() => {
+  OLYMPUS_DASHBOARD_VIEWS = [
+    "home",
+    "setup",
+    "background",
+    "embedding_ledger",
+    "sensitivity",
+    "source",
+    "dispositions"
+  ];
 });
 
 // src/workers/http.ts
@@ -67907,7 +68676,9 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   return async (request) => {
-    request = withoutDashboardControlContextHeader(request);
+    const presentedAuthorization = request.headers.get("Authorization");
+    const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+    request = withoutDashboardInternalContextHeaders(request);
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
     }
@@ -67941,7 +68712,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
-      return fetchHandler(request);
+      return fetchHandler(withAuthenticatedGatewayPublicOrigin(request, presentedAuthorization, authToken, presentedGatewayPublicOrigin));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
@@ -67951,8 +68722,8 @@ function withWorkerBearerAuth(fetchHandler, options) {
       }
       return fetchHandler(request);
     }
-    if (hasValidWorkerBearerToken(request.headers.get("Authorization"), authToken)) {
-      return fetchHandler(request);
+    if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      return fetchHandler(isGatewayPublicOriginContextRoute(request) ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin) : request);
     }
     if (isDashboardControlReadRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
@@ -68160,17 +68931,50 @@ function requestTargetOrigin(request) {
   const forwardedProto = request.headers.get("X-Forwarded-Proto")?.split(",")[0]?.trim().toLowerCase();
   return forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url.host}` : url.origin;
 }
-function withoutDashboardControlContextHeader(request) {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER))
+function withoutDashboardInternalContextHeaders(request) {
+  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER))
     return request;
-  const headers = new Headers(request.headers);
-  headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return new Request(request, { headers });
+  request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+  return request;
+}
+function withAuthenticatedGatewayPublicOrigin(request, authorization, authToken, origin) {
+  if (!hasValidWorkerBearerToken(authorization, authToken))
+    return request;
+  return withGatewayPublicOriginContext(request, origin);
+}
+function isGatewayPublicOriginContextRoute(request) {
+  const path = new URL(request.url).pathname;
+  return request.method === "GET" && path === "/dashboard/ui" || request.method === "POST" && path === "/dashboard/connect/oauth/start";
+}
+function withGatewayPublicOriginContext(request, origin) {
+  const normalized = normalizeGatewayPublicOrigin(origin);
+  if (!normalized)
+    return request;
+  request.headers.set(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER, normalized);
+  return request;
+}
+function normalizeGatewayPublicOrigin(value) {
+  const trimmed2 = value?.trim();
+  if (!trimmed2)
+    return;
+  try {
+    const url = new URL(trimmed2);
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash)
+      return;
+    if (url.protocol === "https:")
+      return url.origin;
+    if (url.protocol !== "http:")
+      return;
+    const host = url.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" ? url.origin : undefined;
+  } catch {
+    return;
+  }
 }
 function withDashboardControlContextHeader(request, csrfToken) {
-  const headers = new Headers(request.headers);
-  headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
-  return new Request(request, { headers });
+  request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  return request;
 }
 function cookieValue(header, name) {
   if (!header)
@@ -68298,7 +69102,7 @@ function optionalEnv(value) {
   const trimmed2 = value?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2";
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2";
 var init_http = __esm(() => {
   init_worker_auth();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -68530,8 +69334,25 @@ function renderEmbeddingLedgerPage(ledger, options) {
     basePath,
     meta: metaLine(ledger),
     body: renderDashboardNav("background", { basePath }) + renderEmbeddingLedgerBody(ledger, now, basePath),
-    styles: [DASHBOARD_NAV_CSS, EMBEDDING_LEDGER_CSS]
+    styles: [DASHBOARD_NAV_CSS, EMBEDDING_LEDGER_CSS],
+    ...options?.format === undefined ? {} : { format: options.format }
   });
+}
+function renderEmbeddingLedgerControlUi(ledger, canWrite, options) {
+  const body = renderEmbeddingLedgerPage(ledger, {
+    ...options,
+    basePath: "/dashboard",
+    format: "fragment"
+  });
+  return {
+    status: 200,
+    title: "Olympus / Embedding decisions",
+    body,
+    controller: "dashboard",
+    can_write: canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15000
+  };
 }
 function renderEmbeddingLedgerBody(ledger, now, basePath) {
   return [
@@ -69316,10 +70137,10 @@ function nearestExplicitAncestor(segments, explicit) {
   }
   return;
 }
-function applySourceDispositionEdits(document, edits, options = {}) {
+function applySourceDispositionEdits(document2, edits, options = {}) {
   const source = options.source?.trim().toLowerCase() || undefined;
-  const rules = document.rules.map((rule) => ({ ...rule }));
-  const originalIds = new Set(document.rules.map((rule) => rule.id));
+  const rules = document2.rules.map((rule) => ({ ...rule }));
+  const originalIds = new Set(document2.rules.map((rule) => rule.id));
   const touchedIds = new Set;
   const applied = [];
   const refused = [];
@@ -69327,7 +70148,7 @@ function applySourceDispositionEdits(document, edits, options = {}) {
   const ruleAppliesHere = (rule) => sourceExclusionRuleAppliesToSource(rule, source);
   if (!enforcesPaths) {
     return {
-      rules: { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [...document.rules] },
+      rules: { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [...document2.rules] },
       changed: false,
       applied: [],
       refused: edits.map((edit) => ({
@@ -69520,10 +70341,10 @@ function uniqueRuleId(path, taken) {
   }
   throw new Error("Could not mint a unique rule id for this folder.");
 }
-function sourceDispositionNonFolderRules(document, source) {
+function sourceDispositionNonFolderRules(document2, source) {
   const wanted = source?.trim().toLowerCase();
   const out = [];
-  for (const rule of document.rules) {
+  for (const rule of document2.rules) {
     if (!sourceExclusionRuleAppliesToSource(rule, wanted))
       continue;
     const state = sourceDispositionStateFor(rule.mode);
@@ -69654,7 +70475,7 @@ function readSourceIngestionExclusionsFile(path) {
   }
   const text = readFileSync27(path, "utf8");
   const raw = JSON.parse(text);
-  const document = parseSourceIngestionExclusions(raw, path);
+  const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
   const rawRules = raw.rules;
   if (Array.isArray(rawRules)) {
@@ -69664,10 +70485,10 @@ function readSourceIngestionExclusionsFile(path) {
         rawRulesById.set(id.trim(), entry);
     }
   }
-  return { path, present: true, document, rawRulesById };
+  return { path, present: true, document: document2, rawRulesById };
 }
-function serializeSourceIngestionExclusions(document, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys())) {
-  const rules = document.rules.map((rule) => {
+function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys())) {
+  const rules = document2.rules.map((rule) => {
     const raw = preserveIds.has(rule.id) ? rawRulesById.get(rule.id) : undefined;
     if (raw !== undefined)
       return raw;
@@ -69681,7 +70502,7 @@ function serializeSourceIngestionExclusions(document, rawRulesById = new Map, pr
       reason: rule.reason
     };
   });
-  return `${JSON.stringify({ schemaVersion: document.schemaVersion, rules }, null, 2)}
+  return `${JSON.stringify({ schemaVersion: document2.schemaVersion, rules }, null, 2)}
 `;
 }
 function writeSourceIngestionExclusionsFile(options) {
@@ -69745,7 +70566,7 @@ function selectableDispositionStates(node, ancestorState) {
   return [...STATE_ORDER];
 }
 function renderSourceDispositionsHtml(view, options) {
-  const sources = view.sources.map((source) => renderDispositionSource(source)).join("");
+  const body = renderSourceDispositionsFragment(view);
   const csrfToken = escapeScriptJson2(JSON.stringify(options?.csrfToken ?? ""));
   return `<!doctype html>
 <html lang="en">
@@ -69757,7 +70578,14 @@ function renderSourceDispositionsHtml(view, options) {
 ${DISPOSITIONS_CSS}</style>
   </head>
   <body>
-    <main class="picker-page">
+    <div data-olympus-dispositions-root>${body}</div>
+    ${standaloneSourceDispositionsControllerScript(csrfToken)}
+  </body>
+</html>`;
+}
+function renderSourceDispositionsFragment(view) {
+  const sources = view.sources.map((source) => renderDispositionSource(source)).join("");
+  return `<main class="picker-page">
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
@@ -69768,159 +70596,64 @@ ${DISPOSITIONS_CSS}</style>
       </header>
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
-    </main>
-    <script>
-      const csrfToken = ${csrfToken};
-      const labels = { ingest: 'Full ingestion', metadata_only: 'Metadata only', exclude: 'No ingestion' };
-      // Choosing folders in a large tree is minutes of purely local work: no
-      // request leaves this page between opening it and pressing Save, so a
-      // control session that only expired would die under the owner mid-edit
-      // and take every unsaved choice with it. The renewal carries exactly what
-      // a save carries -- the HttpOnly cookie and the CSRF token, never the
-      // worker bearer -- and only fires when the owner has actually done
-      // something since the last one, so an abandoned tab still lets the
-      // session lapse.
-      const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
-      let lastActivityMs = 0;
-      let lastRenewalMs = Date.now();
-      const noteActivity = () => { lastActivityMs = Date.now(); };
-      document.addEventListener('pointerdown', noteActivity, { passive: true });
-      document.addEventListener('keydown', noteActivity, { passive: true });
-      async function renewControlSession() {
-        if (!csrfToken || lastActivityMs <= lastRenewalMs) return;
-        lastRenewalMs = Date.now();
-        try {
-          await fetch('/dashboard/control/session', {
-            method: 'POST',
-            cache: 'no-store',
-            credentials: 'same-origin',
-            headers: { 'X-Olympus-CSRF': csrfToken },
-          });
-        } catch (error) {
-          // A renewal that cannot reach the worker changes nothing on the page;
-          // the save path is what reports an unusable session.
-        }
+    </main>`;
+}
+function renderSourceDispositionsControlUi(view, canWrite) {
+  const body = renderSourceDispositionsFragment(view);
+  return {
+    status: 200,
+    title: "Olympus / Choose folders",
+    body,
+    controller: "dispositions",
+    can_write: canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15000
+  };
+}
+function standaloneSourceDispositionsControllerScript(csrfTokenJson) {
+  const mountSource = mountDispositionsController.toString().replaceAll("</script", "<\\/script");
+  return `<script>
+    (function () {
+      var csrfToken = ${csrfTokenJson};
+      var root = document.querySelector('[data-olympus-dispositions-root]');
+      if (!root) return;
+      var abort = new AbortController();
+      var mount = ${mountSource};
+      async function json(response) {
+        try { return await response.json(); } catch (error) { return {}; }
       }
-      if (csrfToken) setInterval(renewControlSession, KEEPALIVE_INTERVAL_MS);
-      function selectFolder(row) {
-        const form = row.closest('form[data-dispositions-source]');
-        if (!form) return;
-        form.querySelectorAll('.folder-row.selected').forEach((item) => item.classList.remove('selected'));
-        row.classList.add('selected');
-        form.dataset.selectedPath = row.dataset.path || '';
-        const inspector = form.querySelector('.finder-inspector');
-        if (!inspector) return;
-        inspector.querySelector('[data-inspector-empty]').hidden = true;
-        inspector.querySelector('[data-inspector-content]').hidden = false;
-        inspector.querySelector('[data-inspector-name]').textContent = row.dataset.name || '';
-        inspector.querySelector('[data-inspector-path]').textContent = row.dataset.path || '';
-        inspector.querySelector('[data-inspector-count]').textContent = row.dataset.counts || '';
-        // A locked row explains itself first: why the three buttons below it
-        // will not move matters more than where its current choice came from.
-        // The form's reason covers a whole source that cannot be edited here.
-        inspector.querySelector('[data-inspector-note]').textContent = row.dataset.locked
-          || form.dataset.locked
-          || (row.dataset.origin === 'default'
-            ? 'Uses the Full ingestion default until you choose otherwise.'
-            : row.dataset.origin === 'inherited'
-              ? 'Inherited from the nearest folder choice above.'
-              : 'This folder has its own choice.');
-        const selectable = new Set((row.dataset.selectable || '').split(',').filter(Boolean));
-        inspector.querySelectorAll('button[data-picker-state]').forEach((button) => {
-          const state = button.dataset.pickerState;
-          button.disabled = !selectable.has(state);
-          button.classList.toggle('on', row.dataset.state === state);
-        });
-      }
-      document.querySelectorAll('.folder-row').forEach((row) => {
-        row.addEventListener('click', () => selectFolder(row));
-        row.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFolder(row); }
-        });
-      });
-      document.querySelectorAll('button[data-picker-state]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const form = button.closest('form[data-dispositions-source]');
-          const path = form?.dataset.selectedPath;
-          const state = button.dataset.pickerState;
-          if (!form || !path || !state || button.disabled) return;
-          const row = Array.from(form.querySelectorAll('.folder-row')).find((item) => item.dataset.path === path);
-          const radio = Array.from(form.querySelectorAll('input[type="radio"]')).find((input) => input.dataset.path === path && input.value === state);
-          if (!(row instanceof HTMLElement) || !(radio instanceof HTMLInputElement)) return;
-          radio.checked = true;
-          row.dataset.state = state;
-          const status = row.querySelector('[data-folder-status]');
-          if (status) status.textContent = labels[state] || state;
-          selectFolder(row);
-        });
-      });
-      document.querySelectorAll('[data-folder-search]').forEach((input) => {
-        input.addEventListener('input', () => {
-          const query = input.value.trim().toLowerCase();
-          const form = input.closest('form[data-dispositions-source]');
-          form?.querySelectorAll('.folder-row').forEach((row) => {
-            row.hidden = query !== '' && !(row.dataset.search || '').includes(query);
-          });
-        });
-      });
-      document.querySelectorAll('button[data-cancel-picker]').forEach((button) => {
-        button.addEventListener('click', () => window.location.reload());
-      });
-      document.querySelectorAll('form[data-dispositions-source]').forEach((form) => {
-        form.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          const message = document.getElementById('save-message');
-          if (!csrfToken) {
-            if (message) message.textContent = 'Open this picker from the dashboard before saving.';
-            return;
-          }
-          // Only radios the owner actually moved are sent. Posting every folder
-          // on the page would rewrite rules nobody touched and re-slug their
-          // ids, which is the one thing a save here must never do.
-          const edits = [];
-          form.querySelectorAll('input[type="radio"]:checked').forEach((input) => {
-            if (input.value === input.getAttribute('data-initial')) return;
-            edits.push({ path: input.getAttribute('data-path'), state: input.value });
-          });
-          if (edits.length === 0) {
-            if (message) message.textContent = 'Nothing changed.';
-            return;
-          }
-          if (message) message.textContent = 'Saving ' + edits.length + ' change(s)...';
-          try {
-            const response = await fetch('/dashboard/dispositions', {
-              method: 'POST',
-              credentials: 'same-origin',
+      var controller = mount({
+        root: root,
+        transport: {
+          async control(params) {
+            if (params.action !== 'save_dispositions') {
+              return { status: 400, body: { error: { message: 'Unsupported picker action.' } } };
+            }
+            var response = await fetch('/dashboard/dispositions', {
+              method: 'POST', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ source: form.getAttribute('data-dispositions-source'), edits }),
+              body: JSON.stringify({ source: params.source, edits: params.edits }),
             });
-            if (response.status === 401) {
-              // Never reload here: the choices on this page are the only copy.
-              if (message) {
-                message.textContent = 'The control session expired. Your folder choices are still here — '
-                  + 'unlock controls on the dashboard, then reopen this picker to save them.';
-              }
-              return;
-            }
-            const payload = await response.json();
-            if (!response.ok || payload.ok !== true) {
-              throw new Error(payload?.error?.message || 'Save failed.');
-            }
-            const refused = (payload.result?.refused || []);
-            if (refused.length > 0) {
-              if (message) message.textContent = refused.map((entry) => entry.path + ': ' + entry.message).join(' ');
-              return;
-            }
-            if (message) message.textContent = 'Saved. Reloading...';
-            window.location.reload();
-          } catch (error) {
-            if (message) message.textContent = error instanceof Error ? error.message : 'Save failed.';
-          }
-        });
+            return { status: response.status, body: await json(response) };
+          },
+          async renew() {
+            await fetch('/dashboard/control/session', {
+              method: 'POST', cache: 'no-store', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken },
+            });
+          },
+        },
+        navigate: function (href) { window.location.assign(href); },
+        refresh: async function () { window.location.reload(); return undefined; },
+        returnUrl: window.location.href,
+        canWrite: Boolean(csrfToken),
+        authority: 'worker-session',
+        signal: abort.signal,
+        pollIntervalMs: 0,
       });
-    </script>
-  </body>
-</html>`;
+      window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
+    })();
+  </script>`;
 }
 function renderDispositionSource(source) {
   const counts = source.tree.counts;
@@ -70044,186 +70777,13 @@ function escapeHtml2(value) {
 function escapeScriptJson2(value) {
   return value.replaceAll("<", "\\u003c").replaceAll(">", "\\u003e").replaceAll("&", "\\u0026");
 }
-var SOURCE_DISPOSITIONS_DRY_RUN_COMMAND = "bun run source-exclusions:purge -- --dry-run", SOURCE_DISPOSITIONS_PURGE_COMMAND = "bun run source-exclusions:purge -- --purge", SOURCE_DISPOSITIONS_STRIP_COMMAND = "bun run source-exclusions:purge -- --strip-metadata-only", STATE_ORDER, NOT_EDITABLE_BY_PATH_REASON, PICKER_STATE_LABELS, DISPOSITIONS_CSS = `
-      :root {
-        color-scheme: light;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: #1c2523;
-        background: #f6f7f5;
-        --accent: #2f7d67;
-        --accent-strong: #276a57;
-        --accent-soft: #e7f0ec;
-        --warn: #9a6b1f;
-        --warn-soft: #f7efdd;
-        --danger: #b04a38;
-        --border: #e0e5e1;
-        --muted: #4d5955;
-        --faint: #616e69;
-        --card: #ffffff;
-        --radius-card: 10px;
-        --radius-control: 8px;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; font-size: 14px; line-height: 1.55; }
-      main { max-width: 880px; margin: 0 auto; padding: 40px 24px 72px; }
-      header { margin-bottom: 24px; display: grid; gap: 8px; }
-      h1 { font-size: 24px; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
-      h2 { font-size: 16px; font-weight: 600; margin: 0; }
-      h3 { font-size: 14px; font-weight: 600; margin: 0; }
-      p { margin: 0; color: var(--muted); max-width: 72ch; }
-      .eyebrow { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
-      .subtle { color: var(--muted); font-size: 13px; }
-      code { background: #f0f3f1; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
-
-      .warn-note { background: var(--warn-soft); border: 1px solid #e2c888; border-radius: var(--radius-card); padding: 11px 14px; color: #6f551f; font-size: 13px; }
-      .warn-note strong { color: #59410f; }
-
-      .auth { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; margin-bottom: 16px; }
-      .auth-status { font-size: 13px; }
-      .auth-status.authorized { color: var(--accent); font-weight: 500; }
-
-      .source-dispositions { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 12px; margin-bottom: 16px; }
-      .source-head { display: grid; gap: 3px; }
-
-      .tree { display: grid; gap: 2px; }
-      .node { border-top: 1px solid var(--border); padding: 8px 0 8px 0; }
-      .node > .children { margin-left: 18px; border-left: 1px solid var(--border); padding-left: 12px; }
-      .node-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; cursor: default; }
-      /* A flex summary drops the native disclosure triangle in every engine, so
-         the affordance is drawn here. Without it a folder with children looks
-         exactly like one without, and the whole tree reads as flat. */
-      details.node > summary.node-head { cursor: pointer; list-style: none; }
-      details.node > summary.node-head::-webkit-details-marker { display: none; }
-      details.node > summary.node-head::before { content: "\\25B8"; color: var(--faint); font-size: 11px; width: 10px; }
-      details.node[open] > summary.node-head::before { content: "\\25BE"; }
-      .node.leaf > .node-head::before { content: ""; width: 10px; }
-      .node-name { font-weight: 500; }
-      .node-counts { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-
-      /* Explicit and inherited are the distinction this page exists to draw, so
-         they are separated by fill, weight and a note — never by colour alone,
-         which a reader with low colour vision would not see at all. */
-      .chip { display: inline-flex; align-items: baseline; gap: 5px; border-radius: 999px; font-size: 12px; padding: 1px 9px; border: 1px solid var(--border); }
-      .chip-note { font-size: 11px; opacity: 0.85; }
-      .chip.explicit { font-weight: 600; }
-      .chip.explicit.exclude { background: #f6e2de; border-color: #dcb0a6; color: #7d2f20; }
-      .chip.explicit.metadata_only { background: var(--warn-soft); border-color: #d9c9a3; color: #6f551f; }
-      .chip.explicit.ingest { background: var(--accent-soft); border-color: #b6d3c8; color: var(--accent-strong); }
-      .chip.inherited { background: transparent; border-style: dashed; color: var(--faint); font-weight: 400; }
-      .chip.default { background: transparent; color: var(--faint); }
-      .mixed { font-size: 11.5px; color: var(--warn); border: 1px dotted #d9c9a3; border-radius: 999px; padding: 0 8px; }
-
-      .control { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0 0; font-size: 13px; }
-      .control label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
-      .control label.locked { opacity: 0.5; }
-      .control-locked { font-size: 12.5px; color: var(--faint); margin: 6px 0 0; max-width: 70ch; }
-
-      .media-rules { background: #fbfcfb; border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; }
-      .media-rules ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-      .media-rules li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
-      .rule-criterion { font-size: 12.5px; color: #2a3733; }
-
-      .cleanup { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 10px; margin-bottom: 16px; }
-      .copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-      label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
-      input[readonly] { background: #f6f8f6; color: #2a3733; }
-      input { border: 1px solid #ccd5d1; border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: 13.5px; min-width: 0; }
-      button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; justify-self: start; }
-      button.secondary { background: transparent; color: var(--accent); }
-      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-      form { display: grid; gap: 10px; }
-      .action-message { color: var(--muted); font-size: 13px; min-height: 18px; }
-
-      @media (max-width: 720px) {
-        main { padding: 28px 16px 48px; }
-        .node > .children { margin-left: 8px; padding-left: 8px; }
-      }
-
-      /* Finder-style Olympus picker. These rules intentionally override the
-         retired light form above while the underlying save contract remains
-         unchanged. */
-      :root {
-        color-scheme: dark;
-        color: var(--t1);
-        background: #0B0B0E;
-        --accent: var(--link);
-        --accent-strong: var(--link);
-        --accent-soft: var(--panel2);
-        --border: var(--line);
-        --muted: var(--t3);
-        --faint: var(--t4);
-        --card: var(--bg);
-      }
-      body { background: #0B0B0E; color: var(--t1); }
-      .picker-page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 72px; }
-      .picker-header { margin: 0 0 18px; display: grid; gap: 5px; }
-      .picker-header h1 { color: var(--t1); font-size: 22px; }
-      .picker-header p { color: var(--t3); }
-      .picker-header strong { color: var(--t2); }
-      .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
-      .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
-      .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
-      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
-      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: 12.5px; }
-      .location.selected { background: var(--panel2); color: var(--t1); }
-      .location .folder-icon { color: var(--link); font-size: 10px; }
-      .finder-browser { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); }
-      .finder-toolbar { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
-      .finder-toolbar h2 { color: var(--t1); font-size: 15px; }
-      .finder-toolbar p { color: var(--t4); font-size: 11.5px; margin-top: 2px; }
-      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: 12px; }
-      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
-      .tree { height: 468px; overflow: auto; display: block; padding: 6px; }
-      /* Under the tree, not inside it: these count folders and items the tree
-         does not list, so a reader who scrolls to the bottom of the tree has
-         not seen them. */
-      .tree-notes { padding: 8px 14px 10px; border-top: 1px solid var(--line2); display: grid; gap: 4px; }
-      .tree-notes .subtle { color: var(--t4); font-size: 11.5px; }
-      .node { border: 0; padding: 0; }
-      .node > .children { margin-left: 18px; padding-left: 0; border-left: 1px solid var(--line2); }
-      details.node > summary.folder-row { list-style: none; }
-      details.node > summary.folder-row::-webkit-details-marker { display: none; }
-      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: 10px; }
-      details.node[open] > summary.folder-row::before { content: "\\25BE"; }
-      .folder-row { min-height: 31px; display: grid; grid-template-columns: 12px 15px minmax(150px, 1fr) 64px 128px; gap: 7px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: default; color: var(--t2); }
-      .folder-row:hover { background: rgba(255,255,255,.035); }
-      .folder-row.selected { background: var(--link-line); color: var(--t1); }
-      .folder-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
-      .node.leaf .folder-row .disclosure { width: 12px; }
-      .folder-icon { color: var(--link); font-size: 11px; }
-      .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-      .node-counts, .node-state { color: var(--t3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-      .folder-row.selected .node-counts, .folder-row.selected .node-state { color: var(--t1); }
-      .stored-controls { display: none; }
-      .finder-inspector { grid-column: 3; grid-row: 1; padding: 22px 18px; background: rgba(255,255,255,.015); }
-      .finder-inspector [data-inspector-empty] { padding-top: 120px; text-align: center; color: var(--t4); }
-      .inspector-folder { color: var(--link); font-size: 30px; margin-bottom: 10px; }
-      .finder-inspector h3 { color: var(--t1); font-size: 15px; margin-bottom: 4px; }
-      .inspector-path { color: var(--t4); font-size: 11px; overflow-wrap: anywhere; }
-      .inspector-count { color: var(--t3); font-size: 12px; margin: 9px 0 18px; }
-      .choice-stack { display: grid; gap: 7px; }
-      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: 12.5px; }
-      .choice-stack button span { color: var(--t4); font-size: 10.5px; font-weight: 400; }
-      .choice-stack button.on { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
-      .choice-stack button:disabled { opacity: .38; cursor: not-allowed; }
-      .inspector-note { color: var(--t4); font-size: 11px; margin-top: 12px; }
-      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 11.5px; }
-      .footer-actions { display: flex; gap: 8px; }
-      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
-      .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
-      .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
-      .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
-      @media (max-width: 860px) {
-        .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
-        .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
-        .finder-footer { grid-row: 3; }
-      }
-`;
+var SOURCE_DISPOSITIONS_DRY_RUN_COMMAND = "bun run source-exclusions:purge -- --dry-run", SOURCE_DISPOSITIONS_PURGE_COMMAND = "bun run source-exclusions:purge -- --purge", SOURCE_DISPOSITIONS_STRIP_COMMAND = "bun run source-exclusions:purge -- --strip-metadata-only", STATE_ORDER, NOT_EDITABLE_BY_PATH_REASON, PICKER_STATE_LABELS;
 var init_source_dispositions = __esm(() => {
   init_atomic_file();
   init_source_disposition_tree();
   init_operation_error();
   init_theme();
+  init_components();
   init_source_ingestion_exclusions();
   STATE_ORDER = ["ingest", "metadata_only", "exclude"];
   NOT_EDITABLE_BY_PATH_REASON = "This source names folders by identity rather than by path, " + "so the folder tree cannot edit its rules.";
@@ -70563,6 +71123,7 @@ function createEmailSourceWorker(options = {}) {
         if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url.pathname)) {
           return new Response("Not Found", { status: 404 });
         }
+        const dashboardUi = request.method === "GET" && url.pathname === "/dashboard/ui" ? parseDashboardControlUiRequest(url, request.headers) : undefined;
         const filesAlias = fileExtractionAliasFor(url.pathname, basePath);
         const filesAliasTaken = filesAlias !== undefined && fileExtraction !== undefined;
         if (filesAliasTaken)
@@ -70694,7 +71255,7 @@ function createEmailSourceWorker(options = {}) {
         if (request.method === "GET" && url.pathname === "/dashboard/auth-check") {
           return json({ ok: true });
         }
-        if (request.method === "GET" && (url.pathname === "/dashboard/dispositions" || url.pathname === "/dashboard/dispositions.json") || request.method === "POST" && url.pathname === "/dashboard/dispositions") {
+        if (request.method === "GET" && (url.pathname === "/dashboard/dispositions" || url.pathname === "/dashboard/dispositions.json") || request.method === "POST" && url.pathname === "/dashboard/dispositions" || dashboardUi?.params.view === "dispositions") {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(501, "ingestion_dispositions_not_supported", "Private source worker does not have the ingestion-dispositions picker configured.");
           }
@@ -70729,6 +71290,9 @@ function createEmailSourceWorker(options = {}) {
               rulesPath,
               rulesPresent: file.present
             });
+            if (dashboardUi?.params.view === "dispositions") {
+              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite));
+            }
             if (url.pathname === "/dashboard/dispositions.json")
               return json(view);
             return html(renderSourceDispositionsHtml(view, {
@@ -70738,14 +71302,20 @@ function createEmailSourceWorker(options = {}) {
             runtime.close?.();
           }
         }
-        if (request.method === "GET" && url.pathname === "/dashboard" && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM)) {
+        if (publicRuntimeCannotRenderEmbeddingLedger(dashboardUi?.params.view)) {
+          throw new EmailSourceWorkerError(501, "embedding_ledger_not_supported", "This Olympus build does not include the embedding decision ledger.");
+        }
+        if (request.method === "GET" && url.pathname === "/dashboard" && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM) || dashboardUi?.params.view === "embedding_ledger") {
           const ledger = await readEmbeddingLedger(resolveEmbeddingLedgerPath(process.env));
+          if (dashboardUi?.params.view === "embedding_ledger") {
+            return json(renderEmbeddingLedgerControlUi(ledger, dashboardUi.canWrite));
+          }
           const ledgerBasePath = embeddingLedgerBasePath(url);
           return html(renderEmbeddingLedgerPage(ledger, {
             ...ledgerBasePath === undefined ? {} : { basePath: ledgerBasePath }
           }));
         }
-        if (request.method === "GET" && (url.pathname === "/dashboard" || url.pathname === "/dashboard.json")) {
+        if (request.method === "GET" && (url.pathname === "/dashboard" || url.pathname === "/dashboard.json" || url.pathname === "/dashboard/ui")) {
           if (!sourceIndexStatus || !sourceDashboard) {
             throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
           }
@@ -70755,6 +71325,7 @@ function createEmailSourceWorker(options = {}) {
           const registry2 = registryRead.registry;
           const secretStore = dashboardSecretStore(sourceDashboard);
           const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          const nativeDashboardOAuthOrigin = dashboardUi?.nativeOAuthAvailable === false ? undefined : dashboardOAuthOrigin;
           const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
           const googleCloudProjectId = dashboardGoogleCloudProjectId();
           const sourceIndexDashboardStatus = withCredentialDegradations(await sourceIndexStatus.status({
@@ -70786,8 +71357,8 @@ function createEmailSourceWorker(options = {}) {
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
             ...googleCloudProjectId ? { googleCloudProjectId } : {},
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            oauthRedirectBaseUrl: dashboardOAuthOrigin,
-            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardOAuthOrigin, dashboardClientIdSets.own),
+            ...nativeDashboardOAuthOrigin ? { oauthRedirectBaseUrl: nativeDashboardOAuthOrigin } : {},
+            publisherOAuthSources: nativeDashboardOAuthOrigin ? dashboardPublisherOAuthSources(nativeDashboardOAuthOrigin, dashboardClientIdSets.own) : [],
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -70804,8 +71375,18 @@ function createEmailSourceWorker(options = {}) {
           const options2 = {
             embeddingRuntime,
             backgroundRuntime,
-            ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {}
+            ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+            ...dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {},
+            embeddingLedgerAvailable: !PUBLIC_RUNTIME_BUILD
           };
+          if (dashboardUi) {
+            return json(renderDashboardControlUi({
+              params: dashboardUi.params,
+              view,
+              canWrite: dashboardUi.canWrite,
+              options: options2
+            }));
+          }
           const page = renderDashboardHtmlRoute({ url, view, options: options2 });
           return html(page.html, page.status);
         }
@@ -73155,6 +73736,44 @@ function dashboardOAuthAttemptExpired(attempt, now) {
 function dashboardReturnTo() {
   return "/dashboard";
 }
+function parseDashboardControlUiRequest(url, headers) {
+  const allowed = new Set(["native", "view", "can_write", "source_id"]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new EmailSourceWorkerError(400, "invalid_request", "Native dashboard request contains an unknown or repeated field.");
+    }
+  }
+  if (url.searchParams.get("native") !== "1") {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native dashboard requests must declare native=1.");
+  }
+  const requestedView = url.searchParams.get("view");
+  if (!requestedView || !OLYMPUS_DASHBOARD_VIEWS.includes(requestedView)) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native dashboard request names an unknown view.");
+  }
+  const view = requestedView;
+  const writeValue = url.searchParams.get("can_write");
+  if (writeValue !== "0" && writeValue !== "1") {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native dashboard request must declare can_write=0 or can_write=1.");
+  }
+  const sourceId = url.searchParams.get("source_id")?.trim() || undefined;
+  if (sourceId && (sourceId.length > 256 || sourceId.includes("\x00"))) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native dashboard source_id is invalid.");
+  }
+  if (view === "source" && !sourceId) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native source view requires source_id.");
+  }
+  if (view !== "source" && sourceId) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native source_id is allowed only for the source view.");
+  }
+  return {
+    params: { view, ...sourceId ? { source_id: sourceId } : {} },
+    canWrite: writeValue === "1",
+    nativeOAuthAvailable: headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
+  };
+}
+function publicRuntimeCannotRenderEmbeddingLedger(view) {
+  return PUBLIC_RUNTIME_BUILD && view === "embedding_ledger";
+}
 function dashboardSecretStore(sourceDashboard) {
   return sourceDashboard.secretStore ?? createDefaultSecretStore();
 }
@@ -73379,6 +73998,15 @@ function dashboardOAuthClientSecretRequired(source) {
   return source === "x";
 }
 function dashboardOAuthRedirectOrigin(url, headers) {
+  const gatewayPublicOrigin = headers?.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
+  if (gatewayPublicOrigin) {
+    try {
+      const gateway = new URL(gatewayPublicOrigin);
+      const loopbackHttp = gateway.protocol === "http:" && (gateway.hostname === "localhost" || gateway.hostname === "127.0.0.1" || gateway.hostname === "[::1]");
+      if (!gateway.username && !gateway.password && gateway.pathname === "/" && !gateway.search && !gateway.hash && (gateway.protocol === "https:" || loopbackHttp))
+        return gateway.origin;
+    } catch {}
+  }
   if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")) {
     return `http://127.0.0.1${url.port ? `:${url.port}` : ""}`;
   }
@@ -73722,6 +74350,7 @@ var init_email_source = __esm(() => {
   init_source_watch_runtime();
   init_corpora();
   init_dashboard();
+  init_control_ui_contract();
   init_http();
   init_embedding_ledger2();
   init_embedding_ledger();
@@ -79721,13 +80350,13 @@ async function runSetupWizard(options) {
       install: managedWorker.install,
       state: workerState,
       activation: managedWorker.activation,
-      next: managedWorker.activation === "failed" && workerState === "active" ? "The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status." : workerState === "active" ? "The managed worker is running; open the dashboard with olympus dashboard." : workerState === "not_started" ? "Dry run: rerun without --dry-run to write and start the managed worker." : "Run olympus worker install, then olympus worker status.",
+      next: managedWorker.activation === "failed" && workerState === "active" ? "The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status." : workerState === "active" ? "The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access." : workerState === "not_started" ? "Dry run: rerun without --dry-run to write and start the managed worker." : "Run olympus worker install, then olympus worker status.",
       ...managedWorker.activation_detail ? { activation_detail: managedWorker.activation_detail } : {}
     },
     connections,
     dashboard: {
       url: "http://127.0.0.1:8010/dashboard",
-      next: "Open the local dashboard after the worker is running."
+      next: "Open Olympus in the OpenClaw Control UI (2026.9.2 with Custom plugin UI enabled), or run olympus dashboard for standalone access."
     }
   };
 }

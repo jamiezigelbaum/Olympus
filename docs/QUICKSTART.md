@@ -351,11 +351,35 @@ produce it.
 
 ## 6. Watch it ingest
 
+On OpenClaw **2026.9.2**, open **Olympus** in the Control UI sidebar. This is
+the normal OpenClaw plugin interface: the same source setup, scope, ingestion,
+and background views live alongside your agent. Read access follows your
+OpenClaw permissions; changing sources requires write access. You do not paste
+the Olympus worker token into this interface.
+
+OpenClaw's native plugin UI is currently an opt-in feature. Enable **Settings →
+Labs → Custom plugin UI**, restart the Gateway through your normal managed
+procedure, and reload the browser. Use the Control UI served by that Gateway
+over **HTTPS or localhost**. A separately hosted Control UI or plain HTTP on a
+LAN address cannot load authenticated native plugin assets. These are
+[OpenClaw's feature-plugin requirements](https://docs.openclaw.ai/plugins/feature-plugins).
+
+Browser OAuth also needs OpenClaw's `gateway.publicOrigin` set to the HTTPS or
+localhost origin through which you reach the Gateway. Olympus uses that
+configured address for provider callbacks, while its worker stays private.
+If it is missing, the page explains the requirement before starting OAuth.
+Follow your Gateway's managed configuration procedure; see
+[OpenClaw's Gateway configuration](https://docs.openclaw.ai/gateway/configuration-reference).
+
+The standalone dashboard remains available for older hosts, when custom plugin
+UI is disabled, and whenever direct access is useful:
+
 ```bash
 olympus dashboard
 ```
 
-The command prints three fields: the dashboard `url`, whether it `opened` a
+The standalone command prints three fields: the dashboard `url`, whether it
+`opened` a
 browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
 token — and that is the URL that works. A browser cannot send a bearer
 header from the address bar, so the bare `/dashboard` path returns 401; copy
@@ -371,7 +395,8 @@ accepted on exactly two routes — `GET /dashboard` and `GET /dashboard.json`
 with the link can read your dashboard, so treat the URL like the screen
 itself rather than like a secret to be scrubbed.
 
-Changing anything (connecting, reauthenticating, sync now) asks once for the
+In the standalone interface, changing anything (connecting, reauthenticating,
+sync now) asks once for the
 **worker token**, which is a different value and is a real secret:
 `<rootDir>/bin/olympus dashboard token` prints it — `rootDir` comes from
 `openclaw plugins inspect olympus --json`, because `olympus` is not on PATH

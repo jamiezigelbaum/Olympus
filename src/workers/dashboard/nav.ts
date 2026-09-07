@@ -1,3 +1,5 @@
+import { DASHBOARD_NAV_CSS } from './static-styles.ts';
+export { DASHBOARD_NAV_CSS };
 /**
  * The dashboard's top nav: the three pages a reader can reach by name.
  *
@@ -79,10 +81,3 @@ export function renderDashboardNav(active: DashboardNavKey, options?: DashboardN
 }
 
 /** The nav's own layout. Only a page that renders the nav inlines this. */
-export const DASHBOARD_NAV_CSS = `.top { position: sticky; top: 0; z-index: 12; background: var(--bg); padding-top: 2px; }
-.dnav { position: sticky; top: 39px; z-index: 11; display: flex; gap: 4px; margin: -8px 0 22px; border-bottom: 1px solid var(--line2); background: var(--bg); }
-.dnav .dnavlink { color: var(--t3); text-decoration: none; font-size: 12.5px; padding: 6px 12px 8px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.dnav .dnavlink:hover { color: var(--link); }
-.dnav .dnavlink:focus-visible { outline: 1px solid var(--link); outline-offset: -2px; border-radius: 4px; }
-.dnav .dnavlink.on { color: var(--t1); border-bottom-color: var(--link-line); }
-`;

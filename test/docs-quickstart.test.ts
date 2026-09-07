@@ -44,7 +44,7 @@ describe('first-run docs', () => {
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
-    expect(install).toContain('Keep `olympus dashboard` open as the operator-facing progress view.');
+    expect(install).toContain('Keep Olympus open in OpenClaw as the operator-facing progress view; use standalone access only when needed.');
     expect(install).toContain('MUST explain the credential in one plain sentence before asking for it.');
     expect(install).toContain('MUST NOT show internal config keys such as');
     expect(install).toContain('MUST NOT invent keychain, `security add-generic-password`, 1Password, or');
@@ -68,18 +68,20 @@ describe('first-run docs', () => {
     expect(docs).not.toContain('background scheduler currently runs the Dropbox file pipeline');
   });
 
-  test('README first-run path opens the dashboard only after worker and gateway checks', () => {
+  test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
     const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
-    const getStarted = readme.slice(
-      readme.indexOf('## Get started'),
-      readme.indexOf('Full walkthrough with what to expect at each step:'),
-    );
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    const dashboardStep = quickstart.indexOf('## 6. Watch it ingest');
 
-    expect(getStarted.indexOf('olympus worker install')).toBeLessThan(getStarted.indexOf('olympus dashboard'));
-    expect(getStarted.indexOf('olympus worker status')).toBeLessThan(getStarted.indexOf('olympus dashboard'));
-    expect(getStarted.indexOf('openclaw config validate')).toBeLessThan(getStarted.indexOf('openclaw gateway restart'));
-    expect(getStarted.indexOf('openclaw doctor --lint')).toBeLessThan(getStarted.indexOf('openclaw gateway restart'));
-    expect(getStarted.indexOf('openclaw gateway restart')).toBeLessThan(getStarted.indexOf('olympus dashboard'));
+    expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
+    expect(dashboardStep).toBeGreaterThan(0);
+    for (const check of ['olympus worker status', 'openclaw config validate', 'openclaw doctor --lint']) {
+      expect(quickstart.indexOf(check)).toBeGreaterThan(0);
+      expect(quickstart.indexOf(check)).toBeLessThan(dashboardStep);
+    }
+    expect(quickstart.indexOf('openclaw config validate')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw doctor --lint')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw gateway restart')).toBeLessThan(dashboardStep);
     expect(readme).toContain('treat plugin install/enable, gateway');
     expect(readme).toMatch(/repo docs and commands should never require raw edits to\s+OpenClaw runtime config/);
   });

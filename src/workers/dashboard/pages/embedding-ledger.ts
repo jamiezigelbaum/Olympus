@@ -33,8 +33,9 @@ import {
   type EmbeddingLedgerReadResult,
 } from '../../embedding-ledger.ts';
 import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
-import { escapeHtml, pageShell, safeHref } from '../components.ts';
+import { dashboardPageSignature, escapeHtml, pageShell, safeHref } from '../components.ts';
 import { dashboardCount, dashboardRelativeFromMs } from '../vocabulary.ts';
+import type { OlympusDashboardReadResult } from '../../../control-ui-contract.ts';
 
 const DEFAULT_BASE_PATH = '/dashboard';
 
@@ -50,6 +51,7 @@ export interface EmbeddingLedgerPageOptions {
   now?: Date;
   /** Path prefix the page's own links are built from. Defaults to /dashboard. */
   basePath?: string;
+  format?: 'document' | 'fragment';
 }
 
 /**
@@ -73,7 +75,30 @@ export function renderEmbeddingLedgerPage(
     body: renderDashboardNav('background', { basePath })
       + renderEmbeddingLedgerBody(ledger, now, basePath),
     styles: [DASHBOARD_NAV_CSS, EMBEDDING_LEDGER_CSS],
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
+}
+
+/** Inert native-Control-UI projection of the append-only ledger page. */
+export function renderEmbeddingLedgerControlUi(
+  ledger: EmbeddingLedgerReadResult,
+  canWrite: boolean,
+  options?: Omit<EmbeddingLedgerPageOptions, 'format'>,
+): OlympusDashboardReadResult {
+  const body = renderEmbeddingLedgerPage(ledger, {
+    ...options,
+    basePath: '/dashboard',
+    format: 'fragment',
+  });
+  return {
+    status: 200,
+    title: 'Olympus / Embedding decisions',
+    body,
+    controller: 'dashboard',
+    can_write: canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15_000,
+  };
 }
 
 /** The body without the shell, so the page's composition can be read alone. */

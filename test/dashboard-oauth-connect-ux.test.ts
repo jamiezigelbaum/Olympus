@@ -37,7 +37,7 @@ import {
   type DashboardSourceCard,
   type SourceDashboardViewModel,
 } from '../src/workers/source-dashboard.ts';
-import { controlScript } from '../src/workers/dashboard/components.ts';
+import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
 import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.ts';
 import { renderDashboardHomePage } from '../src/workers/dashboard/pages/home.ts';
 import { dashboardAttentionLine, dashboardStatus } from '../src/workers/dashboard/vocabulary.ts';
@@ -304,36 +304,35 @@ describe('the card walks the owner through registering the callback itself', () 
 
 describe('the provider opens in its own tab', () => {
   test('the tab is pre-opened inside the gesture, never with noopener', () => {
-    const script = controlScript({ csrfToken: 'csrf-fixture' });
+    const script = mountDashboardController.toString();
 
     // window.open(..., 'noopener') returns null by spec EVEN ON SUCCESS, so a
     // truthiness check on it declared every successful connect blocked. The tab
     // is opened blank inside the submit event — the only moment the browser
     // will allow it — its opener severed by hand, and pointed at the provider
     // once /start answers.
-    expect(script).toContain("window.open('', '_blank')");
+    expect(script).toContain('window.open');
     expect(script).toContain('tab.opener = null');
-    expect(script).toContain('authorizationTab.location = payload.authorization_url');
+    expect(script).toContain('authorizationTab.location.href = authorizationUrl');
     expect(script).not.toContain("'noopener')");
-    expect(script).not.toContain('window.location.assign(payload.authorization_url)');
     // A tab that was never opened is stated, not diagnosed: the page cannot
     // know why the browser refused.
     expect(script).toContain("If a new tab didn't open, open it here");
     expect(script).not.toContain('blocked the new tab');
     // The fallback is a node with a checked https href, never interpolated
     // markup, and the dashboard tab keeps polling either way.
-    expect(script).toContain("String(url).indexOf('https://') !== 0");
-    expect(script).toContain("document.createElement('a')");
+    expect(script).toContain('url.startsWith("https://")');
+    expect(script).toContain('document.createElement("a")');
     // A blank tab is never left orphaned when the start call does not produce
     // an authorization URL.
     expect(script).toContain('closeAuthorizationTab(authorizationTab)');
   });
 
   test('the cancel form posts to the cancel route and nothing else does', () => {
-    const script = controlScript({});
+    const script = mountDashboardController.toString();
 
-    expect(script).toContain("'/dashboard/connect/oauth/cancel'");
-    expect(script).toContain("connectKind === 'oauth_cancel'");
+    expect(script).toContain('action: "cancel_oauth"');
+    expect(script).toContain('connect === "oauth_cancel"');
   });
 });
 

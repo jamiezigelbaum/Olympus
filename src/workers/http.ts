@@ -26,6 +26,14 @@ export interface WorkerBearerAuthOptions {
  */
 export const DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-CSRF';
+/**
+ * Internal context carried from the native Gateway bridge to the worker.
+ *
+ * The auth wrapper strips any caller-supplied value and restores it only when
+ * the same request presents the worker bearer. That lets OAuth use the
+ * Gateway's configured public origin without trusting a browser Host header.
+ */
+export const DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = 'X-Olympus-Gateway-Public-Origin';
 const DASHBOARD_CONTROL_COOKIE = 'olympus_dashboard_control';
 const DASHBOARD_CONTROL_SIGNATURE_CONTEXT = 'olympus-dashboard-control-session-v3';
 const DASHBOARD_CONTROL_CSRF_CONTEXT = 'olympus-dashboard-control-csrf-v2';
@@ -66,7 +74,9 @@ export function withWorkerBearerAuth(
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
   return async (request: Request): Promise<Response> => {
-    request = withoutDashboardControlContextHeader(request);
+    const presentedAuthorization = request.headers.get('Authorization');
+    const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+    request = withoutDashboardInternalContextHeaders(request);
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
     }
@@ -107,7 +117,12 @@ export function withWorkerBearerAuth(
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
-      return fetchHandler(request);
+      return fetchHandler(withAuthenticatedGatewayPublicOrigin(
+        request,
+        presentedAuthorization,
+        authToken,
+        presentedGatewayPublicOrigin,
+      ));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
       // The dash_ token authorizes reading. A separately minted HttpOnly
@@ -122,8 +137,10 @@ export function withWorkerBearerAuth(
       }
       return fetchHandler(request);
     }
-    if (hasValidWorkerBearerToken(request.headers.get('Authorization'), authToken)) {
-      return fetchHandler(request);
+    if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      return fetchHandler(isGatewayPublicOriginContextRoute(request)
+        ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin)
+        : request);
     }
     if (isDashboardControlReadRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
@@ -433,17 +450,61 @@ function requestTargetOrigin(request: Request): string {
     : url.origin;
 }
 
-function withoutDashboardControlContextHeader(request: Request): Request {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) return request;
-  const headers = new Headers(request.headers);
-  headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return new Request(request, { headers });
+function withoutDashboardInternalContextHeaders(request: Request): Request {
+  if (
+    !request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)
+    && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
+  ) return request;
+  // Mutate the request Headers directly. Bun 1.3 keeps the original headers
+  // when `new Request(existing, { headers })` is used, so a copy-and-delete
+  // looks correct but leaves a forged internal header in place.
+  request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+  return request;
+}
+
+function withAuthenticatedGatewayPublicOrigin(
+  request: Request,
+  authorization: string | null,
+  authToken: string,
+  origin: string | null,
+): Request {
+  if (!hasValidWorkerBearerToken(authorization, authToken)) return request;
+  return withGatewayPublicOriginContext(request, origin);
+}
+
+function isGatewayPublicOriginContextRoute(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return (request.method === 'GET' && path === '/dashboard/ui')
+    || (request.method === 'POST' && path === '/dashboard/connect/oauth/start');
+}
+
+function withGatewayPublicOriginContext(request: Request, origin: string | null): Request {
+  const normalized = normalizeGatewayPublicOrigin(origin);
+  if (!normalized) return request;
+  request.headers.set(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER, normalized);
+  return request;
+}
+
+/** Same public-origin contract OpenClaw applies to gateway.publicOrigin. */
+function normalizeGatewayPublicOrigin(value: string | null): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return undefined;
+    if (url.protocol === 'https:') return url.origin;
+    if (url.protocol !== 'http:') return undefined;
+    const host = url.hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function withDashboardControlContextHeader(request: Request, csrfToken: string): Request {
-  const headers = new Headers(request.headers);
-  headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
-  return new Request(request, { headers });
+  request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  return request;
 }
 
 function cookieValue(header: string | null, name: string): string | undefined {

@@ -1,0 +1,265 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { Window } from 'happy-dom';
+import plugin, { setInertBody } from '../src/control-ui.ts';
+import type {
+  OlympusDashboardControlResult,
+  OlympusDashboardReadResult,
+} from '../src/control-ui-contract.ts';
+import {
+  mountDashboardController,
+  mountDispositionsController,
+} from '../src/control-ui/browser-controller.ts';
+import { buildDispositionsPreviewView } from '../scripts/control-ui-preview.ts';
+import { renderSourceDispositionsControlUi } from '../src/workers/source-dispositions.ts';
+
+const GLOBALS = [
+  'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
+  'HTMLTextAreaElement', 'HTMLSelectElement', 'ShadowRoot', 'Event', 'MouseEvent', 'KeyboardEvent', 'FormData', 'CSS',
+] as const;
+
+const previous = new Map<string, PropertyDescriptor | undefined>();
+let happyWindow: Window;
+
+beforeEach(() => {
+  happyWindow = new Window({ url: 'https://gateway.test/' });
+  const values: Record<(typeof GLOBALS)[number], unknown> = {
+    window: happyWindow,
+    document: happyWindow.document,
+    navigator: happyWindow.navigator,
+    Element: happyWindow.Element,
+    HTMLElement: happyWindow.HTMLElement,
+    HTMLFormElement: happyWindow.HTMLFormElement,
+    HTMLInputElement: happyWindow.HTMLInputElement,
+    HTMLTextAreaElement: happyWindow.HTMLTextAreaElement,
+    HTMLSelectElement: happyWindow.HTMLSelectElement,
+    ShadowRoot: happyWindow.ShadowRoot,
+    Event: happyWindow.Event,
+    MouseEvent: happyWindow.MouseEvent,
+    KeyboardEvent: happyWindow.KeyboardEvent,
+    FormData: happyWindow.FormData,
+    CSS: happyWindow.CSS,
+  };
+  for (const name of GLOBALS) {
+    previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: values[name] });
+  }
+});
+
+afterEach(() => {
+  for (const name of GLOBALS) {
+    const descriptor = previous.get(name);
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else delete (globalThis as Record<string, unknown>)[name];
+  }
+  previous.clear();
+  happyWindow.close();
+});
+
+function result(body: string, signature: string, canWrite = true): OlympusDashboardReadResult {
+  return {
+    status: 200,
+    title: 'Olympus',
+    body,
+    controller: 'dashboard',
+    can_write: canWrite,
+    signature,
+    poll_interval_ms: 0,
+  };
+}
+
+const noControl = async (): Promise<OlympusDashboardControlResult> => ({ status: 200, body: { ok: true } });
+
+describe('dashboard controller DOM lifetime', () => {
+  test('a dirty draft survives refresh after any focus age and permission revoke/regrant', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
+      + '<input name="api_key" type="password"><button type="submit">Connect</button><span data-action-message></span></form>';
+    document.body.append(root);
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: noControl },
+      navigate() {},
+      async refresh() { reads += 1; return result('<p>replacement</p>', 'next'); },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'initial',
+      pollIntervalMs: 0,
+    });
+    const input = root.querySelector<HTMLInputElement>('input[name="api_key"]')!;
+    const button = root.querySelector<HTMLButtonElement>('button')!;
+    input.value = 'unsaved-secret';
+    input.focus();
+
+    await controller.refresh();
+    expect(reads).toBe(0);
+    expect(root.contains(input)).toBe(true);
+    expect(input.value).toBe('unsaved-secret');
+
+    controller.update({ canWrite: false });
+    expect(input.disabled).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(input.value).toBe('unsaved-secret');
+    controller.update({ canWrite: true });
+    expect(input.disabled).toBe(false);
+    expect(button.disabled).toBe(false);
+    expect(input.value).toBe('unsaved-secret');
+    controller.dispose();
+  });
+
+  test('poll replacement is sanitized, navigation respects modifiers, and disposal retires listeners', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<a href="/dashboard?setup">Setup</a>';
+    document.body.append(root);
+    let reads = 0;
+    const navigations: string[] = [];
+    const abort = new AbortController();
+    const controller = mountDashboardController({
+      root,
+      transport: { control: noControl },
+      navigate(href) { navigations.push(href); },
+      async refresh() {
+        reads += 1;
+        return result('<img src="x" onerror="globalThis.pwned=1"><script>globalThis.pwned=2</script><p id="safe">safe</p>', 'next');
+      },
+      replaceHtml: setInertBody,
+      returnUrl: 'https://gateway.test/',
+      canWrite: true,
+      signal: abort.signal,
+      signature: 'initial',
+      pollIntervalMs: 0,
+    });
+    const link = root.querySelector('a')!;
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0, ctrlKey: true }));
+    expect(navigations).toEqual([]);
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    expect(navigations).toEqual(['/dashboard?setup']);
+
+    await controller.refresh();
+    expect(root.querySelector('script')).toBeNull();
+    expect(root.querySelector('img')?.hasAttribute('onerror')).toBe(false);
+    expect(root.querySelector('#safe')?.textContent).toBe('safe');
+
+    abort.abort();
+    const readCount = reads;
+    root.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await controller.refresh();
+    expect(reads).toBe(readCount);
+  });
+});
+
+describe('folder picker DOM lifetime', () => {
+  test('unchanged and changed polls preserve selected folder, search, open state and focus', async () => {
+    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
+    const root = document.createElement('div');
+    root.innerHTML = initial.body;
+    document.body.append(root);
+    const queue = [initial, { ...initial, signature: 'changed' }];
+    const controller = mountDispositionsController({
+      root,
+      transport: { control: noControl },
+      navigate() {},
+      async refresh() { return queue.shift(); },
+      returnUrl: 'https://gateway.test/?view=dispositions',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: initial.signature,
+      pollIntervalMs: 0,
+    });
+    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
+      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
+    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const search = root.querySelector<HTMLInputElement>('[data-folder-search]')!;
+    search.value = 'fin';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const choice = root.querySelector<HTMLButtonElement>('[data-picker-state="metadata_only"]')!;
+    choice.focus();
+
+    await controller.refresh();
+    expect(root.querySelector('[data-picker-state="metadata_only"]')).toBe(choice);
+    expect(document.activeElement).toBe(choice);
+    expect(root.querySelector<HTMLFormElement>('form')?.dataset.selectedPath).toBe('/2 Areas/Finances');
+
+    await controller.refresh();
+    expect(root.querySelector<HTMLInputElement>('[data-folder-search]')?.value).toBe('fin');
+    expect(root.querySelector<HTMLFormElement>('form')?.dataset.selectedPath).toBe('/2 Areas/Finances');
+    expect(root.querySelector<HTMLDetailsElement>('details')?.open).toBe(true);
+    expect(root.querySelector('[data-picker-state="metadata_only"]')).not.toBe(choice);
+    expect((document.activeElement as HTMLElement | null)?.dataset.pickerState).toBe('metadata_only');
+    controller.dispose();
+  });
+
+  test('a failed save and ordinary poll retain dirty folder choices', async () => {
+    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
+    const root = document.createElement('div');
+    root.innerHTML = initial.body;
+    document.body.append(root);
+    let reads = 0;
+    const controller = mountDispositionsController({
+      root,
+      transport: { control: async () => ({ status: 500, body: { error: { message: 'Save failed safely.' } } }) },
+      navigate() {},
+      async refresh() { reads += 1; return { ...initial, signature: 'changed' }; },
+      returnUrl: 'https://gateway.test/?view=dispositions',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: initial.signature,
+      pollIntervalMs: 0,
+    });
+    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
+      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
+    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-picker-state="exclude"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const form = root.querySelector<HTMLFormElement>('form')!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#save-message')?.textContent).toBe('Save failed safely.');
+    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked).toBe(true);
+
+    await controller.refresh();
+    expect(reads).toBe(0);
+    expect(root.contains(form)).toBe(true);
+    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked).toBe(true);
+    controller.dispose();
+  });
+});
+
+describe('native host subscription', () => {
+  test('an unrelated host snapshot does not reload the mounted page', async () => {
+    const container = document.createElement('div');
+    document.body.append(container);
+    let page: { mount(container: HTMLElement, context: never): { dispose(): void } } | undefined;
+    let subscriber: (() => void) | undefined;
+    let reads = 0;
+    const connection = { connected: true, canRead: true, canWrite: true };
+    const host = {
+      connection,
+      request: async () => {
+        reads += 1;
+        return result('<p>stable</p>', 'stable');
+      },
+      subscribe(listener: () => void) { subscriber = listener; return () => { subscriber = undefined; }; },
+      navigation: { openPage() {}, pageHref: () => 'https://gateway.test/?view=home' },
+      ui: {
+        registerPage(value: typeof page) { page = value; return () => {}; },
+        registerNavigation() { return () => {}; },
+      },
+    };
+    const disposePlugin = plugin.activate(host as never) as () => void;
+    const mounted = page!.mount(container, {
+      host,
+      signal: new AbortController().signal,
+      props: { view: 'home' },
+      presented: true,
+    } as never);
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(1);
+    subscriber?.();
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(1);
+    mounted.dispose();
+    disposePlugin();
+  });
+});

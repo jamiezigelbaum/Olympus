@@ -864,8 +864,8 @@ it. Setup's own output says so, under `worker`: `worker.state` is the state
 the service manager reported when setup returned, `worker.next` is the step
 that state calls for, and `worker.activation_detail` appears only when the
 start did not take. On the healthy path `worker.state` is `active` and
-`worker.next` reads `The managed worker is running; open the dashboard with
-olympus dashboard.` Read those three fields before you run anything here —
+`worker.next` reads `The managed worker is running; open Olympus in OpenClaw.
+Use olympus dashboard for standalone access.` Read those three fields before you run anything here —
 they usually make this step a confirmation.
 
 Also check setup's `ok` and `worker.activation`: a failed start or policy
@@ -966,7 +966,29 @@ stop the background service first so the two do not race.
 
 ## Step 5 — Connect sources
 
-Open the dashboard and make it the operator-facing connect surface:
+On OpenClaw **2026.9.2**, use **Olympus** in the Control UI sidebar as the
+operator-facing connect surface. Native plugin pages require **Settings →
+Labs → Custom plugin UI**, a Gateway restart through the applicable managed
+procedure, and a browser reload. Use that Gateway's own Control UI over HTTPS
+or localhost. The setting is an OpenClaw opt-in: explain it and use the
+operator's authorized live-change workflow when enabling it; never silently
+edit runtime configuration. See the
+[upstream contract](https://docs.openclaw.ai/plugins/feature-plugins).
+
+The integrated page uses the signed-in operator's read/write permissions.
+It keeps the worker bearer on the server and needs no worker-token paste.
+Keep the operator in OpenClaw for source setup, scope, and ingestion.
+
+For native browser OAuth, verify that `gateway.publicOrigin` names the
+operator's Gateway origin (HTTPS, or literal localhost/loopback HTTP). Its
+callback routes reach Olympus through the Gateway; do not send a remote
+browser to the private worker's loopback port. If the address is not configured,
+use the applicable live-change procedure to set it with the operator's
+authorization. The dashboard names the missing prerequisite without starting
+an unusable authorization attempt.
+
+For an older host, disabled custom plugin UI, or explicitly requested direct
+access, open the retained standalone dashboard:
 
 ```bash
 olympus dashboard
@@ -975,7 +997,7 @@ olympus dashboard
 Say: "I've opened your Olympus dashboard. Click Connect on the sources you
 want; I'll watch status and help with any one-time setup."
 
-`olympus dashboard` prints three fields and no fourth: `url`, `opened`
+The standalone `olympus dashboard` command prints three fields and no fourth: `url`, `opened`
 (whether it managed to open a browser), and `hint`. **Hand the printed
 `url` to the operator exactly as printed.** It ends in
 `?token=dash_…` — the read-only view token — and that is the URL the
@@ -1030,8 +1052,8 @@ Ask which sources they want now, but do not bulk-connect anything yourself.
 Sources can be started in any order from the dashboard, and OAuth sources can
 be in flight in parallel. Your job is to narrate, run one-time setup when a
 card asks for it, and diagnose failures by watching `olympus connect status`
-and `olympus doctor`. Keep `olympus dashboard` open as the operator-facing
-progress view.
+and `olympus doctor`. Keep Olympus open in OpenClaw as the operator-facing
+progress view; use standalone access only when needed.
 
 Connect-conversation rules:
 
@@ -1208,7 +1230,7 @@ If the first PNG render does not scan, regenerate once (QR payloads rotate
 quickly; a stale payload is the usual cause) before suspecting the bridge.
 
 Rules:
-- Keep `olympus dashboard` open as the operator-facing progress view.
+- Keep Olympus open in OpenClaw as the operator-facing progress view; use standalone access only when needed.
 - Run only the command for the source currently being connected.
 - A dashboard Connect click authorizes only that source. Before YOU run
   any `--detach` connect yourself, ask for that specific source — every
@@ -1370,8 +1392,9 @@ the worker only if it reports `resolved_restart_required`);
 `degraded_credentials`; and the first answer's audit block must not
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
-should be absent. Then show the operator `olympus dashboard` — a local, token-protected view of source
-freshness and where public, private, secure, and secrets are allowed to go.
+should be absent. Then show the operator Olympus in OpenClaw: source freshness
+and where public, private, secure, and secrets are allowed to go. Use
+`olympus dashboard` when standalone access is needed.
 
 Report to the operator: what was installed, the chosen posture, which
 sources are connected, which prerequisites remain open, and the doctor

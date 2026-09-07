@@ -25,8 +25,6 @@ import {
   DASHBOARD_LANE_CSS,
   attentionRow,
   backgroundRow,
-  clipboardScript,
-  controlScript,
   dashboardNeedsSetupSheet,
   dashboardOAuthConnectSheet,
   escapeHtml,
@@ -64,6 +62,16 @@ export interface DashboardPageOptions extends DashboardVocabularyOptions {
    * silence rather than a guess.
    */
   embeddingRuntime?: EmbeddingRuntimeFacts;
+  /** Native Control UI asks for inert body markup instead of a document. */
+  format?: 'document' | 'fragment';
+  /** Native mode inherits Gateway authority and never shows the worker-token gate. */
+  controlMode?: 'standalone' | 'native';
+  /** Presentation only; the Gateway still enforces operator.write server-side. */
+  canWrite?: boolean;
+  /** Native OAuth needs a trusted Gateway public origin for its callback. */
+  nativeOAuthAvailable?: boolean;
+  /** Private builds retain the append-only embedding decision ledger. */
+  embeddingLedgerAvailable?: boolean;
 }
 
 /** Statuses that read as a row with a reason and a control, not as a card. */
@@ -111,14 +119,12 @@ export function renderDashboardHomePage(
       ...blocks.filter((block) => block.length > 0),
     ].join('\n'),
     styles: [DASHBOARD_LANE_CSS, DASHBOARD_NAV_CSS],
-    scripts: [
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-      clipboardScript(),
-    ],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 
@@ -286,7 +292,7 @@ function attentionAction(
   // this row. This is the state an expired X or Google credential lands in
   // when the operator's client id is missing, so the row must not dead-end.
   if (action.kind === 'needs_setup') {
-    if (options?.controlSessionCsrfToken === undefined) {
+    if (!dashboardControlsAvailable(options)) {
       return { action: lockedAction(reconnecting ? 'Reauthenticate' : action.label, options?.basePath) };
     }
     const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
@@ -297,7 +303,7 @@ function attentionAction(
   }
   if (action.kind !== 'oauth' && action.kind !== 'api_key') return undefined;
   const label = reconnecting && action.label === 'Connect' ? 'Reauthenticate' : action.label;
-  if (options?.controlSessionCsrfToken === undefined) {
+  if (!dashboardControlsAvailable(options)) {
     return { action: lockedAction(label, options?.basePath) };
   }
   // An oauth source whose key is on file opens the same sheet the setup page
@@ -317,6 +323,12 @@ function attentionAction(
     }
   }
   return { action: { label, kind: action.kind, source: action.source, primary: true } };
+}
+
+function dashboardControlsAvailable(options: DashboardPageOptions | undefined): boolean {
+  return options?.controlMode === 'native'
+    ? options.canWrite === true
+    : options?.controlSessionCsrfToken !== undefined;
 }
 
 /**

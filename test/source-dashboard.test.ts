@@ -1540,17 +1540,23 @@ describe('multi-source source dashboard', () => {
     const landingHtml = await landing.text();
     expect(landing.status).toBe(200);
     // The landing page is the live dashboard: connected Gmail on a card, and
-    // the control script that carries a later connect to the OAuth redirect.
+    // the shared standalone controller that carries a later connect to the
+    // OAuth redirect.
     expect(landingHtml).toContain('Gmail');
     // The provider now opens in its own tab, so the dashboard survives the
     // round trip instead of being navigated away from it.
     // A tab pre-opened inside the submit gesture, then pointed at the
     // provider. window.open(..., 'noopener') returns null by spec even on
     // success, so it could never tell a blocked tab from an opened one.
-    expect(landingHtml).toContain("window.open('', '_blank')");
-    expect(landingHtml).toContain('authorizationTab.location = payload.authorization_url');
-    expect(landingHtml).not.toContain('window.location.assign(payload.authorization_url)');
-    expect(landingHtml).toContain('dashboard-poll-signature');
+    expect(landingHtml).toMatch(/window\.open\((?:''|""),\s*(?:'_blank'|"_blank")\)/);
+    expect(landingHtml).toMatch(/tab\.opener\s*=\s*null/);
+    expect(landingHtml).toMatch(/authorizationTab\.location\.href\s*=\s*authorizationUrl/);
+    expect(landingHtml).toContain('/dashboard/connect/oauth/start');
+    // Polling now owns one inert root whose signature and session markers are
+    // data, while the shared controller is the only executable path.
+    expect(landingHtml).toContain('data-olympus-dashboard-root');
+    expect(landingHtml).toMatch(/data-signature="[0-9a-f]{64}"/);
+    expect(landingHtml).not.toContain('dashboard-poll-signature');
 
     const manual = await fetch(new Request('http://worker.test/dashboard/sync-now', {
       method: 'POST',

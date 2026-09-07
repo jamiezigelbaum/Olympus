@@ -151,6 +151,16 @@ Continue the quickstart to describe your data, choose a privacy posture,
 connect credentials, and verify a cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
+On OpenClaw **2026.9.2**, use **Olympus** in the Control UI sidebar to connect
+sources, choose scope, and follow ingestion. Enable **Settings → Labs → Custom
+plugin UI**, then restart the Gateway through your normal managed procedure
+and reload the browser. OpenClaw currently makes this integration experimental
+and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
+your signed-in OpenClaw permissions; its worker token stays on the server.
+The standalone `olympus dashboard` command remains available for older hosts,
+when custom plugin UI is off, and for direct access when needed. See the
+[dashboard guide](docs/QUICKSTART.md#6-watch-it-ingest).
+
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It explains the separate secure/non-secure routes, registered embedding
@@ -229,8 +239,8 @@ flowchart LR
 | `olympus setup --preset <preset> --yes` | writes sovereignty policy and worker auth for the chosen posture |
 | `olympus connect <source> ...` | records OAuth, session, or API-key credentials with source-specific flags |
 | `olympus worker foreground\|install\|start\|stop\|restart\|status\|upgrade\|uninstall` | one versioned lifecycle for the local engine, foreground or supervised |
-| `olympus dashboard` | opens the local ingestion dashboard |
-| `olympus dashboard token` | prints the worker token the dashboard's Unlock field asks for |
+| `olympus dashboard` | opens the standalone dashboard when direct access is needed |
+| `olympus dashboard token` | prints the token for the standalone dashboard's Unlock field |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |

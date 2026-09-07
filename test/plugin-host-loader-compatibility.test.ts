@@ -78,6 +78,25 @@ function resolveJiti(root: string): string | undefined {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
+/**
+ * Read the emitted helper module that owns one symbol imported by a bundle.
+ *
+ * OpenClaw 2026.9.2 extracted native-require mechanics from the loader-cache
+ * chunk into sdk-alias-*.js. Resolve the actual import rather than guessing a
+ * content-hashed filename, while still requiring the loader to name and call
+ * the expected helper.
+ */
+function importedHelperSource(loaderDir: string, importer: string, symbol: string): string {
+  const importLine = importer.split('\n').find((line) =>
+    line.startsWith('import ') && line.includes(symbol));
+  expect(importLine, `OpenClaw loader does not import ${symbol}`).toBeDefined();
+  const relativePath = /\bfrom\s+["']\.\/([^"']+\.js)["']/.exec(importLine!)?.[1];
+  expect(relativePath, `OpenClaw ${symbol} helper module not found`).toBeDefined();
+  const path = join(loaderDir, relativePath!);
+  expect(existsSync(path), `OpenClaw ${symbol} helper does not exist: ${relativePath}`).toBe(true);
+  return readFileSync(path, 'utf8');
+}
+
 /** Written by the overlay the moment it is evaluated, one byte per evaluation. */
 const EVALUATION_SENTINEL = 'overlay-evaluated.log';
 
@@ -248,15 +267,29 @@ describe.skipIf(!available)('OpenClaw host plugin loader', () => {
       .find((entry) => entry.startsWith('plugin-module-loader-cache-') && entry.endsWith('.js'));
     expect(loaderFile, 'OpenClaw plugin module loader cache not found').toBeDefined();
     const source = readFileSync(join(loaderDir, loaderFile!), 'utf8');
-    // A synchronous native require, then a jiti source transform. If either
-    // disappears this test is measuring the wrong thing and must be updated.
-    expect(source).toContain('nodeRequire(modulePath)');
-    expect(source).toContain('createJiti');
+    // A synchronous native require, then a synchronous jiti source transform.
+    // OpenClaw 2026.7.1 emits the native-require helper inline; 2026.9.2
+    // imports it from sdk-alias-*.js. Prove the complete extracted call chain,
+    // not merely the helper filename or host version, so deleting either leg
+    // still makes this guard fail.
+    if (source.includes('nodeRequire(modulePath)')) {
+      expect(source).toContain('function tryNativeRequireJavaScriptModule(');
+      expect(source).toContain('tryNativeRequireJavaScriptModule(target');
+    } else {
+      expect(source).toContain('tryNativeRequireJavaScriptModule(target');
+      const nativeHelper = importedHelperSource(loaderDir, source, 'tryNativeRequireJavaScriptModule');
+      expect(nativeHelper).toContain('function tryNativeRequireJavaScriptModule(');
+      expect(nativeHelper).toContain('return tryNativeRequireModule(moduleSpecifier, options)');
+      expect(nativeHelper).toContain('function tryNativeRequireModule(');
+      expect(nativeHelper).toContain('const require = createRequire(import.meta.url)');
+      expect(nativeHelper).toContain('return require(modulePath)');
+    }
+
+    expect(source).toContain('requireForJiti("jiti")');
+    expect(source).toContain('loaded.createJiti');
+    expect(source).toContain('params.createLoader ?? loadCreateJitiLoaderFactory()');
+    expect(source).toMatch(/return getLoadWithSourceTransform\(\)\(target(?:, \.\.\.rest)?\)/);
     expect(source).not.toContain('await import(');
-    const version = (JSON.parse(readFileSync(join(openClawRoot!, 'package.json'), 'utf8')) as {
-      version: string;
-    }).version;
-    expect(version.length).toBeGreaterThan(0);
   });
 
   for (const leg of legs) {

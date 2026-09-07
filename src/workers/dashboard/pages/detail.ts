@@ -45,9 +45,7 @@ import {
   actionButton,
   advancedPanel,
   attentionBanner,
-  clipboardScript,
   connectorSheet,
-  controlScript,
   countChip,
   escapeHtml,
   pageShell,
@@ -162,14 +160,12 @@ export function renderDashboardDetailPage(
     // along because this page now carries the connect control for a source
     // that needs one — the row a warning on home leads to has to be able to
     // finish what the warning is about.
-    scripts: [
-      clipboardScript(),
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-    ],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 
