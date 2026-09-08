@@ -44,7 +44,7 @@
     "src/workers/source-dispositions.ts",
     "src/workers/source-ingestion-ledger.ts"
   ],
-  "implementation_guard_sha256": "e21ec17a7b82dca81636b4a96ee8b99ec920f7dea81a04a53f3be39b328e2138",
+  "implementation_guard_sha256": "3bcbe39a2821abcb2058e782b211a1eca0399d60522ce669e489ea1d17dcd78e",
   "pending_review": {
     "requested_on": "2026-09-02",
     "reason": "The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again. The second clean-install rehearsal (2026-09-05) then changed the unconnected-source states again: every not-connected card reads one readiness, a never-run source says it is waiting for the first sync, a publisher setup sheet leads from the one-click sentence the action itself carries, and the worker-token gate names the plugin bin path. The native OpenClaw pages, their shared browser controls, and the retained standalone interface now await owner acceptance for the integrated layout."

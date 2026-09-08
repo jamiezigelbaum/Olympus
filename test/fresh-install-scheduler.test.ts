@@ -92,6 +92,8 @@ describe('fresh install worker scheduler', () => {
           authToken: 'boot-failure-token',
           schedulerEnabled: true,
           exec: alwaysInactiveLinuxManager(),
+          actionSettleTimeoutMs: 20,
+          actionSettlePollMs: 0,
         });
       } catch (caught) {
         error = caught;
