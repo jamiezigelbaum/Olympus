@@ -1,3 +1,5 @@
+import { BACKGROUND_CSS } from '../static-styles.ts';
+export { BACKGROUND_CSS };
 /**
  * Background: the work the owner never asked for by hand — embedding, vision
  * extraction, scheduled syncs, the drains and supervisors — one block per lane
@@ -39,7 +41,6 @@ import type { DashboardSourceCard, SourceDashboardViewModel } from '../../source
 import {
   DASHBOARD_LANE_CSS,
   attentionRow,
-  controlScript,
   escapeHtml,
   miniBar,
   pageShell,
@@ -706,13 +707,12 @@ export function renderDashboardBackgroundPage(
     // The embedding toggle is the first control this page has ever carried, so
     // it is also the first time this page needs the shared control wiring — the
     // same token prompt and the same auth-check every other control uses.
-    scripts: [
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-    ],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 
@@ -1298,34 +1298,7 @@ function renderEmbeddingToggle(
  * under one of them. Self-contained rather than folded into the shared theme —
  * these rules describe one page.
  */
-const BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
-.lane .lstate { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
-.lane .lfacts { color: var(--t2); font-size: 12.5px; margin-top: 5px; font-variant-numeric: tabular-nums; }
-.lane .lmove { color: var(--t3); font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
-.lane .lreason { color: var(--warn); font-size: 12px; margin-top: 5px; max-width: 74ch; }
-.lane .lreason.stuck { color: var(--bad); }
-.lane .lreason.unknown { color: var(--t3); }
-.lane .lbar { margin-top: 8px; }
-.lane .lbar .minibar { width: 100%; max-width: 340px; }
-.lane .lanestrip { margin-top: 8px; }
-.lane .lqueue { margin-top: 8px; border-top: 1px solid var(--line2); padding-top: 7px; }
-.lane .lq { color: var(--t3); font-size: 12px; line-height: 1.55; }
-.lane .lq b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.lane.quiet { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 14px; }
-.lane.quiet .lquiet { color: var(--t4); font-size: 12px; }
-.info { color: var(--t3); font-size: 12.5px; line-height: 1.6; max-width: 74ch; }
-.infolink { margin-top: 8px; font-size: 12.5px; }
-.embblock { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin: -3px 0 7px; }
-.embblock .embstate { font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-.embblock .embline { color: var(--t3); font-size: 12px; line-height: 1.5; margin-bottom: 4px; }
-.embblock .embline.warn { color: var(--warn); }
-.embblock .rowform { margin: 8px 0 6px; }
-@media (max-width: 700px) {
-  .lane .lanehd { flex-wrap: wrap; }
-}
-`;
+
 
 /* ----------------------------------------------------------------- runs -- */
 

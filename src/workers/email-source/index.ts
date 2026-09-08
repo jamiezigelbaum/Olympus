@@ -126,9 +126,16 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
-import { renderDashboardHtmlRoute } from '../dashboard/index.ts';
-import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER } from '../http.ts';
-
+import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import {
+  OLYMPUS_DASHBOARD_VIEWS,
+  type OlympusDashboardReadParams,
+} from '../../control-ui-contract.ts';
+import {
+  DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+} from '../http.ts';
 import {
   readEmbeddingRuntime,
   resolveEmbeddingOverridePath,
@@ -152,6 +159,7 @@ import {
 } from '../credential-health.ts';
 import {
   buildSourceDispositionsView,
+  renderSourceDispositionsControlUi,
   renderSourceDispositionsHtml,
   resolveSourceIngestionExclusionsPath,
   readSourceIngestionExclusionsFile,
@@ -666,6 +674,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url.pathname)) {
           return new Response('Not Found', { status: 404 });
         }
+        const dashboardUi = request.method === 'GET' && url.pathname === '/dashboard/ui'
+          ? parseDashboardControlUiRequest(url, request.headers)
+          : undefined;
 
         // The family-scoped extraction paths are aliases of the generic
         // `/source/index/files/*` ones, and the rewrite below is what makes the
@@ -825,7 +836,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // an authorized fetch, so the strong credential is the only way in.
         if ((request.method === 'GET'
           && (url.pathname === '/dashboard/dispositions' || url.pathname === '/dashboard/dispositions.json'))
-          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')) {
+          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')
+          || dashboardUi?.params.view === 'dispositions') {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(
               501,
@@ -864,6 +876,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               rulesPath,
               rulesPresent: file.present,
             });
+            if (dashboardUi?.params.view === 'dispositions') {
+              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite));
+            }
             if (url.pathname === '/dashboard/dispositions.json') return json(view);
             return html(renderSourceDispositionsHtml(view, {
               csrfToken: request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined,
@@ -873,7 +888,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
         }
 
-        if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json')) {
+        if (request.method === 'GET'
+          && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json' || url.pathname === '/dashboard/ui')) {
           if (!sourceIndexStatus || !sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -891,6 +907,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const registry = registryRead.registry;
           const secretStore = dashboardSecretStore(sourceDashboard);
           const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          const nativeDashboardOAuthOrigin = dashboardUi?.nativeOAuthAvailable === false
+            ? undefined
+            : dashboardOAuthOrigin;
           const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           const googleCloudProjectId = dashboardGoogleCloudProjectId();
           const sourceIndexDashboardStatus = withCredentialDegradations(
@@ -954,12 +973,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
             ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            oauthRedirectBaseUrl: dashboardOAuthOrigin,
+            ...(nativeDashboardOAuthOrigin ? { oauthRedirectBaseUrl: nativeDashboardOAuthOrigin } : {}),
             // Which sources connect through Olympus's own app, so their card can
             // offer one Connect button instead of a walkthrough for an app the
             // owner does not have to register. Names sources only — no client
             // id, no relay URL, no state: this rides on the read-only surface.
-            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardOAuthOrigin, dashboardClientIdSets.own),
+            publisherOAuthSources: nativeDashboardOAuthOrigin
+              ? dashboardPublisherOAuthSources(nativeDashboardOAuthOrigin, dashboardClientIdSets.own)
+              : [],
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -988,7 +1009,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+            ...(dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {}),
           };
+          if (dashboardUi) {
+            return json(renderDashboardControlUi({
+              params: dashboardUi.params,
+              view,
+              canWrite: dashboardUi.canWrite,
+              options,
+            }));
+          }
           const page = renderDashboardHtmlRoute({ url, view, options });
           return html(page.html, page.status);
         }
@@ -4289,18 +4319,14 @@ function createDashboardOAuthCallbackRateLimiter(): (key: string, now: number) =
 }
 
 /**
- * `<source>:<caller address>` — the finest granularity this route can trust.
- * `X-Forwarded-For`'s first hop is the ordinary shape a reverse proxy sets
- * (the same convention `dashboardForwardedProto` already reads for the
- * origin scheme), used opportunistically rather than as a security boundary:
- * a caller that can spoof it can already reach this unauthenticated route
- * directly, and the limiter's job is to bound an accidental or scripted flood,
- * not to authenticate anyone. Absent the header, every caller for a source
- * shares one bucket — coarser, never wrong.
+ * `<source>:<caller address>`. The callback peer header is injected only by
+ * `withWorkerBearerAuth` after verifying the Gateway's HMAC, so a direct
+ * callback or a caller-supplied copy cannot choose a bucket. Direct callers
+ * share the conservative `unknown` bucket.
  */
 function dashboardOAuthCallbackRateLimitKey(source: DashboardOAuthSource, headers: Headers): string {
-  const forwardedFor = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return `${source}:${forwardedFor || 'unknown'}`;
+  const peer = headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)?.trim();
+  return `${source}:${peer || 'unknown'}`;
 }
 
 const DASHBOARD_UNPAIR_SOURCE_IDS: DashboardUnpairSource[] = [
@@ -4632,6 +4658,51 @@ function dashboardOAuthAttemptExpired(attempt: DashboardOAuthAttempt, now: Date)
  */
 function dashboardReturnTo(): string {
   return '/dashboard';
+}
+
+function parseDashboardControlUiRequest(
+  url: URL,
+  headers: Headers,
+): {
+  params: OlympusDashboardReadParams;
+  canWrite: boolean;
+  nativeOAuthAvailable: boolean;
+} {
+  const allowed = new Set(['native', 'view', 'can_write', 'source_id']);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request contains an unknown or repeated field.');
+    }
+  }
+  if (url.searchParams.get('native') !== '1') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard requests must declare native=1.');
+  }
+  const requestedView = url.searchParams.get('view');
+  if (!requestedView || !OLYMPUS_DASHBOARD_VIEWS.includes(requestedView as never)) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request names an unknown view.');
+  }
+  const view = requestedView as OlympusDashboardReadParams['view'];
+  const writeValue = url.searchParams.get('can_write');
+  if (writeValue !== '0' && writeValue !== '1') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request must declare can_write=0 or can_write=1.');
+  }
+  const sourceId = url.searchParams.get('source_id')?.trim() || undefined;
+  if (sourceId && (sourceId.length > 256 || sourceId.includes('\0'))) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard source_id is invalid.');
+  }
+  if (view === 'source' && !sourceId) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source view requires source_id.');
+  }
+  if (view !== 'source' && sourceId) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source_id is allowed only for the source view.');
+  }
+  return {
+    params: { view, ...(sourceId ? { source_id: sourceId } : {}) },
+    canWrite: writeValue === '1',
+    // workers/http.ts has already stripped any untrusted value and restores
+    // this header only beside a valid worker bearer.
+    nativeOAuthAvailable: headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER),
+  };
 }
 
 function dashboardSecretStore(sourceDashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>): SecretStore {
@@ -5125,6 +5196,28 @@ function dashboardOAuthClientSecretRequired(source: DashboardOAuthSource | 'goog
  * never point a callback at another origin.
  */
 function dashboardOAuthRedirectOrigin(url: URL, headers?: Headers): string {
+  const gatewayPublicOrigin = headers?.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
+  if (gatewayPublicOrigin) {
+    // workers/http.ts strips this internal context from every inbound request
+    // and restores a normalized value only for the holder of the worker
+    // bearer. Re-parse here as a final fail-closed check because this function
+    // also has direct unit-test callers that can bypass the HTTP wrapper.
+    try {
+      const gateway = new URL(gatewayPublicOrigin);
+      const loopbackHttp = gateway.protocol === 'http:'
+        && (gateway.hostname === 'localhost' || gateway.hostname === '127.0.0.1' || gateway.hostname === '[::1]');
+      if (
+        !gateway.username
+        && !gateway.password
+        && gateway.pathname === '/'
+        && !gateway.search
+        && !gateway.hash
+        && (gateway.protocol === 'https:' || loopbackHttp)
+      ) return gateway.origin;
+    } catch {
+      // Fall through to the standalone dashboard's request origin.
+    }
+  }
   if (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]')) {
     return `http://127.0.0.1${url.port ? `:${url.port}` : ''}`;
   }

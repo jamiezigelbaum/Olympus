@@ -21,16 +21,32 @@ import {
   type Operation,
   type OperationContext,
 } from './core/operations.ts';
+import { registerOlympusDashboardGateway } from './core/control-ui-gateway.ts';
 
 interface OpenClawPluginApi {
   pluginConfig?: unknown;
   config?: unknown;
   registerTool(tool: NativeTool): void;
+  registerGatewayMethod?(method: string, handler: (input: {
+    params: Record<string, unknown>;
+    client: { invalidated?: boolean; connect?: { scopes?: unknown } } | null;
+    respond(
+      ok: boolean,
+      payload?: unknown,
+      error?: { code: 'INVALID_REQUEST' | 'UNAVAILABLE'; message: string },
+      meta?: Record<string, unknown>,
+    ): void;
+    context?: { getRuntimeConfig?: () => unknown };
+    signal?: AbortSignal;
+  }) => Promise<void> | void, options?: {
+    scope?: 'operator.read' | 'operator.write';
+    profileAccess?: 'independent' | 'required';
+  }): void;
   registerHttpRoute?(route: {
     path: string;
     auth: 'plugin';
     match: 'exact';
-    handler(request: IncomingMessage, response: ServerResponse): Promise<void>;
+    handler(request: IncomingMessage, response: ServerResponse): Promise<boolean | void> | boolean | void;
   }): void;
 }
 
@@ -205,6 +221,7 @@ const plugin = {
     };
 
     registerSourceWatchDeliveryRoute(api, config);
+    registerOlympusDashboardGateway(api, config);
 
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, {

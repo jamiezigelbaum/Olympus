@@ -18,12 +18,47 @@ import {
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
 } from '../src/workers/http.ts';
 
 describe('worker HTTP bind and auth', () => {
+  test('trusts Gateway public-origin context only beside the worker bearer', async () => {
+    const seen: Array<string | null> = [];
+    const guarded = withWorkerBearerAuth(async (request) => {
+      seen.push(request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER));
+      return new Response('ok');
+    }, { authToken: 'worker-secret' });
+
+    // OAuth callbacks are public and state-authenticated, so a browser may
+    // reach them; its attempt to forge the internal Gateway origin is stripped.
+    await guarded(new Request('http://worker.test/oauth/callback/dropbox?code=c&state=s', {
+      headers: { [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://attacker.test' },
+    }));
+    await guarded(new Request('http://worker.test/oauth/callback/dropbox?code=c&state=s', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+    await guarded(new Request('http://worker.test/dashboard/ui', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'http://non-loopback.example',
+      },
+    }));
+    await guarded(new Request('http://worker.test/v1/private', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+
+    expect(seen).toEqual([null, 'https://gateway.example', null, null]);
+  });
+
   test('every worker server binds loopback by default and honors the shared override', () => {
     const resolvers = [
       resolveEmailSourceBindHostFromEnv,

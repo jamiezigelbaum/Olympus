@@ -6,7 +6,10 @@
   "review_method": "dialogic_owner_review_in_app_browser",
   "reviewed_commit": "b0211134136365582bfdec946f8683f5cad7903b",
   "reviewed_visual_paths": [
+    "scripts/control-ui-preview.ts",
     "scripts/dashboard-preview.ts",
+    "src/control-ui",
+    "src/control-ui.ts",
     "src/workers/dashboard",
     "src/workers/source-dashboard.ts",
     "src/workers/source-dispositions.ts"
@@ -16,14 +19,24 @@
     "INSTALL_FOR_AGENTS.md",
     "README.md",
     "dist/cli.js",
+    "dist/control-ui",
     "dist/index.js",
     "docs/QUICKSTART.md",
     "docs/V0_4_RELEASE.md",
+    "openclaw.plugin.json",
+    "package.json",
+    "scripts/control-ui-preview.ts",
     "scripts/dashboard-preview.ts",
-    "scripts/release-artifact.ts",
     "scripts/release-artifact-ci.ts",
+    "scripts/release-artifact.ts",
     "src/cli.ts",
+    "src/control-ui",
+    "src/control-ui-contract.ts",
+    "src/control-ui.ts",
+    "src/core/control-ui-gateway.ts",
     "src/core/google-pilot-client.ts",
+    "src/core/setup.ts",
+    "src/native-plugin.ts",
     "src/workers/dashboard",
     "src/workers/email-source/index.ts",
     "src/workers/http.ts",
@@ -31,10 +44,10 @@
     "src/workers/source-dispositions.ts",
     "src/workers/source-ingestion-ledger.ts"
   ],
-  "implementation_guard_sha256": "8c12ce9da9961c921c263e0396f0def5f3491e53cec00eebc3b3e7c8b40d4e3c",
+  "implementation_guard_sha256": "f1f5fd2f6399f7159137a0bc57e88552ddfcdaf350825e38b5e42437147caea0",
   "pending_review": {
     "requested_on": "2026-09-02",
-    "reason": "The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again. The second clean-install rehearsal (2026-09-05) then changed the unconnected-source states again: every not-connected card reads one readiness, a never-run source says it is waiting for the first sync, a publisher setup sheet leads from the one-click sentence the action itself carries, and the worker-token gate names the plugin bin path."
+    "reason": "The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again. The second clean-install rehearsal (2026-09-05) then changed the unconnected-source states again: every not-connected card reads one readiness, a never-run source says it is waiting for the first sync, a publisher setup sheet leads from the one-click sentence the action itself carries, and the worker-token gate names the plugin bin path. The native OpenClaw pages, their shared browser controls, and the retained standalone interface now await owner acceptance for the integrated layout."
   },
   "reviewed_states": [
     {

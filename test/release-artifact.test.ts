@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'bun:test';
 import {
   V0_4_PUBLIC_PACKAGE_BUILD_READY,
@@ -103,6 +104,7 @@ describe('release artifact packaging', () => {
       expect(listing.stdout).toContain('package/bin/olympus');
       expect(listing.stdout).toContain('package/INSTALL_FOR_AGENTS.md');
       expect(listing.stdout).toContain('package/dist/cli.js');
+      expect(listing.stdout).toContain('package/dist/control-ui/index.js');
       expect(listing.stdout).toContain('package/docs/QUICKSTART.md');
       expect(listing.stdout).not.toContain('package/docs/ARCHITECTURE.md');
       expect(listing.stdout).toContain('package/docs/TRUST_MODEL.md');
@@ -124,6 +126,15 @@ describe('release artifact packaging', () => {
       const packageDir = join(extractDir, 'package');
       expect(allFiles(packageDir).map((path) => relative(packageDir, path)).sort())
         .toEqual([...V0_4_PUBLIC_PACKAGE_FILES].sort());
+      const packagedManifest = JSON.parse(readFileSync(join(packageDir, 'openclaw.plugin.json'), 'utf8')) as {
+        controlUi: { entry: string };
+      };
+      const browserEntryPath = join(packageDir, packagedManifest.controlUi.entry);
+      expect(relative(packageDir, browserEntryPath)).toBe('dist/control-ui/index.js');
+      expect(statSync(browserEntryPath).size).toBeLessThanOrEqual(4 * 1024 * 1024);
+      const browserModule = await import(pathToFileURL(browserEntryPath).href);
+      expect(browserModule.default.id).toBe('olympus');
+      expect(typeof browserModule.default.activate).toBe('function');
       const packagedReadme = readFileSync(join(packageDir, 'README.md'), 'utf8');
       expect(packagedReadme).not.toContain('docs/DEVELOPMENT.md');
       expect(packagedReadme).not.toContain('bun run verify');

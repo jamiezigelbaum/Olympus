@@ -36,7 +36,11 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import {
+  createGatewayCallbackPeerHeader,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  withWorkerBearerAuth,
+} from '../src/workers/http.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,
@@ -684,10 +688,13 @@ describe('publisher provenance survives reauthentication', () => {
 describe('callback rate limiting', () => {
   const RATE_LIMIT_MAX_PER_WINDOW = 30;
 
-  function floodRequest(source: string, forwardedFor: string): Request {
+  function floodRequest(source: string, peer: string): Request {
     return new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/${source}?code=flood&state=aaaa.bbbb`,
-      { headers: { 'X-Forwarded-For': forwardedFor } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader(peer, 'dashboard-secret'),
+      } },
     );
   }
 
@@ -707,7 +714,10 @@ describe('callback rate limiting', () => {
     // other refusal on this route uses, and the exchange never runs.
     const shouldHaveWorked = await instance.fetch(new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=too-late&state=${encodeURIComponent(state)}`,
-      { headers: { 'X-Forwarded-For': '203.0.113.9' } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.9', 'dashboard-secret'),
+      } },
     ));
     expect(shouldHaveWorked.status).toBe(410);
     const baseline = await fixture().fetch(new Request(
@@ -727,7 +737,29 @@ describe('callback rate limiting', () => {
     const state = authorizeUrl.searchParams.get('state')!;
     const completed = await instance.fetch(new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
-      { headers: { 'X-Forwarded-For': '203.0.113.2' } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.2', 'dashboard-secret'),
+      } },
+    ));
+    expect(completed.status).toBe(303);
+  });
+
+  test('a direct caller cannot select a relay peer bucket by spoofing the private header', async () => {
+    const instance = fixture();
+    for (let i = 0; i < RATE_LIMIT_MAX_PER_WINDOW; i += 1) {
+      const request = floodRequest('dropbox', '203.0.113.10');
+      request.headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, '203.0.113.10.forged');
+      expect((await instance.fetch(request)).status).toBe(410);
+    }
+    const authorizeUrl = await authorizationUrl(await startConnect(instance));
+    const state = authorizeUrl.searchParams.get('state')!;
+    const completed = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.10', 'dashboard-secret'),
+      } },
     ));
     expect(completed.status).toBe(303);
   });

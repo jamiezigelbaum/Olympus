@@ -129,6 +129,15 @@ testers have exercised the normal product journey without custom engineering.
 - **2026-08-31 — Built artifacts.** `dist/` remains source-controlled for v0.4.
   CI rebuilds and checks it, and the release package contains only current,
   allowlisted built output.
+- **2026-09-07 — OpenClaw dashboard integration.** OpenClaw's native Control
+  UI is the default Olympus plugin interface when available. Target the
+  shipped `2026.9.2` API, with its explicit Custom plugin UI Labs opt-in and
+  same-Gateway HTTPS/localhost requirements. Reuse the existing dashboard
+  renderers and browser controls through scoped Gateway operations; keep the
+  worker bearer server-side. Preserve standalone dashboard access for older
+  hosts and future integrations. This repository change does not upgrade or
+  deploy Castor, change the qualified host floor, or close the clean-install
+  and real-provider qualification exits.
 - **Standing — Embedding control.** Any model, provider, dimension, epoch, or re-embed change requires the owner's advance approval with cost stated and an embedding-ledger entry. Existing vectors are never discarded merely to simplify a cutover.
 
 ## Qualification levels
