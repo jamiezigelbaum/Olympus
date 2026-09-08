@@ -167,15 +167,67 @@ in the [A/B report](reviews/parallel-ab/README.md). No runtime source changed
 while testing; no adoption or merge occurred. Current main advanced only in
 restart-script/protocol surfaces, with the evaluated runtime inputs unchanged.
 
+## Real Air rehearsal (2026-09-08)
+
+The real candidate artifact at commit `4c314e959936ab5580d52a959ae129fb94191352`
+is installed on the designated macOS Air rehearsal host under OpenClaw 2026.9.2.
+Its SHA-256 is
+`97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267`
+and its size is 703,157 bytes. Pull request #21's seven required contexts are
+green for that head, including an independent critical lifecycle review. The
+pull request remains open and must not be merged as part of this experiment.
+
+The first worker activation attempt exposed a real launchd boundary: `bootstrap`
+accepted the job before `print` reported it running, and the lifecycle facade
+rolled back immediately. The candidate now applies the same bounded readiness
+settle already used by start/restart before deciding whether install/upgrade
+succeeded. The regression, lifecycle suite, local fast lane, 420-test deploy
+lane, package check, independent review, and exact-head CI all pass. The rebuilt
+artifact then upgraded the worker successfully from an immutable digest-named
+version root; its service is active, loopback health answers, and no lifecycle
+transaction remains.
+
+Gateway reload stayed disabled during install and worker recovery. Two later
+Gateway restarts used the reviewed Darwin safe-restart path: one loaded the
+candidate plugin, and one applied OpenClaw's documented Custom plugin UI Labs
+setting. Each established a new stable launchd process, an owned loopback
+listener, a successful HTTP response, and a fresh process-bound ready line.
+The preflight resolved all six local credential references, accepted only the
+one native OAuth informational record, and found no skipped exec references.
+
+Olympus is the only enabled user-installed plugin on this host that declares a
+native UI. A real browser session shows Olympus in the OpenClaw navigation and
+renders its Setup and Background views. Direct Gateway reads of Home, Setup,
+and Background return 200 through the live worker bridge with operator write
+authority. No connect, sync, credential, source, or embedding control was
+invoked during the rehearsal.
+
+Two focused OpenClaw/Luna turns then called the installed tools successfully.
+A narrow `source_index_status` request returned the exact requested fields, and
+`source_answer` returned no evidence plus an explicit no-matching-evidence gap
+for a question about unavailable email. One all-corpus status turn failed the
+interpretation check: OpenClaw truncates the 10,245-character native tool result
+at 10,000 characters, and the model mislabeled configured corpus rows as
+connected/answer-ready source counts. The dashboard remains authoritative at
+zero connected and zero answer-ready sources. This is a disclosed product
+usability defect and was not used as passing evidence.
+
+The [content-free rehearsal receipt](reviews/parallel-air-rehearsal.json)
+records the exact evidence and limits. This proves candidate install, worker
+lifecycle, Gateway loading, native dashboard rendering, and read-only tool
+execution on one real host. With no connected source on that host, it does not
+prove real-provider ingestion, personal-corpus answer parity, or superiority.
+
 ## Parallel build and test
 
-Use this branch's dedicated worktree. Run `bun install --frozen-lockfile` and
-`bun run verify:full` for the full local comparison, or the closest affected
-tests during further edits. Package checks use the same public archive
-inventory as v0.4. The branch is backed up as
-`origin/codex/first-principles-simplification`; no pull request or merge is part
-of this experiment. Remote CI was not run: the unchanged workflow triggers on
-`main` and pull requests, while this work stays on its parallel branch.
+The original A/B build remains backed up as
+`origin/codex/first-principles-simplification`; that branch had no pull request
+and did not run remote CI. The later real-host rehearsal continues in the
+separate `codex/air-real-rehearsal` worktree and pull request #21, which remains
+unmerged. Run `bun install --frozen-lockfile` and `bun run verify:full` in the
+relevant dedicated worktree for a full local comparison, or the closest
+affected tests during further edits. Package checks use the same public archive
+inventory as v0.4.
 
 The simulated clean-home runner accepts `--fixture --plan <fixture-plan.json>`, so
 artifact identities for this experiment can be supplied without rewriting the
@@ -202,5 +254,6 @@ These generated archives are local test assets, not committed release inputs.
 Any artifact built with the synthetic Google client fixture is for tests only.
 Real-provider, private-corpus held-out evaluation, clean-host qualification,
 dashboard owner acceptance, and adoption remain separate decisions/proofs.
-No live state, credentials, vectors, services, or current v0.4 artifacts are
-changed by this experiment.
+The digest-pinned real candidate described above remains installed only on the
+designated Air rehearsal host. Credentials, vectors, and source connections
+were not changed, and the branch remains unmerged.
