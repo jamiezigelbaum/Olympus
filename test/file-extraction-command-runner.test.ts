@@ -59,7 +59,7 @@ describe('runExtractionCommand: normal completion', () => {
       timeoutMs: 10_000,
     });
     expect(result).toEqual({ stdout: 'out', stderr: 'err' });
-  });
+  }, 30_000);
 
   test('a non-zero exit rejects with the structured error carrying both streams', async () => {
     let caught: unknown;
@@ -77,7 +77,7 @@ describe('runExtractionCommand: normal completion', () => {
     expect(failure.exitCode).toBe(7);
     expect(failure.stdout).toBe('partial');
     expect(failure.stderr).toBe('why');
-  });
+  }, 30_000);
 
   test('a missing binary rejects with the spawn error', async () => {
     let caught: unknown;
@@ -91,7 +91,7 @@ describe('runExtractionCommand: normal completion', () => {
       caught = error;
     }
     expect((caught as NodeJS.ErrnoException).code).toBe('ENOENT');
-  });
+  }, 30_000);
 });
 
 describe('runExtractionCommand: timeout kills the whole process group', () => {

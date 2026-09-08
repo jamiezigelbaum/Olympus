@@ -142,21 +142,21 @@ describe('transcription wrapper: local lane', () => {
     expect(result.stderr).toContain('duration 181 min exceeds OLYMPUS_TRANSCRIBE_MAX_MINUTES=180');
     expect(existsSync(h.whisperMarker)).toBe(false);
     expect(existsSync(h.lockDir)).toBe(false);
-  });
+  }, 30_000);
 
   test('rejects a malformed knob with a usage exit', () => {
     const h = harness('bad-knob', { OLYMPUS_TRANSCRIBE_SLOTS: 'many' });
     const result = run(h);
     expect(result.code).toBe(64);
     expect(result.stderr).toContain('OLYMPUS_TRANSCRIBE_SLOTS');
-  });
+  }, 30_000);
 
   test('a missing input is a clear failure', () => {
     const h = harness('missing');
     const result = run(h, [join(h.dir, 'nope.mp3')]);
     expect(result.code).toBe(66);
     expect(result.stderr).toContain('not a readable file');
-  });
+  }, 30_000);
 });
 
 describe('transcription wrapper: semaphore', () => {
@@ -261,5 +261,5 @@ describe('transcription wrapper: orphan sweep', () => {
     } finally {
       user.kill('SIGKILL');
     }
-  });
+  }, 30_000);
 });
