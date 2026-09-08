@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Native Darwin activation has its own identity and credential proof. Keep the
+# Linux path below unchanged; macOS must never impersonate systemd/journald.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  darwin_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  darwin_node="${OPENCLAW_SAFE_RESTART_NODE_BIN:-node}"
+  if ! command -v "$darwin_node" >/dev/null 2>&1; then
+    echo "Node is required for the native Darwin Gateway proof." >&2
+    exit 75
+  fi
+  exec "$darwin_node" "$darwin_script_dir/lib/gateway-darwin-proof.mjs" "$@"
+fi
+
 # Exit codes:
 #   0   restart completed and the new Gateway boot was proven
 #   64  command usage or invalid numeric configuration

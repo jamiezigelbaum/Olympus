@@ -28,10 +28,10 @@ const planSha = createHash('sha256').update(planBytes).digest('hex');
 const plan = JSON.parse(planBytes.toString('utf8')) as {
   assertion_contracts: Record<string, string[]>;
   candidate_artifact: { artifact_sha256: string; artifact_bytes: number };
-  rollback_baseline: { artifact_sha256: string; artifact_bytes: number };
+  rollback_baseline: { artifact_sha256: string; artifact_bytes: number; package_files: string[] };
 };
 const candidateIdentity = verifyQualificationArtifact(artifact, plan.candidate_artifact);
-const previousIdentity = verifyQualificationArtifact(previousArtifact, plan.rollback_baseline);
+const previousIdentity = verifyQualificationArtifact(previousArtifact, plan.rollback_baseline, plan.rollback_baseline.package_files);
 const scratch = mkdtempSync(join(tmpdir(), 'olympus-release-qualification-'));
 try {
   const packageRoot = join(scratch, 'package');
