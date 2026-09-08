@@ -30,6 +30,9 @@ LOCK_DIR="${OLYMPUS_TRANSCRIBE_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}/olympus-transc
 NICE_LEVEL="${OLYMPUS_TRANSCRIBE_NICE:-15}"
 THREADS="${OLYMPUS_TRANSCRIBE_THREADS:-4}"
 MAX_MINUTES="${OLYMPUS_TRANSCRIBE_MAX_MINUTES:-180}"
+# CPU fallback is near real time on `base` with 4 threads; keep it inside the
+# extractor's 1800 s timeout so a long file is refused up front, never orphaned.
+LOCAL_MAX_MINUTES="${OLYMPUS_TRANSCRIBE_LOCAL_MAX_MINUTES:-25}"
 TMP_ROOT="${OLYMPUS_TRANSCRIBE_TMP_ROOT:-/tmp}"
 SWEEP_AGE_MINUTES="${OLYMPUS_TRANSCRIBE_SWEEP_AGE_MINUTES:-1440}"
 SWEEP_ON_START="${OLYMPUS_TRANSCRIBE_SWEEP_ON_START:-true}"
@@ -53,6 +56,7 @@ is_positive_int "$SLOTS" || die 64 "OLYMPUS_TRANSCRIBE_SLOTS must be a positive 
 is_nonneg_int "$LOCK_WAIT_SECONDS" || die 64 "OLYMPUS_TRANSCRIBE_LOCK_WAIT_SECONDS must be a non-negative integer."
 is_positive_int "$THREADS" || die 64 "OLYMPUS_TRANSCRIBE_THREADS must be a positive integer."
 is_positive_int "$MAX_MINUTES" || die 64 "OLYMPUS_TRANSCRIBE_MAX_MINUTES must be a positive integer."
+is_positive_int "$LOCAL_MAX_MINUTES" || die 64 "OLYMPUS_TRANSCRIBE_LOCAL_MAX_MINUTES must be a positive integer."
 is_positive_int "$SWEEP_AGE_MINUTES" || die 64 "OLYMPUS_TRANSCRIBE_SWEEP_AGE_MINUTES must be a positive integer."
 is_positive_int "$REMOTE_TIMEOUT_SECONDS" || die 64 "OLYMPUS_TRANSCRIBE_REMOTE_TIMEOUT_SECONDS must be a positive integer."
 [[ "$NICE_LEVEL" =~ ^-?[0-9]+$ ]] || die 64 "OLYMPUS_TRANSCRIBE_NICE must be an integer."
@@ -208,6 +212,9 @@ if [[ -n "$REMOTE_URL" ]]; then
 fi
 
 # --- local CPU whisper ---------------------------------------------------------------
+if is_nonneg_int "${duration_seconds:-}" && (( (duration_seconds + 59) / 60 > LOCAL_MAX_MINUTES )); then
+  die 65 "refusing ${input} for local CPU whisper: $(( (duration_seconds + 59) / 60 )) min exceeds OLYMPUS_TRANSCRIBE_LOCAL_MAX_MINUTES=${LOCAL_MAX_MINUTES} (remote lane unavailable)"
+fi
 [[ -x "$WHISPER_BIN" ]] || command -v "$WHISPER_BIN" >/dev/null 2>&1 || die 69 "whisper not found at ${WHISPER_BIN}"
 out_dir="${work_dir}/out"
 mkdir -p -- "$out_dir"

@@ -66,7 +66,8 @@ loads) or the calling unit's environment.
 | `OLYMPUS_TRANSCRIBE_LOCK_DIR` | `$XDG_RUNTIME_DIR/olympus-transcribe-locks` (or `/tmp/...`) | Slot lock files. Must be one local filesystem shared by every caller. |
 | `OLYMPUS_TRANSCRIBE_NICE` | `15` | Nice level for ffmpeg and whisper. |
 | `OLYMPUS_TRANSCRIBE_THREADS` | `4` | Thread cap (BLAS/OpenMP env + ffmpeg `-threads`). |
-| `OLYMPUS_TRANSCRIBE_MAX_MINUTES` | `180` | Refuse longer inputs. Keep it consistent with `OLYMPUS_TRANSCRIBE_TIMEOUT_SECONDS` (extractor default 1800 s): CPU `base` runs near real time with 4 threads, so a 180-minute file cannot finish inside a 30-minute timeout. Pick one or the other for the host. |
+| `OLYMPUS_TRANSCRIBE_MAX_MINUTES` | `180` | Refuse longer inputs outright (applies to the remote lane). |
+| `OLYMPUS_TRANSCRIBE_LOCAL_MAX_MINUTES` | `25` | Cap for the local CPU fallback only. CPU `base` runs near real time with 4 threads, so this keeps a fallback inside the extractor's 1800 s `OLYMPUS_TRANSCRIBE_TIMEOUT_SECONDS`; longer files are refused (exit 65) when the remote lane is unavailable instead of timing out. Owner decision 2026-09-08. |
 | `OLYMPUS_TRANSCRIBE_URL` | unset | Remote lane, e.g. Delphi through the existing tunnel: `http://127.0.0.1:28090/v1/audio/transcriptions`. |
 | `OLYMPUS_TRANSCRIBE_REMOTE_MODEL` | `whisper-1` | `model` field for the remote lane. |
 | `OLYMPUS_TRANSCRIBE_REMOTE_TIMEOUT_SECONDS` | `1800` | `curl --max-time` for the remote call. |
