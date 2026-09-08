@@ -64,9 +64,10 @@ export function validateNativeAudit(report, exitCode) {
     || !exactKeys(report.resolution, ['refsChecked', 'skippedExecRefs', 'resolvabilityComplete'])
     || !count(report.resolution.refsChecked) || report.resolution.skippedExecRefs !== 0
     || report.resolution.resolvabilityComplete !== true
-    || !exactKeys(report.summary, ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'legacyResidueCount'])
+    || !exactKeys(report.summary, ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'storeResidueCount', 'legacyResidueCount'])
     || !Object.values(report.summary).every(count) || report.summary.plaintextCount !== 0
     || report.summary.unresolvedRefCount !== 0 || report.summary.shadowedRefCount !== 0
+    || report.summary.storeResidueCount !== 0
     || report.summary.legacyResidueCount !== report.findings.length) fail('Native credential audit was incomplete or unsafe.', 78);
   for (const finding of report.findings) {
     if (!exactKeys(finding, ['code', 'severity', 'file', 'jsonPath', 'message', 'provider', 'profileId'])

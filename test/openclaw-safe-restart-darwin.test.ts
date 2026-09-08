@@ -14,7 +14,7 @@ const next = { ...identity, pid: 43, startedAt: 'Tue Sep  8 10:01:00 2026' };
 const observedAt = Date.parse('2026-09-08T10:04:00.000Z');
 const oauth = { code: 'LEGACY_RESIDUE', severity: 'info', file: '/fixture/agents/main/agent/openclaw-agent.sqlite', jsonPath: 'profiles.fixture:default', message: 'OAuth credentials are present (out of scope for static SecretRef migration).', provider: 'fixture', profileId: 'fixture:default' };
 function audit(findings: unknown[] = []) {
-  return { version: 1, status: findings.length ? 'findings' : 'clean', resolution: { refsChecked: 4, skippedExecRefs: 0, resolvabilityComplete: true }, filesScanned: ['/fixture/openclaw.json', oauth.file], summary: { plaintextCount: 0, unresolvedRefCount: 0, shadowedRefCount: 0, legacyResidueCount: findings.length }, findings };
+  return { version: 1, status: findings.length ? 'findings' : 'clean', resolution: { refsChecked: 4, skippedExecRefs: 0, resolvabilityComplete: true }, filesScanned: ['/fixture/openclaw.json', oauth.file], summary: { plaintextCount: 0, unresolvedRefCount: 0, shadowedRefCount: 0, storeResidueCount: 0, legacyResidueCount: findings.length }, findings };
 }
 
 describe('native Darwin safe-restart proof contracts', () => {
@@ -54,6 +54,8 @@ describe('native Darwin safe-restart proof contracts', () => {
     }
     const unresolved = audit(); unresolved.summary.unresolvedRefCount = 1;
     expect(() => validateNativeAudit(unresolved, 0)).toThrow();
+    const storeResidue = audit(); storeResidue.summary.storeResidueCount = 1;
+    expect(() => validateNativeAudit(storeResidue, 0)).toThrow();
   });
   test('uses the root launchd job identity, not nested active-state fields', () => {
     const job = `${target} = {\n\tstate = running\n\tpid = 42\n\tnested = {\n\t\tstate = active\n\t\tpid = 900\n\t}\n}\n`;
