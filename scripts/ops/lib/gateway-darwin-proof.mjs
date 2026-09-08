@@ -75,7 +75,7 @@ export function validateNativeAudit(report, exitCode) {
       || finding.message !== 'OAuth credentials are present (out of scope for static SecretRef migration).'
       || !safeText(finding.provider) || !safeText(finding.profileId)
       || finding.jsonPath !== `profiles.${finding.profileId}` || !safeText(finding.file)
-      || basename(finding.file) !== 'openclaw-agent.sqlite' || !report.filesScanned.includes(finding.file)) {
+      || basename(finding.file) !== 'openclaw.sqlite' || !report.filesScanned.includes(finding.file)) {
       fail('Native credential audit reported a blocking finding.', 78);
     }
   }

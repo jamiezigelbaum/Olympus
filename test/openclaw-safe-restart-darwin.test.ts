@@ -12,7 +12,7 @@ const target = 'gui/501/ai.openclaw.gateway';
 const identity = { pid: 42, startedAt: 'Tue Sep  8 10:00:00 2026', executable: '/usr/local/bin/node' };
 const next = { ...identity, pid: 43, startedAt: 'Tue Sep  8 10:01:00 2026' };
 const observedAt = Date.parse('2026-09-08T10:04:00.000Z');
-const oauth = { code: 'LEGACY_RESIDUE', severity: 'info', file: '/fixture/agents/main/agent/openclaw-agent.sqlite', jsonPath: 'profiles.fixture:default', message: 'OAuth credentials are present (out of scope for static SecretRef migration).', provider: 'fixture', profileId: 'fixture:default' };
+const oauth = { code: 'LEGACY_RESIDUE', severity: 'info', file: '/fixture/state/openclaw.sqlite', jsonPath: 'profiles.fixture:default', message: 'OAuth credentials are present (out of scope for static SecretRef migration).', provider: 'fixture', profileId: 'fixture:default' };
 function audit(findings: unknown[] = []) {
   return { version: 1, status: findings.length ? 'findings' : 'clean', resolution: { refsChecked: 4, skippedExecRefs: 0, resolvabilityComplete: true }, filesScanned: ['/fixture/openclaw.json', oauth.file], summary: { plaintextCount: 0, unresolvedRefCount: 0, shadowedRefCount: 0, storeResidueCount: 0, legacyResidueCount: findings.length }, findings };
 }
@@ -49,7 +49,7 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(() => validateNativeAudit({ ...audit(), version: 2 }, 0)).toThrow();
   });
   test('does not broaden native OAuth exception to plaintext, warnings, or arbitrary residues', () => {
-    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { jsonPath: 'profiles.another' }]) {
+    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { file: '/fixture/openclaw-agent.sqlite' }, { jsonPath: 'profiles.another' }]) {
       expect(() => validateNativeAudit(audit([{ ...oauth, ...change }]), 1)).toThrow();
     }
     const unresolved = audit(); unresolved.summary.unresolvedRefCount = 1;
