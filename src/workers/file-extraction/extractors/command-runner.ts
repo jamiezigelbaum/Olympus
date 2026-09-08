@@ -16,12 +16,20 @@
  *   - A timeout SIGKILLs the child and rejects; it never resolves with
  *     whatever partial output had arrived.
  *
+ * One property was added after the 2026-09-08 sparta incident: the child is
+ * spawned DETACHED, as the leader of its own process group, and a timeout
+ * kills that whole group. The old runner killed only the direct child. Every
+ * transcription command is a shell wrapper around a `whisper` python process,
+ * so the SIGKILL reaped the wrapper and orphaned the grandchild, which kept
+ * burning four to seven cores for hours after the extractor had already
+ * reported a timeout. Seven of them took a sixteen-core host to load 60.
+ *
  * Doc comments in this directory are always multi-line blocks: the
  * architecture guard reads a single-line block comment as a regex literal.
  */
 
 import { Buffer } from 'node:buffer';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -85,12 +93,37 @@ export class ExtractionCommandTimeoutError extends Error {
   }
 }
 
+/**
+ * Kills the child and everything it started. `detached: true` made the child
+ * the leader of a process group whose id equals its pid, so a negative pid
+ * addresses the group. The fallback covers the window in which the group is
+ * already gone (ESRCH) or the platform has no group semantics; either way the
+ * direct child gets the signal.
+ */
+export function killExtractionProcessGroup(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL'): void {
+  const pid = child.pid;
+  if (pid !== undefined && pid > 0 && process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall through to the direct kill below.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may already have exited; there is nothing left to kill.
+  }
+}
+
 export async function runExtractionCommand(
   request: ExtractionCommandRunRequest,
 ): Promise<ExtractionCommandRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(request.command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -100,7 +133,7 @@ export async function runExtractionCommand(
       ? setTimeout(() => {
           if (settled) return;
           settled = true;
-          child.kill('SIGKILL');
+          killExtractionProcessGroup(child);
           reject(new ExtractionCommandTimeoutError({
             command: request.command,
             timeoutMs: request.timeoutMs,
@@ -113,6 +146,7 @@ export async function runExtractionCommand(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      killExtractionProcessGroup(child);
       reject(error);
     });
     child.on('close', (code) => {

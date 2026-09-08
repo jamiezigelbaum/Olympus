@@ -7345,10 +7345,23 @@ var init_dropbox = __esm(() => {
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn } from "node:child_process";
+function killExtractionProcessGroup(child, signal = "SIGKILL") {
+  const pid = child.pid;
+  if (pid !== undefined && pid > 0 && process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {}
+  }
+  try {
+    child.kill(signal);
+  } catch {}
+}
 async function runExtractionCommand(request) {
   return new Promise((resolve2, reject) => {
     const child = spawn(request.command, request.args, {
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32"
     });
     const stdout = [];
     const stderr = [];
@@ -7358,7 +7371,7 @@ async function runExtractionCommand(request) {
       if (settled)
         return;
       settled = true;
-      child.kill("SIGKILL");
+      killExtractionProcessGroup(child);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
         timeoutMs: request.timeoutMs
@@ -7372,6 +7385,7 @@ async function runExtractionCommand(request) {
       settled = true;
       if (timer)
         clearTimeout(timer);
+      killExtractionProcessGroup(child);
       reject(error);
     });
     child.on("close", (code) => {
