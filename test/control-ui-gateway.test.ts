@@ -13,7 +13,10 @@ import {
   resolveGatewayPublicOrigin,
   type DashboardFetch,
 } from '../src/core/control-ui-gateway.ts';
-import { DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../src/workers/http.ts';
+import {
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+} from '../src/workers/http.ts';
 
 type RegisteredHandler = (input: {
   params: Record<string, unknown>;
@@ -197,7 +200,11 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     const route = registrations.routes.get('/oauth/callback/dropbox')!;
     const response = mockResponse();
     await route(
-      { method: 'GET', url: '/oauth/callback/dropbox?code=provider-code&state=signed-state' } as IncomingMessage,
+      {
+        method: 'GET',
+        url: '/oauth/callback/dropbox?code=provider-code&state=signed-state',
+        socket: { remoteAddress: '203.0.113.10' },
+      } as IncomingMessage,
       response.value,
     );
     expect(requests).toHaveLength(1);
@@ -205,6 +212,8 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     expect(requests[0]?.init?.redirect).toBe('manual');
     expect(new Headers(requests[0]?.init?.headers).get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER))
       .toBe('https://gateway.example');
+    const callbackPeerHeader = new Headers(requests[0]?.init?.headers).get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
+    expect(callbackPeerHeader).toMatch(/^203\.0\.113\.10\.[A-Za-z0-9_-]{43}$/);
     expect(response.statusCode()).toBe(303);
     expect(response.headers.get('location')).toBe('/oauth/callback/dropbox/done');
     expect(response.body()).not.toContain('provider-code');
@@ -226,6 +235,36 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     );
     expect(requests).toHaveLength(2);
     expect(polluted.statusCode()).toBe(400);
+  });
+
+  test('OAuth callback rate limits per trusted peer and ignores spoofed forwarding headers', async () => {
+    let forwarded = 0;
+    const registrations = gatewayRegistrations(async () => {
+      forwarded += 1;
+      return new Response(null, { status: 303, headers: { Location: '/oauth/callback/dropbox/done' } });
+    });
+    const route = registrations.routes.get('/oauth/callback/dropbox')!;
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = mockResponse();
+      await route(callbackRequest('203.0.113.10', '203.0.113.20'), response.value);
+      expect(response.statusCode()).toBe(303);
+    }
+    expect(forwarded).toBe(30);
+
+    // Changing X-Forwarded-For cannot evade the bucket owned by the actual
+    // socket peer.
+    const samePeerSpoof = mockResponse();
+    await route(callbackRequest('203.0.113.10', '198.51.100.99'), samePeerSpoof.value);
+    expect(samePeerSpoof.statusCode()).toBe(410);
+    expect(forwarded).toBe(30);
+
+    // A distinct socket peer retains its own budget even when its forwarding
+    // header impersonates the flooded peer.
+    const distinctPeer = mockResponse();
+    await route(callbackRequest('203.0.113.20', '203.0.113.10'), distinctPeer.value);
+    expect(distinctPeer.statusCode()).toBe(303);
+    expect(forwarded).toBe(31);
   });
 
   test('read/action schemas and public origin parser are closed', () => {
@@ -260,6 +299,18 @@ function gatewayRegistrations(fetchImpl: DashboardFetch, publicOrigin: string | 
     },
   }, configuredWorker(), { fetchImpl });
   return { methods, routes };
+}
+
+function callbackRequest(remoteAddress: string, forwardedFor: string): IncomingMessage {
+  return {
+    method: 'GET',
+    url: '/oauth/callback/dropbox?code=provider-code&state=signed-state',
+    headers: {
+      'x-forwarded-for': forwardedFor,
+      [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: 'attacker-selected-peer.forged',
+    },
+    socket: { remoteAddress },
+  } as unknown as IncomingMessage;
 }
 
 function mockResponse() {

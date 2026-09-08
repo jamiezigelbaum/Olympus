@@ -34,6 +34,9 @@ export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-
  * Gateway's configured public origin without trusting a browser Host header.
  */
 export const DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = 'X-Olympus-Gateway-Public-Origin';
+/** Authenticated context minted by the Gateway for an OAuth callback relay. */
+export const DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = 'X-Olympus-Gateway-Callback-Peer';
+const DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = 'olympus-dashboard-callback-peer-v1';
 const DASHBOARD_CONTROL_COOKIE = 'olympus_dashboard_control';
 const DASHBOARD_CONTROL_SIGNATURE_CONTEXT = 'olympus-dashboard-control-session-v3';
 const DASHBOARD_CONTROL_CSRF_CONTEXT = 'olympus-dashboard-control-csrf-v2';
@@ -76,6 +79,7 @@ export function withWorkerBearerAuth(
   return async (request: Request): Promise<Response> => {
     const presentedAuthorization = request.headers.get('Authorization');
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+    const presentedGatewayCallbackPeer = request.headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
     request = withoutDashboardInternalContextHeaders(request);
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
@@ -122,6 +126,7 @@ export function withWorkerBearerAuth(
         presentedAuthorization,
         authToken,
         presentedGatewayPublicOrigin,
+        presentedGatewayCallbackPeer,
       ));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
@@ -454,12 +459,14 @@ function withoutDashboardInternalContextHeaders(request: Request): Request {
   if (
     !request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)
     && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
+    && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)
   ) return request;
   // Mutate the request Headers directly. Bun 1.3 keeps the original headers
   // when `new Request(existing, { headers })` is used, so a copy-and-delete
   // looks correct but leaves a forged internal header in place.
   request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+  request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
   return request;
 }
 
@@ -468,9 +475,41 @@ function withAuthenticatedGatewayPublicOrigin(
   authorization: string | null,
   authToken: string,
   origin: string | null,
+  callbackPeer: string | null,
 ): Request {
   if (!hasValidWorkerBearerToken(authorization, authToken)) return request;
-  return withGatewayPublicOriginContext(request, origin);
+  const withOrigin = withGatewayPublicOriginContext(request, origin);
+  const peer = verifyGatewayCallbackPeerHeader(callbackPeer, authToken);
+  if (peer) withOrigin.headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, peer);
+  return withOrigin;
+}
+
+export function createGatewayCallbackPeerHeader(peer: string, authToken: string): string {
+  const normalized = normalizeGatewayCallbackPeer(peer);
+  const signature = createHmac('sha256', authToken)
+    .update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`)
+    .digest('base64url');
+  return `${normalized}.${signature}`;
+}
+
+function verifyGatewayCallbackPeerHeader(value: string | null, authToken: string): string | undefined {
+  if (!value) return undefined;
+  const separator = value.lastIndexOf('.');
+  if (separator <= 0 || separator === value.length - 1) return undefined;
+  const peer = normalizeGatewayCallbackPeer(value.slice(0, separator));
+  const presented = value.slice(separator + 1);
+  const expected = createHmac('sha256', authToken)
+    .update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`)
+    .digest('base64url');
+  const presentedBytes = Buffer.from(presented, 'ascii');
+  const expectedBytes = Buffer.from(expected, 'ascii');
+  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual(presentedBytes, expectedBytes)) return undefined;
+  return peer;
+}
+
+function normalizeGatewayCallbackPeer(value: string): string {
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : 'unknown';
 }
 
 function isGatewayPublicOriginContextRoute(request: Request): boolean {

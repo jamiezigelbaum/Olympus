@@ -142,6 +142,7 @@ import {
 } from '../../control-ui-contract.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
 } from '../http.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
@@ -4542,18 +4543,14 @@ function createDashboardOAuthCallbackRateLimiter(): (key: string, now: number) =
 }
 
 /**
- * `<source>:<caller address>` — the finest granularity this route can trust.
- * `X-Forwarded-For`'s first hop is the ordinary shape a reverse proxy sets
- * (the same convention `dashboardForwardedProto` already reads for the
- * origin scheme), used opportunistically rather than as a security boundary:
- * a caller that can spoof it can already reach this unauthenticated route
- * directly, and the limiter's job is to bound an accidental or scripted flood,
- * not to authenticate anyone. Absent the header, every caller for a source
- * shares one bucket — coarser, never wrong.
+ * `<source>:<caller address>`. The callback peer header is injected only by
+ * `withWorkerBearerAuth` after verifying the Gateway's HMAC, so a direct
+ * callback or a caller-supplied copy cannot choose a bucket. Direct callers
+ * share the conservative `unknown` bucket.
  */
 function dashboardOAuthCallbackRateLimitKey(source: DashboardOAuthSource, headers: Headers): string {
-  const forwardedFor = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return `${source}:${forwardedFor || 'unknown'}`;
+  const peer = headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)?.trim();
+  return `${source}:${peer || 'unknown'}`;
 }
 
 const DASHBOARD_UNPAIR_SOURCE_IDS: DashboardUnpairSource[] = [

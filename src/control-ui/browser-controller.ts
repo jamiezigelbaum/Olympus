@@ -384,6 +384,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted) return;
+      if (!force && (hasDirtyInput() || hasFocusedControl())) {
+        canWrite = result.can_write;
+        applyWriteCapability();
+        return;
+      }
       replaceBody(result, force);
     } catch {
       // Polling is quiet. A directly submitted control reports its own failure.
@@ -722,6 +727,10 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted) return;
       canWrite = result.can_write;
+      if (!force && dirty) {
+        applyWriteCapability();
+        return;
+      }
       if (!force && result.signature === signature) {
         applyWriteCapability();
         return;

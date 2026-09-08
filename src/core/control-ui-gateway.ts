@@ -12,7 +12,11 @@ import {
 } from '../control-ui-contract.ts';
 import type { OlympusConfig } from './config.ts';
 import { workerAuthTokenFromConfig } from './worker-auth.ts';
-import { DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../workers/http.ts';
+import {
+  createGatewayCallbackPeerHeader,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+} from '../workers/http.ts';
 
 type GatewayErrorCode = 'INVALID_REQUEST' | 'UNAVAILABLE';
 type GatewayRespond = (
@@ -64,6 +68,14 @@ const OAUTH_CALLBACK_URL_MAX_BYTES = 16 * 1024;
 const DASHBOARD_TIMEOUT_MAX_MS = 180_000;
 const DASHBOARD_TIMEOUT_MIN_MS = 1_000;
 const OAUTH_CALLBACK_SOURCES = ['gmail', 'google-drive', 'dropbox', 'x'] as const;
+const OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60_000;
+const OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
+const OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS = 1_024;
+
+interface OAuthCallbackRateLimitBucket {
+  windowStart: number;
+  count: number;
+}
 
 class DashboardGatewayInvalidRequestError extends Error {}
 class DashboardGatewayUnavailableError extends Error {}
@@ -330,12 +342,21 @@ function registerOAuthCallbackRoutes(
   fetchImpl: DashboardFetch,
 ): void {
   if (!api.registerHttpRoute) return;
+  const callbackRateLimiter = createOAuthCallbackRateLimiter();
   for (const source of OAUTH_CALLBACK_SOURCES) {
     api.registerHttpRoute({
       path: `/oauth/callback/${source}`,
       auth: 'plugin',
       match: 'exact',
       handler: async (request, response) => {
+        // Provider redirects are intentionally unauthenticated. Bound the
+        // cheap relay work per source and trusted peer before touching the
+        // worker; forwarded headers are caller-controlled on this route.
+        if (request.method === 'GET'
+          && !callbackRateLimiter(`${source}:${trustedCallbackPeer(request)}`, Date.now())) {
+          writeCallbackPage(response, false, 410);
+          return true;
+        }
         await handleOAuthCallback({ request, response, source, config, openClawConfig: api.config, fetchImpl });
         return true;
       },
@@ -354,6 +375,38 @@ function registerOAuthCallbackRoutes(
       },
     });
   }
+}
+
+/**
+ * Fixed-window callback limiter with a hard bucket bound. This is an abuse
+ * control for the unauthenticated provider redirect, not the OAuth state
+ * boundary; the relay still verifies the signed state in the worker.
+ */
+function createOAuthCallbackRateLimiter(): (key: string, now: number) => boolean {
+  const buckets = new Map<string, OAuthCallbackRateLimitBucket>();
+  return (key: string, now: number): boolean => {
+    for (const [bucketKey, bucket] of buckets) {
+      if (now - bucket.windowStart >= OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) buckets.delete(bucketKey);
+    }
+    let bucket = buckets.get(key);
+    if (!bucket || now - bucket.windowStart >= OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) {
+      if (!bucket && buckets.size >= OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS) {
+        const oldest = buckets.keys().next().value as string | undefined;
+        if (oldest !== undefined) buckets.delete(oldest);
+      }
+      bucket = { windowStart: now, count: 0 };
+      buckets.set(key, bucket);
+    }
+    if (bucket.count >= OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW) return false;
+    bucket.count += 1;
+    return true;
+  };
+}
+
+/** Node's socket peer is Gateway-owned; X-Forwarded-For is not. */
+function trustedCallbackPeer(request: IncomingMessage): string {
+  const address = request.socket?.remoteAddress?.trim();
+  return address || 'unknown';
 }
 
 async function handleOAuthCallback(input: {
@@ -398,7 +451,12 @@ async function handleOAuthCallback(input: {
       url: workerUrl,
       init: {
         method: 'GET',
-        headers: workerHeaders(authToken, publicOrigin),
+        headers: workerHeaders(
+          authToken,
+          publicOrigin,
+          false,
+          createGatewayCallbackPeerHeader(trustedCallbackPeer(input.request), authToken),
+        ),
         // The worker's success is a relative redirect to its clean /done URL.
         // Never follow it: doing so could carry the worker bearer into a future
         // redirect-policy regression, and the Gateway returns its own inert page.
@@ -583,13 +641,19 @@ function workerRootUrl(config: OlympusConfig, path: string): URL {
   }
 }
 
-function workerHeaders(authToken: string, gatewayPublicOrigin?: string, json = false): Headers {
+function workerHeaders(
+  authToken: string,
+  gatewayPublicOrigin?: string,
+  json = false,
+  callbackPeerHeader?: string,
+): Headers {
   const headers = new Headers({
     Accept: 'application/json',
     Authorization: `Bearer ${authToken}`,
   });
   if (json) headers.set('Content-Type', 'application/json');
   if (gatewayPublicOrigin) headers.set(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER, gatewayPublicOrigin);
+  if (callbackPeerHeader) headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, callbackPeerHeader);
   return headers;
 }
 

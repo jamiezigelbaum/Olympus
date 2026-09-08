@@ -108,6 +108,38 @@ describe('dashboard controller DOM lifetime', () => {
     controller.dispose();
   });
 
+  test('an edit made while refresh is pending is not replaced by the response', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
+      + '<input name="api_key" type="password"><button type="submit">Connect</button></form>';
+    document.body.append(root);
+    let resolveRefresh!: (value: OlympusDashboardReadResult) => void;
+    const pendingRefresh = new Promise<OlympusDashboardReadResult>((resolve) => { resolveRefresh = resolve; });
+    const controller = mountDashboardController({
+      root,
+      transport: { control: noControl },
+      navigate() {},
+      refresh: () => pendingRefresh,
+      returnUrl: 'https://gateway.test/',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'initial',
+      pollIntervalMs: 0,
+    });
+
+    const refreshing = controller.refresh();
+    const input = root.querySelector<HTMLInputElement>('input[name="api_key"]')!;
+    input.focus();
+    input.value = 'typed while refresh is waiting';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    resolveRefresh(result('<p>replacement</p>', 'next'));
+    await refreshing;
+
+    expect(root.contains(input)).toBe(true);
+    expect(input.value).toBe('typed while refresh is waiting');
+    controller.dispose();
+  });
+
   test('poll replacement is sanitized, navigation respects modifiers, and disposal retires listeners', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<a href="/dashboard?setup">Setup</a>';
@@ -222,6 +254,41 @@ describe('folder picker DOM lifetime', () => {
     expect(reads).toBe(0);
     expect(root.contains(form)).toBe(true);
     expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked).toBe(true);
+    controller.dispose();
+  });
+
+  test('a folder edit made while refresh is pending is not replaced by the response', async () => {
+    const initial = renderSourceDispositionsControlUi(buildDispositionsPreviewView(), true);
+    const root = document.createElement('div');
+    root.innerHTML = initial.body;
+    document.body.append(root);
+    let resolveRefresh!: (value: OlympusDashboardReadResult) => void;
+    const pendingRefresh = new Promise<OlympusDashboardReadResult>((resolve) => { resolveRefresh = resolve; });
+    const controller = mountDispositionsController({
+      root,
+      transport: { control: noControl },
+      navigate() {},
+      refresh: () => pendingRefresh,
+      returnUrl: 'https://gateway.test/?view=dispositions',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: initial.signature,
+      pollIntervalMs: 0,
+    });
+
+    const refreshing = controller.refresh();
+    const finance = Array.from(root.querySelectorAll<HTMLElement>('.folder-row'))
+      .find((row) => row.dataset.path === '/2 Areas/Finances')!;
+    finance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-picker-state="exclude"]')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    resolveRefresh({ ...initial, signature: 'next' });
+    await refreshing;
+
+    const form = root.querySelector<HTMLFormElement>('form[data-dispositions-source]')!;
+    expect(form.dataset.selectedPath).toBe('/2 Areas/Finances');
+    expect(form.querySelector<HTMLInputElement>('input[value="exclude"][data-path="/2 Areas/Finances"]')?.checked)
+      .toBe(true);
     controller.dispose();
   });
 });
