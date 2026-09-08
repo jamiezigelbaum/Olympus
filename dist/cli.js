@@ -7345,19 +7345,39 @@ var init_dropbox = __esm(() => {
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn } from "node:child_process";
-function killExtractionProcessGroup(child, signal = "SIGKILL") {
+function errnoCode(error) {
+  const code = error?.code;
+  return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
+}
+function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.kill) {
   const pid = child.pid;
-  if (pid !== undefined && pid > 0 && process.platform !== "win32") {
+  if (pid === undefined || pid <= 0) {
+    return { ok: true };
+  }
+  let groupFailure;
+  if (process.platform !== "win32") {
     try {
-      process.kill(-pid, signal);
-      return;
-    } catch {}
+      kill(-pid, signal);
+      return { ok: true };
+    } catch (error) {
+      const code = errnoCode(error);
+      if (code !== "ESRCH")
+        groupFailure = code;
+    }
   }
   try {
-    child.kill(signal);
-  } catch {}
+    kill(pid, signal);
+    return { ok: true };
+  } catch (error) {
+    const code = errnoCode(error);
+    if (code === "ESRCH") {
+      return groupFailure ? { ok: false, code: groupFailure } : { ok: true };
+    }
+    return { ok: false, code: groupFailure ?? code };
+  }
 }
-async function runExtractionCommand(request) {
+async function runExtractionCommand(request, internals = {}) {
+  const kill = internals.kill ?? process.kill;
   return new Promise((resolve2, reject) => {
     const child = spawn(request.command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -7371,10 +7391,11 @@ async function runExtractionCommand(request) {
       if (settled)
         return;
       settled = true;
-      killExtractionProcessGroup(child);
+      const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
-        timeoutMs: request.timeoutMs
+        timeoutMs: request.timeoutMs,
+        ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
     }, request.timeoutMs) : undefined;
     child.stdout.on("data", (chunk) => stdout.push(chunk));
@@ -7385,7 +7406,7 @@ async function runExtractionCommand(request) {
       settled = true;
       if (timer)
         clearTimeout(timer);
-      killExtractionProcessGroup(child);
+      killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(error);
     });
     child.on("close", (code) => {
@@ -7430,11 +7451,13 @@ var init_command_runner = __esm(() => {
   ExtractionCommandTimeoutError = class ExtractionCommandTimeoutError extends Error {
     command;
     timeoutMs;
+    terminationFailed;
     constructor(input) {
-      super(`${input.command} timed out.`);
+      super(input.terminationFailed ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out.`);
       this.name = "ExtractionCommandTimeoutError";
       this.command = input.command;
       this.timeoutMs = input.timeoutMs;
+      this.terminationFailed = input.terminationFailed;
     }
   };
 });
@@ -61086,11 +61109,21 @@ class WhisperCommandTranscriber {
   async transcribe(input) {
     const argv = this.argvTemplate.map((arg) => arg.replaceAll("{input}", input.inputPath));
     const [command, ...args] = argv;
-    const result = await this.commandRunner({
-      command,
-      args,
-      timeoutMs: this.timeoutMs
-    });
+    let result;
+    try {
+      result = await this.commandRunner({
+        command,
+        args,
+        timeoutMs: this.timeoutMs
+      });
+    } catch (error2) {
+      if (error2 instanceof ExtractionCommandError && error2.exitCode !== null) {
+        const kind = TRANSCRIBE_TERMINAL_EXIT_KINDS[error2.exitCode];
+        if (kind)
+          throw new TranscriptionTerminalError(error2, kind);
+      }
+      throw error2;
+    }
     const sidecar = await readFirstExisting([
       `${input.inputPath}.txt`,
       sidecarPathForInput(input.inputPath)
@@ -61162,8 +61195,14 @@ function createTranscriptionExtractor(options = {}) {
           ...bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}
         };
       } catch (error2) {
+        if (error2 instanceof TranscriptionTerminalError) {
+          return { status: "failed_terminal", errorKind: error2.errorKind };
+        }
         if (error2 instanceof ExtractionCommandTimeoutError) {
-          return { status: "failed_retryable", errorKind: "transcribe_command_timeout" };
+          return {
+            status: "failed_retryable",
+            errorKind: error2.terminationFailed ? "transcribe_command_timeout_kill_failed" : "transcribe_command_timeout"
+          };
         }
         return { status: "failed_retryable", errorKind: "transcribe_command_failed" };
       } finally {
@@ -61207,11 +61246,30 @@ function normalizeTranscriptText(input) {
 
 `).trim();
 }
-var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1800000, MAX_TRANSCRIPT_CHARS = 200000, TEMP_DIR_PREFIX4 = "olympus-transcribe-", TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
+var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1800000, MAX_TRANSCRIPT_CHARS = 200000, TEMP_DIR_PREFIX4 = "olympus-transcribe-", TRANSCRIBE_TERMINAL_EXIT_KINDS, TranscriptionTerminalError, TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
 var init_transcription = __esm(() => {
   init_bounded_text();
   init_command_runner();
   init_text();
+  TRANSCRIBE_TERMINAL_EXIT_KINDS = {
+    64: "transcribe_command_usage",
+    65: "transcribe_input_refused",
+    66: "transcribe_input_unreadable",
+    76: "transcribe_remote_lane_rejected",
+    78: "transcribe_remote_lane_misconfigured"
+  };
+  TranscriptionTerminalError = class TranscriptionTerminalError extends Error {
+    exitCode;
+    errorKind;
+    commandError;
+    constructor(cause, errorKind) {
+      super(`${cause.command} exited with terminal status ${cause.exitCode} (${errorKind}).`);
+      this.name = "TranscriptionTerminalError";
+      this.exitCode = cause.exitCode ?? -1;
+      this.errorKind = errorKind;
+      this.commandError = cause;
+    }
+  };
   TRANSCRIPTION_AUDIO_MIME_TYPES = [
     "audio/wav",
     "audio/x-wav",
