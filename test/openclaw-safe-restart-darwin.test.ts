@@ -80,8 +80,8 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(() => assertNewStableIdentity(identity, next, next)).not.toThrow();
   });
   test('ties every listener to the launchd PID and the exact loopback endpoint', () => {
-    expect(() => assertListenerOwner('p43\nn127.0.0.1:18789\nn[::1]:18789\n', 43, '127.0.0.1', 18789)).not.toThrow();
-    for (const wrong of ['p44\nn127.0.0.1:18789\n', 'p43\nn*:18789\n', 'p43\nn127.0.0.1:18888\n', 'p43\nn127.0.0.1:18789\np44\nn[::1]:18789\n', '']) {
+    expect(() => assertListenerOwner('p43\nf32\nn127.0.0.1:18789\nf33\nn[::1]:18789\n', 43, '127.0.0.1', 18789)).not.toThrow();
+    for (const wrong of ['p44\nn127.0.0.1:18789\n', 'f32\nn127.0.0.1:18789\n', 'p43\nn*:18789\n', 'p43\nn127.0.0.1:18888\n', 'p43\nn127.0.0.1:18789\np44\nn[::1]:18789\n', '']) {
       expect(() => assertListenerOwner(wrong, 43, '127.0.0.1', 18789)).toThrow();
     }
   });

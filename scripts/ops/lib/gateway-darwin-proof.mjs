@@ -120,7 +120,15 @@ export function parseProcessStart(text) {
 export function assertListenerOwner(text, pid, hostname, port) {
   let owner; let expectedSocket = false; let sockets = 0;
   for (const line of text.trim().split('\n')) {
-    if (/^p[1-9][0-9]*$/.test(line)) { owner = Number(line.slice(1)); continue; }
+    if (/^p[1-9][0-9]*$/.test(line)) {
+      owner = Number(line.slice(1));
+      if (owner !== pid) fail('Gateway listener belongs to an unexpected process.');
+      continue;
+    }
+    if (/^f.+$/.test(line)) {
+      if (owner !== pid) fail('Gateway listener file has no expected process owner.');
+      continue;
+    }
     if (!line.startsWith('n') || owner !== pid) fail('Gateway listener belongs to an unexpected process.');
     const address = line.slice(1);
     if (![ `127.0.0.1:${port}`, `[::1]:${port}` ].includes(address)) fail('Gateway listener is not exclusively loopback.');
