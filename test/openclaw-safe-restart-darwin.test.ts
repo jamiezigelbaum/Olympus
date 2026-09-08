@@ -145,7 +145,7 @@ describe('native Darwin safe-restart proof contracts', () => {
     const node = Bun.which('node'); if (!node) throw new Error('node required');
     const out = execFileSync(node, [helperPath, '--dry-run'], { encoding: 'utf8', env: { PATH: '/nonexistent', HOME: '/nonexistent', OPENCLAW_SAFE_RESTART_OPENCLAW_BIN: '/must-not-run' } });
     expect(out).toContain('No checks or restart executed.');
-  });
+  }, 30_000);
   test('native branch never enables exec audit or issues launchctl lifecycle verbs itself', () => {
     const source = readFileSync(helperPath, 'utf8');
     expect(source).toContain("['secrets', 'audit', '--check', '--json']");

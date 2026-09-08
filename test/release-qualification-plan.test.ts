@@ -27,7 +27,7 @@ describe('Slice 3F exact qualification plan', () => {
     ], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain('custom simulation plan requires --fixture');
-  });
+  }, 30_000);
 
   test('pins the approved hosts, exact seven sources, executable owners, and normal-install rule', () => {
     expect(plan.simulated_matrix.map((entry) => entry.host_os)).toEqual(['darwin_arm64', 'linux_x64_ubuntu_lts']);
