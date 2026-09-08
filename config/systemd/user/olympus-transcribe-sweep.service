@@ -1,0 +1,8 @@
+[Unit]
+Description=Olympus transcription temp-dir sweep (stale olympus-transcribe-* / olympus-whisper.* under /tmp)
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/olympus-whisper-transcribe --sweep
+EnvironmentFile=-%h/.config/olympus/worker.env
+Nice=10
