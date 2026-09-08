@@ -317,7 +317,12 @@ function installOrUpgradeLifecycle(
       ? runWorkerServiceAction('restart', serviceActionOptions(effective))
       : undefined;
     updateTransactionPhase(effective, 'qualifying');
-    const firstService = inspectWorkerService(serviceActionOptions(effective));
+    // launchctl bootstrap and systemctl enable --now acknowledge submission,
+    // not readiness. In particular, launchd can report a freshly bootstrapped
+    // job as `waiting` for several reads before the process reaches `running`.
+    // The action facade already uses this bounded settle for start/restart;
+    // install and upgrade need the same boundary before deciding to roll back.
+    const firstService = settleWorkerServiceState(effective, ['active']);
     if (firstService.state !== 'active') {
       throw activationFailure(
         `Lifecycle activation reported success but worker status is ${firstService.state}.`,

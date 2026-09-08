@@ -76246,7 +76246,7 @@ function installOrUpgradeLifecycle(action, options) {
     const managedBytesChanged = previousUnitBytes !== readManagedFileSnapshot(preview.unit_path) || previousEnvBytes !== readManagedFileSnapshot(preview.env_path);
     const postInstallRestart = effective.platform === "linux" && before.state === "active" && (action === "upgrade" || managedBytesChanged) ? runWorkerServiceAction("restart", serviceActionOptions(effective)) : undefined;
     updateTransactionPhase(effective, "qualifying");
-    const firstService = inspectWorkerService(serviceActionOptions(effective));
+    const firstService = settleWorkerServiceState(effective, ["active"]);
     if (firstService.state !== "active") {
       throw activationFailure(`Lifecycle activation reported success but worker status is ${firstService.state}.`, effective);
     }
