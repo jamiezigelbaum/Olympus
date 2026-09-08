@@ -13,11 +13,20 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   ExtractionCommandError,
   ExtractionCommandTimeoutError,
+  killExtractionProcessGroup,
   runExtractionCommand,
+  type ExtractionKillFn,
 } from '../src/workers/file-extraction/extractors/command-runner.ts';
+
+function errno(code: string): NodeJS.ErrnoException {
+  const error = new Error(code) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
 
 function processIsAlive(pid: number): boolean {
   try {
@@ -140,5 +149,88 @@ describe('runExtractionCommand: timeout kills the whole process group', () => {
     }
     expect(caught).toBeInstanceOf(ExtractionCommandTimeoutError);
     expect('stdout' in (caught as object)).toBe(false);
+  }, 15_000);
+});
+
+describe('killExtractionProcessGroup: ESRCH is benign, anything else is a termination failure', () => {
+  test('ESRCH on the group falls through to the direct kill and reports ok', () => {
+    const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    const calls: number[] = [];
+    const kill: ExtractionKillFn = (pid) => {
+      calls.push(pid);
+      if (pid < 0) throw errno('ESRCH');
+    };
+    try {
+      expect(killExtractionProcessGroup(child, 'SIGKILL', kill)).toEqual({ ok: true });
+      expect(calls).toEqual([-child.pid!, child.pid!]);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  }, 15_000);
+
+  test('EPERM on the group still attempts the direct kill, and EPERM there too is surfaced', () => {
+    const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    const calls: number[] = [];
+    const kill: ExtractionKillFn = (pid) => {
+      calls.push(pid);
+      throw errno('EPERM');
+    };
+    try {
+      expect(killExtractionProcessGroup(child, 'SIGKILL', kill)).toEqual({ ok: false, code: 'EPERM' });
+      expect(calls).toEqual([-child.pid!, child.pid!]);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  }, 15_000);
+
+  test('a group EPERM followed by a direct ESRCH is still reported: the grandchildren may live on', () => {
+    const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    const kill: ExtractionKillFn = (pid) => {
+      throw errno(pid < 0 ? 'EPERM' : 'ESRCH');
+    };
+    try {
+      expect(killExtractionProcessGroup(child, 'SIGKILL', kill)).toEqual({ ok: false, code: 'EPERM' });
+    } finally {
+      child.kill('SIGKILL');
+    }
+  }, 15_000);
+
+  test('a timeout whose kill fails rejects with the failure named on the error', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'olympus-command-runner-'));
+    const pidFile = join(dir, 'child.pid');
+    let caught: unknown;
+    try {
+      const run = runExtractionCommand(
+        { command: 'bash', args: ['-c', `echo $$ > "${pidFile}"; sleep 300`], timeoutMs: 300 },
+        { kill: () => { throw errno('EPERM'); } },
+      );
+      const wrapper = await waitForPidFile(pidFile, 5_000);
+      try {
+        await run;
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ExtractionCommandTimeoutError);
+      const failure = caught as ExtractionCommandTimeoutError;
+      expect(failure.terminationFailed).toBe('EPERM');
+      expect(failure.message).toContain('could not be terminated (EPERM)');
+      // The stubbed kill never signalled anything, so the wrapper is still
+      // alive: exactly the situation the error exists to report.
+      expect(processIsAlive(wrapper)).toBe(true);
+      process.kill(-wrapper, 'SIGKILL');
+      expect(await waitUntilGone(wrapper, 5_000)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test('a plain timeout carries no termination failure', async () => {
+    let caught: unknown;
+    try {
+      await runExtractionCommand({ command: 'sleep', args: ['300'], timeoutMs: 200 });
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as ExtractionCommandTimeoutError).terminationFailed).toBeUndefined();
   }, 15_000);
 });
