@@ -75731,7 +75731,8 @@ function prepareWorkerUpgradeArtifact(options) {
       if (existsSync20(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
-        if (versionTreeDigest(workingDirectory) === expectedDigest) {
+        const existingMode = lstatSync11(workingDirectory).mode & 511;
+        if (existingMode === 365 && versionTreeDigest(workingDirectory) === expectedDigest) {
           removeStagingTree(staging);
           syncDirectorySync(versionsDir);
           return { artifactSha256, packageVersion, workingDirectory };
@@ -75914,9 +75915,11 @@ function makeVersionTreeReadOnly(root) {
       chmodSync10(path, 292);
     }
   }
-  chmodSync10(root, 365);
-  if (!statSync8(root).isDirectory())
+  chmodSync10(root, 448);
+  const rootStats = statSync8(root);
+  if (!rootStats.isDirectory() || (rootStats.mode & 511) !== 448) {
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
+  }
 }
 function syncVersionTree(root) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
@@ -75957,26 +75960,38 @@ function hashVersionTree(root, relativeRoot, digest) {
     digest.update(readFileSync21(path));
   }
 }
-function publishVersionTree(staging, workingDirectory, versionsDir) {
+function publishVersionTree(staging, workingDirectory, versionsDir, syncDirectory2 = syncDirectorySync) {
   let replacedPath;
-  if (existsSync20(workingDirectory)) {
-    replacedPath = join31(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
-    renameSync6(workingDirectory, replacedPath);
-    syncDirectorySync(versionsDir);
-  }
+  let published = false;
   try {
+    if (existsSync20(workingDirectory)) {
+      replacedPath = join31(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
+      renameSync6(workingDirectory, replacedPath);
+      syncDirectory2(versionsDir);
+    }
     renameSync6(staging, workingDirectory);
-    syncDirectorySync(versionsDir);
+    published = true;
+    chmodSync10(workingDirectory, 365);
+    syncDirectory2(workingDirectory);
+    syncDirectory2(versionsDir);
   } catch (error) {
-    if (replacedPath && existsSync20(replacedPath) && !existsSync20(workingDirectory)) {
-      renameSync6(replacedPath, workingDirectory);
-      syncDirectorySync(versionsDir);
+    try {
+      if (published && existsSync20(workingDirectory))
+        removeStagingTree(workingDirectory);
+      if (replacedPath && existsSync20(replacedPath) && !existsSync20(workingDirectory)) {
+        renameSync6(replacedPath, workingDirectory);
+      }
+      syncDirectory2(versionsDir);
+    } catch (rollbackError) {
+      const publication = error instanceof Error ? error.message : "unknown publication failure";
+      const rollback = rollbackError instanceof Error ? rollbackError.message : "unknown rollback failure";
+      throw new OperationError("config_error", "Could not restore the previous Olympus worker version after failed publication.", `Publication failed: ${publication}; rollback failed: ${rollback}`);
     }
     throw error;
   }
   if (replacedPath && existsSync20(replacedPath)) {
     removeStagingTree(replacedPath);
-    syncDirectorySync(versionsDir);
+    syncDirectory2(versionsDir);
   }
 }
 function removeStagingTree(root) {
