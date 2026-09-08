@@ -2,8 +2,8 @@
   "schema_version": 1,
   "artifact_input": "release-artifacts/olympus-0.4.0.tgz",
   "candidate_artifact": {
-    "artifact_sha256": "44e3a5692fd9d26ddc510d59b81f84eed5709c356aa70c1f4a2c82a652f99046",
-    "artifact_bytes": 703170
+    "artifact_sha256": "97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267",
+    "artifact_bytes": 703157
   },
   "rollback_baseline": {
     "source_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
