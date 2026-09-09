@@ -119,6 +119,13 @@ export interface SourceWatchGatewayConnection {
   certificatePath?: string;
 }
 
+export interface SourceWatchDeliveryTransportFactoryOptions {
+  authToken?: string;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: TimeoutFetch;
+  timeoutMs?: number;
+}
+
 export const SOURCE_WATCH_POLICY = Object.freeze({
   raw_source_exposed: false as const,
   source_text_returned: false as const,
@@ -411,6 +418,47 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
   }
 }
 
+/**
+ * Build the worker's delivery transport without making Gateway configuration
+ * a prerequisite for the rest of the source worker to boot. Configuration and
+ * certificate loading are lazy and begin on the first delivery. An unavailable
+ * OpenClaw CLI preserves the legacy HTTP default; an authored config or trust
+ * material that cannot be consumed returns a fixed fail-closed transport and
+ * allows a later delivery to retry initialization.
+ */
+export function createOpenClawSourceWatchDeliveryTransport(
+  options: SourceWatchDeliveryTransportFactoryOptions = {},
+): SourceWatchDeliveryTransport {
+  let initialized: Promise<SourceWatchDeliveryTransport> | undefined;
+  const initialize = async (): Promise<SourceWatchDeliveryTransport> => {
+    const env = options.env ?? process.env;
+    const gatewayConfig = await loadOpenClawGatewayConfig(env);
+    return new OpenClawSourceWatchDeliveryTransport({
+      ...(options.authToken ? { authToken: options.authToken } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(gatewayConfig ? { gatewayConfig } : {}),
+    });
+  };
+  return {
+    async send(lease) {
+      if (!initialized) {
+        const attempt = initialize();
+        initialized = attempt.catch(() => {
+          initialized = undefined;
+          return {
+            send: async () => ({
+              status: 'failed' as const,
+              errorKind: 'openclaw_gateway_config_unavailable',
+            }),
+          } satisfies SourceWatchDeliveryTransport;
+        });
+      }
+      return (await initialized).send(lease);
+    },
+  };
+}
 export function defaultOpenClawGatewayBaseUrl(
   env: Record<string, string | undefined> = process.env,
   gatewayConfig?: unknown,

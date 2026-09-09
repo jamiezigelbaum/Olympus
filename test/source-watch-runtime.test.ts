@@ -18,6 +18,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   listSourceWatchPublicViews,
   OpenClawSourceWatchDeliveryTransport,
+  createOpenClawSourceWatchDeliveryTransport,
   defaultOpenClawGatewayBaseUrl,
   loadOpenClawGatewayConfig,
   resolveSourceWatchGatewayConnection,
@@ -437,6 +438,63 @@ describe('durable source watch runtime', () => {
     }
   });
 
+  test('isolates a failed Gateway config read, retries after repair, and avoids an HTTP fallback', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-config-outage-'));
+    const fakeOpenClaw = join(dir, 'openclaw');
+    writeFileSync(fakeOpenClaw, '#!/bin/sh\nexit 1\n');
+    chmodSync(fakeOpenClaw, 0o755);
+    let fetches = 0;
+    try {
+      const transport = await createOpenClawSourceWatchDeliveryTransport({
+        authToken: 'shared-worker-token',
+        env: { PATH: dir, HOME: dir },
+        fetchImpl: async () => {
+          fetches += 1;
+          return new Response(JSON.stringify({
+            status: 'sent',
+            receipt: { platform_message_ids: ['repaired-http-delivery'] },
+          }));
+        },
+      });
+      await withStore(async ({ store, executor, owner }) => {
+        store.createWatch(watchInput('watch-config-outage'), owner);
+        store.recordMatch(executor, {
+          watchId: 'watch-config-outage',
+          ref: hit('message-config-outage', START, START).ref,
+        });
+        const lease = store.leaseDeliveries(executor, { leaseDurationMs: 60_000 })[0];
+        if (!lease) throw new Error('expected config-outage delivery lease');
+        expect(await transport.send(lease)).toEqual({
+          status: 'failed',
+          errorKind: 'openclaw_gateway_config_unavailable',
+        });
+        expect(fetches).toBe(0);
+        writeFileSync(fakeOpenClaw, '#!/bin/sh\nprintf \'%s\\n\' \'{"port":18789}\'\n');
+        expect(await transport.send(lease)).toMatchObject({ status: 'delivered' });
+      });
+      expect(fetches).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not await a stalled Gateway config CLI during transport factory creation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-config-stalled-'));
+    const fakeOpenClaw = join(dir, 'openclaw');
+    writeFileSync(fakeOpenClaw, '#!/bin/sh\nsleep 30\n');
+    chmodSync(fakeOpenClaw, 0o755);
+    try {
+      const started = performance.now();
+      const transport = createOpenClawSourceWatchDeliveryTransport({
+        authToken: 'shared-worker-token',
+        env: { PATH: dir, HOME: dir },
+      });
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(transport).toBeDefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   test('preserves loopback HTTP, refuses redirects, non-loopback targets, and HTTPS downgrades', async () => {
     expect(defaultOpenClawGatewayBaseUrl({})).toBe('http://127.0.0.1:18789');
     expect(defaultOpenClawGatewayBaseUrl({ OPENCLAW_GATEWAY_PORT: '19101' }))
