@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
+import { homedir } from 'node:os';
+import { resolve as resolvePath } from 'node:path';
+import { checkServerIdentity } from 'node:tls';
 import {
   createTrustedSourceWatchOwnerContext,
   SOURCE_WATCH_MAX_QUERY_LENGTH,
@@ -95,6 +100,23 @@ export type SourceWatchTransportResult = {
 
 export interface SourceWatchDeliveryTransport {
   send(lease: SourceWatchDeliveryLease): Promise<SourceWatchTransportResult>;
+}
+
+/** The supported OpenClaw gateway fields used by the worker bridge. */
+export interface SourceWatchGatewayConfig {
+  gateway?: {
+    port?: unknown;
+    tls?: {
+      enabled?: unknown;
+      certPath?: unknown;
+    };
+  };
+}
+
+export interface SourceWatchGatewayConnection {
+  baseUrl: string;
+  /** Public trust material only; never the gateway private key. */
+  certificatePath?: string;
 }
 
 export const SOURCE_WATCH_POLICY = Object.freeze({
@@ -293,17 +315,49 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
   private readonly fetchImpl: TimeoutFetch;
   private readonly authToken: string | undefined;
   private readonly baseUrl: string;
+  private readonly caPem: string | undefined;
   private readonly timeoutMs: number;
 
   constructor(options: {
     fetchImpl?: TimeoutFetch;
     authToken?: string;
     baseUrl?: string;
+    gatewayConfig?: unknown;
+    gatewayPort?: number;
+    env?: Record<string, string | undefined>;
+    /** Explicit public certificate path for a test or a resolved config. */
+    publicCertificatePath?: string;
     timeoutMs?: number;
   } = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.authToken = normalizeWorkerAuthToken(options.authToken);
-    this.baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? defaultOpenClawGatewayBaseUrl());
+    const env = options.env ?? process.env;
+    const configured = options.gatewayConfig === undefined
+      ? undefined
+      : resolveSourceWatchGatewayConnection(options.gatewayConfig, {
+          env,
+          ...(options.gatewayPort !== undefined ? { gatewayPort: options.gatewayPort } : {}),
+        });
+    const configuredUrl = configured?.baseUrl;
+    const baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? configuredUrl ?? defaultOpenClawGatewayBaseUrl(env));
+    if (configuredUrl && options.baseUrl && new URL(options.baseUrl).protocol !== new URL(configuredUrl).protocol) {
+      throw new TypeError('Source watch delivery gateway URL does not match gateway.tls.enabled.');
+    }
+    this.baseUrl = baseUrl;
+    const trustPath = options.publicCertificatePath ?? configured?.certificatePath;
+    if (new URL(baseUrl).protocol === 'https:') {
+      if (!trustPath) {
+        throw new TypeError('Source watch HTTPS gateway requires gateway.tls.certPath.');
+      }
+      try {
+        this.caPem = readFileSync(trustPath, 'utf8');
+      } catch {
+        throw new TypeError('Source watch HTTPS gateway public certificate could not be read.');
+      }
+      if (!this.caPem.trim()) {
+        throw new TypeError('Source watch HTTPS gateway public certificate is empty.');
+      }
+    }
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
@@ -316,7 +370,7 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
     }
     let response: Response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`, withWorkerAuthHeader({
+      const requestInit = withWorkerAuthHeader({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -324,7 +378,12 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
           downstream_idempotency_key: lease.downstreamIdempotencyKey,
           payload: sourceWatchEvidencePointerPayload(lease),
         }),
-      }, this.authToken), this.timeoutMs);
+        redirect: 'error',
+      }, this.authToken);
+      const url = `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`;
+      response = this.caPem
+        ? await requestVerifiedHttps(url, requestInit, this.timeoutMs, this.caPem)
+        : await fetchWithTimeout(this.fetchImpl, url, requestInit, this.timeoutMs);
     } catch {
       return { status: 'failed', errorKind: 'openclaw_gateway_unreachable' };
     }
@@ -354,14 +413,9 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
 
 export function defaultOpenClawGatewayBaseUrl(
   env: Record<string, string | undefined> = process.env,
+  gatewayConfig?: unknown,
 ): string {
-  const rawPort = env.OPENCLAW_GATEWAY_PORT?.trim() || '18789';
-  if (!/^\d+$/.test(rawPort)) throw new TypeError('OPENCLAW_GATEWAY_PORT must be an integer port.');
-  const port = Number(rawPort);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new TypeError('OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.');
-  }
-  return `http://127.0.0.1:${port}`;
+  return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
 }
 
 export async function runSourceWatchDeliveryPass(input: {
@@ -508,6 +562,95 @@ export async function runSourceWatchEvaluationPass(input: {
   };
 }
 
+/**
+ * Resolve the worker's loopback target from OpenClaw's already-resolved
+ * Gateway settings. The worker only consumes the public certificate path;
+ * `gateway.tls.keyPath` is deliberately outside this shape.
+ */
+export function resolveSourceWatchGatewayConnection(
+  config: unknown,
+  options: {
+    env?: Record<string, string | undefined>;
+    gatewayPort?: number;
+  } = {},
+): SourceWatchGatewayConnection {
+  const env = options.env ?? process.env;
+  const gateway = asRecord(asRecord(config)?.gateway);
+  const tls = asRecord(gateway?.tls);
+  if (tls?.enabled !== undefined && typeof tls.enabled !== 'boolean') {
+    throw new TypeError('OpenClaw gateway.tls.enabled must be a boolean.');
+  }
+  const tlsEnabled = tls?.enabled === true;
+  const port = resolveGatewayPortValue(options.gatewayPort ?? gateway?.port, env);
+  let certificatePath: string | undefined;
+  if (tlsEnabled) {
+    // `caPath` is OpenClaw's server-side client-verification CA, not the
+    // certificate the worker is connecting to. Trust the configured public
+    // server certificate, which is the right root for Air's self-signed leaf.
+    certificatePath = resolvePublicCertificatePath(tls?.certPath, env, 'gateway.tls.certPath');
+    if (!certificatePath) {
+      // OpenClaw's auto-generated certificate historically used a CN-only
+      // certificate. Requiring an authored public trust path makes the
+      // localhost SAN requirement explicit instead of silently trusting it.
+      throw new TypeError('OpenClaw HTTPS gateway requires gateway.tls.certPath.');
+    }
+  }
+  return {
+    baseUrl: normalizeGatewayBaseUrl(`${tlsEnabled ? 'https' : 'http'}://127.0.0.1:${port}`),
+    ...(certificatePath ? { certificatePath } : {}),
+  };
+}
+
+/**
+ * Read the active Gateway config through OpenClaw's supported read-only CLI.
+ * This keeps the source worker aligned with config includes, profiles, and
+ * environment resolution without copying those rules into Olympus.
+ */
+export async function loadOpenClawGatewayConfig(
+  env: Record<string, string | undefined> = process.env,
+): Promise<unknown | undefined> {
+  const command = resolveOpenClawCommand(env);
+  let child: ReturnType<typeof Bun.spawn>;
+  try {
+    child = Bun.spawn([command, 'config', 'get', 'gateway', '--json'], {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'ignore',
+      env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    });
+  } catch {
+    return undefined;
+  }
+  const timer = setTimeout(() => child.kill(), 5_000);
+  try {
+    const [stdout, code] = await Promise.all([
+      new Response(child.stdout as unknown as BodyInit).text(),
+      child.exited,
+    ]);
+    if (code !== 0) {
+      throw new Error('OpenClaw gateway configuration could not be resolved.');
+    }
+    const start = stdout.indexOf('{');
+    const end = stdout.lastIndexOf('}');
+    if (start < 0 || end <= start) {
+      throw new Error('OpenClaw gateway configuration returned no JSON.');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout.slice(start, end + 1)) as unknown;
+    } catch {
+      throw new Error('OpenClaw gateway configuration returned invalid JSON.');
+    }
+    const record = asRecord(parsed);
+    if (!record || record.ok === false) {
+      throw new Error('OpenClaw gateway configuration was refused.');
+    }
+    return record;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function observedAt(hit: Awaited<ReturnType<typeof routeSourceIndexSearch>>['hits'][number]): string {
   for (const value of [
     hit.provenance?.citation?.updatedAt,
@@ -547,15 +690,176 @@ function leaseFence(lease: SourceWatchDeliveryLease) {
   };
 }
 
+function resolveGatewayPortValue(
+  configuredPort: unknown,
+  env: Record<string, string | undefined>,
+): number {
+  const envPort = parseGatewayPort(env.OPENCLAW_GATEWAY_PORT);
+  if (envPort !== undefined) return envPort;
+  if (configuredPort !== undefined && configuredPort !== null) {
+    if (typeof configuredPort !== 'number' || !Number.isFinite(configuredPort) || !Number.isSafeInteger(configuredPort)) {
+      throw new TypeError('OpenClaw gateway.port must be an integer port.');
+    }
+    if (configuredPort > 0 && configuredPort <= 65_535) return configuredPort;
+  }
+  return 18_789;
+}
+
+function parseGatewayPort(raw: string | undefined): number | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const numeric = /^\d+$/.test(trimmed)
+    ? trimmed
+    : /^(?:[^:[\]]+|\[[^\]]+\]):(\d+)$/.exec(trimmed)?.[1];
+  if (!numeric) throw new TypeError('OPENCLAW_GATEWAY_PORT must be an integer port.');
+  const port = Number(numeric);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new TypeError('OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.');
+  }
+  return port;
+}
+
+function resolvePublicCertificatePath(
+  value: unknown,
+  env: Record<string, string | undefined>,
+  field: string,
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
+  }
+  const trimmed = value.trim();
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir();
+  const expanded = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')
+    ? `${home}${trimmed.slice(1)}`
+    : trimmed;
+  return resolvePath(expanded);
+}
+
+function resolveOpenClawCommand(env: Record<string, string | undefined>): string {
+  const pathEntries = env.PATH?.split(':').map((entry) => entry.trim()).filter(Boolean) ?? [];
+  for (const entry of pathEntries) {
+    const candidate = resolvePath(entry, 'openclaw');
+    if (existsSync(candidate)) return candidate;
+  }
+  const found = Bun.which('openclaw');
+  if (found) return found;
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir();
+  for (const candidate of [
+    '/opt/homebrew/bin/openclaw',
+    '/usr/local/bin/openclaw',
+    resolvePath(home, '.openclaw', 'bin', 'openclaw'),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return 'openclaw';
+}
+
 function normalizeGatewayBaseUrl(value: string): string {
   const url = new URL(value);
-  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
-    throw new TypeError('Source watch delivery gateway must use loopback HTTP.');
+  if (!['http:', 'https:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+    throw new TypeError('Source watch delivery gateway must use loopback HTTP(S).');
   }
   if (url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
     throw new TypeError('Source watch delivery gateway base URL must not contain credentials, path, query, or fragment.');
   }
   return url.origin;
+}
+
+function requestVerifiedHttps(
+  urlValue: string,
+  init: RequestInit,
+  timeoutMs: number,
+  ca: string,
+): Promise<Response> {
+  const url = new URL(urlValue);
+  if (url.protocol !== 'https:') throw new TypeError('Verified HTTPS request requires an HTTPS URL.');
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, key) => { headers[key] = value; });
+  const hostname = url.hostname.startsWith('[') && url.hostname.endsWith(']')
+    ? url.hostname.slice(1, -1)
+    : url.hostname;
+  const servername = hostname.includes(':') ? undefined : hostname;
+  const body = init.body;
+  if (body !== undefined && typeof body !== 'string' && !(body instanceof Uint8Array)) {
+    throw new TypeError('Source watch HTTPS request body must be text or bytes.');
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let removeAbortListener: (() => void) | undefined;
+    let request: ReturnType<typeof httpsRequest> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      removeAbortListener?.();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      request?.destroy();
+      reject(error);
+    };
+    const succeed = (response: Response) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(response);
+    };
+    const abort = () => {
+      const error = new Error('Source watch HTTPS request aborted.');
+      error.name = 'AbortError';
+      fail(error);
+    };
+    try {
+      request = httpsRequest({
+        protocol: 'https:',
+        hostname,
+        ...(url.port ? { port: Number(url.port) } : {}),
+        path: `${url.pathname}${url.search}`,
+        method: init.method ?? 'GET',
+        headers,
+        ca,
+        rejectUnauthorized: true,
+        ...(servername ? { servername } : {}),
+        checkServerIdentity,
+      }, (incoming) => {
+        const chunks: Buffer[] = [];
+        incoming.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)));
+        incoming.on('end', () => {
+          const responseHeaders = new Headers();
+          for (const [key, value] of Object.entries(incoming.headers)) {
+            if (Array.isArray(value)) value.forEach((item) => responseHeaders.append(key, item));
+            else if (value !== undefined) responseHeaders.set(key, value);
+          }
+          succeed(new Response(Buffer.concat(chunks), {
+            status: incoming.statusCode ?? 0,
+            statusText: incoming.statusMessage ?? '',
+            headers: responseHeaders,
+          }));
+        });
+        incoming.on('error', fail);
+      });
+      request.on('error', fail);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => abort(), timeoutMs);
+        request.setTimeout(timeoutMs, abort);
+      }
+      if (init.signal) {
+        if (init.signal.aborted) abort();
+        else {
+          const abortFromUpstream = () => abort();
+          init.signal.addEventListener('abort', abortFromUpstream, { once: true });
+          removeAbortListener = () => init.signal?.removeEventListener('abort', abortFromUpstream);
+        }
+      }
+      if (settled) return;
+      if (body === undefined) request.end();
+      else request.end(typeof body === 'string' ? body : Buffer.from(body));
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 function safeErrorKind(value: string): string {
