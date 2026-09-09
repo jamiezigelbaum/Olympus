@@ -49,6 +49,7 @@ const ALLOWED_DOCS = new Set([
   'docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md',
   'docs/ops/HARNESS_PROTOCOL.md',
   'docs/ops/OAUTH_RELAY.md',
+  'docs/ops/TRANSCRIPTION_LANE.md',
   'docs/ops/OPENCLAW_CHANGE_PROTOCOL.md',
   'docs/ops/PUBLIC_FLIP_RUNBOOK.md',
   'docs/reference/delphi-consumer-contract.md',

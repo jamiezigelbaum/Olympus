@@ -30,6 +30,7 @@ import { extname, join } from 'node:path';
 import type { Extractor, ExtractorInput, ExtractorOutput } from '../types.ts';
 import { boundText, buildDerivation, normalizeMimeType } from './bounded-text.ts';
 import {
+  ExtractionCommandError,
   ExtractionCommandTimeoutError,
   runExtractionCommand,
   type ExtractionCommandRunner,
@@ -42,6 +43,88 @@ export const DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1_800_000;
 export const MAX_TRANSCRIPT_CHARS = 200_000;
 
 const TEMP_DIR_PREFIX = 'olympus-transcribe-';
+
+/**
+ * Hosts the transcription command's remote lane may address. The only remote
+ * this lane knows is the owner's Delphi appliance reached through the
+ * existing loopback SSH tunnel from the worker host, the same trust class as
+ * the local VLM extractor's `127.0.0.1:28090`. Anything else is cloud egress
+ * and is refused here and, independently, by the wrapper itself (exit 78).
+ */
+export const TRANSCRIBE_REMOTE_LANE_HOSTS: readonly string[] = ['127.0.0.1', 'localhost'];
+
+/**
+ * Wrapper exit codes whose meaning is deterministic: running the same
+ * command on the same file again cannot succeed until an operator changes
+ * something. Each maps to a bounded `errorKind`; the extractor reports them
+ * as `failed_terminal` so the scheduler and the drain callers stop
+ * rescheduling them. Every other non-zero exit (no slot, 5xx fallback that
+ * then failed, whisper crash, signal) stays retryable. Mirrors the exit-code
+ * table at the top of config/systemd/user/olympus-whisper-transcribe.sh.
+ */
+export const TRANSCRIBE_TERMINAL_EXIT_KINDS: Readonly<Record<number, string>> = {
+  64: 'transcribe_command_usage',
+  65: 'transcribe_input_refused',
+  66: 'transcribe_input_unreadable',
+  76: 'transcribe_remote_lane_rejected',
+  78: 'transcribe_remote_lane_misconfigured',
+};
+
+/**
+ * The transcription command reported a deterministic failure (see
+ * `TRANSCRIBE_TERMINAL_EXIT_KINDS`). Carries the bounded kind and the exit
+ * code; the command's streams stay on the wrapped cause and are never copied
+ * into a stored field.
+ */
+export class TranscriptionTerminalError extends Error {
+  readonly exitCode: number;
+  readonly errorKind: string;
+  readonly commandError: ExtractionCommandError;
+
+  constructor(cause: ExtractionCommandError, errorKind: string) {
+    super(`${cause.command} exited with terminal status ${cause.exitCode} (${errorKind}).`);
+    this.name = 'TranscriptionTerminalError';
+    this.exitCode = cause.exitCode ?? -1;
+    this.errorKind = errorKind;
+    this.commandError = cause;
+  }
+}
+
+export function isTerminalTranscriptionError(error: unknown): error is TranscriptionTerminalError {
+  return error instanceof TranscriptionTerminalError;
+}
+
+export interface TranscribeRemoteLane {
+  url: string;
+  host: string;
+}
+
+/**
+ * Reads `OLYMPUS_TRANSCRIBE_URL` and enforces the loopback boundary. Returns
+ * the lane when it is set and loopback, `undefined` when unset, and throws
+ * when it names any other host: a process that would hand audio to a
+ * non-loopback URL must not start at all.
+ */
+export function resolveTranscribeRemoteLane(
+  env: Record<string, string | undefined> = process.env,
+): TranscribeRemoteLane | undefined {
+  const raw = env.OLYMPUS_TRANSCRIBE_URL?.trim();
+  if (!raw) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('OLYMPUS_TRANSCRIBE_URL is not a valid URL; the transcription remote lane must be a loopback http(s) URL.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isHttp = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  if (!isHttp || !TRANSCRIBE_REMOTE_LANE_HOSTS.includes(host) || parsed.username || parsed.password) {
+    throw new Error(
+      `OLYMPUS_TRANSCRIBE_URL host '${parsed.hostname}' is not loopback; the transcription remote lane is the Delphi tunnel on 127.0.0.1/localhost only and never cloud ASR.`,
+    );
+  }
+  return { url: raw, host };
+}
 
 /**
  * Mime types the lane plans for. Video containers are included because voice
@@ -89,8 +172,9 @@ export interface WhisperCommandTranscriberOptions {
    * replaced with the temp audio path, and the template MUST contain one:
    * a template without it would transcribe nothing and silently succeed.
    *
-   * The command must be LOCAL infrastructure only. No remote transcription
-   * rides this lane.
+   * The command must be LOCAL infrastructure only. The one remote it may
+   * reach is the owner's Delphi appliance over the loopback tunnel (see
+   * `resolveTranscribeRemoteLane`); no cloud ASR rides this lane.
    */
   command: string;
   timeoutMs?: number;
@@ -129,11 +213,20 @@ export class WhisperCommandTranscriber implements Transcriber {
   async transcribe(input: TranscriberInput): Promise<TranscriberResult> {
     const argv = this.argvTemplate.map((arg) => arg.replaceAll('{input}', input.inputPath));
     const [command, ...args] = argv;
-    const result = await this.commandRunner({
-      command: command!,
-      args,
-      timeoutMs: this.timeoutMs,
-    });
+    let result;
+    try {
+      result = await this.commandRunner({
+        command: command!,
+        args,
+        timeoutMs: this.timeoutMs,
+      });
+    } catch (error) {
+      if (error instanceof ExtractionCommandError && error.exitCode !== null) {
+        const kind = TRANSCRIBE_TERMINAL_EXIT_KINDS[error.exitCode];
+        if (kind) throw new TranscriptionTerminalError(error, kind);
+      }
+      throw error;
+    }
     // Whisper-style runners emit a sidecar .txt next to the input; fall back to
     // stdout when no sidecar appears. Both shapes are live.
     const sidecar = await readFirstExisting([
@@ -149,6 +242,9 @@ export function createWhisperCommandTranscriberFromEnv(
 ): WhisperCommandTranscriber | undefined {
   const command = env.OLYMPUS_TRANSCRIBE_COMMAND?.trim();
   if (!command) return undefined;
+  // Fail closed before any process starts: the wrapper checks the same
+  // boundary, but a caller must not even be constructed with cloud egress.
+  resolveTranscribeRemoteLane(env);
   const timeoutSeconds = env.OLYMPUS_TRANSCRIBE_TIMEOUT_SECONDS?.trim();
   let timeoutMs: number | undefined;
   if (timeoutSeconds) {
@@ -249,8 +345,19 @@ export function createTranscriptionExtractor(
           ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
         };
       } catch (error) {
+        if (error instanceof TranscriptionTerminalError) {
+          return { status: 'failed_terminal', errorKind: error.errorKind };
+        }
         if (error instanceof ExtractionCommandTimeoutError) {
-          return { status: 'failed_retryable', errorKind: 'transcribe_command_timeout' };
+          // A timeout whose kill failed is still retryable (the runner has no
+          // way to finish the work), but under its own token so the operator
+          // sees that a process may be lingering.
+          return {
+            status: 'failed_retryable',
+            errorKind: error.terminationFailed
+              ? 'transcribe_command_timeout_kill_failed'
+              : 'transcribe_command_timeout',
+          };
         }
         return { status: 'failed_retryable', errorKind: 'transcribe_command_failed' };
       } finally {

@@ -4,13 +4,19 @@
 // OLYMPUS_TRANSCRIBE_COMMAND to turn files captured by tools/whatsapp-bridge
 // into <media_path>.transcript.txt sidecars consumed by the live connector.
 // It must never route WhatsApp personal audio through domain-expert, Gemini,
-// GCS, or any cloud ASR lane.
+// GCS, or any cloud ASR lane. The one remote the command may use is the
+// owner's Delphi appliance over the loopback SSH tunnel (OLYMPUS_TRANSCRIBE_URL
+// on 127.0.0.1/localhost, the same trust class as local); the drain refuses to
+// start with any other host, so `local_only` / `cloud_asr_allowed: false` in
+// the receipt below stay true by construction.
 
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, extname, join } from 'node:path';
 import { writePrivateFileAtomic } from '../src/core/atomic-file.ts';
 import {
   createWhisperCommandTranscriberFromEnv,
+  isTerminalTranscriptionError,
+  resolveTranscribeRemoteLane,
   type Transcriber,
 } from '../src/workers/file-extraction/extractors/transcription.ts';
 import {
@@ -23,7 +29,7 @@ const DEFAULT_IDLE_SLEEP_SECONDS = 15;
 const DEFAULT_ERROR_BACKOFF_SECONDS = 60;
 const AUDIO_EXTENSIONS = new Set(['.aac', '.bin', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.webm']);
 
-type WhatsAppTranscriptionStatusName = 'transcribed' | 'failed_retryable';
+type WhatsAppTranscriptionStatusName = 'transcribed' | 'failed_retryable' | 'failed_terminal';
 
 interface WhatsAppTranscriptStatusFile {
   kind: 'whatsapp_audio_transcription_status';
@@ -55,7 +61,9 @@ export interface WhatsAppTranscribeDrainSummary {
     transcribed: number;
     skipped_already_transcribed: number;
     skipped_backoff: number;
+    skipped_terminal: number;
     failed_retryable: number;
+    failed_terminal: number;
     idle_runs: number;
   };
   extractor_kind: string;
@@ -64,6 +72,12 @@ export interface WhatsAppTranscribeDrainSummary {
   policy: {
     local_only: true;
     cloud_asr_allowed: false;
+    /**
+     * `none` when the command runs CPU whisper on this host; `loopback_only`
+     * when OLYMPUS_TRANSCRIBE_URL names the Delphi tunnel on 127.0.0.1 or
+     * localhost. No third value exists: any other host aborts startup.
+     */
+    remote_lane: 'none' | 'loopback_only';
     raw_source_exposed: false;
     source_text_returned: false;
   };
@@ -77,6 +91,8 @@ export async function runWhatsAppTranscribeDrain(
   env: Record<string, string | undefined> = process.env,
   options: { transcriber?: Transcriber; stopState?: StopState } = {},
 ): Promise<WhatsAppTranscribeDrainSummary> {
+  // Throws on any non-loopback host before a transcriber exists.
+  const remoteLane = resolveTranscribeRemoteLane(env);
   const transcriber = options.transcriber ?? createWhisperCommandTranscriberFromEnv(env);
   if (!transcriber) {
     throw new Error('OLYMPUS_TRANSCRIBE_COMMAND is required (argv template with an {input} placeholder; local infrastructure only).');
@@ -92,7 +108,9 @@ export async function runWhatsAppTranscribeDrain(
       transcribed: 0,
       skipped_already_transcribed: 0,
       skipped_backoff: 0,
+      skipped_terminal: 0,
       failed_retryable: 0,
+      failed_terminal: 0,
       idle_runs: 0,
     },
     extractor_kind: config.extractorKind,
@@ -101,6 +119,7 @@ export async function runWhatsAppTranscribeDrain(
     policy: {
       local_only: true,
       cloud_asr_allowed: false,
+      remote_lane: remoteLane ? 'loopback_only' : 'none',
       raw_source_exposed: false,
       source_text_returned: false,
     },
@@ -114,7 +133,9 @@ export async function runWhatsAppTranscribeDrain(
     summary.counts.transcribed += pass.transcribed;
     summary.counts.skipped_already_transcribed += pass.skippedAlreadyTranscribed;
     summary.counts.skipped_backoff += pass.skippedBackoff;
+    summary.counts.skipped_terminal += pass.skippedTerminal;
     summary.counts.failed_retryable += pass.failedRetryable;
+    summary.counts.failed_terminal += pass.failedTerminal;
     if (pass.workDone === 0) summary.counts.idle_runs += 1;
     await writeHeartbeat(config, summary);
 
@@ -132,7 +153,9 @@ interface DrainPassResult {
   transcribed: number;
   skippedAlreadyTranscribed: number;
   skippedBackoff: number;
+  skippedTerminal: number;
   failedRetryable: number;
+  failedTerminal: number;
   workDone: number;
 }
 
@@ -142,7 +165,9 @@ async function runOnePass(config: WhatsAppTranscribeDrainConfig, transcriber: Tr
     transcribed: 0,
     skippedAlreadyTranscribed: 0,
     skippedBackoff: 0,
+    skippedTerminal: 0,
     failedRetryable: 0,
+    failedTerminal: 0,
     workDone: 0,
   };
   for (const mediaPath of await listAudioMediaFiles(config.mediaDir)) {
@@ -152,6 +177,13 @@ async function runOnePass(config: WhatsAppTranscribeDrainConfig, transcriber: Tr
       continue;
     }
     const previous = await readStatus(statusPath(mediaPath));
+    // A terminal status is a parked file: the command said retrying cannot
+    // help (over the cap, unreadable, remote lane misconfigured). It is
+    // re-examined only when the status file is removed by hand.
+    if (previous?.status === 'failed_terminal') {
+      result.skippedTerminal += 1;
+      continue;
+    }
     if (previous?.next_retry_at && Date.parse(previous.next_retry_at) > Date.now()) {
       result.skippedBackoff += 1;
       continue;
@@ -176,17 +208,31 @@ async function runOnePass(config: WhatsAppTranscribeDrainConfig, transcriber: Tr
       });
       result.transcribed += 1;
     } catch (error) {
-      await writeStatus(mediaPath, {
-        kind: 'whatsapp_audio_transcription_status',
-        status: 'failed_retryable',
-        attempts,
-        error_class: classifyTranscriptionError(error),
-        extractor_kind: config.extractorKind,
-        extractor_version: config.extractorVersion,
-        updated_at: nowIso(),
-        next_retry_at: new Date(Date.now() + config.errorBackoffMs * attempts).toISOString(),
-      });
-      result.failedRetryable += 1;
+      if (isTerminalTranscriptionError(error)) {
+        await writeStatus(mediaPath, {
+          kind: 'whatsapp_audio_transcription_status',
+          status: 'failed_terminal',
+          attempts,
+          error_class: error.errorKind,
+          extractor_kind: config.extractorKind,
+          extractor_version: config.extractorVersion,
+          updated_at: nowIso(),
+          next_retry_at: null,
+        });
+        result.failedTerminal += 1;
+      } else {
+        await writeStatus(mediaPath, {
+          kind: 'whatsapp_audio_transcription_status',
+          status: 'failed_retryable',
+          attempts,
+          error_class: classifyTranscriptionError(error),
+          extractor_kind: config.extractorKind,
+          extractor_version: config.extractorVersion,
+          updated_at: nowIso(),
+          next_retry_at: new Date(Date.now() + config.errorBackoffMs * attempts).toISOString(),
+        });
+        result.failedRetryable += 1;
+      }
     }
     result.workDone += 1;
   }
@@ -232,7 +278,7 @@ async function readStatus(path: string): Promise<WhatsAppTranscriptStatusFile | 
     const parsed = JSON.parse(await readFile(path, 'utf8')) as Partial<WhatsAppTranscriptStatusFile>;
     return {
       kind: 'whatsapp_audio_transcription_status',
-      status: parsed.status === 'transcribed' ? 'transcribed' : 'failed_retryable',
+      status: parsed.status === 'transcribed' || parsed.status === 'failed_terminal' ? parsed.status : 'failed_retryable',
       attempts: Number.isInteger(parsed.attempts) && parsed.attempts! > 0 ? parsed.attempts! : 0,
       error_class: typeof parsed.error_class === 'string' ? parsed.error_class : null,
       extractor_kind: typeof parsed.extractor_kind === 'string' ? parsed.extractor_kind : WHATSAPP_TRANSCRIPT_EXTRACTOR_KIND,

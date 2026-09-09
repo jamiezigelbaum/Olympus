@@ -17,11 +17,17 @@ import {
 } from '../src/workers/file-extraction/extractors/command-runner.ts';
 import {
   MAX_TRANSCRIPT_CHARS,
+  TRANSCRIBE_REMOTE_LANE_HOSTS,
+  TRANSCRIBE_TERMINAL_EXIT_KINDS,
   TRANSCRIPTION_EXTRACTOR_KIND,
   TRANSCRIPTION_EXTRACTOR_VERSION,
+  TranscriptionTerminalError,
   WhisperCommandTranscriber,
   createTranscriptionExtractor,
+  createWhisperCommandTranscriberFromEnv,
+  isTerminalTranscriptionError,
   normalizeTranscriptText,
+  resolveTranscribeRemoteLane,
   parseTranscriberArgvTemplate,
   sidecarPathForInput,
   tempAudioFileName,
@@ -155,6 +161,63 @@ describe('transcription extractor: transcripts', () => {
     if (failed.status !== 'failed_retryable') return;
     expect(failed.errorKind).toBe('transcribe_command_failed');
     expect(JSON.stringify(failed)).not.toContain('/home/private');
+  });
+
+  test('deterministic wrapper exits are terminal under bounded tokens; the rest stay retryable', async () => {
+    const expectations: Array<[number, string]> = [
+      [64, 'transcribe_command_usage'],
+      [65, 'transcribe_input_refused'],
+      [66, 'transcribe_input_unreadable'],
+      [76, 'transcribe_remote_lane_rejected'],
+      [78, 'transcribe_remote_lane_misconfigured'],
+    ];
+    expect(Object.entries(TRANSCRIBE_TERMINAL_EXIT_KINDS).map(([code, kind]) => [Number(code), kind])).toEqual(expectations);
+    for (const [exitCode, errorKind] of expectations) {
+      const failing: ExtractionCommandRunner = async () => {
+        throw new ExtractionCommandError({ command: 'transcribe', exitCode, stdout: '', stderr: '/home/private/voice.m4a refused' });
+      };
+      const result = await createTranscriptionExtractor({ command: 'transcribe {input}', commandRunner: failing })
+        .extract(extractorInput({ bytes: textBytes('audio'), mimeType: AUDIO_MIME }));
+      expect(result.status).toBe('failed_terminal');
+      if (result.status !== 'failed_terminal') return;
+      expect(result.errorKind).toBe(errorKind);
+      expect(JSON.stringify(result)).not.toContain('/home/private');
+    }
+    for (const exitCode of [69, 70, 143, 1]) {
+      const failing: ExtractionCommandRunner = async () => {
+        throw new ExtractionCommandError({ command: 'transcribe', exitCode, stdout: '', stderr: '' });
+      };
+      const result = await createTranscriptionExtractor({ command: 'transcribe {input}', commandRunner: failing })
+        .extract(extractorInput({ bytes: textBytes('audio'), mimeType: AUDIO_MIME }));
+      expect(result.status).toBe('failed_retryable');
+    }
+  });
+
+  test('the command transcriber throws a typed terminal error the WhatsApp drain can recognize', async () => {
+    const failing: ExtractionCommandRunner = async () => {
+      throw new ExtractionCommandError({ command: 'transcribe', exitCode: 65, stdout: '', stderr: 'over the cap' });
+    };
+    const transcriber = new WhisperCommandTranscriber({ command: 'transcribe {input}', commandRunner: failing });
+    let caught: unknown;
+    try {
+      await transcriber.transcribe({ inputPath: '/tmp/x.m4a' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(isTerminalTranscriptionError(caught)).toBe(true);
+    expect((caught as TranscriptionTerminalError).exitCode).toBe(65);
+    expect((caught as TranscriptionTerminalError).errorKind).toBe('transcribe_input_refused');
+  });
+
+  test('a timeout whose kill failed is retryable under its own token', async () => {
+    const unkillable: ExtractionCommandRunner = async () => {
+      throw new ExtractionCommandTimeoutError({ command: 'transcribe', timeoutMs: 5, terminationFailed: 'EPERM' });
+    };
+    const result = await createTranscriptionExtractor({ command: 'transcribe {input}', commandRunner: unkillable })
+      .extract(extractorInput({ bytes: textBytes('audio'), mimeType: AUDIO_MIME }));
+    expect(result.status).toBe('failed_retryable');
+    if (result.status !== 'failed_retryable') return;
+    expect(result.errorKind).toBe('transcribe_command_timeout_kill_failed');
   });
 
   test('an unconfigured transcriber is retryable under a bounded token', async () => {
@@ -350,6 +413,45 @@ describe('transcription extractor: the command-backed transcriber', () => {
       .toThrow(/\{input\} placeholder/);
     expect(parseTranscriberArgvTemplate('  transcribe   {input}  '))
       .toEqual(['transcribe', '{input}']);
+  });
+});
+
+describe('transcription extractor: the remote lane is loopback only', () => {
+  test('unset means no remote lane', () => {
+    expect(resolveTranscribeRemoteLane({})).toBeUndefined();
+    expect(resolveTranscribeRemoteLane({ OLYMPUS_TRANSCRIBE_URL: '  ' })).toBeUndefined();
+  });
+
+  test('127.0.0.1 and localhost are the whole allowlist', () => {
+    expect(TRANSCRIBE_REMOTE_LANE_HOSTS).toEqual(['127.0.0.1', 'localhost']);
+    expect(resolveTranscribeRemoteLane({ OLYMPUS_TRANSCRIBE_URL: 'http://127.0.0.1:28090/v1/audio/transcriptions' }))
+      .toEqual({ url: 'http://127.0.0.1:28090/v1/audio/transcriptions', host: '127.0.0.1' });
+    expect(resolveTranscribeRemoteLane({ OLYMPUS_TRANSCRIBE_URL: 'https://LOCALHOST/v1/audio/transcriptions' })?.host).toBe('localhost');
+  });
+
+  test('any other host, userinfo, or scheme refuses before a transcriber exists', () => {
+    for (const url of [
+      'https://api.openai.com/v1/audio/transcriptions',
+      'http://delphi.tail1234.ts.net:28090/v1/audio/transcriptions',
+      'http://127.0.0.1.evil.example/v1',
+      'http://user:pw@127.0.0.1:28090/v1',
+      'http://[::1]:28090/v1',
+      'ftp://127.0.0.1/v1',
+      'not a url',
+    ]) {
+      expect(() => resolveTranscribeRemoteLane({ OLYMPUS_TRANSCRIBE_URL: url })).toThrow(/loopback/);
+      expect(() => createWhisperCommandTranscriberFromEnv({
+        OLYMPUS_TRANSCRIBE_COMMAND: 'transcribe {input}',
+        OLYMPUS_TRANSCRIBE_URL: url,
+      })).toThrow(/loopback/);
+    }
+  });
+
+  test('a loopback lane constructs the env transcriber normally', () => {
+    expect(createWhisperCommandTranscriberFromEnv({
+      OLYMPUS_TRANSCRIBE_COMMAND: 'transcribe {input}',
+      OLYMPUS_TRANSCRIBE_URL: 'http://localhost:28090/v1/audio/transcriptions',
+    })).toBeInstanceOf(WhisperCommandTranscriber);
   });
 });
 
