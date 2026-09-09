@@ -18,6 +18,8 @@ const oauthFinding = {
   profileId: 'openai-codex:default',
 };
 
+const sharedOauthFinding = { ...oauthFinding, file: '/fixture/state/openclaw.sqlite' };
+
 function auditReport(findings: Array<Record<string, unknown>> = []) {
   return {
     version: 1,
@@ -32,6 +34,18 @@ function auditReport(findings: Array<Record<string, unknown>> = []) {
       legacyResidueCount: findings.filter(finding => finding.code === 'LEGACY_RESIDUE').length,
     },
     findings,
+  };
+}
+
+function extendedAuditReport(findings: Array<Record<string, unknown>> = []) {
+  const report = auditReport(findings);
+  return {
+    ...report,
+    filesScanned: [...report.filesScanned, sharedOauthFinding.file],
+    summary: {
+      ...report.summary,
+      storeResidueCount: findings.filter(finding => finding.code === 'STORE_RESIDUE').length,
+    },
   };
 }
 
@@ -259,6 +273,100 @@ describe('OpenClaw safe restart', () => {
     expect(result.stdout + result.stderr).not.toContain(oauthFinding.profileId);
   }, 30_000);
 
+  test('permits the extended v1 summary and exact shared-state OAuth information', () => {
+    const findings = [
+      { ...sharedOauthFinding, provider: 'openai', profileId: 'openai:primary', jsonPath: 'profiles.openai:primary' },
+      { ...sharedOauthFinding, provider: 'openai', profileId: 'openai:secondary', jsonPath: 'profiles.openai:secondary' },
+      { ...sharedOauthFinding, provider: 'xai', profileId: 'xai:default', jsonPath: 'profiles.xai:default' },
+    ];
+    const report = extendedAuditReport(findings);
+    report.resolution.refsChecked = 12;
+    const result = runScenario({
+      args: ['--secrets-touched'], auditOutput: JSON.stringify(report), auditExit: 1,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('only native OAuth informational records');
+    expect(result.stdout).toContain('Gateway boot proved: MainPID=4242');
+    expect(result.captured.match(/openclaw_args=gateway restart/g)).toHaveLength(1);
+    expect(result.stdout + result.stderr).not.toContain(sharedOauthFinding.file);
+    expect(result.stdout + result.stderr).not.toContain('openai:primary');
+  }, 30_000);
+
+  test.each([{ findings: [] }, { findings: [oauthFinding] }, { findings: [oauthFinding, sharedOauthFinding] }])(
+    'permits extended clean, per-agent, and mixed native OAuth reports %#', ({ findings }) => {
+      const result = runScenario({
+        args: ['--secrets-touched', '--preflight-only'],
+        auditOutput: JSON.stringify(extendedAuditReport(findings)), auditExit: findings.length ? 1 : 0,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('preflight passed');
+      expect(result.captured).not.toContain('openclaw_args=gateway restart');
+    }, 30_000,
+  );
+
+  test.each([
+    '/fixture/openclaw.sqlite',
+    '/fixture/cache/openclaw.sqlite',
+    '/fixture/state/nested/openclaw.sqlite',
+    '/fixture/state/openclaw.sqlite.bak',
+    '/fixture/state/../state/openclaw.sqlite',
+    '/fixture/state//openclaw.sqlite',
+    'relative/state/openclaw.sqlite',
+  ])('refuses a scanned OAuth finding at unsupported shared database path %s', (file) => {
+    const report = extendedAuditReport([{ ...sharedOauthFinding, file }]);
+    report.filesScanned = ['/fixture/openclaw.json', file];
+    const result = runScenario({
+      args: ['--secrets-touched', '--preflight-only'], auditOutput: JSON.stringify(report), auditExit: 1,
+    });
+    expect(result.exitCode).toBe(78);
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+  }, 30_000);
+
+  test('refuses shared-state OAuth without the known extended summary or scanned file', () => {
+    const legacySummary = auditReport([sharedOauthFinding]);
+    legacySummary.filesScanned.push(sharedOauthFinding.file);
+    const unscanned = extendedAuditReport([sharedOauthFinding]);
+    unscanned.filesScanned = ['/fixture/openclaw.json'];
+    for (const report of [legacySummary, unscanned]) {
+      const result = runScenario({
+        args: ['--secrets-touched', '--preflight-only'], auditOutput: JSON.stringify(report), auditExit: 1,
+      });
+      expect(result.exitCode).toBe(78);
+      expect(result.captured).not.toContain('openclaw_args=gateway restart');
+    }
+  }, 30_000);
+
+  test.each([
+    { storeResidueCount: 1 },
+    { storeResidueCount: -1 },
+    { storeResidueCount: '0' },
+    { storeResidueCount: null },
+    { storeResidueCount: false },
+    { unknownCount: 0 },
+    { plaintextCount: 1 },
+    { unresolvedRefCount: 1 },
+    { shadowedRefCount: 1 },
+    { legacyResidueCount: 0 },
+  ])('refuses unsafe or unknown extended summary %j', (patch) => {
+    const report = extendedAuditReport([sharedOauthFinding]);
+    const result = runScenario({
+      args: ['--secrets-touched', '--preflight-only'],
+      auditOutput: JSON.stringify({ ...report, summary: { ...report.summary, ...patch } }), auditExit: 1,
+    });
+    expect(result.exitCode).toBe(78);
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+  }, 30_000);
+
+  test.each([0, 1])('refuses STORE_RESIDUE even when its summary count is %i', (storeResidueCount) => {
+    const report = extendedAuditReport([sharedOauthFinding, { ...sharedOauthFinding, code: 'STORE_RESIDUE' }]);
+    report.summary.storeResidueCount = storeResidueCount;
+    const result = runScenario({
+      args: ['--secrets-touched', '--preflight-only'], auditOutput: JSON.stringify(report), auditExit: 1,
+    });
+    expect(result.exitCode).toBe(78);
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+  }, 30_000);
+
   test.each([
     { code: 'PLAINTEXT_FOUND', severity: 'warn' },
     { code: 'REF_SHADOWED', severity: 'warn' },
@@ -326,13 +434,15 @@ describe('OpenClaw safe restart', () => {
 
   test.each([0, 1, 2, 7, 126, 127, 137])('accepts exit %i only with its consistent supported report', (auditExit) => {
     for (const hasOAuth of [false, true]) {
-      const result = runScenario({
-        args: ['--secrets-touched', '--preflight-only'],
-        auditOutput: JSON.stringify(auditReport(hasOAuth ? [oauthFinding] : [])),
-        auditExit,
-      });
-      expect(result.exitCode).toBe(auditExit === (hasOAuth ? 1 : 0) ? 0 : 78);
-      expect(result.captured).not.toContain('openclaw_args=gateway restart');
+      for (const report of [auditReport(hasOAuth ? [oauthFinding] : []), extendedAuditReport(hasOAuth ? [sharedOauthFinding] : [])]) {
+        const result = runScenario({
+          args: ['--secrets-touched', '--preflight-only'],
+          auditOutput: JSON.stringify(report),
+          auditExit,
+        });
+        expect(result.exitCode).toBe(auditExit === (hasOAuth ? 1 : 0) ? 0 : 78);
+        expect(result.captured).not.toContain('openclaw_args=gateway restart');
+      }
     }
   }, 30_000);
 

@@ -135,6 +135,8 @@ try {
   });
   if (audit.error || audit.signal || ![0, 1].includes(audit.status)) process.exit(1);
   const report = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(audit.stdout));
+  const summaryKeys = ["plaintextCount", "unresolvedRefCount", "shadowedRefCount", "legacyResidueCount"];
+  const extendedSummary = exactKeys(report?.summary, [...summaryKeys, "storeResidueCount"]);
   if (!exactKeys(report, ["version", "status", "resolution", "filesScanned", "summary", "findings"])
       || report.version !== 1 || !Array.isArray(report.findings)
       || !Array.isArray(report.filesScanned) || report.filesScanned.length === 0
@@ -143,10 +145,11 @@ try {
       || !exactKeys(report.resolution, ["refsChecked", "skippedExecRefs", "resolvabilityComplete"])
       || !count(report.resolution.refsChecked) || report.resolution.skippedExecRefs !== 0
       || report.resolution.resolvabilityComplete !== true
-      || !exactKeys(report.summary, ["plaintextCount", "unresolvedRefCount", "shadowedRefCount", "legacyResidueCount"])
+      || !(exactKeys(report.summary, summaryKeys) || extendedSummary)
       || !Object.values(report.summary).every(count)
       || report.summary.plaintextCount !== 0 || report.summary.unresolvedRefCount !== 0
       || report.summary.shadowedRefCount !== 0
+      || (extendedSummary && report.summary.storeResidueCount !== 0)
       || report.summary.legacyResidueCount !== report.findings.length) process.exit(1);
   for (const finding of report.findings) {
     if (!exactKeys(finding, ["code", "severity", "file", "jsonPath", "message", "provider", "profileId"])
@@ -154,7 +157,11 @@ try {
         || finding.message !== "OAuth credentials are present (out of scope for static SecretRef migration)."
         || !text(finding.provider) || !text(finding.profileId)
         || finding.jsonPath !== `profiles.${finding.profileId}`
-        || !text(finding.file) || path.basename(finding.file) !== "openclaw-agent.sqlite"
+        || !text(finding.file)
+        || !(path.basename(finding.file) === "openclaw-agent.sqlite"
+          || (extendedSummary && path.normalize(finding.file) === finding.file
+            && path.basename(path.dirname(finding.file)) === "state"
+            && path.basename(finding.file) === "openclaw.sqlite"))
         || !report.filesScanned.includes(finding.file)) process.exit(1);
   }
   const hasOAuth = report.findings.length > 0;
