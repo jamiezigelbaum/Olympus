@@ -189,19 +189,69 @@ prior Olympus setup — including an already-installed olympus plugin the
 command below would update — and you have not already cleared the residue
 gate in this flow, STOP and run Rule zero before the commands below.
 
-**Pilot install — this is the path you use.** Install the exact qualified
-`olympus-0.4.0.tgz` supplied by the maintainer, with its SHA-256 and byte count.
-**ASK THE OPERATOR** for the candidate and receipt if either is missing; do
-not build a replacement or substitute a Git checkout. Compare both values
-before installing and stop on any mismatch:
+### Pilot download
+
+**Obtain the package yourself.** The operator needs only the installation
+prompt. Do not ask them to supply a tarball, a checksum receipt, or GitHub
+credentials. Download the designated pilot through GitHub's public release
+API without authentication:
+
+`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1`
+
+The repository guide pins the designated candidate below. These are agent-only
+verification inputs, not a receipt to request from the operator:
+
+- SHA-256: `97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267`
+- Byte count: `703157`
+
+1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
+   response, `tag_name` equal to `v0.4.0-pilot.1`, `prerelease` equal to `true`,
+   and `draft` equal to `false`.
+   Do not use `/releases/latest`: GitHub excludes prereleases there, and a
+   later release is not automatically this pilot's candidate.
+2. Select exactly one uploaded asset named `olympus-0.4.0.tgz` from `assets`.
+   Require `state: "uploaded"`, a positive integer `id` and `size`, and a
+   `digest` of the form `sha256:` followed by 64 hexadecimal characters.
+   Its `browser_download_url` must be exactly
+   `https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz`.
+   Require the metadata's digest and size to match the pinned values above;
+   a replacement upload under the same tag/name is not a qualified candidate.
+   GitHub's generated source-code archives are not the plugin package.
+3. Download that asset into a new temporary directory, following HTTPS
+   redirects to GitHub's asset storage. Compute its SHA-256 and byte count
+   locally and compare both with the metadata from step 2. Do not extract,
+   execute, or install an archive unless both match. Keep this verified local
+   file for the entire install; do not download another copy between steps.
+4. Record the release tag, asset ID, SHA-256, and byte count in the install
+   report. This is automatic bookkeeping, not another operator question.
+   These values satisfy any reference to a "supplied candidate and receipt"
+   in an older packaged guide. Read `package/INSTALL_FOR_AGENTS.md` from this
+   verified archive. From here, the packaged guide alone governs installation
+   and setup, retaining the existing-install and consent checks. Execute its
+   plugin install command exactly once; the command below is a reference,
+   not an additional install. The repository guide on `main` owns candidate
+   selection: skip any candidate-selection/download section in the packaged
+   guide and use this already-verified local archive throughout. Do not switch
+   to a stale tag or repeat the download because the packaged guide names one.
+
+If the release or asset is missing, say **"The Olympus pilot download is not
+available yet; the maintainer needs to publish it."** A failed request,
+missing digest, ambiguous asset, or checksum/size mismatch stops installation.
+Explain the download failure; do not ask the operator to fetch a receipt or
+log into GitHub, build a replacement, use a Git checkout, or select another
+version as a fallback. A network or rate-limit failure can be retried as a
+read-only download after reporting it.
+
+For the local comparison in step 3, use the downloaded file's absolute path:
 
 ```bash
 shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
 wc -c < /absolute/path/to/olympus-0.4.0.tgz
 ```
 
-Record the matching artifact identity in the install report. Read this guide
-from that same archive; npm archives place it at `package/INSTALL_FOR_AGENTS.md`.
+The expected digest and size come from the repository pin and fetched release
+metadata, never from the same local file you are checking. Reference command
+for the packaged guide's single install of those verified bytes:
 
 ```bash
 openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
@@ -250,7 +300,8 @@ The `npm-pack:` prefix creates OpenClaw's per-plugin npm project and verifies
 the installed dependency shape. A raw archive/path install or Git checkout
 does not qualify these package bytes. Pilot testers and internal release
 qualification use the same candidate; a product fix needs a newly qualified
-candidate and receipt before an affected tester retries.
+candidate before an affected tester retries; the agent retrieves its identity
+automatically through the designated release metadata.
 
 `clawhub:olympus` becomes the one-line public install **after the pilot**,
 using the byte-identical qualified package. Until publication,

@@ -4,8 +4,9 @@ From zero to asking your own data questions, in about ten minutes.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
-and the maintainer's qualified Olympus tarball, SHA-256, and byte count. macOS
-or Linux.
+on macOS or Linux. An agent with terminal access can obtain the pilot package
+and guide you through setup automatically; no file or checksum-receipt handoff
+is needed. You can also follow the steps below manually.
 
 OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
 `>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
@@ -18,11 +19,14 @@ up PATH from your shell rc, which non-interactive shells never read. Adding
 The `olympus` CLI is a Bun script, so it needs `bun` on PATH wherever you run
 it.
 
-**Fastest path — let your agent install it.** Paste into any agent with a
-terminal: *"Retrieve and follow the instructions in INSTALL_FOR_AGENTS.md"*
-(at the repo root and inside the release tarball). The agent runs this
-whole guide, asks you for the decisions that are yours, and verifies the
-result. The steps below are the same flow, by hand.
+**Fastest path — let your agent install it.** Paste into OpenClaw, or another
+agent with a terminal:
+
+> Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
+
+The agent downloads the package, runs this whole guide, asks you for the
+decisions that are yours, and verifies the result. The steps below are the
+same flow, by hand.
 
 Before first setup, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
@@ -58,10 +62,17 @@ in step 2. That choice is the heart of Olympus.
 
 ## 1. Install the plugin
 
-The pilot installs the exact qualified tarball supplied by the maintainer.
-Before installing, compare its SHA-256 and byte count with the supplied
-receipt; stop on a mismatch or a missing receipt. Do not build a replacement
-or substitute a Git checkout. Record that identity with your install results.
+Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
+to obtain the designated package from GitHub. It retrieves the SHA-256 and
+byte count automatically from the release asset metadata; there is no separate
+receipt to request. For a manual download, open the
+[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.1)
+and choose `olympus-0.4.0.tgz` under Assets, not a source-code archive. Compare
+its SHA-256 and byte count with the pin in the linked download procedure and
+record the release tag, asset ID, digest, and size with your install results.
+Stop if the download is
+unavailable or either value differs. Do not build a replacement or substitute
+a Git checkout.
 
 ```bash
 shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
