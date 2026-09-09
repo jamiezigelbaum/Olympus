@@ -69,7 +69,7 @@ Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
 receipt to request. For a manual download, open the
-[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.1)
+[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.2)
 and choose `olympus-0.4.0.tgz` under Assets, not a source-code archive. Compare
 its SHA-256 and byte count with the pin in the linked download procedure and
 record the release tag, asset ID, digest, and size with your install results.

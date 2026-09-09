@@ -21,6 +21,12 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-09 — Repaired pilot download.** The installer pins
+  `v0.4.0-pilot.2` to the repaired candidate archive; publishing that exact
+  archive and verifying its anonymous download are prerequisites for this
+  download pin to reach `main`. This distributes the repaired installation
+  guide without adopting the broader experimental source branch.
+
 - **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
   setup and worker/Gateway activation before optional dashboard source choice.
   No mailbox is required for base-worker health. Preserve the approved
