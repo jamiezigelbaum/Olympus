@@ -471,7 +471,6 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   }
 
   const health = asRecord(await response.json());
-  const configured = typeof health.configured === 'boolean' ? health.configured : true;
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -481,13 +480,20 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
       hint: 'Fix the listed credential, then restart the Olympus worker or POST /v1/source/credentials/recheck.',
     };
   }
+  if (health.reachable === false || (health.status !== undefined && health.status !== 'ok')) {
+    return {
+      name,
+      ok: false,
+      detail: `Source worker at ${baseUrl} reported unhealthy /health (status=${typeof health.status === 'string' ? health.status : 'unknown'}, reachable=${health.reachable !== false}).`,
+      hint: EMAIL_WORKER_HINT,
+    };
+  }
+  // `configured` describes the legacy email connector, not this shared worker.
+  // No connected mailbox is a valid base install; source readiness has its own checks.
   return {
     name,
-    ok: configured,
-    detail: `Email worker at ${baseUrl} answered /health (reachable=true configured=${configured}).`,
-    ...(configured
-      ? {}
-      : { hint: 'The worker is running but reports configured=false; check its connector configuration.' }),
+    ok: true,
+    detail: `Source worker at ${baseUrl} answered /health; no worker health or credential failures reported.`,
   };
 }
 

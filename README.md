@@ -97,6 +97,11 @@ fork:
 | **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
+“Private cloud only” describes **secure-data handling**: Venice answers secure
+questions and secure search uses local keywords. Gemini still supplies
+embeddings for public and ordinary-private content. Secure content never goes
+to Gemini.
+
 Some rules are not configurable, by design: secure content never routes to
 ordinary cloud models, secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
@@ -130,8 +135,10 @@ define it.
 
 The agent checks prerequisites, installs the plugin, helps you describe your
 data as a sensitivity map, asks for your privacy posture, connects your keys
-without logging them, and verifies the install end to end. About ten minutes
-plus OAuth clicks.
+without logging them, and verifies worker and plugin activation. That completes
+base installation. Then you can choose a source in the dashboard or leave
+Olympus ready for later; no source is selected for you. Once your chosen source
+is ready, the agent checks a first answer and its citations.
 
 Prefer to drive it yourself? Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)**,
 starting with the archive identity and existing-install checks. Its install
@@ -148,10 +155,12 @@ OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
 ```
 
 Continue the quickstart to describe your data, choose a privacy posture,
-connect credentials, and verify a cited answer. The CLI lives inside the
+connect model credentials, and verify base activation before optional source
+setup and the first cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
-On OpenClaw **2026.9.2**, use **Olympus** in the Control UI sidebar to connect
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, use **Olympus** in the Control UI sidebar to connect
 sources, choose scope, and follow ingestion. Enable **Settings → Labs → Custom
 plugin UI**, then restart the Gateway through your normal managed procedure
 and reload the browser. OpenClaw currently makes this integration experimental
@@ -159,12 +168,18 @@ and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
 your signed-in OpenClaw permissions; its worker token stays on the server.
 The standalone `olympus dashboard` command remains available for older hosts,
 when custom plugin UI is off, and for direct access when needed. See the
-[dashboard guide](docs/QUICKSTART.md#6-watch-it-ingest).
+[dashboard guide](docs/QUICKSTART.md#5-optionally-connect-a-source).
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It explains the separate secure/non-secure routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
+
+Choose how to supply each key: paste it yourself from your password manager's
+website into a supported local field or silent terminal input, or authorize an
+exact named-item read through an already authenticated manager CLI. The manual
+route needs no password-manager desktop app or CLI; a 1Password `op://`
+reference needs authenticated `op` access for an agent fetch.
 
 ## Supported sources
 
@@ -187,10 +202,11 @@ configured OS/1Password secret store when supported, never in plain text.
 Ingestion, classification, and indexing all run in one supervised local
 worker — `olympus worker install` makes it start on login. All seven declared
 sources sync through the canonical connector-store runtime; v0.4 supports one
-connected account per provider. Dashboard onboarding now presents one explicit
-seven-stage journey from security preset through cited-answer readiness, with
-the next supported action on every blocked or degraded source. Clean-install
-and real-provider qualification remain Slice 4 work, not alternate ingestion
+connected account per provider. After base activation, dashboard onboarding
+guides the source you choose from credentials and scope through initial sync
+and cited-answer readiness, with the next supported action on blocked or
+degraded sources. The seven-source roster is not an installation checklist.
+Clean-install and real-provider qualification remain Slice 4 work, not alternate ingestion
 paths.
 
 On an existing live OpenClaw install, treat plugin install/enable, gateway

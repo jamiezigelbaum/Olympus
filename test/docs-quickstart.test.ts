@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -44,7 +45,10 @@ describe('first-run docs', () => {
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
-    expect(install).toContain('Keep Olympus open in OpenClaw as the operator-facing progress view; use standalone access only when needed.');
+    expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
+    expect(install).not.toContain('Ask which sources they want now');
+    expect(install).toContain('Keep the selected Olympus dashboard open as the operator-facing progress view.');
     expect(install).toContain('MUST explain the credential in one plain sentence before asking for it.');
     expect(install).toContain('MUST NOT show internal config keys such as');
     expect(install).toContain('MUST NOT invent keychain, `security add-generic-password`, 1Password, or');
@@ -68,10 +72,89 @@ describe('first-run docs', () => {
     expect(docs).not.toContain('background scheduler currently runs the Dropbox file pipeline');
   });
 
+  test('required user-facing transition and full tier explainer preserve approved copy', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const scripts = [
+      ["> Olympus is installed. Quick proof:", 'd3f1f9fddd7d6b9a376a7ffcfa81ad841ca87524f8298a58d8a1df62934a9aab'],
+      ["> Here's how Olympus treats your data", '6572236609c7e45c9f11f3f2974605f752f98dddda33dc47d7c2a4fb7966f5ad'],
+    ];
+    for (const [start, digest] of scripts) {
+      const from = install.indexOf(start!);
+      expect(from).toBeGreaterThan(0);
+      const block = install.slice(from, install.indexOf('\n\n', from));
+      expect(createHash('sha256').update(block).digest('hex')).toBe(digest!);
+    }
+    expect(install).toContain('required user-facing transition');
+    expect(install).toContain('Required user-facing four-tier explanation');
+    expect(install).toContain('before asking any sensitivity or posture question');
+    expect(install.indexOf(scripts[0]![0]!)).toBeLessThan(install.indexOf(scripts[1]![0]!));
+    expect(install.indexOf(scripts[1]![0]!)).toBeLessThan(install.indexOf('> Do you run local AI models'));
+  });
+
+  test('base activation precedes optional source choice and source answer proof', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    for (const [doc, steps] of [
+      [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Optional source setup', '## Step 7 — Verify the chosen source']],
+      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Optionally connect a source', '## 6. Verify a cited answer']],
+    ] as const) {
+      const positions = steps.map((step) => doc.indexOf(step));
+      expect(positions.every((position) => position > 0)).toBe(true);
+      expect(positions).toEqual([...positions].sort((left, right) => left - right));
+      const activation = doc.slice(positions[1], positions[2]);
+      expect(activation).toContain('openclaw config validate');
+      expect(activation).toContain('openclaw gateway restart');
+      const sourceSetup = doc.slice(positions[2], positions[3]);
+      expect(sourceSetup).toMatch(/source.*later/);
+      expect(sourceSetup).toContain('checklist');
+      expect(doc.slice(positions[3])).toMatch(/initial sync and answer\s+readiness|initial sync and\s+reports answer readiness/);
+      expect(doc).not.toContain('Connect Gmail in step 4');
+    }
+    expect(install).toContain('The restart is its own consent gate');
+    expect(install).toContain('Each credential here is its own Rule one gate');
+    expect(install).toContain('Now clear the second gate, before you run setup');
+    expect(install).toContain('base installation verified; cited-answer');
+  });
+
+  test('credential sourcing distinguishes manual web access from authenticated CLI access', () => {
+    for (const path of ['INSTALL_FOR_AGENTS.md', 'docs/SOVEREIGNTY_CONFIG.md']) {
+      const doc = readFileSync(join(ROOT, path), 'utf8').replace(/\s+/g, ' ');
+      expect(doc).toContain('op://vault/item/field');
+      expect(doc).toContain('authenticated `op` access');
+      expect(doc).toMatch(/No password-manager desktop app or CLI is required|requires no password-manager desktop app or CLI/);
+      expect(doc).toContain('silent terminal input');
+    }
+  });
+
+  test('private cloud only distinguishes secure search from ordinary embeddings', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const posture = install.slice(install.indexOf('> 3. **Private cloud only**'), install.indexOf('> 4. **Do not add'))
+      .replace(/>\s*/g, '').replace(/\s+/g, ' ');
+    expect(posture).toContain('Secure content goes only to Venice');
+    expect(posture).toContain('public and ordinary-private search indexing');
+    expect(posture).toContain('keyword search');
+    expect(posture).toContain('secure content never goes to Gemini');
+    expect(posture).toContain('“Only” describes secure-data handling');
+  });
+
+  test('native dashboard guidance checks artifact support and preserves standalone authentication', () => {
+    for (const path of ['INSTALL_FOR_AGENTS.md', 'README.md', 'docs/QUICKSTART.md']) {
+      const doc = readFileSync(join(ROOT, path), 'utf8').replace(/\s+/g, ' ');
+      expect(doc).toContain('2026.9.2');
+      expect(doc).toContain('artifact includes native Control UI support');
+      expect(doc).toContain('standalone dashboard');
+    }
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    expect(install).toContain('Settings → Labs → Custom plugin UI');
+    expect(install).toContain('gateway.publicOrigin');
+    expect(install).toContain('never paste it into chat');
+    expect(install).toContain('`dash_` token is not the worker token');
+  });
+
   test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
     const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
-    const dashboardStep = quickstart.indexOf('## 6. Watch it ingest');
+    const dashboardStep = quickstart.indexOf('## 5. Optionally connect a source');
 
     expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
     expect(dashboardStep).toBeGreaterThan(0);

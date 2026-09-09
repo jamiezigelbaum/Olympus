@@ -223,7 +223,7 @@ describe('runDoctor', () => {
       'source_ingestion_health',
     ]);
     expect(checkByName(result.checks, 'argus_model_pool').detail).toContain('no sovereignty posture configured yet');
-    expect(checkByName(result.checks, 'email_worker').detail).toContain('configured=true');
+    expect(checkByName(result.checks, 'email_worker').detail).toContain('no worker health or credential failures');
     expect(checkByName(result.checks, 'source_index_status').detail)
       .toContain('secure_local.dropbox.files: connector store, 100 chunks, 100 embedded');
   });
@@ -569,6 +569,71 @@ describe('runDoctor', () => {
     expect(requestedPaths).toEqual([]);
   });
 
+  test('a healthy source worker with no sources or mailbox passes base-install health', async () => {
+    const config = enabledEmailConfig();
+    config.worker.scheduler.enabled = true;
+    config.worker.scheduler.sourceIds = [];
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': {
+        reachable: true,
+        configured: false,
+        connector: 'gogcli',
+        status: 'ok',
+        raw_email_exposed: false,
+        dependency_check: 'not_run',
+        detail: 'No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.',
+      },
+      '/v1/source/index/status': { kind: 'source_index_status', corpora: [] },
+      '/v1/source/scheduler/status': {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        selected_source_ids: [],
+        missing_selected_source_ids: [],
+        sources: [],
+      },
+    });
+    const result = await runDoctor(doctorDeps({
+      config, delphi: healthyDelphi(), fetchImpl,
+      handleRegistry: { version: 1, handles: [] },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.checks.every((check) => check.ok)).toBe(true);
+    const worker = checkByName(result.checks, 'email_worker');
+    expect(worker.ok).toBe(true);
+    expect(worker.hint).toBeUndefined();
+    expect(worker.detail).not.toContain('Connect Gmail');
+  });
+
+  test.each([
+    { status: 'degraded', configured: false },
+    { status: 'error', configured: true },
+    { status: 'ok', reachable: false, configured: false },
+  ])('unhealthy worker health fails independently of mailbox configuration: %j', async (health) => {
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': health,
+      '/v1/source/index/status': { kind: 'source_index_status', corpora: [] },
+    });
+    const result = await runDoctor(doctorDeps({
+      config: enabledEmailConfig(), delphi: healthyDelphi(), fetchImpl,
+    }));
+    expect(result.ok).toBe(false);
+    const worker = checkByName(result.checks, 'email_worker');
+    expect(worker.ok).toBe(false);
+    expect(worker.detail).toContain('unhealthy');
+    expect(worker.hint).toBeDefined();
+  });
+
+  test('a failing worker health HTTP response stays red without a mailbox', async () => {
+    const fetchImpl = (async () => jsonResponse({ status: 'ok', configured: false }, 503)) as unknown as typeof fetch;
+    const result = await runDoctor(doctorDeps({
+      config: enabledEmailConfig(), delphi: healthyDelphi(), fetchImpl,
+    }));
+    expect(checkByName(result.checks, 'email_worker').ok).toBe(false);
+    expect(checkByName(result.checks, 'email_worker').detail).toContain('HTTP 503');
+  });
+
   test('fails closed without throwing when the worker is unreachable', async () => {
     const fetchImpl = (async () => {
       throw new Error('ECONNREFUSED');
@@ -583,7 +648,7 @@ describe('runDoctor', () => {
     expect(checkByName(result.checks, 'source_index_status').ok).toBe(false);
   });
 
-  test('reports worker boot credential degradation with a fix hint', async () => {
+  test.each([false, true])('reports worker boot credential degradation with a fix hint (mailbox configured=%s)', async (configured) => {
     const degradedCredential = {
       kind: 'worker_credential_degraded',
       display_name: 'Sovereignty embedding profile "gemini-internal"',
@@ -598,7 +663,7 @@ describe('runDoctor', () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': {
         status: 'degraded',
-        configured: true,
+        configured,
         degraded_credentials: [degradedCredential],
       },
       '/v1/source/index/status': {
