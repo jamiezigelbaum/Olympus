@@ -459,6 +459,7 @@ export function createOpenClawSourceWatchDeliveryTransport(
     },
   };
 }
+
 export function defaultOpenClawGatewayBaseUrl(
   env: Record<string, string | undefined> = process.env,
   gatewayConfig?: unknown,

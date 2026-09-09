@@ -49,7 +49,7 @@ read canonical `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` first (packaged relative
 to the update skill at `../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md`). If the
 canonical file or the sanctioned restart wrapper is missing, fail closed.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 52f838c7d7fe2516a5ae65e4479e652a7cd32c194fcd5a1df72f1044d1f176da -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9c49536d15699b634439a40f6cf3368d83de80f0524ca239f63de70a702282ce -->
 
 Use `openclaw docs <query>` and/or gateway `config.schema.lookup` first; mutate
 config only through `openclaw config set|unset` or gateway `config.patch`;

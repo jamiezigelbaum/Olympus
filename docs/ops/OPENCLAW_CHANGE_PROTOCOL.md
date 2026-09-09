@@ -203,7 +203,15 @@ A successful Darwin boot proof requires all of the following together:
   captured in UTC. The PID/start pair must differ from the captured pre-restart process.
 - Native `lsof` reports the exact expected loopback listener owned by that PID,
   with no unexpected process or wildcard listener on the configured port.
-- A bounded, proxy-free loopback HTTP request returns a 2xx response.
+- A bounded, proxy-free loopback HTTP request returns a 2xx response when
+  effective `gateway.tls.enabled` is false. When it is true, the proof uses
+  Node's built-in HTTPS client with the configured public `certPath` as its
+  trust anchor, normal hostname validation (`rejectUnauthorized: true`), and
+  a TLS 1.3 minimum. It never reads `keyPath`, uses `caPath` as an outbound
+  trust shortcut, follows redirects, or consults proxy environment variables.
+  `OPENCLAW_GATEWAY_URL`, port, and any supported TLS environment overrides
+  must resolve to the exact managed `127.0.0.1` endpoint and effective config;
+  a mismatch refuses.
 - The managed stdout log, held open before restart, contains an exact complete
   timestamped listening line in bytes appended after the captured frontier.
   Its timestamp must be at or after the next whole second beyond the FINAL
@@ -212,9 +220,10 @@ A successful Darwin boot proof requires all of the following together:
   same-birth-second lines as well as older predecessor lines. An untimestamped
   line, a genuine startup that logged within that ambiguous first second, log
   rotation/truncation, oversized append, or missing/partial line fails closed.
-- PID, start time, executable and listener ownership remain the same after
-  the HTTP/log checks. The log corroborates that identity and function; it
-  does not certify either on its own or identify the loaded plugin artifact.
+- PID, start time, executable, listener ownership, and watched certificate
+  inputs remain the same after the HTTP(S)/log checks. The log corroborates
+  that identity and function; it does not certify either on its own or identify
+  the loaded plugin artifact.
 
 `--dry-run` performs no checks. Darwin `--preflight-only` reads the native
 service context needed for credential validation but never restarts or claims

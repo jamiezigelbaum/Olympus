@@ -1,13 +1,16 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { appendFileSync, closeSync, fstatSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Server } from 'node:net';
 import { describe, expect, test } from 'bun:test';
 
 // Pure parser/contract fixtures only. These are not a live macOS rehearsal.
 const helperPath = join(import.meta.dir, '..', 'scripts', 'ops', 'lib', 'gateway-darwin-proof.mjs');
 const helper = await import(new URL('../scripts/ops/lib/gateway-darwin-proof.mjs', import.meta.url).href);
-const { assertManagedWrapper, parseServiceEnvironment, validateNativeAudit, parseLaunchdPid, parseProcessStart, assertListenerOwner, assertNewStableIdentity, freshBootLine, readFreshLogAppend, statusDescriptor } = helper;
+const { assertManagedWrapper, parseServiceEnvironment, validateNativeAudit, parseGatewayRootConfig, parseLaunchdPid, parseProcessStart, assertListenerOwner, assertNewStableIdentity, freshBootLine, readFreshLogAppend, statusDescriptor, parseGatewayTlsConfig, gatewayProofEndpoint, probeGatewayEndpoint } = helper;
 const target = 'gui/501/ai.openclaw.gateway';
 const identity = { pid: 42, startedAt: 'Tue Sep  8 10:00:00 2026', executable: '/usr/local/bin/node' };
 const next = { ...identity, pid: 43, startedAt: 'Tue Sep  8 10:01:00 2026' };
@@ -15,6 +18,53 @@ const observedAt = Date.parse('2026-09-08T10:04:00.000Z');
 const oauth = { code: 'LEGACY_RESIDUE', severity: 'info', file: '/fixture/state/openclaw.sqlite', jsonPath: 'profiles.fixture:default', message: 'OAuth credentials are present (out of scope for static SecretRef migration).', provider: 'fixture', profileId: 'fixture:default' };
 function audit(findings: unknown[] = []) {
   return { version: 1, status: findings.length ? 'findings' : 'clean', resolution: { refsChecked: 4, skippedExecRefs: 0, resolvabilityComplete: true }, filesScanned: ['/fixture/openclaw.json', oauth.file], summary: { plaintextCount: 0, unresolvedRefCount: 0, shadowedRefCount: 0, storeResidueCount: 0, legacyResidueCount: findings.length }, findings };
+}
+
+async function listen(server: Server): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('test server did not expose a TCP address');
+  return address.port;
+}
+
+async function close(server: Server): Promise<void> {
+  if (!server.listening) return;
+  if (typeof (server as Server & { closeAllConnections?: unknown }).closeAllConnections === 'function') {
+    (server as Server & { closeAllConnections: () => void }).closeAllConnections();
+  }
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+function testCertificate(directory: string, name: string) {
+  const openssl = Bun.which('openssl');
+  if (!openssl) throw new Error('openssl is required for the dynamic TLS proof test');
+  const keyPath = join(directory, `${name}.key`);
+  const certPath = join(directory, `${name}.pem`);
+  execFileSync(openssl, [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1',
+    '-keyout', keyPath, '-out', certPath,
+  ], { stdio: 'ignore' });
+  return { keyPath, certPath };
+}
+
+function nodeTlsProbe(certPath: string, keyPath: string, caPath: string, port: number, host = '127.0.0.1', timeout = 5000): Promise<string> {
+  const node = Bun.which('node');
+  if (!node) throw new Error('Node is required for the TLS 1.3 proof test');
+  const helperUrl = new URL('../scripts/ops/lib/gateway-darwin-proof.mjs', import.meta.url).href;
+  const source = `import { parseGatewayTlsConfig, probeGatewayEndpoint } from ${JSON.stringify(helperUrl)};
+const [certPath, keyPath, caPath, port, host, timeout] = process.argv.slice(1);
+const tls = parseGatewayTlsConfig({ enabled: true, certPath, keyPath, caPath });
+const endpoint = new URL(\`https://\${host}:\${port}/\`);
+console.log(await probeGatewayEndpoint(endpoint, tls, Number(timeout)));`;
+  return new Promise((resolve, reject) => {
+    execFile(node, [
+      '--input-type=module', '-e', source, certPath, keyPath, caPath, String(port), host, String(timeout),
+    ], { encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
 }
 
 describe('native Darwin safe-restart proof contracts', () => {
@@ -29,6 +79,15 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(parsed.HOME).toBe('/Users/fixture');
     expect(parsed.TOKEN).toBe('$(must-not-run) `must-not-run`');
     expect(parsed.QUOTE).toBe("one'two");
+  });
+  test('binds the effective gateway config to one strict root JSON file with no includes', () => {
+    expect(parseGatewayRootConfig('{"gateway":{"port":18789}}')).toEqual({ gateway: { port: 18789 } });
+    for (const source of [
+      '{"$include":"./gateway.json"}',
+      '{"gateway":{"nested":{"$include":["./tls.json"]}}}',
+      '{"gateway":{"\\u0024include":"./escaped.json"}}',
+      '{// JSON5 is outside the qualified Air config contract\n"gateway":{}}',
+    ]) expect(() => parseGatewayRootConfig(source)).toThrow();
   });
   test.each([
     "export TOKEN=$(must-not-run)\n", "export TOKEN='value'; command\n", "export TOKEN=\"$VALUE\"\n",
@@ -49,8 +108,17 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(() => validateNativeAudit({ ...audit(), version: 2 }, 0)).toThrow();
   });
   test('does not broaden native OAuth exception to plaintext, warnings, or arbitrary residues', () => {
-    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { file: '/fixture/openclaw-agent.sqlite' }, { jsonPath: 'profiles.another' }]) {
+    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { file: '/fixture/other/openclaw.sqlite' }, { jsonPath: 'profiles.another' }]) {
       expect(() => validateNativeAudit(audit([{ ...oauth, ...change }]), 1)).toThrow();
+    }
+    const agentFinding = { ...oauth, file: '/fixture/agents/main/agent/openclaw-agent.sqlite' };
+    const agentReport = audit([agentFinding]);
+    agentReport.filesScanned = ['/fixture/openclaw.json', agentFinding.file];
+    expect(validateNativeAudit(agentReport, 1)).toEqual({ refsChecked: 4, nativeOAuthProfiles: 1 });
+    for (const file of ['/fixture/state/../state/openclaw.sqlite', '/fixture/state//openclaw.sqlite']) {
+      const report = audit([{ ...oauth, file }]);
+      report.filesScanned = ['/fixture/openclaw.json', file];
+      expect(() => validateNativeAudit(report, 1)).toThrow();
     }
     const unresolved = audit(); unresolved.summary.unresolvedRefCount = 1;
     expect(() => validateNativeAudit(unresolved, 0)).toThrow();
@@ -156,7 +224,77 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(source).not.toMatch(/\['(?:kickstart|bootstrap|bootout)'/);
     expect(source).toContain('constants.O_NOFOLLOW');
     expect(source).toContain('frontier.size');
+    expect(source).toContain("minVersion: 'TLSv1.3'");
+    expect(source).toContain('rejectUnauthorized: true');
+    expect(source).toContain('keyPath');
+    expect(source).not.toContain('publicFile(tls.keyPath)');
     expect(source).toContain('OpenClaw owns its internal lifecycle operations.');
     expect(source).not.toContain('Restarting the native Gateway exactly once.');
   });
+
+  test('proves real loopback HTTP and TLS 1.3 HTTPS with the effective public certificate', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'darwin-gateway-tls-'));
+    const pair = testCertificate(directory, 'trusted');
+    const http = createServer((_request, response) => { response.writeHead(200); response.end('ok'); });
+    const https = createHttpsServer({ key: readFileSync(pair.keyPath), cert: readFileSync(pair.certPath), minVersion: 'TLSv1.3' }, (_request, response) => { response.writeHead(200); response.end('ok'); });
+    try {
+      const httpPort = await listen(http);
+      const plain = { enabled: false };
+      await expect(probeGatewayEndpoint(gatewayProofEndpoint(httpPort, plain), plain)).resolves.toBe(200);
+
+      const tls = parseGatewayTlsConfig({ enabled: true, autoGenerate: false, certPath: pair.certPath, keyPath: pair.keyPath, caPath: pair.certPath });
+      const httpsPort = await listen(https);
+      expect((await nodeTlsProbe(pair.certPath, pair.keyPath, pair.certPath, httpsPort)).trim()).toBe('200');
+      expect(gatewayProofEndpoint(httpsPort, tls, {
+        OPENCLAW_GATEWAY_TLS_ENABLED: 'true',
+        OPENCLAW_GATEWAY_TLS_CERT_PATH: pair.certPath,
+        OPENCLAW_GATEWAY_TLS_KEY_PATH: pair.keyPath,
+        OPENCLAW_GATEWAY_TLS_CA_PATH: pair.certPath,
+      }).protocol).toBe('https:');
+      expect(() => gatewayProofEndpoint(httpsPort, tls, { OPENCLAW_GATEWAY_TLS_ENABLED: 'false' })).toThrow();
+      expect(() => gatewayProofEndpoint(httpsPort, tls, { OPENCLAW_GATEWAY_TLS_UNREVIEWED: 'true' })).toThrow();
+    } finally {
+      await close(http);
+      await close(https);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('refuses invalid, untrusted, hostname-mismatched, error, redirect, and timeout endpoints', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'darwin-gateway-tls-refuse-'));
+    const trusted = testCertificate(directory, 'trusted');
+    const untrusted = testCertificate(directory, 'untrusted');
+    const trustedTls = parseGatewayTlsConfig({ enabled: true, certPath: trusted.certPath, keyPath: trusted.keyPath, caPath: trusted.certPath });
+    const invalid = join(directory, 'invalid.pem');
+    writeFileSync(invalid, 'not a certificate\n', { mode: 0o600 });
+    const invalidHttp = createServer((_request, response) => { response.writeHead(200); response.end('ok'); });
+    const untrustedServer = createHttpsServer({ key: readFileSync(untrusted.keyPath), cert: readFileSync(untrusted.certPath), minVersion: 'TLSv1.3' }, (_request, response) => { response.writeHead(200); response.end('ok'); });
+    const redirect = createServer((_request, response) => { response.writeHead(302, { location: '/' }); response.end(); });
+    const timeout = createServer((request) => { setTimeout(() => request.socket.destroy(), 200); });
+    try {
+      expect(() => parseGatewayTlsConfig({ enabled: true, certPath: invalid, keyPath: trusted.keyPath, caPath: trusted.certPath })).toThrow();
+      const untrustedPort = await listen(untrustedServer);
+      await expect(nodeTlsProbe(trusted.certPath, trusted.keyPath, trusted.certPath, untrustedPort, '127.0.0.1', 1000)).rejects.toThrow();
+      await expect(nodeTlsProbe(untrusted.certPath, untrusted.keyPath, untrusted.certPath, untrustedPort, 'localhost', 1000)).rejects.toThrow();
+
+      const errorServer = createServer(() => { /* closed before its endpoint is probed */ });
+      const errorPort = await listen(errorServer);
+      await close(errorServer);
+      await expect(probeGatewayEndpoint(new URL(`http://127.0.0.1:${errorPort}/`), { enabled: false }, 200)).rejects.toThrow();
+
+      const redirectPort = await listen(redirect);
+      await expect(probeGatewayEndpoint(new URL(`http://127.0.0.1:${redirectPort}/`), { enabled: false }, 1000)).rejects.toThrow();
+      const timeoutPort = await listen(timeout);
+      await expect(probeGatewayEndpoint(new URL(`http://127.0.0.1:${timeoutPort}/`), { enabled: false }, 50)).rejects.toThrow();
+      expect(() => gatewayProofEndpoint(redirectPort, { enabled: true }, { OPENCLAW_GATEWAY_URL: `http://127.0.0.1:${redirectPort}/` })).toThrow();
+      expect(() => gatewayProofEndpoint(redirectPort, { enabled: false }, { OPENCLAW_GATEWAY_URL: `http://localhost:${redirectPort}/` })).toThrow();
+      expect(() => gatewayProofEndpoint(redirectPort, { enabled: false }, { OPENCLAW_GATEWAY_PORT: String(redirectPort + 1) })).toThrow();
+    } finally {
+      await close(invalidHttp);
+      await close(untrustedServer);
+      await close(redirect);
+      await close(timeout);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

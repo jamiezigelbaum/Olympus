@@ -845,7 +845,7 @@ function runScenario(options: ScenarioOptions = {}): {
     'exit 0',
   ].join('\n'));
   // These scenarios exercise Linux even when the tests run on macOS.
-  writeFileSync(join(bin, 'uname'), '#!/bin/sh\nprintf \"Linux\\n\"\n');
+  writeFileSync(join(bin, 'uname'), '#!/bin/sh\nprintf "Linux\\n"\n');
   writeFileSync(join(bin, 'journalctl'), [
     '#!/usr/bin/env bash',
     'set -euo pipefail',

@@ -6,6 +6,8 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { userInfo } from 'node:os';
@@ -19,6 +21,166 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const count = value => Number.isSafeInteger(value) && value >= 0;
 const exactKeys = (value, keys) => record(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const safeText = value => typeof value === 'string' && value.trim() && !/[\u0000-\u001f\u007f]/u.test(value);
+
+function publicFile(path) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (stat.mode & 0o022) !== 0 || stat.size > MAX_BYTES) {
+      fail('Configured public TLS material is not a safe regular file.', 77);
+    }
+    return readFileSync(fd);
+  } finally { closeSync(fd); }
+}
+
+function certificateDer(pem) {
+  const match = /-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END CERTIFICATE-----/u.exec(pem.toString('ascii'));
+  if (!match) fail('Configured TLS certificate is not a PEM certificate.', 77);
+  try { return Buffer.from(match[1].replace(/\s+/gu, ''), 'base64'); } catch { fail('Configured TLS certificate is not a PEM certificate.', 77); }
+}
+
+function absolutePath(value, label) {
+  if (!safeText(value) || !isAbsolute(value) || value.includes('\0')) fail(`Configured ${label} path is invalid.`, 77);
+  return value;
+}
+
+/**
+ * Turn the effective `gateway.tls` value into the public material needed by
+ * the proof. The private key path is validated as metadata only and is never
+ * opened or read.
+ */
+export function parseGatewayTlsConfig(value) {
+  const config = value;
+  if (config === null || config === undefined) return { enabled: false };
+  if (!record(config)) fail('Effective Gateway TLS configuration is unavailable.', 77);
+  if (config.enabled !== true && config.enabled !== false && config.enabled !== undefined) {
+    fail('Effective Gateway TLS enabled value is invalid.', 77);
+  }
+  if (config.enabled !== true) return { enabled: false };
+  if (config.autoGenerate === true) fail('Auto-generated Gateway TLS certificates are not accepted for controlled proof.', 77);
+  const certPath = absolutePath(config.certPath, 'TLS certificate');
+  const keyPath = absolutePath(config.keyPath, 'TLS private key');
+  const caPath = config.caPath === undefined ? undefined : absolutePath(config.caPath, 'TLS CA');
+  const certificate = publicFile(certPath);
+  // The Gateway's caPath is server-side client-verification material. It is
+  // watched as a public startup input, but is not silently used as the
+  // outbound peer trust bundle. The configured public server certificate is
+  // the explicit trust anchor and is pinned again after the handshake.
+  const caFile = caPath === undefined || caPath === certPath ? certificate : publicFile(caPath);
+  return {
+    enabled: true,
+    certPath,
+    keyPath,
+    ...(caPath === undefined ? {} : { caPath }),
+    certificate,
+    ca: certificate,
+    caFile,
+    certificateDigest: digest(certificateDer(certificate)),
+  };
+}
+
+function assertTlsEnvironmentOverrides(env, tls) {
+  const aliases = {
+    enabled: ['OPENCLAW_GATEWAY_TLS_ENABLED'],
+    certPath: ['OPENCLAW_GATEWAY_TLS_CERT_PATH', 'OPENCLAW_GATEWAY_TLS_CERTPATH'],
+    keyPath: ['OPENCLAW_GATEWAY_TLS_KEY_PATH', 'OPENCLAW_GATEWAY_TLS_KEYPATH'],
+    caPath: ['OPENCLAW_GATEWAY_TLS_CA_PATH', 'OPENCLAW_GATEWAY_TLS_CAPATH'],
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (!/^OPENCLAW_GATEWAY_TLS(?:_|$)/u.test(key)) continue;
+    const field = Object.entries(aliases).find(([, names]) => names.includes(key))?.[0];
+    if (!field) fail('Unsupported Gateway TLS environment override.', 77);
+    const expected = field === 'enabled' ? String(tls.enabled) : tls[field];
+    if (typeof expected !== 'string' && typeof expected !== 'boolean') fail('Gateway TLS environment override is not effective.', 77);
+    if (String(value) !== String(expected)) fail('Gateway TLS environment override differs from effective configuration.', 77);
+  }
+}
+
+/**
+ * Resolve the only endpoint the native proof may contact. A Gateway URL
+ * override is allowed only when it still names the managed loopback port and
+ * the protocol selected by effective gateway.tls.
+ */
+export function gatewayProofEndpoint(port, tls, env = {}) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) fail('Gateway proof port is invalid.', 77);
+  if (!record(tls) || typeof tls.enabled !== 'boolean') fail('Gateway TLS proof configuration is invalid.', 77);
+  assertTlsEnvironmentOverrides(env, tls);
+  const expectedProtocol = tls.enabled ? 'https:' : 'http:';
+  const expected = `${expectedProtocol}//127.0.0.1:${port}/`;
+  const raw = env.OPENCLAW_GATEWAY_URL ?? expected;
+  let endpoint;
+  try { endpoint = new URL(raw); } catch { fail('Gateway URL override is invalid.', 77); }
+  if (endpoint.protocol !== expectedProtocol || endpoint.hostname !== '127.0.0.1'
+    || endpoint.port !== String(port) || endpoint.pathname !== '/' || endpoint.search || endpoint.hash
+    || endpoint.username || endpoint.password) fail('Gateway proof URL is not the exact managed loopback endpoint.', 77);
+  if (env.OPENCLAW_GATEWAY_PORT !== undefined && env.OPENCLAW_GATEWAY_PORT !== String(port)) {
+    fail('Gateway port environment override differs from the managed port.', 77);
+  }
+  return endpoint;
+}
+
+/**
+ * Bounded native HTTP(S) function proof. HTTPS deliberately uses Node's
+ * verifier with the configured public CA, normal hostname checks, and TLS 1.3
+ * minimum. It never follows redirects, consults proxy environment variables,
+ * or reads a server private key.
+ */
+export function probeGatewayEndpoint(endpoint, tls, timeoutMs = 5000) {
+  if (!(endpoint instanceof URL) || !['http:', 'https:'].includes(endpoint.protocol)) fail('Gateway proof URL is invalid.', 77);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) fail('Gateway proof timeout is invalid.', 77);
+  const secure = endpoint.protocol === 'https:';
+  if (secure !== tls?.enabled) fail('Gateway proof protocol does not match effective TLS.', 77);
+  if (secure && !tls?.ca) fail('Gateway HTTPS proof has no configured public CA.', 77);
+  const requestOptions = {
+    protocol: endpoint.protocol,
+    hostname: endpoint.hostname,
+    port: endpoint.port,
+    path: `${endpoint.pathname}${endpoint.search}`,
+    method: 'GET',
+    timeout: timeoutMs,
+    ...(secure ? {
+      ca: tls.ca,
+      rejectUnauthorized: true,
+      minVersion: 'TLSv1.3',
+    } : {}),
+  };
+  const request = secure ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    const refuse = message => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(message));
+    };
+    const req = request(requestOptions, response => {
+      const socket = response.socket;
+      response.resume();
+      response.once('end', () => {
+        if (response.statusCode === undefined || response.statusCode < 200 || response.statusCode >= 300) {
+          refuse('Gateway loopback function returned a non-success status.');
+          return;
+        }
+        if (secure) {
+          const peer = socket?.getPeerCertificate?.(true);
+          if (!socket?.encrypted || !socket.authorized || !peer?.raw || digest(peer.raw) !== tls.certificateDigest) {
+            refuse('Gateway HTTPS certificate was not verified against the configured certificate.');
+            return;
+          }
+        }
+        if (!settled) { settled = true; clearTimeout(timer); resolve(response.statusCode); }
+      });
+    });
+    timer = setTimeout(() => {
+      refuse('Gateway loopback function timed out.');
+      req.destroy();
+    }, timeoutMs);
+    req.once('timeout', () => req.destroy(new Error('Gateway loopback function timed out.')));
+    req.once('error', error => refuse(error?.message || 'Gateway loopback function failed.'));
+    req.end();
+  });
+}
 
 export function assertManagedWrapper(text) {
   if (text !== WRAPPER) fail('Managed environment wrapper differs from the qualified native wrapper.');
@@ -55,7 +217,27 @@ export function parseServiceEnvironment(text) {
   return env;
 }
 
+/**
+ * The qualified Air config is one canonical JSON file. Includes would make a
+ * digest of the root file insufficient to bind the effective configuration,
+ * so refuse them recursively rather than implementing a second config loader.
+ */
+export function parseGatewayRootConfig(bytes) {
+  let config;
+  try { config = JSON.parse(typeof bytes === 'string' ? bytes : decode(bytes)); } catch { fail('Gateway root config is not canonical JSON.', 77); }
+  const visit = value => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!record(value)) return;
+    if (Object.hasOwn(value, '$include')) fail('Gateway root config includes external material.', 77);
+    Object.values(value).forEach(visit);
+  };
+  visit(config);
+  return config;
+}
+
 export function validateNativeAudit(report, exitCode) {
+  const summaryKeys = ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'legacyResidueCount'];
+  const extendedSummary = exactKeys(report?.summary, [...summaryKeys, 'storeResidueCount']);
   if (!exactKeys(report, ['version', 'status', 'resolution', 'filesScanned', 'summary', 'findings'])
     || report.version !== 1 || !Array.isArray(report.findings)
     || !Array.isArray(report.filesScanned) || report.filesScanned.length === 0
@@ -64,10 +246,10 @@ export function validateNativeAudit(report, exitCode) {
     || !exactKeys(report.resolution, ['refsChecked', 'skippedExecRefs', 'resolvabilityComplete'])
     || !count(report.resolution.refsChecked) || report.resolution.skippedExecRefs !== 0
     || report.resolution.resolvabilityComplete !== true
-    || !exactKeys(report.summary, ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'storeResidueCount', 'legacyResidueCount'])
+    || !(exactKeys(report.summary, summaryKeys) || extendedSummary)
     || !Object.values(report.summary).every(count) || report.summary.plaintextCount !== 0
     || report.summary.unresolvedRefCount !== 0 || report.summary.shadowedRefCount !== 0
-    || report.summary.storeResidueCount !== 0
+    || (extendedSummary && report.summary.storeResidueCount !== 0)
     || report.summary.legacyResidueCount !== report.findings.length) fail('Native credential audit was incomplete or unsafe.', 78);
   for (const finding of report.findings) {
     if (!exactKeys(finding, ['code', 'severity', 'file', 'jsonPath', 'message', 'provider', 'profileId'])
@@ -75,7 +257,11 @@ export function validateNativeAudit(report, exitCode) {
       || finding.message !== 'OAuth credentials are present (out of scope for static SecretRef migration).'
       || !safeText(finding.provider) || !safeText(finding.profileId)
       || finding.jsonPath !== `profiles.${finding.profileId}` || !safeText(finding.file)
-      || basename(finding.file) !== 'openclaw.sqlite' || !report.filesScanned.includes(finding.file)) {
+      || !(basename(finding.file) === 'openclaw-agent.sqlite'
+        || (extendedSummary && resolve(finding.file) === finding.file
+          && basename(dirname(finding.file)) === 'state'
+          && basename(finding.file) === 'openclaw.sqlite'))
+      || !report.filesScanned.includes(finding.file)) {
       fail('Native credential audit reported a blocking finding.', 78);
     }
   }
@@ -215,7 +401,7 @@ export function statusDescriptor(status, home) {
 export async function runDarwinRestart(argv = process.argv.slice(2), env = process.env) {
   for (const arg of argv) if (!['--dry-run', '--preflight-only', '--secrets-touched', '--help', '-h'].includes(arg)) fail('Unknown safe-restart argument.', 64);
   if (argv.some(arg => ['--dry-run', '--help', '-h'].includes(arg))) {
-    console.log('Darwin safe restart: verify the native managed environment; require reload mode off; config validate; doctor lint; complete native secrets audit without exec providers; invoke one official restart command; prove new launchd PID/start, owned loopback listener, HTTP success, and fresh boot-log append. No checks or restart executed.');
+    console.log('Darwin safe restart: verify the native managed environment; require reload mode off; config validate; doctor lint; complete native secrets audit without exec providers; invoke one official restart command; prove new launchd PID/start, owned loopback listener, certificate-verified HTTP(S) success, and fresh boot-log append. No checks or restart executed.');
     return;
   }
   if (process.platform !== 'darwin' || typeof process.getuid !== 'function') fail('Darwin proof requires native macOS.');
@@ -228,6 +414,7 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
   const status = commandJson(openclaw, ['gateway', 'status', '--no-probe', '--json'], inspectEnv);
   const descriptor = statusDescriptor(status, home);
   const configBytes = privateFile(descriptor.configPath, uid);
+  parseGatewayRootConfig(configBytes);
   const plistBytes = privateFile(descriptor.sourcePath, uid);
   const plist = commandJson('/usr/bin/plutil', ['-convert', 'json', '-o', '-', descriptor.sourcePath], inspectEnv);
   const expectedWrapper = join(home, '.openclaw', 'service-env', LABEL + '-env-wrapper.sh');
@@ -252,9 +439,18 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
   if (realpathSync(join(dirname(dirname(arguments_[entryIndex])), 'openclaw.mjs')) !== openclaw) fail('CLI and managed Gateway entry do not belong to the same OpenClaw install.');
   const port = Number(arguments_.at(-1));
   if (!Number.isInteger(port) || port < 1 || port > 65535 || status.gateway?.port !== port || status.gateway.bindHost !== '127.0.0.1') fail('Gateway is not configured on the expected loopback port.');
-  const expectedUrl = `http://127.0.0.1:${port}/`;
-  if (env.OPENCLAW_GATEWAY_LOOPBACK_URL && env.OPENCLAW_GATEWAY_LOOPBACK_URL !== expectedUrl) fail('Configured proof URL differs from the managed Gateway endpoint.');
   if (commandJson(openclaw, ['config', 'get', 'gateway.reload.mode', '--json'], nativeEnv) !== 'off') fail('Set gateway.reload.mode off through the blessed CLI before controlled activation.');
+  // `gateway.tls` is optional. Read the parent object so an absent field is a
+  // valid plain-HTTP configuration instead of a failed leaf lookup.
+  const gatewayConfig = commandJson(openclaw, ['config', 'get', 'gateway', '--json'], nativeEnv);
+  const tls = parseGatewayTlsConfig(record(gatewayConfig) ? gatewayConfig.tls : undefined);
+  const endpointEnvironment = { ...env, ...nativeEnv };
+  if (env.OPENCLAW_GATEWAY_URL !== undefined && nativeEnv.OPENCLAW_GATEWAY_URL !== undefined
+    && env.OPENCLAW_GATEWAY_URL !== nativeEnv.OPENCLAW_GATEWAY_URL) fail('Gateway URL environment overrides disagree.', 77);
+  if (env.OPENCLAW_GATEWAY_PORT !== undefined && nativeEnv.OPENCLAW_GATEWAY_PORT !== undefined
+    && env.OPENCLAW_GATEWAY_PORT !== nativeEnv.OPENCLAW_GATEWAY_PORT) fail('Gateway port environment overrides disagree.', 77);
+  const endpoint = gatewayProofEndpoint(port, tls, endpointEnvironment);
+  const expectedUrl = endpoint.href;
   const bootTimeout = Number(env.OPENCLAW_SAFE_RESTART_BOOT_TIMEOUT_SECONDS ?? 90);
   const pollSeconds = Number(env.OPENCLAW_SAFE_RESTART_BOOT_POLL_SECONDS ?? 2);
   if (!Number.isInteger(bootTimeout) || bootTimeout < 0 || bootTimeout > 600 || !Number.isInteger(pollSeconds) || pollSeconds < 1 || pollSeconds > 30) fail('Invalid bounded boot-proof timing.', 64);
@@ -280,8 +476,9 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
   try { auditReport = JSON.parse(decode(audit.stdout)); } catch { fail('Native credential audit did not return supported JSON.', 78); }
   const readiness = validateNativeAudit(auditReport, audit.status);
   console.log(`Native credential readiness proved: ${readiness.refsChecked} local references; ${readiness.nativeOAuthProfiles} native OAuth profiles; no skipped exec references.`);
-  const watched = [[descriptor.sourcePath, plistBytes, false], [expectedWrapper, wrapperBytes, false], [environmentPath, environmentBytes, true], [descriptor.configPath, configBytes, false]];
-  for (const [path, bytes, secretFile] of watched) if (digest(privateFile(path, uid, secretFile)) !== digest(bytes)) fail('Managed startup inputs changed during preflight.');
+  const watched = [[descriptor.sourcePath, plistBytes, 'managed'], [expectedWrapper, wrapperBytes, 'managed'], [environmentPath, environmentBytes, 'secret'], [descriptor.configPath, configBytes, 'managed'], ...(tls.enabled ? [[tls.certPath, tls.certificate, 'public'], ...(tls.caPath && tls.caPath !== tls.certPath ? [[tls.caPath, tls.caFile, 'public']] : [])] : [])];
+  const watchedDigestMatches = () => watched.every(([path, bytes, kind]) => digest(kind === 'public' ? publicFile(path) : privateFile(path, uid, kind === 'secret')) === digest(bytes));
+  if (!watchedDigestMatches()) fail('Managed startup inputs changed during preflight.');
   if (argv.includes('--preflight-only')) { console.log('Darwin preflight passed; no restart was run.'); return; }
   if (!isAbsolute(plist.StandardOutPath) || !plist.StandardOutPath.startsWith(join(home, 'Library', 'Logs') + '/')) fail('Unsupported managed Gateway stdout log path.');
   const logFd = openSync(plist.StandardOutPath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -290,7 +487,7 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
     if (!frontier.isFile() || frontier.uid !== uid || (frontier.mode & 0o022) !== 0) fail('Gateway stdout log is not an owned regular file.');
     const before = capture(); listeners(before.pid);
     if (before.pid !== previous.pid || before.startedAt !== previous.startedAt) fail('Gateway changed during preflight.');
-    for (const [path, bytes, secretFile] of watched) if (digest(privateFile(path, uid, secretFile)) !== digest(bytes)) fail('Managed startup inputs changed during preflight.');
+    if (!watchedDigestMatches()) fail('Managed startup inputs changed during preflight.');
     console.log('Invoking one official Gateway restart command; OpenClaw owns its internal lifecycle operations.');
     let restart;
     try { restart = execute(openclaw, ['gateway', 'restart', '--preserve-definition'], nativeEnv, 120000); }
@@ -300,17 +497,16 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
     do {
       try {
         const first = capture(); listeners(first.pid);
-        const http = execute('/usr/bin/curl', ['--fail', '--silent', '--show-error', '--noproxy', '*', '--connect-timeout', '1', '--max-time', '3', '--output', '/dev/null', '--write-out', '%{http_code}', expectedUrl], nativeEnv, 5000);
-        if (http.status !== 0 || !/^2[0-9]{2}$/.test(decode(http.stdout))) fail('Gateway loopback HTTP function was not successful.', 77);
+        await probeGatewayEndpoint(endpoint, tls, 5000);
         const line = readFreshLogAppend(logFd, plist.StandardOutPath, frontier, first.startedAt);
         const last = capture(); listeners(last.pid); assertNewStableIdentity(previous, first, last);
-        for (const [path, bytes, secretFile] of watched) if (digest(privateFile(path, uid, secretFile)) !== digest(bytes)) fail('Managed startup inputs changed across restart.', 77);
-        console.log(`Gateway boot proved: LaunchAgent=${target} PID=${last.pid} startedUTC=${last.startedAt}; owned loopback listener answered at ${expectedUrl}; fresh corroborating log line: ${line}`);
+        if (!watchedDigestMatches()) fail('Managed startup inputs changed across restart.', 77);
+        console.log(`Gateway boot proved: LaunchAgent=${target} PID=${last.pid} startedUTC=${last.startedAt}; owned loopback listener answered with certificate-verified ${endpoint.protocol.slice(0, -1).toUpperCase()} at ${expectedUrl}; fresh corroborating log line: ${line}`);
         return;
       } catch { if (Date.now() >= deadline) break; }
       await new Promise(resolve => setTimeout(resolve, pollSeconds * 1000));
     } while (Date.now() <= deadline);
-    fail('Darwin Gateway boot unproven: new stable process, owned listener, HTTP success, and fresh log are all required. Run openclaw gateway stability --bundle latest; do not retry restart automatically.', 77);
+    fail('Darwin Gateway boot unproven: new stable process, owned listener, certificate-verified HTTP(S) success, and fresh log are all required. Run openclaw gateway stability --bundle latest; do not retry restart automatically.', 77);
   } finally { closeSync(logFd); }
 }
 

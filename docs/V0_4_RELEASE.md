@@ -37,6 +37,18 @@ testers have exercised the normal product journey without custom engineering.
   backend. The Air's WebKit runtime rejected Secure plugin cookies on loopback
   HTTP in a secret-free reproduction; supported browser/transport selection is
   an explicit prerequisite, never a reason to weaken cookie or Gateway auth.
+- **2026-09-09 — Native macOS HTTPS pilot.** An isolated Gateway trial proved
+  that the Mac app activates the published Olympus UI over trusted loopback
+  HTTPS and reads its worker view. The authorized Air rollout preserves the
+  installed pilot and adds verified HTTPS worker delivery, a controlled native
+  restart proof, and the mountain plugin icon. This is a pilot transport fix;
+  certificate bootstrap and renewal for general installations, real-source
+  qualification, and the broader installation experiment remain separate work.
+- **2026-09-09 — Repaired pilot download.** The installer pins
+  `v0.4.0-pilot.2` to the repaired candidate archive; publishing that exact
+  archive and verifying its anonymous download are prerequisites for this
+  download pin to reach `main`. This distributes the repaired installation
+  guide without adopting the broader experimental source branch.
 - **2026-08-26 — Product boundary.** Olympus is the OpenClaw plugin. Private deployment, credentials, incident response, and host maintenance belong in a private ops repository. The supported v0.4 topology is same-host macOS or Linux.
 - **2026-08-26 — Shared Google OAuth.** The pilot ships a publisher-owned Google Desktop OAuth client ID for Gmail and Drive. Google documents installed applications as public clients and accepts the authorization-code exchange with client ID plus PKCE; no client secret is required or packaged. Users click Connect, sign in, and consent. The dashboard names the unverified-app warning honestly. User grants and refresh tokens remain local; a client-ID-only BYO path remains an advanced fallback.
 - **2026-08-26 — Converge, verify, delete.** Preserve useful existing connector stores. Complete bounded replay/import only where legacy stores contain useful data absent from the canonical store, reuse embeddings only when identity and dimensions prove exact compatibility, re-fetch only missing/corrupt/unverifiable portions, then delete transition machinery. No general migration system ships.

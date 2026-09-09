@@ -60559,6 +60559,11 @@ var init_answer_latency_log = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash30 } from "node:crypto";
+import { existsSync as existsSync24, readFileSync as readFileSync25 } from "node:fs";
+import { request as httpsRequest2 } from "node:https";
+import { homedir as homedir32 } from "node:os";
+import { resolve as resolvePath } from "node:path";
+import { checkServerIdentity } from "node:tls";
 function trustedSourceWatchOwnerFromRequest(request) {
   const ownerId = request.headers.get(SOURCE_WATCH_OWNER_HEADER);
   const routeKind = request.headers.get(SOURCE_WATCH_ROUTE_KIND_HEADER);
@@ -60698,11 +60703,36 @@ class OpenClawSourceWatchDeliveryTransport {
   fetchImpl;
   authToken;
   baseUrl;
+  caPem;
   timeoutMs;
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.authToken = normalizeWorkerAuthToken(options.authToken);
-    this.baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? defaultOpenClawGatewayBaseUrl());
+    const env = options.env ?? process.env;
+    const configured = options.gatewayConfig === undefined ? undefined : resolveSourceWatchGatewayConnection(options.gatewayConfig, {
+      env,
+      ...options.gatewayPort !== undefined ? { gatewayPort: options.gatewayPort } : {}
+    });
+    const configuredUrl = configured?.baseUrl;
+    const baseUrl = normalizeGatewayBaseUrl(options.baseUrl ?? configuredUrl ?? defaultOpenClawGatewayBaseUrl(env));
+    if (configuredUrl && options.baseUrl && new URL(options.baseUrl).protocol !== new URL(configuredUrl).protocol) {
+      throw new TypeError("Source watch delivery gateway URL does not match gateway.tls.enabled.");
+    }
+    this.baseUrl = baseUrl;
+    const trustPath = options.publicCertificatePath ?? configured?.certificatePath;
+    if (new URL(baseUrl).protocol === "https:") {
+      if (!trustPath) {
+        throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
+      }
+      try {
+        this.caPem = readFileSync25(trustPath, "utf8");
+      } catch {
+        throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
+      }
+      if (!this.caPem.trim()) {
+        throw new TypeError("Source watch HTTPS gateway public certificate is empty.");
+      }
+    }
     this.timeoutMs = options.timeoutMs ?? 30000;
   }
   async send(lease) {
@@ -60714,15 +60744,18 @@ class OpenClawSourceWatchDeliveryTransport {
     }
     let response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`, withWorkerAuthHeader({
+      const requestInit = withWorkerAuthHeader({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           route: lease.route,
           downstream_idempotency_key: lease.downstreamIdempotencyKey,
           payload: sourceWatchEvidencePointerPayload(lease)
-        })
-      }, this.authToken), this.timeoutMs);
+        }),
+        redirect: "error"
+      }, this.authToken);
+      const url = `${this.baseUrl}${SOURCE_WATCH_DELIVERY_ROUTE}`;
+      response = this.caPem ? await requestVerifiedHttps(url, requestInit, this.timeoutMs, this.caPem) : await fetchWithTimeout(this.fetchImpl, url, requestInit, this.timeoutMs);
     } catch {
       return { status: "failed", errorKind: "openclaw_gateway_unreachable" };
     }
@@ -60749,15 +60782,39 @@ class OpenClawSourceWatchDeliveryTransport {
     };
   }
 }
-function defaultOpenClawGatewayBaseUrl(env = process.env) {
-  const rawPort = env.OPENCLAW_GATEWAY_PORT?.trim() || "18789";
-  if (!/^\d+$/.test(rawPort))
-    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port.");
-  const port = Number(rawPort);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
-    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.");
-  }
-  return `http://127.0.0.1:${port}`;
+function createOpenClawSourceWatchDeliveryTransport(options = {}) {
+  let initialized;
+  const initialize = async () => {
+    const env = options.env ?? process.env;
+    const gatewayConfig = await loadOpenClawGatewayConfig(env);
+    return new OpenClawSourceWatchDeliveryTransport({
+      ...options.authToken ? { authToken: options.authToken } : {},
+      ...options.env ? { env: options.env } : {},
+      ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+      ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+      ...gatewayConfig ? { gatewayConfig } : {}
+    });
+  };
+  return {
+    async send(lease) {
+      if (!initialized) {
+        const attempt = initialize();
+        initialized = attempt.catch(() => {
+          initialized = undefined;
+          return {
+            send: async () => ({
+              status: "failed",
+              errorKind: "openclaw_gateway_config_unavailable"
+            })
+          };
+        });
+      }
+      return (await initialized).send(lease);
+    }
+  };
+}
+function defaultOpenClawGatewayBaseUrl(env = process.env, gatewayConfig) {
+  return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
 }
 async function runSourceWatchDeliveryPass(input) {
   const leases = input.store.leaseDeliveries(input.executor, {
@@ -60881,6 +60938,80 @@ async function runSourceWatchEvaluationPass(input) {
     counts
   };
 }
+function resolveSourceWatchGatewayConnection(config2, options = {}) {
+  const env = options.env ?? process.env;
+  const gateway = asRecord10(asRecord10(config2)?.gateway);
+  const tls = asRecord10(gateway?.tls);
+  if (tls?.enabled !== undefined && typeof tls.enabled !== "boolean") {
+    throw new TypeError("OpenClaw gateway.tls.enabled must be a boolean.");
+  }
+  const tlsEnabled = tls?.enabled === true;
+  const port = resolveGatewayPortValue(options.gatewayPort ?? gateway?.port, env);
+  let certificatePath;
+  if (tlsEnabled) {
+    certificatePath = resolvePublicCertificatePath(tls?.certPath, env, "gateway.tls.certPath");
+    if (!certificatePath) {
+      throw new TypeError("OpenClaw HTTPS gateway requires gateway.tls.certPath.");
+    }
+  }
+  return {
+    baseUrl: normalizeGatewayBaseUrl(`${tlsEnabled ? "https" : "http"}://127.0.0.1:${port}`),
+    ...certificatePath ? { certificatePath } : {}
+  };
+}
+async function loadOpenClawGatewayConfig(env = process.env) {
+  const command = resolveOpenClawCommand(env);
+  let child;
+  try {
+    child = Bun.spawn([command, "config", "get", "gateway", "--json"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: Object.fromEntries(Object.entries(env).filter((entry) => entry[1] !== undefined))
+    });
+  } catch {
+    return;
+  }
+  const timer = setTimeout(() => child.kill(), 15000);
+  try {
+    const [stdout, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited
+    ]);
+    if (code !== 0) {
+      throw new Error("OpenClaw gateway configuration could not be resolved.");
+    }
+    const start = stdout.indexOf("{");
+    const end = stdout.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      throw new Error("OpenClaw gateway configuration returned no JSON.");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(stdout.slice(start, end + 1));
+    } catch {
+      throw new Error("OpenClaw gateway configuration returned invalid JSON.");
+    }
+    const record3 = asRecord10(parsed);
+    if (!record3 || record3.ok === false) {
+      throw new Error("OpenClaw gateway configuration was refused.");
+    }
+    const tls = asRecord10(record3.tls);
+    return {
+      gateway: {
+        ...record3.port !== undefined ? { port: record3.port } : {},
+        ...tls ? {
+          tls: {
+            ...tls.enabled !== undefined ? { enabled: tls.enabled } : {},
+            ...tls.certPath !== undefined ? { certPath: tls.certPath } : {}
+          }
+        } : {}
+      }
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function observedAt(hit) {
   for (const value of [
     hit.provenance?.citation?.updatedAt,
@@ -60909,15 +61040,177 @@ function leaseFence(lease) {
     leaseGeneration: lease.leaseGeneration
   };
 }
+function resolveGatewayPortValue(configuredPort, env) {
+  const envPort = parseGatewayPort(env.OPENCLAW_GATEWAY_PORT);
+  if (envPort !== undefined)
+    return envPort;
+  if (configuredPort !== undefined && configuredPort !== null) {
+    if (typeof configuredPort !== "number" || !Number.isFinite(configuredPort) || !Number.isSafeInteger(configuredPort)) {
+      throw new TypeError("OpenClaw gateway.port must be an integer port.");
+    }
+    if (configuredPort > 0 && configuredPort <= 65535)
+      return configuredPort;
+  }
+  return 18789;
+}
+function parseGatewayPort(raw) {
+  const trimmed2 = raw?.trim();
+  if (!trimmed2)
+    return;
+  const numeric = /^\d+$/.test(trimmed2) ? trimmed2 : /^(?:[^:[\]]+|\[[^\]]+\]):(\d+)$/.exec(trimmed2)?.[1];
+  if (!numeric)
+    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port.");
+  const port = Number(numeric);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new TypeError("OPENCLAW_GATEWAY_PORT must be an integer port from 1 through 65535.");
+  }
+  return port;
+}
+function resolvePublicCertificatePath(value, env, field) {
+  if (value === undefined || value === null)
+    return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
+  }
+  const trimmed2 = value.trim();
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir32();
+  const expanded = trimmed2 === "~" || trimmed2.startsWith("~/") || trimmed2.startsWith("~\\") ? `${home}${trimmed2.slice(1)}` : trimmed2;
+  return resolvePath(expanded);
+}
+function resolveOpenClawCommand(env) {
+  const pathEntries = env.PATH?.split(":").map((entry) => entry.trim()).filter(Boolean) ?? [];
+  for (const entry of pathEntries) {
+    const candidate = resolvePath(entry, "openclaw");
+    if (existsSync24(candidate))
+      return candidate;
+  }
+  const found = Bun.which("openclaw");
+  if (found)
+    return found;
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir32();
+  for (const candidate of [
+    "/opt/homebrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    resolvePath(home, ".openclaw", "bin", "openclaw")
+  ]) {
+    if (existsSync24(candidate))
+      return candidate;
+  }
+  return "openclaw";
+}
 function normalizeGatewayBaseUrl(value) {
   const url = new URL(value);
-  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
-    throw new TypeError("Source watch delivery gateway must use loopback HTTP.");
+  if (!["http:", "https:"].includes(url.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new TypeError("Source watch delivery gateway must use loopback HTTP(S).");
   }
   if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
     throw new TypeError("Source watch delivery gateway base URL must not contain credentials, path, query, or fragment.");
   }
   return url.origin;
+}
+function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
+  const url = new URL(urlValue);
+  if (url.protocol !== "https:")
+    throw new TypeError("Verified HTTPS request requires an HTTPS URL.");
+  const headers = {};
+  new Headers(init.headers).forEach((value, key) => {
+    headers[key] = value;
+  });
+  const hostname = url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname;
+  const servername = hostname.includes(":") ? undefined : hostname;
+  const body = init.body;
+  if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
+    throw new TypeError("Source watch HTTPS request body must be text or bytes.");
+  }
+  return new Promise((resolve7, reject) => {
+    let settled = false;
+    let timer;
+    let removeAbortListener;
+    let request;
+    const cleanup = () => {
+      if (timer !== undefined)
+        clearTimeout(timer);
+      removeAbortListener?.();
+    };
+    const fail = (error2) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      request?.destroy();
+      reject(error2);
+    };
+    const succeed = (response) => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      resolve7(response);
+    };
+    const abort = () => {
+      const error2 = new Error("Source watch HTTPS request aborted.");
+      error2.name = "AbortError";
+      fail(error2);
+    };
+    try {
+      request = httpsRequest2({
+        protocol: "https:",
+        hostname,
+        ...url.port ? { port: Number(url.port) } : {},
+        path: `${url.pathname}${url.search}`,
+        method: init.method ?? "GET",
+        headers,
+        ca,
+        rejectUnauthorized: true,
+        ...servername ? { servername } : {},
+        checkServerIdentity
+      }, (incoming) => {
+        const chunks = [];
+        incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        incoming.on("end", () => {
+          try {
+            const responseHeaders = new Headers;
+            for (const [key, value] of Object.entries(incoming.headers)) {
+              if (Array.isArray(value))
+                value.forEach((item) => responseHeaders.append(key, item));
+              else if (value !== undefined)
+                responseHeaders.set(key, value);
+            }
+            succeed(new Response(Buffer.concat(chunks), {
+              status: incoming.statusCode ?? 0,
+              statusText: incoming.statusMessage ?? "",
+              headers: responseHeaders
+            }));
+          } catch (error2) {
+            fail(error2);
+          }
+        });
+        incoming.on("error", fail);
+      });
+      request.on("error", fail);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => abort(), timeoutMs);
+        request.setTimeout(timeoutMs, abort);
+      }
+      if (init.signal) {
+        if (init.signal.aborted)
+          abort();
+        else {
+          const abortFromUpstream = () => abort();
+          init.signal.addEventListener("abort", abortFromUpstream, { once: true });
+          removeAbortListener = () => init.signal?.removeEventListener("abort", abortFromUpstream);
+        }
+      }
+      if (settled)
+        return;
+      if (body === undefined)
+        request.end();
+      else
+        request.end(typeof body === "string" ? body : Buffer.from(body));
+    } catch (error2) {
+      fail(error2);
+    }
+  });
 }
 function safeErrorKind(value) {
   const normalized = value.toLowerCase().replace(/[^a-z0-9._:-]+/g, "_").slice(0, 128);
@@ -65842,14 +66135,14 @@ var init_http = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync22, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
+import { mkdirSync as mkdirSync22, readFileSync as readFileSync26, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname27, join as join41 } from "node:path";
-import { homedir as homedir32 } from "node:os";
+import { homedir as homedir33 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join41(env.HOME?.trim() || homedir32(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join41(env.HOME?.trim() || homedir33(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
@@ -65870,7 +66163,7 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
 function readEmbeddingOperatorOverride(path) {
   let raw;
   try {
-    raw = readFileSync25(path, "utf8");
+    raw = readFileSync26(path, "utf8");
   } catch (error2) {
     if (error2?.code === "ENOENT")
       return "none";
@@ -65909,7 +66202,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord11(JSON.parse(readFileSync25(path, "utf8")));
+    return asRecord11(JSON.parse(readFileSync26(path, "utf8")));
   } catch {
     return;
   }
@@ -66097,7 +66390,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/workers/dashboard/background-runtime.ts
-import { readFileSync as readFileSync26 } from "node:fs";
+import { readFileSync as readFileSync27 } from "node:fs";
 import { join as join42 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
@@ -66116,7 +66409,7 @@ function asRecord12(value) {
 }
 function readJsonFile2(path) {
   try {
-    return asRecord12(JSON.parse(readFileSync26(path, "utf8")));
+    return asRecord12(JSON.parse(readFileSync27(path, "utf8")));
   } catch {
     return;
   }
@@ -66766,7 +67059,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync24, lstatSync as lstatSync14, mkdirSync as mkdirSync23, readFileSync as readFileSync27 } from "node:fs";
+import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync25, lstatSync as lstatSync14, mkdirSync as mkdirSync23, readFileSync as readFileSync28 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -66822,7 +67115,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync24(path)) {
+  if (!existsSync25(path)) {
     return {
       path,
       present: false,
@@ -66830,7 +67123,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text = readFileSync27(path, "utf8");
+  const text = readFileSync28(path, "utf8");
   const raw = JSON.parse(text);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -66871,7 +67164,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync24(path)) {
+  if (existsSync25(path)) {
     const stat5 = lstatSync14(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -67372,8 +67665,8 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-import { readFileSync as readFileSync28, statSync as statSync9 } from "node:fs";
-import { homedir as homedir33 } from "node:os";
+import { readFileSync as readFileSync29, statSync as statSync9 } from "node:fs";
+import { homedir as homedir34 } from "node:os";
 import { join as join43, resolve as resolve7 } from "node:path";
 
 class GogcliEmailConnectorStub {
@@ -70064,7 +70357,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync28(join43(homedir33(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync29(join43(homedir34(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -70775,13 +71068,13 @@ var init_analyst_anthropic = __esm(() => {
 });
 
 // src/core/analyst-openclaw-infer.ts
-import { existsSync as existsSync25 } from "node:fs";
-function resolveOpenClawCommand() {
+import { existsSync as existsSync26 } from "node:fs";
+function resolveOpenClawCommand2() {
   const found = Bun.which(DEFAULT_COMMAND);
   if (found)
     return found;
   for (const candidate of ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw", `${process.env.HOME ?? ""}/.openclaw/bin/openclaw`]) {
-    if (candidate && existsSync25(candidate))
+    if (candidate && existsSync26(candidate))
       return candidate;
   }
   return DEFAULT_COMMAND;
@@ -70805,7 +71098,7 @@ class SpawnOpenClawRunner {
   }
 }
 function createOpenClawInferAnalystModel(options = {}) {
-  const command = options.command ?? resolveOpenClawCommand();
+  const command = options.command ?? resolveOpenClawCommand2();
   const model = options.model ?? DEFAULT_MODEL3;
   const thinking = options.thinking ?? DEFAULT_THINKING;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS4;
@@ -71105,11 +71398,11 @@ var init_credential_degradation = __esm(() => {
 
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync13, mkdirSync as mkdirSync24 } from "node:fs";
-import { homedir as homedir34 } from "node:os";
+import { homedir as homedir35 } from "node:os";
 import { dirname as dirname29, join as join44 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join44(homedir34(), ".local", "share");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join44(homedir35(), ".local", "share");
   return join44(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
 }
 
@@ -73119,7 +73412,7 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync26 } from "node:fs";
+import { existsSync as existsSync27 } from "node:fs";
 import { isAbsolute as isAbsolute7 } from "node:path";
 function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && options.provider.backend !== "local") {
@@ -73335,7 +73628,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync26(store.dbPath))
+        if (!existsSync27(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -74229,7 +74522,7 @@ async function main() {
   const sourceWatchStore = new LocalSourceWatchStore;
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: "source-watch-scheduler" });
   const sourceWatchSearch = sourceAnswerLanes ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes) : undefined;
-  const sourceWatchDeliveryTransport = new OpenClawSourceWatchDeliveryTransport({
+  const sourceWatchDeliveryTransport = createOpenClawSourceWatchDeliveryTransport({
     ...authToken ? { authToken } : {}
   });
   const sourceWatchPass = sourceWatchSearch ? {
@@ -74979,7 +75272,7 @@ var init_server4 = __esm(async () => {
 // src/cli.ts
 init_config();
 import { randomBytes as randomBytes6 } from "node:crypto";
-import { readFileSync as readFileSync29 } from "node:fs";
+import { readFileSync as readFileSync30 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -77329,7 +77622,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync29("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync30("/dev/stdin", "utf8");
   }
   return params;
 }
