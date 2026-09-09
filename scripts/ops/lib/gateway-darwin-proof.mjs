@@ -217,7 +217,27 @@ export function parseServiceEnvironment(text) {
   return env;
 }
 
+/**
+ * The qualified Air config is one canonical JSON file. Includes would make a
+ * digest of the root file insufficient to bind the effective configuration,
+ * so refuse them recursively rather than implementing a second config loader.
+ */
+export function parseGatewayRootConfig(bytes) {
+  let config;
+  try { config = JSON.parse(typeof bytes === 'string' ? bytes : decode(bytes)); } catch { fail('Gateway root config is not canonical JSON.', 77); }
+  const visit = value => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!record(value)) return;
+    if (Object.hasOwn(value, '$include')) fail('Gateway root config includes external material.', 77);
+    Object.values(value).forEach(visit);
+  };
+  visit(config);
+  return config;
+}
+
 export function validateNativeAudit(report, exitCode) {
+  const summaryKeys = ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'legacyResidueCount'];
+  const extendedSummary = exactKeys(report?.summary, [...summaryKeys, 'storeResidueCount']);
   if (!exactKeys(report, ['version', 'status', 'resolution', 'filesScanned', 'summary', 'findings'])
     || report.version !== 1 || !Array.isArray(report.findings)
     || !Array.isArray(report.filesScanned) || report.filesScanned.length === 0
@@ -226,10 +246,10 @@ export function validateNativeAudit(report, exitCode) {
     || !exactKeys(report.resolution, ['refsChecked', 'skippedExecRefs', 'resolvabilityComplete'])
     || !count(report.resolution.refsChecked) || report.resolution.skippedExecRefs !== 0
     || report.resolution.resolvabilityComplete !== true
-    || !exactKeys(report.summary, ['plaintextCount', 'unresolvedRefCount', 'shadowedRefCount', 'storeResidueCount', 'legacyResidueCount'])
+    || !(exactKeys(report.summary, summaryKeys) || extendedSummary)
     || !Object.values(report.summary).every(count) || report.summary.plaintextCount !== 0
     || report.summary.unresolvedRefCount !== 0 || report.summary.shadowedRefCount !== 0
-    || report.summary.storeResidueCount !== 0
+    || (extendedSummary && report.summary.storeResidueCount !== 0)
     || report.summary.legacyResidueCount !== report.findings.length) fail('Native credential audit was incomplete or unsafe.', 78);
   for (const finding of report.findings) {
     if (!exactKeys(finding, ['code', 'severity', 'file', 'jsonPath', 'message', 'provider', 'profileId'])
@@ -237,7 +257,11 @@ export function validateNativeAudit(report, exitCode) {
       || finding.message !== 'OAuth credentials are present (out of scope for static SecretRef migration).'
       || !safeText(finding.provider) || !safeText(finding.profileId)
       || finding.jsonPath !== `profiles.${finding.profileId}` || !safeText(finding.file)
-      || basename(finding.file) !== 'openclaw.sqlite' || !report.filesScanned.includes(finding.file)) {
+      || !(basename(finding.file) === 'openclaw-agent.sqlite'
+        || (extendedSummary && resolve(finding.file) === finding.file
+          && basename(dirname(finding.file)) === 'state'
+          && basename(finding.file) === 'openclaw.sqlite'))
+      || !report.filesScanned.includes(finding.file)) {
       fail('Native credential audit reported a blocking finding.', 78);
     }
   }
@@ -390,6 +414,7 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
   const status = commandJson(openclaw, ['gateway', 'status', '--no-probe', '--json'], inspectEnv);
   const descriptor = statusDescriptor(status, home);
   const configBytes = privateFile(descriptor.configPath, uid);
+  parseGatewayRootConfig(configBytes);
   const plistBytes = privateFile(descriptor.sourcePath, uid);
   const plist = commandJson('/usr/bin/plutil', ['-convert', 'json', '-o', '-', descriptor.sourcePath], inspectEnv);
   const expectedWrapper = join(home, '.openclaw', 'service-env', LABEL + '-env-wrapper.sh');

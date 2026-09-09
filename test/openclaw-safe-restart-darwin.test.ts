@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test';
 // Pure parser/contract fixtures only. These are not a live macOS rehearsal.
 const helperPath = join(import.meta.dir, '..', 'scripts', 'ops', 'lib', 'gateway-darwin-proof.mjs');
 const helper = await import(new URL('../scripts/ops/lib/gateway-darwin-proof.mjs', import.meta.url).href);
-const { assertManagedWrapper, parseServiceEnvironment, validateNativeAudit, parseLaunchdPid, parseProcessStart, assertListenerOwner, assertNewStableIdentity, freshBootLine, readFreshLogAppend, statusDescriptor, parseGatewayTlsConfig, gatewayProofEndpoint, probeGatewayEndpoint } = helper;
+const { assertManagedWrapper, parseServiceEnvironment, validateNativeAudit, parseGatewayRootConfig, parseLaunchdPid, parseProcessStart, assertListenerOwner, assertNewStableIdentity, freshBootLine, readFreshLogAppend, statusDescriptor, parseGatewayTlsConfig, gatewayProofEndpoint, probeGatewayEndpoint } = helper;
 const target = 'gui/501/ai.openclaw.gateway';
 const identity = { pid: 42, startedAt: 'Tue Sep  8 10:00:00 2026', executable: '/usr/local/bin/node' };
 const next = { ...identity, pid: 43, startedAt: 'Tue Sep  8 10:01:00 2026' };
@@ -78,6 +78,15 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(parsed.TOKEN).toBe('$(must-not-run) `must-not-run`');
     expect(parsed.QUOTE).toBe("one'two");
   });
+  test('binds the effective gateway config to one strict root JSON file with no includes', () => {
+    expect(parseGatewayRootConfig('{"gateway":{"port":18789}}')).toEqual({ gateway: { port: 18789 } });
+    for (const source of [
+      '{"$include":"./gateway.json"}',
+      '{"gateway":{"nested":{"$include":["./tls.json"]}}}',
+      '{"gateway":{"\\u0024include":"./escaped.json"}}',
+      '{// JSON5 is outside the qualified Air config contract\n"gateway":{}}',
+    ]) expect(() => parseGatewayRootConfig(source)).toThrow();
+  });
   test.each([
     "export TOKEN=$(must-not-run)\n", "export TOKEN='value'; command\n", "export TOKEN=\"$VALUE\"\n",
     "export TOKEN='a'\nexport TOKEN='b'\n", "export TOKEN='unterminated\n", "export TOKEN='a' trailing\n",
@@ -97,8 +106,17 @@ describe('native Darwin safe-restart proof contracts', () => {
     expect(() => validateNativeAudit({ ...audit(), version: 2 }, 0)).toThrow();
   });
   test('does not broaden native OAuth exception to plaintext, warnings, or arbitrary residues', () => {
-    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { file: '/fixture/openclaw-agent.sqlite' }, { jsonPath: 'profiles.another' }]) {
+    for (const change of [{ severity: 'warning' }, { code: 'PLAINTEXT_FOUND' }, { message: 'Other legacy residue' }, { file: '/fixture/auth.json' }, { file: '/fixture/other/openclaw.sqlite' }, { jsonPath: 'profiles.another' }]) {
       expect(() => validateNativeAudit(audit([{ ...oauth, ...change }]), 1)).toThrow();
+    }
+    const agentFinding = { ...oauth, file: '/fixture/agents/main/agent/openclaw-agent.sqlite' };
+    const agentReport = audit([agentFinding]);
+    agentReport.filesScanned = ['/fixture/openclaw.json', agentFinding.file];
+    expect(validateNativeAudit(agentReport, 1)).toEqual({ refsChecked: 4, nativeOAuthProfiles: 1 });
+    for (const file of ['/fixture/state/../state/openclaw.sqlite', '/fixture/state//openclaw.sqlite']) {
+      const report = audit([{ ...oauth, file }]);
+      report.filesScanned = ['/fixture/openclaw.json', file];
+      expect(() => validateNativeAudit(report, 1)).toThrow();
     }
     const unresolved = audit(); unresolved.summary.unresolvedRefCount = 1;
     expect(() => validateNativeAudit(unresolved, 0)).toThrow();
