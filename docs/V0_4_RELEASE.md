@@ -4,7 +4,9 @@ Status in this branch: baseline reference for an unadopted parallel experiment.
 
 The current v0.4 testing continues independently on `main`. This branch follows
 [`PARALLEL_SIMPLIFICATION.md`](PARALLEL_SIMPLIFICATION.md); none of the historical
-completion receipts below qualify its different source or package bytes.
+completion receipts below qualify its different source or package bytes. Main's prompt-only bootstrap selects the
+published pilot; this candidate retains its supplied-package handoff so it
+cannot substitute the prior published archive for the candidate under review.
 
 Owner: Olympus product owner
 Planning authority: this document defines v0.4 scope, sequence, and completion. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
@@ -25,6 +27,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
+  setup and worker/Gateway activation before optional dashboard source choice.
+  No mailbox is required for base-worker health. Preserve the approved
+  transition and full tier explanation as required user-facing blocks;
+  distinguish Venice secure answers from Gemini non-secure embeddings, and
+  authenticated password-manager CLI access from manual browser entry.
+  Native UI readiness requires a browser activation receipt, not just a loaded
+  backend. The Air's WebKit runtime rejected Secure plugin cookies on loopback
+  HTTP in a secret-free reproduction; supported browser/transport selection is
+  an explicit prerequisite, never a reason to weaken cookie or Gateway auth.
 - **2026-08-26 — Product boundary.** Olympus is the OpenClaw plugin. Private deployment, credentials, incident response, and host maintenance belong in a private ops repository. The supported v0.4 topology is same-host macOS or Linux.
 - **2026-08-26 — Shared Google OAuth.** The pilot ships a publisher-owned Google Desktop OAuth client ID for Gmail and Drive. Google documents installed applications as public clients and accepts the authorization-code exchange with client ID plus PKCE; no client secret is required or packaged. Users click Connect, sign in, and consent. The dashboard names the unverified-app warning honestly. User grants and refresh tokens remain local; a client-ID-only BYO path remains an advanced fallback.
 - **2026-08-26 — Converge, verify, delete.** Preserve useful existing connector stores. Complete bounded replay/import only where legacy stores contain useful data absent from the canonical store, reuse embeddings only when identity and dimensions prove exact compatibility, re-fetch only missing/corrupt/unverifiable portions, then delete transition machinery. No general migration system ships.

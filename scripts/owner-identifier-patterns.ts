@@ -160,14 +160,31 @@ export function pathCarriesOwnerIdentityToken(
 }
 
 /**
- * The MIT license's copyright line is the one place a scanned file deliberately
- * names its owner. Only that exact line, and only in `LICENSE`, is neutralised
- * before scanning; the identity stays banned everywhere else, including the
- * rest of the license text.
+ * Public attribution and download addresses are deliberate disclosures. Keep
+ * each exception exact and confined to the files that need it; no private
+ * identity, arbitrary GitHub URL, or surrounding text is exempt.
  */
 export const LICENSE_COPYRIGHT_LINE = 'Copyright (c) 2026 Jamie Zigelbaum';
 
+const PUBLIC_INSTALL_URL_FILES = new Set([
+  'README.md',
+  'INSTALL_FOR_AGENTS.md',
+  'docs/QUICKSTART.md',
+  'test/install-guide-consistency.test.ts',
+]);
+const PUBLIC_INSTALL_URLS = new Set([
+  'https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md',
+  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1',
+  'https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz',
+  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.1',
+]);
+
 export function scannableText(relativePath: string, text: string): string {
+  if (PUBLIC_INSTALL_URL_FILES.has(relativePath)) {
+    return text.replace(/https:\/\/[^\s<>"'`()]+/g, (url) => (
+      PUBLIC_INSTALL_URLS.has(url) ? '<public-olympus-install-url>' : url
+    ));
+  }
   return relativePath === 'LICENSE'
     ? text.replace(LICENSE_COPYRIGHT_LINE, 'Copyright (c) 2026 <holder>')
     : text;

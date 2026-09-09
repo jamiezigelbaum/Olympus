@@ -16,12 +16,20 @@
  *   - A timeout SIGKILLs the child and rejects; it never resolves with
  *     whatever partial output had arrived.
  *
+ * One property was added after the 2026-09-08 sparta incident: the child is
+ * spawned DETACHED, as the leader of its own process group, and a timeout
+ * kills that whole group. The old runner killed only the direct child. Every
+ * transcription command is a shell wrapper around a `whisper` python process,
+ * so the SIGKILL reaped the wrapper and orphaned the grandchild, which kept
+ * burning four to seven cores for hours after the extractor had already
+ * reported a timeout. Seven of them took a sixteen-core host to load 60.
+ *
  * Doc comments in this directory are always multi-line blocks: the
  * architecture guard reads a single-line block comment as a regex literal.
  */
 
 import { Buffer } from 'node:buffer';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -76,21 +84,100 @@ export class ExtractionCommandError extends Error {
 export class ExtractionCommandTimeoutError extends Error {
   readonly command: string;
   readonly timeoutMs: number;
+  /**
+   * Set when the timeout fired but the child (and its group) could not be
+   * signalled for a reason other than already being gone: the errno code,
+   * e.g. `EPERM`. The work may still be running.
+   */
+  readonly terminationFailed: string | undefined;
 
-  constructor(input: { command: string; timeoutMs: number }) {
-    super(`${input.command} timed out.`);
+  constructor(input: { command: string; timeoutMs: number; terminationFailed?: string }) {
+    super(input.terminationFailed
+      ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.`
+      : `${input.command} timed out.`);
     this.name = 'ExtractionCommandTimeoutError';
     this.command = input.command;
     this.timeoutMs = input.timeoutMs;
+    this.terminationFailed = input.terminationFailed;
   }
+}
+
+/**
+ * How an injected kill is invoked: the same shape as `process.kill`. Tests
+ * stub it to exercise the EPERM path without a process they cannot signal.
+ */
+export type ExtractionKillFn = (pid: number, signal: NodeJS.Signals) => void;
+
+/**
+ * What `killExtractionProcessGroup` managed to do. `ok: false` means neither
+ * the group kill nor the direct kill went through for a reason other than the
+ * target being gone already, which is the one outcome an operator has to hear
+ * about: the child is still burning cores after its timeout.
+ */
+export type ExtractionKillOutcome =
+  | { ok: true }
+  | { ok: false; code: string };
+
+function errnoCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && code.length > 0 ? code : 'UNKNOWN';
+}
+
+/**
+ * Kills the child and everything it started. `detached: true` made the child
+ * the leader of a process group whose id equals its pid, so a negative pid
+ * addresses the group. ESRCH from the group kill is benign (the group is
+ * already gone, or the platform has no group semantics) and only the direct
+ * child gets a courtesy signal. Any other failure (EPERM in practice) still
+ * attempts the direct kill, and if that fails too the outcome reports it
+ * rather than pretending the timeout ended the work.
+ */
+export function killExtractionProcessGroup(
+  child: ChildProcess,
+  signal: NodeJS.Signals = 'SIGKILL',
+  kill: ExtractionKillFn = process.kill,
+): ExtractionKillOutcome {
+  const pid = child.pid;
+  if (pid === undefined || pid <= 0) {
+    return { ok: true };
+  }
+  let groupFailure: string | undefined;
+  if (process.platform !== 'win32') {
+    try {
+      kill(-pid, signal);
+      return { ok: true };
+    } catch (error) {
+      const code = errnoCode(error);
+      if (code !== 'ESRCH') groupFailure = code;
+    }
+  }
+  try {
+    kill(pid, signal);
+    return { ok: true };
+  } catch (error) {
+    const code = errnoCode(error);
+    if (code === 'ESRCH') {
+      // The child itself is gone. A non-ESRCH group failure before it is
+      // still a termination failure: the grandchildren may live on.
+      return groupFailure ? { ok: false, code: groupFailure } : { ok: true };
+    }
+    return { ok: false, code: groupFailure ?? code };
+  }
+}
+
+export interface ExtractionCommandRunInternals {
+  kill?: ExtractionKillFn;
 }
 
 export async function runExtractionCommand(
   request: ExtractionCommandRunRequest,
+  internals: ExtractionCommandRunInternals = {},
 ): Promise<ExtractionCommandRunResult> {
+  const kill = internals.kill ?? process.kill;
   return new Promise((resolve, reject) => {
     const child = spawn(request.command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -100,10 +187,11 @@ export async function runExtractionCommand(
       ? setTimeout(() => {
           if (settled) return;
           settled = true;
-          child.kill('SIGKILL');
+          const outcome = killExtractionProcessGroup(child, 'SIGKILL', kill);
           reject(new ExtractionCommandTimeoutError({
             command: request.command,
             timeoutMs: request.timeoutMs,
+            ...(outcome.ok ? {} : { terminationFailed: outcome.code }),
           }));
         }, request.timeoutMs)
       : undefined;
@@ -113,6 +201,7 @@ export async function runExtractionCommand(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      killExtractionProcessGroup(child, 'SIGKILL', kill);
       reject(error);
     });
     child.on('close', (code) => {

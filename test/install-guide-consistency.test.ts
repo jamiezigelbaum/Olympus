@@ -7,6 +7,19 @@ const ROOT = join(import.meta.dir, '..');
 // Repeated clean-install failures came from copied commands drifting apart.
 // Keep the commands in the public entry points on the qualified package path.
 describe('pilot installation entry points', () => {
+  test('the candidate guide keeps the supplied archive and its exact identity', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    expect(readme).toContain('Verify the supplied Olympus tarball against its SHA-256 and byte count.');
+    expect(readme).toContain('Use those exact');
+    expect(quickstart).toContain("maintainer's qualified Olympus tarball, SHA-256, and byte count");
+    expect(install).toContain('**ASK THE OPERATOR** for the candidate and receipt if either is missing');
+    expect(install).toContain('SHA-256');
+    expect(install).not.toContain('### Pilot download');
+    expect(install).not.toContain('/releases/download/v0.4.0-pilot.1/');
+  });
+
   for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md', 'docs/V0_4_RELEASE.md']) {
     test(`${path} installs the qualified archive with host-version consent guidance`, () => {
       const document = readFileSync(join(ROOT, path), 'utf8');

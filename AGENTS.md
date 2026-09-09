@@ -54,7 +54,7 @@ context when dependencies or unresolved questions require it.
 Canonical: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
 — read it BEFORE any change to a live OpenClaw system.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7cd8a3438993e323f363723ebf11eaeec67c18cd85c04bf4af8c065eb4fcaafb -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 52f838c7d7fe2516a5ae65e4479e652a7cd32c194fcd5a1df72f1044d1f176da -->
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or

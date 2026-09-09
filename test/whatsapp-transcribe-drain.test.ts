@@ -38,6 +38,7 @@ describe('WhatsApp local transcription drain', () => {
       policy: {
         local_only: true,
         cloud_asr_allowed: false,
+        remote_lane: 'none',
         raw_source_exposed: false,
         source_text_returned: false,
       },
@@ -105,6 +106,96 @@ describe('WhatsApp local transcription drain', () => {
     expect(summary.counts.skipped_already_transcribed).toBe(1);
     expect(summary.counts.transcribed).toBe(0);
     expect(existsSync(called)).toBe(false);
+  });
+
+  test('a deterministic wrapper exit parks the file as failed_terminal and is never rescheduled', async () => {
+    const dir = makeMediaDir();
+    const audio = join(dir, 'voice-5.ogg');
+    const calls = join(dir, 'calls');
+    writeFileSync(audio, 'fake-audio');
+    // Exit 65 is the wrapper's "refused: over the duration cap".
+    const fake = fakeCommand(`
+      const calls = process.argv[3];
+      let n = 0;
+      try { n = Number(await Bun.file(calls).text()); } catch {}
+      await Bun.write(calls, String(n + 1));
+      console.error('refusing voice-5.ogg: duration 181 min exceeds OLYMPUS_TRANSCRIBE_MAX_MINUTES=180');
+      process.exit(65);
+    `);
+
+    const summary = await runWhatsAppTranscribeDrain({
+      ...envFor(dir, fake, calls),
+      OLYMPUS_WHATSAPP_TRANSCRIBE_MAX_RUNS: '3',
+      OLYMPUS_WHATSAPP_TRANSCRIBE_ERROR_BACKOFF_SECONDS: '0',
+      OLYMPUS_WHATSAPP_TRANSCRIBE_STOP_WHEN_IDLE: 'false',
+    });
+
+    expect(summary.runs).toBe(3);
+    expect(summary.counts.failed_terminal).toBe(1);
+    expect(summary.counts.failed_retryable).toBe(0);
+    expect(summary.counts.skipped_terminal).toBe(2);
+    expect(readFileSync(calls, 'utf8')).toBe('1');
+    expect(existsSync(transcriptPath(audio))).toBe(false);
+    const status = JSON.parse(readFileSync(statusPath(audio), 'utf8'));
+    expect(status).toMatchObject({
+      status: 'failed_terminal',
+      attempts: 1,
+      error_class: 'transcribe_input_refused',
+      next_retry_at: null,
+    });
+    expect(JSON.stringify(status)).not.toContain('voice-5');
+  });
+
+  test('a 5xx-style retryable exit keeps its backoff and is retried', async () => {
+    const dir = makeMediaDir();
+    const audio = join(dir, 'voice-6.ogg');
+    const calls = join(dir, 'calls');
+    writeFileSync(audio, 'fake-audio');
+    // Exit 70 is "whisper failed"; the extractor keeps it retryable.
+    const fake = fakeCommand(`
+      const calls = process.argv[3];
+      let n = 0;
+      try { n = Number(await Bun.file(calls).text()); } catch {}
+      await Bun.write(calls, String(n + 1));
+      process.exit(70);
+    `);
+
+    const summary = await runWhatsAppTranscribeDrain({
+      ...envFor(dir, fake, calls),
+      OLYMPUS_WHATSAPP_TRANSCRIBE_MAX_RUNS: '2',
+      OLYMPUS_WHATSAPP_TRANSCRIBE_ERROR_BACKOFF_SECONDS: '0',
+      OLYMPUS_WHATSAPP_TRANSCRIBE_STOP_WHEN_IDLE: 'false',
+    });
+
+    expect(summary.counts.failed_retryable).toBe(2);
+    expect(summary.counts.failed_terminal).toBe(0);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    expect(JSON.parse(readFileSync(statusPath(audio), 'utf8')).status).toBe('failed_retryable');
+  });
+
+  test('a loopback remote lane is recorded on the receipt; any other host refuses to start', async () => {
+    const dir = makeMediaDir();
+    const fake = fakeCommand(`
+      const input = process.argv[2];
+      await Bun.write(input + '.txt', 'never reached\n');
+    `);
+
+    const loopback = await runWhatsAppTranscribeDrain({
+      ...envFor(dir, fake),
+      OLYMPUS_TRANSCRIBE_URL: 'http://127.0.0.1:28090/v1/audio/transcriptions',
+    });
+    expect(loopback.policy).toEqual({
+      local_only: true,
+      cloud_asr_allowed: false,
+      remote_lane: 'loopback_only',
+      raw_source_exposed: false,
+      source_text_returned: false,
+    });
+
+    await expect(runWhatsAppTranscribeDrain({
+      ...envFor(dir, fake),
+      OLYMPUS_TRANSCRIBE_URL: 'https://api.openai.com/v1/audio/transcriptions',
+    })).rejects.toThrow(/loopback/);
   });
 
   test('heartbeat report is counts-only', async () => {
