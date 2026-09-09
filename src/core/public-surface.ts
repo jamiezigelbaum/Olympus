@@ -184,6 +184,7 @@ export const V0_4_CANONICAL_DOCUMENTS = [
 ] as const;
 
 export const V0_4_PUBLIC_PACKAGE_FILES = [
+  'assets/icon.png',
   'package.json',
   'openclaw.plugin.json',
   'index.js',
