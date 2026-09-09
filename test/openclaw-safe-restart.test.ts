@@ -20,7 +20,7 @@ const oauthFinding = {
 
 const sharedOauthFinding = { ...oauthFinding, file: '/fixture/state/openclaw.sqlite' };
 
-function auditReport(findings: Array<Record<string, unknown>> = []) {
+function auditReport(findings: ReadonlyArray<Record<string, unknown>> = []) {
   return {
     version: 1,
     status: findings.some(finding => finding.code === 'REF_UNRESOLVED')
@@ -37,7 +37,7 @@ function auditReport(findings: Array<Record<string, unknown>> = []) {
   };
 }
 
-function extendedAuditReport(findings: Array<Record<string, unknown>> = []) {
+function extendedAuditReport(findings: ReadonlyArray<Record<string, unknown>> = []) {
   const report = auditReport(findings);
   return {
     ...report,
