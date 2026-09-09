@@ -64154,6 +64154,37 @@ class OpenClawSourceWatchDeliveryTransport {
     };
   }
 }
+function createOpenClawSourceWatchDeliveryTransport(options = {}) {
+  let initialized;
+  const initialize = async () => {
+    const env = options.env ?? process.env;
+    const gatewayConfig = await loadOpenClawGatewayConfig(env);
+    return new OpenClawSourceWatchDeliveryTransport({
+      ...options.authToken ? { authToken: options.authToken } : {},
+      ...options.env ? { env: options.env } : {},
+      ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
+      ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+      ...gatewayConfig ? { gatewayConfig } : {}
+    });
+  };
+  return {
+    async send(lease) {
+      if (!initialized) {
+        const attempt = initialize();
+        initialized = attempt.catch(() => {
+          initialized = undefined;
+          return {
+            send: async () => ({
+              status: "failed",
+              errorKind: "openclaw_gateway_config_unavailable"
+            })
+          };
+        });
+      }
+      return (await initialized).send(lease);
+    }
+  };
+}
 function defaultOpenClawGatewayBaseUrl(env = process.env, gatewayConfig) {
   return resolveSourceWatchGatewayConnection(gatewayConfig, { env }).baseUrl;
 }
@@ -77155,10 +77186,8 @@ async function main() {
   const sourceWatchStore = new LocalSourceWatchStore;
   const sourceWatchExecutor = createSourceWatchExecutorCapability({ executorId: "source-watch-scheduler" });
   const sourceWatchSearch = sourceAnswerLanes ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes) : undefined;
-  const openClawGatewayConfig = await loadOpenClawGatewayConfig(process.env);
-  const sourceWatchDeliveryTransport = new OpenClawSourceWatchDeliveryTransport({
-    ...authToken ? { authToken } : {},
-    ...openClawGatewayConfig ? { gatewayConfig: openClawGatewayConfig } : {}
+  const sourceWatchDeliveryTransport = createOpenClawSourceWatchDeliveryTransport({
+    ...authToken ? { authToken } : {}
   });
   const sourceWatchPass = sourceWatchSearch ? {
     run: () => runSourceWatchSchedulerPass({
