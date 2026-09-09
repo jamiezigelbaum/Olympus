@@ -21,6 +21,13 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-09 — Native macOS HTTPS pilot.** An isolated Gateway trial proved
+  that the Mac app activates the published Olympus UI over trusted loopback
+  HTTPS and reads its worker view. The authorized Air rollout preserves the
+  installed pilot and adds verified HTTPS worker delivery, a controlled native
+  restart proof, and the mountain plugin icon. This is a pilot transport fix;
+  certificate bootstrap and renewal for general installations, real-source
+  qualification, and the broader installation experiment remain separate work.
 - **2026-09-09 — Repaired pilot download.** The installer pins
   `v0.4.0-pilot.2` to the repaired candidate archive; publishing that exact
   archive and verifying its anonymous download are prerequisites for this

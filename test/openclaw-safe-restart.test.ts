@@ -844,6 +844,8 @@ function runScenario(options: ScenarioOptions = {}): {
     `if [[ "$*" == "gateway restart" ]]; then : > ${shellQuote(restartDone)}; fi`,
     'exit 0',
   ].join('\n'));
+  // These scenarios exercise Linux even when the tests run on macOS.
+  writeFileSync(join(bin, 'uname'), '#!/bin/sh\nprintf "Linux\\n"\n');
   writeFileSync(join(bin, 'journalctl'), [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
@@ -922,7 +924,7 @@ function runScenario(options: ScenarioOptions = {}): {
     '  exec /bin/date "$@"',
     'fi',
   ].join('\n'));
-  for (const path of [brokerRead, ...['bun', 'curl', 'date', 'openclaw', 'journalctl', 'systemctl'].map((name) => join(bin, name))]) {
+  for (const path of [brokerRead, ...['bun', 'curl', 'date', 'openclaw', 'journalctl', 'systemctl', 'uname'].map((name) => join(bin, name))]) {
     chmodSync(path, 0o755);
   }
 
