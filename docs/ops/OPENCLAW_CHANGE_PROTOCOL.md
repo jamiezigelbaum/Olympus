@@ -32,9 +32,13 @@ skills, cron, services), in this order:
    findings/exit-1 reports containing only the exact native OAuth
    `LEGACY_RESIDUE`/`info` records: the upstream OAuth out-of-scope message,
    provider/profile identity, matching `profiles.<profileId>` path, and a
-   scanned `openclaw-agent.sqlite` file. Resolution must be complete with no
-   skipped exec refs, and every summary count must agree. Native OAuth login
-   remains intact. Plaintext, shadowing, unresolved refs, other legacy residue,
+   scanned `openclaw-agent.sqlite` file, or a normalized absolute
+   `state/openclaw.sqlite` path with the OpenClaw 2026.9.2 extended v1 summary.
+   The only supported summary shapes are the original four counts and those
+   same counts plus `storeResidueCount`, which must be zero. Resolution must
+   be complete with no skipped exec refs, and every summary count must agree.
+   Native OAuth login remains intact. Plaintext, shadowing, unresolved refs,
+   shared-store residue, other legacy residue,
    unknown or malformed records/reports, inconsistent status/counts/exits, and
    command failures all refuse restart. The wrapper prints fixed verdicts;
    upstream audit bodies and errors are never copied into restart output.
