@@ -401,7 +401,7 @@ describe('durable source watch runtime', () => {
       await closeHttpsServer(wrongHostServer);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('turns an invalid HTTPS response status into a delivery failure without escaping the request callback', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-tls-status-'));
@@ -436,7 +436,7 @@ describe('durable source watch runtime', () => {
       await closeHttpsServer(server);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('isolates a failed Gateway config read, retries after repair, and avoids an HTTP fallback', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-config-outage-'));

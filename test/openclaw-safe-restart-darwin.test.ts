@@ -32,7 +32,9 @@ async function listen(server: Server): Promise<number> {
 
 async function close(server: Server): Promise<void> {
   if (!server.listening) return;
-  server.closeAllConnections?.();
+  if (typeof (server as Server & { closeAllConnections?: unknown }).closeAllConnections === 'function') {
+    (server as Server & { closeAllConnections: () => void }).closeAllConnections();
+  }
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
