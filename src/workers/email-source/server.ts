@@ -208,8 +208,7 @@ import {
 } from '../../core/source-watch.ts';
 import {
   createSourceWatchSearchFromAnalystLanes,
-  OpenClawSourceWatchDeliveryTransport,
-  loadOpenClawGatewayConfig,
+  createOpenClawSourceWatchDeliveryTransport,
   runSourceWatchSchedulerPass,
 } from '../source-watch-runtime.ts';
 import {
@@ -2118,10 +2117,8 @@ export async function main(): Promise<void> {
   const sourceWatchSearch = sourceAnswerLanes
     ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes)
     : undefined;
-  const openClawGatewayConfig = await loadOpenClawGatewayConfig(process.env);
-  const sourceWatchDeliveryTransport = new OpenClawSourceWatchDeliveryTransport({
+  const sourceWatchDeliveryTransport = await createOpenClawSourceWatchDeliveryTransport({
     ...(authToken ? { authToken } : {}),
-    ...(openClawGatewayConfig ? { gatewayConfig: openClawGatewayConfig } : {}),
   });
   const sourceWatchPass = sourceWatchSearch
     ? {
