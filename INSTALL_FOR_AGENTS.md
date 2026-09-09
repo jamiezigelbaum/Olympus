@@ -8,6 +8,9 @@ personal-data layer for OpenClaw: it ingests the operator's sources
 through model lanes the operator explicitly approves. Follow the steps in
 order. Where a step says **ASK THE OPERATOR**, stop and ask — do not pick a
 default. Complete base activation before offering optional source setup.
+Read the current step in full before carrying it out. Immediately before an
+operator-facing transition, read its required message block directly; do not
+use a remembered summary of this guide as the user-facing copy.
 
 ## Rule zero — the residue gate binds EVERY Olympus-touching action
 

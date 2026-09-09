@@ -300,6 +300,13 @@ or `olympus doctor` action for that source.
 
 ## 4. Validate and restart the gateway
 
+Before this restart, select and prepare the dashboard described in Step 5.
+If the artifact supports native Control UI, handle its Labs opt-in and Gateway
+origin now through the authorized configuration workflow. On the tested Air,
+WebKit rejects the Secure plugin cookie over plain loopback HTTP; use Chrome
+on loopback or an existing trusted HTTPS route. Do not weaken authentication
+or change certificate trust just to make the plugin page load.
+
 ```bash
 openclaw config validate
 openclaw doctor --lint
@@ -344,14 +351,16 @@ for that result. You can stop here and connect a source later.
 On OpenClaw **2026.9.2**, open **Olympus** in the Control UI sidebar when the
 installed Olympus artifact includes native Control UI support. The host version
 alone does not prove support. This requires **Settings → Labs → Custom plugin
-UI**, an authorized Gateway restart through the applicable managed procedure,
-and a browser reload. The native page uses your signed-in permissions and
+UI** and the Gateway activation completed in Step 4, followed by a browser
+reload. The native page uses your signed-in permissions and
 keeps the worker bearer on the server, so no worker-token paste is needed.
 Native OAuth also needs `gateway.publicOrigin` to name the Gateway's HTTPS or
 localhost/loopback origin; follow the managed change procedure to configure it.
 See the [agent guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
 
-If that integration is unavailable, use the standalone dashboard:
+If the artifact lacks that integration, or you choose direct access, use the
+standalone dashboard. A declared native UI that fails to load needs diagnosis;
+backend health alone is not a successful UI handoff:
 
 ```bash
 olympus dashboard
