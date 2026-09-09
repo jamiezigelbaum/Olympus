@@ -198,8 +198,15 @@ API without authentication:
 
 `https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1`
 
+The repository guide pins the designated candidate below. These are agent-only
+verification inputs, not a receipt to request from the operator:
+
+- SHA-256: `97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267`
+- Byte count: `703157`
+
 1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
-   response, `tag_name` equal to `v0.4.0-pilot.1`, and `draft` equal to `false`.
+   response, `tag_name` equal to `v0.4.0-pilot.1`, `prerelease` equal to `true`,
+   and `draft` equal to `false`.
    Do not use `/releases/latest`: GitHub excludes prereleases there, and a
    later release is not automatically this pilot's candidate.
 2. Select exactly one uploaded asset named `olympus-0.4.0.tgz` from `assets`.
@@ -207,6 +214,8 @@ API without authentication:
    `digest` of the form `sha256:` followed by 64 hexadecimal characters.
    Its `browser_download_url` must be exactly
    `https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz`.
+   Require the metadata's digest and size to match the pinned values above;
+   a replacement upload under the same tag/name is not a qualified candidate.
    GitHub's generated source-code archives are not the plugin package.
 3. Download that asset into a new temporary directory, following HTTPS
    redirects to GitHub's asset storage. Compute its SHA-256 and byte count
@@ -217,9 +226,13 @@ API without authentication:
    report. This is automatic bookkeeping, not another operator question.
    These values satisfy any reference to a "supplied candidate and receipt"
    in an older packaged guide. Read `package/INSTALL_FOR_AGENTS.md` from this
-   verified archive and continue with its host/setup instructions, retaining
-   the existing-install and consent checks. Do not restart its download step
-   if the same package is already verified in this continuous install.
+   verified archive. From here, the packaged guide alone governs installation
+   and setup, retaining the existing-install and consent checks. Execute its
+   plugin install command exactly once; the command below is a reference,
+   not an additional install. The repository guide on `main` owns candidate
+   selection: skip any candidate-selection/download section in the packaged
+   guide and use this already-verified local archive throughout. Do not switch
+   to a stale tag or repeat the download because the packaged guide names one.
 
 If the release or asset is missing, say **"The Olympus pilot download is not
 available yet; the maintainer needs to publish it."** A failed request,
@@ -236,8 +249,9 @@ shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
 wc -c < /absolute/path/to/olympus-0.4.0.tgz
 ```
 
-The expected digest and size come from the fetched release metadata, never
-from the same local file you are checking. Now install those verified bytes:
+The expected digest and size come from the repository pin and fetched release
+metadata, never from the same local file you are checking. Reference command
+for the packaged guide's single install of those verified bytes:
 
 ```bash
 openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities

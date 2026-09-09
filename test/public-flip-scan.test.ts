@@ -95,7 +95,7 @@ describe('public flip owner-identifier scan', () => {
     expect(report.blockers.map((hit) => hit.match)).toEqual(['sparta']);
   });
 
-  test('the LICENSE copyright line is the only exempt owner name', () => {
+  test('the LICENSE exemption covers only its exact copyright line', () => {
     const { root, paths } = fixtureTree({
       LICENSE: 'MIT License\n\nCopyright (c) 2026 Jamie Zigelbaum\n\nPermission is hereby granted...\n',
     });
@@ -106,6 +106,34 @@ describe('public flip owner-identifier scan', () => {
     });
     const report = scanTree(second.root, second.paths);
     expect(report.blockers.map((hit) => hit.match)).toContain('jamie@example.test');
+  });
+
+  test('only the exact public installation URLs are exempt in the install documents', () => {
+    const urls = [
+      'https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md',
+      'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1',
+      'https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz',
+      'https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.1',
+    ];
+    for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md']) {
+      const clean = fixtureTree({ [path]: urls.map((url) => `\`${url}\``).join('\n') });
+      expect(scanTree(clean.root, clean.paths).blockers).toHaveLength(0);
+      const privateText = fixtureTree({ [path]: `${urls.join('\n')}\nContact jamie@example.test on sparta.` });
+      expect(scanTree(privateText.root, privateText.paths).blockers.map((hit) => hit.match))
+        .toEqual(expect.arrayContaining(['jamie@example.test', 'sparta']));
+    }
+    for (const url of urls) {
+      for (const invalid of [
+        `${url}/private`, `${url}?account=private`, `${url}#private`,
+        url.replace('/Olympus/', '/olympus-ops/'),
+        `https://example.test/?redirect=${url}`,
+      ]) {
+        const tree = fixtureTree({ 'INSTALL_FOR_AGENTS.md': invalid });
+        expect(scanTree(tree.root, tree.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
+      }
+      const elsewhere = fixtureTree({ 'src/elsewhere.ts': url });
+      expect(scanTree(elsewhere.root, elsewhere.paths).blockers.map((hit) => hit.match)).toContain('jamiezigelbaum');
+    }
   });
 
   test('neutral fixture values are allowed anywhere, real ones are not', () => {

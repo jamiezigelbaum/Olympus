@@ -24,7 +24,7 @@ testers have exercised the normal product journey without custom engineering.
 - **2026-09-09 — Prompt-only pilot installation.** A tester copies one prompt
   from the repository into their agent. The agent downloads the designated
   GitHub prerelease package and checks its SHA-256 and byte count against
-  GitHub's asset metadata automatically. No manually supplied tarball or
+  the repository's candidate pin and GitHub's asset metadata automatically. No manually supplied tarball or
   checksum receipt is required. `INSTALL_FOR_AGENTS.md#pilot-download` owns
   candidate selection and the download procedure. GitHub prerelease hosting
   makes the internal rehearsal package retrievable; it does not claim full
@@ -395,6 +395,8 @@ that clean-install real-provider or pilot qualification has passed.
   this same path. The agent records the release tag, asset ID, artifact digest,
   and byte count in the install report so feedback can be tied to the exact
   candidate. Download verification does not substitute for qualification.
+  The repository guide pins the qualified digest and size, so replacing an
+  asset under the same name cannot silently substitute a different build.
 - Before inviting testers, internally prove the same packaged product on clean
   Apple Silicon macOS and x86_64 Ubuntu LTS installations. On both operating
   systems, every declared source must complete install, onboarding, configured

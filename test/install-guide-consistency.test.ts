@@ -15,21 +15,27 @@ describe('pilot installation entry points', () => {
     expect(prompt).toContain('https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md');
     expect(quickstart).toContain(prompt!);
     expect(readme).not.toContain('Give it those files');
-    expect(quickstart).not.toContain('supplied\nreceipt');
+    expect(quickstart.replace(/\s+/g, ' ')).not.toContain('supplied receipt');
   });
 
   test('the agent obtains exact package identity without a user receipt or authentication', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'));
+    const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'))
+      .replace(/\s+/g, ' ');
     expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1');
     expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz');
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
     expect(download).toContain('Do not use `/releases/latest`');
-    expect(download).toContain('Do not extract,\n   execute, or install an archive unless both match');
+    expect(download).toContain('97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267');
+    expect(download).toContain('Byte count: `703157`');
+    expect(download).toContain("metadata's digest and size to match the pinned values");
+    expect(download).toContain('Do not extract, execute, or install an archive unless both match');
     expect(download).toContain('missing digest, ambiguous asset, or checksum/size mismatch stops installation');
-    expect(download).toContain('retaining\n   the existing-install and consent checks');
-    expect(download).toContain('The Olympus pilot download is not\navailable yet; the maintainer needs to publish it.');
+    expect(download).toContain('retaining the existing-install and consent checks');
+    expect(download).toContain('Execute its plugin install command exactly once');
+    expect(download).toContain('skip any candidate-selection/download section in the packaged guide');
+    expect(download).toContain('The Olympus pilot download is not available yet; the maintainer needs to publish it.');
     expect(install).not.toContain('**ASK THE OPERATOR** for the candidate and receipt');
   });
 

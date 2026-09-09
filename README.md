@@ -113,8 +113,8 @@ Paste this into OpenClaw, or another agent with a terminal:
 
 Your agent downloads the designated pilot package, checks it automatically,
 and guides you through setup. You do not need to download files, find a
-checksum receipt, or have a GitHub account. The SHA-256 and byte count come
-from GitHub's release metadata and stay in the agent's install report.
+checksum receipt, or have a GitHub account. The agent checks the SHA-256 and
+byte count against the designated candidate and GitHub's release metadata.
 
 `openclaw plugins install clawhub:olympus` becomes the one-line public path
 once Olympus is published to ClawHub, which happens **after** the pilot. The

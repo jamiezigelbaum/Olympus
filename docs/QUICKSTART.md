@@ -4,8 +4,9 @@ From zero to asking your own data questions, in about ten minutes.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
-and an agent with terminal access. macOS or Linux. The agent obtains the pilot
-package automatically; no file or checksum-receipt handoff is needed.
+on macOS or Linux. An agent with terminal access can obtain the pilot package
+and guide you through setup automatically; no file or checksum-receipt handoff
+is needed. You can also follow the steps below manually.
 
 OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
 `>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
@@ -64,8 +65,12 @@ in step 2. That choice is the heart of Olympus.
 Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
-receipt to request. Compare both before installing and record the release tag,
-asset ID, digest, and size with your install results. Stop if the download is
+receipt to request. For a manual download, open the
+[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.1)
+and choose `olympus-0.4.0.tgz` under Assets, not a source-code archive. Compare
+its SHA-256 and byte count with the pin in the linked download procedure and
+record the release tag, asset ID, digest, and size with your install results.
+Stop if the download is
 unavailable or either value differs. Do not build a replacement or substitute
 a Git checkout.
 
