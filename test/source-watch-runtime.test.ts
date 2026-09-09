@@ -438,7 +438,7 @@ describe('durable source watch runtime', () => {
     }
   });
 
-  test('isolates a failed Gateway config read so delivery fails closed without an HTTP attempt', async () => {
+  test('isolates a failed Gateway config read, retries after repair, and avoids an HTTP fallback', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-config-outage-'));
     const fakeOpenClaw = join(dir, 'openclaw');
     writeFileSync(fakeOpenClaw, '#!/bin/sh\nexit 1\n');
@@ -450,7 +450,10 @@ describe('durable source watch runtime', () => {
         env: { PATH: dir, HOME: dir },
         fetchImpl: async () => {
           fetches += 1;
-          return new Response('{}');
+          return new Response(JSON.stringify({
+            status: 'sent',
+            receipt: { platform_message_ids: ['repaired-http-delivery'] },
+          }));
         },
       });
       await withStore(async ({ store, executor, owner }) => {
@@ -465,8 +468,29 @@ describe('durable source watch runtime', () => {
           status: 'failed',
           errorKind: 'openclaw_gateway_config_unavailable',
         });
+        expect(fetches).toBe(0);
+        writeFileSync(fakeOpenClaw, '#!/bin/sh\nprintf \'%s\\n\' \'{"port":18789}\'\n');
+        expect(await transport.send(lease)).toMatchObject({ status: 'delivered' });
       });
-      expect(fetches).toBe(0);
+      expect(fetches).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not await a stalled Gateway config CLI during transport factory creation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-config-stalled-'));
+    const fakeOpenClaw = join(dir, 'openclaw');
+    writeFileSync(fakeOpenClaw, '#!/bin/sh\nsleep 30\n');
+    chmodSync(fakeOpenClaw, 0o755);
+    try {
+      const started = performance.now();
+      const transport = createOpenClawSourceWatchDeliveryTransport({
+        authToken: 'shared-worker-token',
+        env: { PATH: dir, HOME: dir },
+      });
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(transport).toBeDefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

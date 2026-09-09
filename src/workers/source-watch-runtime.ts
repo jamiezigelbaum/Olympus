@@ -420,14 +420,17 @@ export class OpenClawSourceWatchDeliveryTransport implements SourceWatchDelivery
 
 /**
  * Build the worker's delivery transport without making Gateway configuration
- * a prerequisite for the rest of the source worker to boot. An unavailable
+ * a prerequisite for the rest of the source worker to boot. Configuration and
+ * certificate loading are lazy and begin on the first delivery. An unavailable
  * OpenClaw CLI preserves the legacy HTTP default; an authored config or trust
- * material that cannot be consumed returns a fixed fail-closed transport.
+ * material that cannot be consumed returns a fixed fail-closed transport and
+ * allows a later delivery to retry initialization.
  */
-export async function createOpenClawSourceWatchDeliveryTransport(
+export function createOpenClawSourceWatchDeliveryTransport(
   options: SourceWatchDeliveryTransportFactoryOptions = {},
-): Promise<SourceWatchDeliveryTransport> {
-  try {
+): SourceWatchDeliveryTransport {
+  let initialized: Promise<SourceWatchDeliveryTransport> | undefined;
+  const initialize = async (): Promise<SourceWatchDeliveryTransport> => {
     const env = options.env ?? process.env;
     const gatewayConfig = await loadOpenClawGatewayConfig(env);
     return new OpenClawSourceWatchDeliveryTransport({
@@ -437,14 +440,24 @@ export async function createOpenClawSourceWatchDeliveryTransport(
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(gatewayConfig ? { gatewayConfig } : {}),
     });
-  } catch {
-    return {
-      send: async () => ({
-        status: 'failed',
-        errorKind: 'openclaw_gateway_config_unavailable',
-      }),
-    };
-  }
+  };
+  return {
+    async send(lease) {
+      if (!initialized) {
+        const attempt = initialize();
+        initialized = attempt.catch(() => {
+          initialized = undefined;
+          return {
+            send: async () => ({
+              status: 'failed' as const,
+              errorKind: 'openclaw_gateway_config_unavailable',
+            }),
+          } satisfies SourceWatchDeliveryTransport;
+        });
+      }
+      return (await initialized).send(lease);
+    },
+  };
 }
 
 export function defaultOpenClawGatewayBaseUrl(

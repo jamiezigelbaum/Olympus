@@ -2117,7 +2117,7 @@ export async function main(): Promise<void> {
   const sourceWatchSearch = sourceAnswerLanes
     ? createSourceWatchSearchFromAnalystLanes(sourceAnswerLanes)
     : undefined;
-  const sourceWatchDeliveryTransport = await createOpenClawSourceWatchDeliveryTransport({
+  const sourceWatchDeliveryTransport = createOpenClawSourceWatchDeliveryTransport({
     ...(authToken ? { authToken } : {}),
   });
   const sourceWatchPass = sourceWatchSearch
