@@ -5004,18 +5004,17 @@ function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): st
  *   that matches a CURRENT publisher key). Reading "is a client_id present"
  *   instead stuck a completed publisher connection in bring-your-own the
  *   moment it needed reauthentication (Codex round 3 on e75598f7).
- * - **Google on a loopback dashboard keeps the loopback redirect.** The pilot
- *   client is a Desktop app client and a Desktop client cannot register an https
- *   redirect URI, so the relay is not usable by it — and it does not need to be:
- *   a loopback callback reaches the worker directly. Same publisher app, no
- *   relay, no signed state, exactly today's working local flow.
+ * - **Google on an HTTP loopback dashboard keeps the loopback redirect.** The
+ *   pilot client is a Desktop app client and a Desktop client cannot register
+ *   an HTTPS redirect URI. An HTTPS loopback dashboard therefore uses the
+ *   publisher Web client and the relay, just like any other HTTPS origin.
  * - **Everything else goes through the relay** with `redirect_uri` = the one
  *   registered relay URL and a signed state naming this dashboard's origin.
  *
  * The Dropbox default ships filled in (the owner's "Olympus-Plugin" app,
- * created 2026-09-03); the Google web client default stays empty until the
- * owner creates that app too (`core/publisher-oauth-client.ts`). Until then,
- * every non-loopback Google case answers `undefined` and the dashboard shows
+ * created 2026-09-03), as does the Google Web client default (the owner's
+ * "Olympus Publisher" app in `core/publisher-oauth-client.ts`). If a future
+ * publisher rotation leaves the Web identity unavailable, the dashboard shows
  * the bring-your-own path it shows today.
  */
 interface DashboardPublisherOAuthFlow {
@@ -5064,8 +5063,9 @@ function dashboardPublisherOAuthSources(
 /** Whether an origin this worker derived for itself is a loopback one. */
 function dashboardLoopbackOrigin(origin: string): boolean {
   try {
-    const hostname = new URL(origin).hostname;
-    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+    const url = new URL(origin);
+    if (url.protocol !== 'http:') return false;
+    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
   } catch {
     return false;
   }
@@ -5181,7 +5181,7 @@ function dashboardOAuthClientSecretRequired(source: DashboardOAuthSource | 'goog
 /**
  * The origin a provider must call back on.
  *
- * A loopback request still derives `http://127.0.0.1`: that is the desktop-app
+ * An HTTP loopback request derives `http://127.0.0.1`: that is the desktop-app
  * form every provider accepts on localhost, and it is the working local path.
  *
  * Everything else honors the proxy's declared scheme before the scheme this

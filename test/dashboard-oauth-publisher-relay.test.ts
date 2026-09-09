@@ -28,7 +28,10 @@ import {
   DEFAULT_OAUTH_RELAY_URL,
   OAUTH_RELAY_STATE_TTL_MS,
 } from '../src/core/oauth-relay.ts';
-import { DEFAULT_DROPBOX_PUBLISHER_APP_KEY } from '../src/core/publisher-oauth-client.ts';
+import {
+  DEFAULT_DROPBOX_PUBLISHER_APP_KEY,
+  DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+} from '../src/core/publisher-oauth-client.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
   PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -39,6 +42,7 @@ import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   createGatewayCallbackPeerHeader,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   withWorkerBearerAuth,
 } from '../src/workers/http.ts';
 import {
@@ -48,6 +52,7 @@ import {
 
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
+const GATEWAY_PUBLIC_ORIGIN = 'https://127.0.0.1:18789';
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
@@ -546,6 +551,30 @@ describe('publisher-client relay flow', () => {
     // No publisher app to fall back on: X still asks for the owner's own client.
     expect(refused.status).toBe(409);
     expect((await refused.json()).error.code).toBe('oauth_client_id_missing');
+  });
+});
+
+describe('native Gateway public-origin context', () => {
+  test('authenticated Gateway HTTPS origin selects the Google Web relay for Gmail and Drive', async () => {
+    for (const source of ['gmail', 'google-drive'] as const) {
+      const instance = fixture();
+      const started = await instance.fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer dashboard-secret',
+          'Content-Type': 'application/json',
+          [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: GATEWAY_PUBLIC_ORIGIN,
+        },
+        body: JSON.stringify({ source }),
+      }));
+      const url = await authorizationUrl(started);
+      expect(url.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+      expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+      expect(statePayload(url.searchParams.get('state')!)).toMatchObject({
+        origin: GATEWAY_PUBLIC_ORIGIN,
+        source,
+      });
+    }
   });
 });
 
