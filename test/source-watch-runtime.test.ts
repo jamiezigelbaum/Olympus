@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,7 @@ import {
   listSourceWatchPublicViews,
   OpenClawSourceWatchDeliveryTransport,
   defaultOpenClawGatewayBaseUrl,
+  loadOpenClawGatewayConfig,
   resolveSourceWatchGatewayConnection,
   runSourceWatchDeliveryPass,
   runSourceWatchEvaluationPass,
@@ -312,7 +313,6 @@ describe('durable source watch runtime', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-tls-'));
     const trusted = makeSelfSignedCertificate(dir, 'DNS:localhost,IP:127.0.0.1');
     const wrongHost = makeSelfSignedCertificate(dir, 'IP:127.0.0.1', 'wrong-host');
-    const wrongCa = makeSelfSignedCertificate(dir, 'DNS:localhost,IP:127.0.0.1', 'wrong-ca');
     const server = createServer({
       key: readFileSync(trusted.keyPath),
       cert: readFileSync(trusted.certPath),
@@ -329,6 +329,20 @@ describe('durable source watch runtime', () => {
     });
     try {
       const port = await listenHttpsServer(server);
+      const fakeOpenClaw = join(dir, 'openclaw');
+      const directGatewayConfig = {
+        port,
+        mode: 'local',
+        bind: 'loopback',
+        tls: { enabled: true, certPath: trusted.certPath },
+        auth: { token: 'redacted-by-openclaw' },
+      };
+      writeFileSync(fakeOpenClaw, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(directGatewayConfig)}'\n`);
+      chmodSync(fakeOpenClaw, 0o755);
+      const loadedGatewayConfig = await loadOpenClawGatewayConfig({ PATH: dir, HOME: dir });
+      expect(loadedGatewayConfig).toEqual({
+        gateway: { port, tls: { enabled: true, certPath: trusted.certPath } },
+      });
       expect(resolveSourceWatchGatewayConnection({
         gateway: { port, tls: { enabled: true, certPath: trusted.certPath } },
       })).toEqual({
@@ -345,7 +359,7 @@ describe('durable source watch runtime', () => {
         if (!lease) throw new Error('expected HTTPS delivery lease');
         const transport = new OpenClawSourceWatchDeliveryTransport({
           authToken: 'shared-worker-token',
-          gatewayConfig: { gateway: { port, tls: { enabled: true, certPath: trusted.certPath } } },
+          gatewayConfig: loadedGatewayConfig,
         });
         expect(await transport.send(lease)).toMatchObject({
           status: 'delivered',
@@ -354,7 +368,7 @@ describe('durable source watch runtime', () => {
 
         const untrusted = new OpenClawSourceWatchDeliveryTransport({
           authToken: 'shared-worker-token',
-          gatewayConfig: { gateway: { port, tls: { enabled: true, certPath: wrongCa.certPath } } },
+          gatewayConfig: { gateway: { port, tls: { enabled: true, certPath: wrongHost.certPath } } },
         });
         expect(await untrusted.send(lease)).toEqual({
           status: 'failed',
@@ -384,6 +398,41 @@ describe('durable source watch runtime', () => {
     } finally {
       await closeHttpsServer(server);
       await closeHttpsServer(wrongHostServer);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('turns an invalid HTTPS response status into a delivery failure without escaping the request callback', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-watch-tls-status-'));
+    const certificate = makeSelfSignedCertificate(dir);
+    const server = createServer({
+      key: readFileSync(certificate.keyPath),
+      cert: readFileSync(certificate.certPath),
+    }, (_request, response) => {
+      response.statusCode = 204;
+      response.end();
+    });
+    try {
+      const port = await listenHttpsServer(server);
+      await withStore(async ({ store, executor, owner }) => {
+        store.createWatch(watchInput('watch-invalid-https-status'), owner);
+        store.recordMatch(executor, {
+          watchId: 'watch-invalid-https-status',
+          ref: hit('message-invalid-https-status', START, START).ref,
+        });
+        const lease = store.leaseDeliveries(executor, { leaseDurationMs: 60_000 })[0];
+        if (!lease) throw new Error('expected invalid-status delivery lease');
+        const transport = new OpenClawSourceWatchDeliveryTransport({
+          authToken: 'shared-worker-token',
+          gatewayConfig: { gateway: { port, tls: { enabled: true, certPath: certificate.certPath } } },
+        });
+        expect(await transport.send(lease)).toEqual({
+          status: 'failed',
+          errorKind: 'openclaw_invalid_response',
+        });
+      });
+    } finally {
+      await closeHttpsServer(server);
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -659,7 +708,7 @@ async function withStore(run: (fixture: {
 
 function makeSelfSignedCertificate(
   directory: string,
-  subjectAltName: string,
+  subjectAltName = 'DNS:localhost,IP:127.0.0.1',
   suffix = 'cert',
 ): { certPath: string; keyPath: string } {
   const certPath = join(directory, `${suffix}.crt`);
