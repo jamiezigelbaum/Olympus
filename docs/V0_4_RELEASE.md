@@ -21,6 +21,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
+  setup and worker/Gateway activation before optional dashboard source choice.
+  No mailbox is required for base-worker health. Preserve the approved
+  transition and full tier explanation as required user-facing blocks;
+  distinguish Venice secure answers from Gemini non-secure embeddings, and
+  authenticated password-manager CLI access from manual browser entry.
+  Native UI readiness requires a browser activation receipt, not just a loaded
+  backend. The Air's WebKit runtime rejected Secure plugin cookies on loopback
+  HTTP in a secret-free reproduction; supported browser/transport selection is
+  an explicit prerequisite, never a reason to weaken cookie or Gateway auth.
 - **2026-09-09 — Prompt-only pilot installation.** A tester copies one prompt
   from the repository into their agent. The agent downloads the designated
   GitHub prerelease package and checks its SHA-256 and byte count against

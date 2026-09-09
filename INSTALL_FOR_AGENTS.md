@@ -7,7 +7,10 @@ personal-data layer for OpenClaw: it ingests the operator's sources
 (email, files, chats), indexes them locally, and answers questions
 through model lanes the operator explicitly approves. Follow the steps in
 order. Where a step says **ASK THE OPERATOR**, stop and ask — do not pick a
-default. The whole install takes about ten minutes plus OAuth clicks.
+default. Complete base activation before offering optional source setup.
+Read the current step in full before carrying it out. Immediately before an
+operator-facing transition, read its required message block directly; do not
+use a remembered summary of this guide as the user-facing copy.
 
 ## Rule zero — the residue gate binds EVERY Olympus-touching action
 
@@ -57,7 +60,7 @@ connection the operator never made.
 …plus a look through your own memory/bulletin files and any prior
 session's summary for Olympus notes, and — on macOS — per-provider
 Keychain probes for the providers Olympus connects (venice, gemini,
-google and its `gog` helper, plus any Step 5 provider — Dropbox, X,
+google and its `gog` helper, plus any Step 6 provider — Dropbox, X,
 Readwise — the list is illustrative, not closed), as presence checks
 only (never dump or print a secret's value — MUST NOT #2): a
 credential named for a provider is residue to surface even though
@@ -112,7 +115,7 @@ Each of the following is its own named consent gate, asked and answered
 BEFORE the action is performed, every time:
 
 - **Posture** (Step 2) — the walkthrough and the choice.
-- **Each credential** (Steps 3 and 5) — one plain-language explanation
+- **Each credential** (Steps 3 and 6) — one plain-language explanation
   and one ask per credential, with any recorded caveat surfaced; never
   a batched after-the-fact "your keys are set up."
 - **Worker registration** (Step 2, before `olympus setup`) — the
@@ -121,7 +124,7 @@ BEFORE the action is performed, every time:
   past it is not consent. `olympus setup` is that command: it installs
   the launchd/systemd item itself, so this gate is cleared alongside the
   posture gate and before setup runs, not later in Step 4.
-- **Gateway restart** (Step 6) — its own explicit go, never queued
+- **Gateway restart** (Step 5) — its own explicit go, never queued
   silently behind earlier consent.
 
 A "go" is an explicit, affirmative answer given in response to THIS
@@ -311,25 +314,25 @@ ClawHub.` Do not substitute it during the pilot.
 Success looks like `Installed plugin: olympus`. **Do NOT restart the
 gateway YOURSELF now, and do not restart it to "verify" the plugin
 loaded.** You still owe exactly one DELIBERATE restart and it comes at the
-end (Step 6).
+end (Step 5).
 
 **Be honest about what the install itself already did.** On OpenClaw
 `2026.9.1` installing a plugin can make the gateway reload its plugin set
 on its own, and its boot line can list `olympus` among the loaded plugins
-long before Step 6. So do not tell the operator Olympus "stays dormant
+long before Step 5. So do not tell the operator Olympus "stays dormant
 until one restart at the very end" — it is not true on this version, and
 they can read the log. What IS true, and is the part that matters to them:
 Olympus is registered but has no posture, no credentials and no sources
 yet, so it reads nothing and sends nothing. It stays inert until the
-operator connects a source in Step 5.
+operator connects a source in Step 6.
 
-Step 6's restart is still required, and not as ceremony: it is what makes
+Step 5's restart is still required, and not as ceremony: it is what makes
 the gateway load the plugin against the FINAL config — the posture, worker
 and credentials setup writes — so the agent-facing tools (`source_answer`
 etc.) come up against the configuration the operator actually approved. An
 early restart of your own just doubles the disruption (and, if you are
-running inside this gateway, strands you — see Step 6). Everything between
-here and there — setup, keys, the worker, connecting sources — runs
+running inside this gateway, strands you — see Step 5). Everything between
+here and there — setup, keys, and the worker — runs
 through the standalone `olympus` CLI, which does not depend on the gateway
 having loaded the plugin.
 
@@ -370,15 +373,17 @@ resolves on PATH. When a code block is for the OPERATOR to copy and run
 themselves, write the full resolved path into the block you actually
 hand them.
 
-**Transition rule (this is where installs go wrong):** when you report the
+**Operator mechanics — transition:** when you report the
 install result, do NOT name the preset ids and do NOT ask the operator to
 pick a posture in that report — "you'll need to choose: local-first,
 local-only, …" is exactly the bare menu MUST NOT #1 forbids. Preset ids
 appear for the first time inside the four-option walkthrough, never before
 it. And never end a message with a dead-end status line; every message
-hands the operator an obvious next move. End the install report like this
-(adapt the words, keep the shape — short proof, then an invitation that
-opens Step 2):
+hands the operator an obvious next move.
+
+The following is a **required user-facing transition**. Deliver it in full,
+changing factual status only to match the observed install; do not replace it
+with an abbreviated privacy question:
 
 > Olympus is installed. Quick proof: the plugin loads, and the `olympus`
 > CLI runs (reachable at its plugin path — I haven't touched your PATH or
@@ -402,7 +407,7 @@ operator's machine is never clean. If you have ANY prior knowledge or
 traces of an earlier Olympus setup — notes in your own memory or bulletin
 files, an existing `~/.olympus` or `~/.config/olympus`, credential-store
 items for any provider Olympus connects (venice, gemini, google and
-its `gog` helper, plus any Step 5 provider — Dropbox, X, Readwise —
+its `gog` helper, plus any Step 6 provider — Dropbox, X, Readwise —
 illustrative, not closed; probe read-only by provider/service name,
 e.g. `security find-generic-password -s <ServiceName>` WITHOUT `-w`,
 so a secret's value is never printed; nothing there will say
@@ -436,10 +441,11 @@ must NOT silently accept a default — and you must NOT present the presets
 as a bare list of names. A new operator has no idea what a preset id means.
 **The walkthrough below is part of the gate**: explain, in plain language,
 what each posture means for THEIR data, what it requires, and its trade-off
-— then ask. Adapt this script; do not compress it to a menu.
+— then ask. Preserve the full explanation below; do not compress it to a menu.
 
-Open with the privacy model. The point of each tier is what happens
-*differently* to data in it — never present a tier as a bare list of
+**Required user-facing four-tier explanation.** Deliver this entire block
+before asking any sensitivity or posture question. The point of each tier is
+what happens *differently* to data in it — never present a tier as a bare list of
 category examples. This message both explains the model and opens the
 sensitivity conversation:
 
@@ -477,7 +483,8 @@ sensitivity conversation:
 > protective of? Talk normally — I'll turn what you say into your personal
 > sensitivity map and read it back to you before anything gets saved.
 
-Iterate on that conversation, voice-friendly, until the operator confirms.
+**Operator mechanics — sensitivity mapping.** Iterate on that conversation,
+voice-friendly, until the operator confirms.
 Help the operator untangle two different questions:
 
 - where data is stored today
@@ -616,21 +623,24 @@ before the options name it:
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
 >    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
->    key (free tier available) for search indexing. Trade-off: strongest
->    owner-controlled first step, with private-cloud escalation available;
+>    key (free tier available) for public and ordinary-private search indexing.
+>    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models only** (`local-only`) — secure questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
 >    runtime with lots of fast memory, plus a Gemini API key (free tier
->    available) for search indexing. Trade-off: no sensitive-tier cloud
->    escalation; if the local lane cannot answer, Olympus reports the gap.
+>    available) for public and ordinary-private search indexing. Trade-off: no
+>    sensitive-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
 >    not run local models. Secure content goes only to Venice, on its
 >    Private model path — currently `kimi-k3`. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
->    available) for search indexing. Trade-off: no local-model requirement
+>    available) for public and ordinary-private search indexing. Secure search
+>    stays on this machine as keyword search; secure content never goes to
+>    Gemini. “Only” describes secure-data handling, not all Olympus traffic.
+>    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
 >    for secure answers, on that provider's word rather than on
 >    encryption.
@@ -640,7 +650,8 @@ before the options name it:
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    a Gemini API key (free tier available) for everyday source indexing.
+>    a Gemini API key (free tier available) for public and ordinary-private
+>    source indexing.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
 >
@@ -723,19 +734,26 @@ startup error need the qualified fix, not another credential read.
 The guide also covers creating the user's provider accounts and API spending
 limits; the operator completes sign-in, terms, purchases, and billing changes.
 
-**Credential sourcing (password-manager-aware).** Before sending the
-operator to a website to copy a key — or asking them to paste anything —
-ask where they keep secrets, or note what this machine already offers
-(the macOS Keychain via `security`, 1Password's `op`, Bitwarden's `bw`,
-`pass`). If the credential already lives in their manager, offer to
-fetch it yourself via that manager's CLI and pipe it into the stdin
-connect flow. Pasting into the dashboard field is an equally private,
-operator-run path — fetching just spares them the copy step, so offer,
-never steer. Knowing WHERE they keep secrets is not consent to fetch
-anything: the manager is the SOURCE of the credential, never the
-consent, and the Rule one per-credential gate runs unchanged — explain,
-ask, and only then fetch and connect, one credential at a time. Hard
-limits:
+**Credential sourcing — choose the method before requesting a reference.**
+Ask where the operator keeps the key and offer these two supported routes:
+
+- **Manual web route:** the operator opens their password manager's website
+  and pastes the key themselves into a supported local dashboard field or
+  silent terminal input. For Gemini, use the documented CLI stdin flow below.
+  No password-manager desktop app or CLI is required for this route. Never
+  ask them to paste the key into chat.
+- **Authenticated CLI route:** if they want the agent to fetch the key,
+  verify that their manager CLI is installed and authenticated first. For
+  1Password, an `op://vault/item/field` reference works only with authenticated
+  `op` access; a signed-in website alone does not supply that access. The
+  operator may configure CLI authentication using its supported procedure or
+  choose manual paste. Do not require a desktop app for the manual route or
+  promise that an `op://` reference alone is usable.
+
+Once they choose CLI access, obtain the exact item/field reference and approval
+for this credential, then fetch once directly into the stdin connect flow.
+Do not list or search their vault to find it. Pasting is equally supported;
+knowing where a credential lives never authorizes fetching it. Hard limits:
 
 - The operator supplies the exact item name or reference; if you do not
   have it, ask. Fetch ONLY that named item, after their yes. Never
@@ -875,18 +893,11 @@ it said:
   "embedding_provider_unavailable"}`. All three name the SAME credential.
   Connect the key, run `olympus worker restart`, re-run doctor — the three
   go green together.
-- **No email account connected yet (also expected, and NOT breakage).**
-  Once no credential is degraded, `email_worker` falls through to
-  `Email worker at http://127.0.0.1:8010/v1 answered /health
-  (reachable=true configured=false).` with the hint `The worker is running
-  but reports configured=false; check its connector configuration.` That is
-  a red check whose whole meaning is "no mailbox yet" — the worker's own
-  health detail says it plainly: `No email account is connected yet.
-  Connect Gmail from the Olympus dashboard to enable email answers.` It
-  clears when the operator connects Gmail in Step 5, and it is not a reason
-  to touch config. Note the ordering: the degraded-credential line wins
-  while a credential is degraded, so this sentence usually appears only
-  after the Gemini key is in.
+- **No source connected yet (expected).** A healthy worker passes base-install
+  health with zero sources. Mailbox configuration is not worker readiness;
+  the repaired Doctor no longer marks `email_worker` red just because the
+  operator has not selected Gmail. A connected source with unhealthy status,
+  an unreachable worker, or degraded credentials remains a real failure.
 - **Real breakage.** The worker never answered: the details read `… is not
   reachable at http://127.0.0.1:8010/v1: <connection error>` and the hint
   is `Run olympus worker status, then olympus worker start or olympus
@@ -1015,25 +1026,178 @@ If the operator would rather watch it run in the foreground for a first
 session, `olympus worker foreground` runs it in a terminal they control —
 stop the background service first so the two do not race.
 
-## Step 5 — Connect sources
+## Step 5 — Validate, then restart the gateway (in this order)
 
-Open the dashboard and make it the operator-facing connect surface:
+Resolve the selected dashboard's prerequisites before this restart. If the
+artifact declares native Control UI support, check its Labs opt-in, browser/
+transport compatibility, and Gateway origin described in Step 6 now. Apply
+only authorized settings through the host's supported configuration workflow;
+do not discover these settings only after restarting and handing off.
+
+**Residue check first (Rule zero):** never run this restart to activate a
+configuration the operator has not consented to in this flow; on a
+machine with prior-setup traces the gate must already have been cleared.
+
+**The restart is its own consent gate (Rule one):** it gets its own
+explicit go from the operator, every time — never queued silently behind
+earlier yeses, and never bundled into "finishing up."
+
+**If you are an agent running INSIDE this OpenClaw gateway** (an OpenClaw
+chat agent rather than an external CLI agent): restarting the gateway
+ends your own session mid-turn. Before running the restart, tell the
+operator exactly this — "the next command restarts the gateway and this
+chat will drop; when it's back, message me: *continue the Olympus install
+from Step 6*" — or hand the operator the three commands below to run in
+their own terminal. The same applies to any gateway restart during
+Step 1's plugin install.
+
+Never restart the gateway without a green validate:
+
+```bash
+openclaw config validate
+openclaw doctor --lint
+openclaw gateway restart
+```
+
+**Only `openclaw config validate` is the gate.** It must exit green; if it
+does not, stop and fix the config before restarting (MUST NOT #3).
+
+`openclaw doctor --lint` is a report you read, not a gate you must clear.
+It lints the operator's whole OpenClaw install and routinely exits 1 on
+pre-existing warnings that have nothing to do with Olympus — another
+plugin's config, a deprecated key, an unrelated agent. Findings that are
+not about Olympus are **reported to the operator and left alone**: do not
+fix them (you did not cause them and nobody consented to those changes)
+and do not let them block the restart. A lint finding that IS about
+Olympus is a different matter — treat it as a real defect and resolve it
+before restarting.
+
+After the restart, verify the plugin actually loaded. The honest checks
+are:
+
+- the gateway boot line names olympus among the loaded plugins — read it
+  where it actually is, see below, and
+- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
+  and
+- one real tool call succeeds — `olympus source index status`.
+
+**Where the gateway boot line actually lives.** Do not go looking in
+`openclaw logs` or `~/.openclaw/logs/gateway.log`. On `2026.9.1` the
+former printed nothing, and the latter is a stale file that can be months
+old — believing it will tell you the plugin failed to load on a machine
+where it loaded fine. On macOS the live gateway log is a per-day
+JSON-lines file under `/tmp/openclaw/`, so grep the newest one:
+
+```bash
+grep -h 'http server listening' "$(ls -t /tmp/openclaw/openclaw-*.log | head -1)"
+```
+
+Every line is a JSON object, so the boot record and its loaded-plugin list
+sit inside the `message` field rather than reading as plain text; pipe
+through `jq -r .message` if you want it legible. On Linux the gateway runs
+as a user systemd unit and the same line comes from the journal:
+
+```bash
+journalctl --user -u openclaw -n 200 --no-pager | grep 'http server listening'
+```
+
+If neither surface shows the line — a machine whose log rotated since the
+last restart, for instance — do not manufacture the proof and do not
+restart again to produce one. Say the boot line was not observable, and
+lean on the other two checks: `"status": "loaded"` plus a successful
+`olympus source index status` are conclusive on their own.
+
+For a selected native dashboard, also verify `plugins.controlUi.list` includes
+Olympus without a diagnostic and `plugins.controlUi.status` reports successful
+activation from the actual connected browser. Confirm the sidebar entry and
+page render there. A loaded backend and HTTP health alone do not prove browser
+activation. An unusable selected dashboard keeps the handoff incomplete;
+diagnose its asset/transport error without connecting an unrelated source.
+
+**Do not verify by reading `toolNames` from `plugins inspect`.** It is
+`[]` for olympus by design: the tools (`source_answer`,
+`source_index_status`, `source_index_search`) register at runtime when the
+plugin initializes, not in the static manifest inspect reads. An empty
+`toolNames` on a healthy install proves nothing is wrong, and chasing it
+sends you re-installing a plugin that already works.
+
+For a Hermes Agent install, use the package's narrower MCP-only lane:
+
+```bash
+openclaw plugins inspect olympus --json
+hermes mcp add olympus --command /absolute/managed/olympus/bin/olympus --args serve
+hermes mcp test olympus
+```
+
+Take `plugin.rootDir` from the inspect response and append `/bin/olympus`; do
+not guess OpenClaw's managed storage path and do not assume a global `olympus`
+command exists.
+
+Configure the `olympus` server with
+`tools: { include: [source_answer, source_index_status] }` (the packaged
+`config/hermes/olympus.mcp.yaml` shows the complete YAML), reload MCP, and
+verify the only discovered names are `mcp_olympus_source_answer` and
+`mcp_olympus_source_index_status`. In Step 7, after the chosen source is ready,
+exercise a cited answer through the discovered `mcp_olympus_source_answer`. Do not enable
+`source_index_search`, `source_watch_*`, prompts, or resources for v0.4 Hermes.
+
+The optional `integrations/hermes/ask-sources` adaptation may be copied to
+`~/.hermes/skills/ask-sources` or loaded through `skills.external_dirs`. No
+`hermes://mcp/install` link is published because current Hermes documentation
+does not define that handler, and no external catalog submission is authorized.
+
+## Step 6 — Optional source setup
+
+**Base installation is complete before source choice.** Report the selected
+posture, model prerequisites, worker health, and successful plugin/tool and
+selected-dashboard activation from Steps 1–5. No connected source is required.
+Open the selected dashboard, then deliver this required user-facing handoff:
+
+> Setup is complete. In the Olympus dashboard, connect the sources you use.
+> You can start with one and add others whenever you like. I'll help if any
+> connection needs extra setup.
+
+Source selection happens in the dashboard. Do not turn all supported providers
+into a checklist, choose Gmail to satisfy a health hint, or add a chat question
+asking which source to start before the user has chosen a card. Provide help
+for the source the operator selects and only its approved scope. If the
+operator explicitly needs the documented headless fallback, ask which source
+that fallback should connect.
+
+On OpenClaw **2026.9.2**, prefer **Olympus** in the Control UI sidebar **when
+the installed Olympus artifact includes native Control UI support**. Host
+version alone does not prove that integration exists. Native plugin pages need
+**Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
+managed procedure, and a browser reload. Explain this opt-in and obtain any
+uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
+  WebKit/Safari 26.2 runtime, Secure plugin cookies are rejected over plain
+  localhost/loopback HTTP even though the page is a secure context. For the
+  integrated UI, use Chrome on loopback or an already configured trusted HTTPS
+  route. Do not weaken cookie/authentication settings, expose a new listener,
+  or change certificate trust as an implicit plugin-install step. The integrated page uses the signed-in operator's
+permissions and keeps the worker bearer on the server; it needs no worker-token
+paste. See the [upstream contract](https://docs.openclaw.ai/plugins/feature-plugins).
+
+For native OAuth, verify that `gateway.publicOrigin` names that Gateway's
+HTTPS or literal localhost/loopback HTTP origin. Use the applicable live-change
+procedure for an authorized change; never edit runtime configuration directly
+or send a remote browser to the worker's loopback callback. If native support is absent, or the operator explicitly chooses direct access,
+explain that boundary and use the supported standalone dashboard. If a declared
+native UI fails to appear, inspect `plugins.controlUi.list` and
+`plugins.controlUi.status` first; a loaded backend does not prove browser
+activation. An import failure is a browser/asset delivery failure, not a reason
+to reconnect sources or reinstall the package blindly:
 
 ```bash
 olympus dashboard
 ```
 
-Say: "I've opened your Olympus dashboard. Click Connect on the sources you
-want; I'll watch status and help with any one-time setup."
+Use the required handoff above once the selected dashboard is open.
 
-`olympus dashboard` prints three fields and no fourth: `url`, `opened`
-(whether it managed to open a browser), and `hint`. **Hand the printed
-`url` to the operator exactly as printed.** It ends in
-`?token=dash_…` — the read-only view token — and that is the URL the
-command just opened in the browser. It is also the only URL that works: a
-browser cannot send a bearer header from the address bar, so the bare
-`/dashboard` path returns 401 and gives the reader no way to tell why.
-Copy the URL whole; do not "clean up" the query string.
+The standalone `olympus dashboard` command prints `url`, `opened` (whether it
+opened a browser), and `hint`. Hand the printed `url` to the operator exactly
+as printed, including `?token=dash_…`. The bare `/dashboard` path returns 401;
+do not remove the read-only view token.
 
 The `hint` is the sentence that explains the split, and it is worth
 reading to the operator almost verbatim:
@@ -1077,11 +1241,10 @@ field beside the URL, or prints a `url` with no `dash_` query token at
 all, that build predates this guide: do not read the `auth` field as the
 token, and do not hand over a tokenless URL as if it worked.
 
-Ask which sources they want now, but do not bulk-connect anything yourself.
-Sources can be started in any order from the dashboard, and OAuth sources can
-be in flight in parallel. Your job is to narrate, run one-time setup when a
+Follow the source the operator chose; do not bulk-connect anything yourself.
+Other sources can be added later from the same dashboard. Your job is to narrate, run one-time setup when a
 card asks for it, and diagnose failures by watching `olympus connect status`
-and `olympus doctor`. Keep `olympus dashboard` open as the operator-facing
+and `olympus doctor`. Keep the selected Olympus dashboard open as the operator-facing
 progress view.
 
 Connect-conversation rules:
@@ -1259,7 +1422,7 @@ If the first PNG render does not scan, regenerate once (QR payloads rotate
 quickly; a stale payload is the usual cause) before suspecting the bridge.
 
 Rules:
-- Keep `olympus dashboard` open as the operator-facing progress view.
+- Keep the selected Olympus dashboard open as the operator-facing progress view.
 - Run only the command for the source currently being connected.
 - A dashboard Connect click authorizes only that source. Before YOU run
   any `--detach` connect yourself, ask for that specific source — every
@@ -1267,118 +1430,18 @@ Rules:
 - Treat dashboard Connect clicks as the primary path; use CLI `--detach` only
   as the headless fallback.
 
-## Step 6 — Validate, then restart the gateway (in this order)
+## Step 7 — Verify the chosen source with a cited answer
 
-**Residue check first (Rule zero):** never run this restart to activate a
-configuration the operator has not consented to in this flow; on a
-machine with prior-setup traces the gate must already have been cleared.
-
-**The restart is its own consent gate (Rule one):** it gets its own
-explicit go from the operator, every time — never queued silently behind
-earlier yeses, and never bundled into "finishing up."
-
-**If you are an agent running INSIDE this OpenClaw gateway** (an OpenClaw
-chat agent rather than an external CLI agent): restarting the gateway
-ends your own session mid-turn. Before running the restart, tell the
-operator exactly this — "the next command restarts the gateway and this
-chat will drop; when it's back, message me: *continue the Olympus install
-from Step 7*" — or hand the operator the three commands below to run in
-their own terminal. The same applies to any gateway restart during
-Step 1's plugin install.
-
-Never restart the gateway without a green validate:
-
-```bash
-openclaw config validate
-openclaw doctor --lint
-openclaw gateway restart
-```
-
-**Only `openclaw config validate` is the gate.** It must exit green; if it
-does not, stop and fix the config before restarting (MUST NOT #3).
-
-`openclaw doctor --lint` is a report you read, not a gate you must clear.
-It lints the operator's whole OpenClaw install and routinely exits 1 on
-pre-existing warnings that have nothing to do with Olympus — another
-plugin's config, a deprecated key, an unrelated agent. Findings that are
-not about Olympus are **reported to the operator and left alone**: do not
-fix them (you did not cause them and nobody consented to those changes)
-and do not let them block the restart. A lint finding that IS about
-Olympus is a different matter — treat it as a real defect and resolve it
-before restarting.
-
-After the restart, verify the plugin actually loaded. The honest checks
-are:
-
-- the gateway boot line names olympus among the loaded plugins — read it
-  where it actually is, see below, and
-- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
-  and
-- one real tool call succeeds — `olympus source index status`.
-
-**Where the gateway boot line actually lives.** Do not go looking in
-`openclaw logs` or `~/.openclaw/logs/gateway.log`. On `2026.9.1` the
-former printed nothing, and the latter is a stale file that can be months
-old — believing it will tell you the plugin failed to load on a machine
-where it loaded fine. On macOS the live gateway log is a per-day
-JSON-lines file under `/tmp/openclaw/`, so grep the newest one:
-
-```bash
-grep -h 'http server listening' "$(ls -t /tmp/openclaw/openclaw-*.log | head -1)"
-```
-
-Every line is a JSON object, so the boot record and its loaded-plugin list
-sit inside the `message` field rather than reading as plain text; pipe
-through `jq -r .message` if you want it legible. On Linux the gateway runs
-as a user systemd unit and the same line comes from the journal:
-
-```bash
-journalctl --user -u openclaw -n 200 --no-pager | grep 'http server listening'
-```
-
-If neither surface shows the line — a machine whose log rotated since the
-last restart, for instance — do not manufacture the proof and do not
-restart again to produce one. Say the boot line was not observable, and
-lean on the other two checks: `"status": "loaded"` plus a successful
-`olympus source index status` are conclusive on their own.
-
-**Do not verify by reading `toolNames` from `plugins inspect`.** It is
-`[]` for olympus by design: the tools (`source_answer`,
-`source_index_status`, `source_index_search`) register at runtime when the
-plugin initializes, not in the static manifest inspect reads. An empty
-`toolNames` on a healthy install proves nothing is wrong, and chasing it
-sends you re-installing a plugin that already works.
-
-For a Hermes Agent install, use the package's narrower MCP-only lane:
-
-```bash
-openclaw plugins inspect olympus --json
-hermes mcp add olympus --command /absolute/managed/olympus/bin/olympus --args serve
-hermes mcp test olympus
-```
-
-Take `plugin.rootDir` from the inspect response and append `/bin/olympus`; do
-not guess OpenClaw's managed storage path and do not assume a global `olympus`
-command exists.
-
-Configure the `olympus` server with
-`tools: { include: [source_answer, source_index_status] }` (the packaged
-`config/hermes/olympus.mcp.yaml` shows the complete YAML), reload MCP, and
-verify the only discovered names are `mcp_olympus_source_answer` and
-`mcp_olympus_source_index_status`. Exercise a cited answer through the
-discovered `mcp_olympus_source_answer`. Do not enable
-`source_index_search`, `source_watch_*`, prompts, or resources for v0.4 Hermes.
-
-The optional `integrations/hermes/ask-sources` adaptation may be copied to
-`~/.hermes/skills/ask-sources` or loaded through `skills.external_dirs`. No
-`hermes://mcp/install` link is published because current Hermes documentation
-does not define that handler, and no external catalog submission is authorized.
-
-## Step 7 — Verify end to end
+Run this only after the chosen source has completed a bounded initial sync and
+reports answer readiness. Ask a normal question whose answer the operator
+expects in that source, then check the returned citations against that scope.
+If they deferred sources, report "base installation verified; cited-answer
+proof pending a chosen source" and stop here. An empty-source answer is not
+proof of successful retrieval.
 
 ```bash
 olympus doctor                                   # every check green or explained
-olympus source answer "what's in my sources so far?"
+olympus source answer "<question about the chosen, ready source>"
 ```
 
 `olympus doctor` exits 1 while any check is red, naming the failed checks
@@ -1421,13 +1484,14 @@ the worker only if it reports `resolved_restart_required`);
 `degraded_credentials`; and the first answer's audit block must not
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
-should be absent. Then show the operator `olympus dashboard` — a local, token-protected view of source
+should be absent. Then return to the selected Olympus dashboard — a protected view of source
 freshness and where public, private, secure, and secrets are allowed to go.
 
 Report to the operator: what was installed, the chosen posture, which
 sources are connected, which prerequisites remain open, and the doctor
-summary. The install is done only when doctor is green or every non-green
-check has been explicitly accepted by the operator.
+summary. Report base installation and cited-answer proof separately. Explain every
+non-green doctor check; resolve required model or worker failures before
+claiming base readiness. Unchosen sources are not missing install steps.
 
 ## Resuming after an interruption
 

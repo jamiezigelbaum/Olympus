@@ -1,6 +1,6 @@
 # Olympus Quickstart
 
-From zero to asking your own data questions, in about ten minutes.
+Install Olympus, then optionally connect a source and verify a cited answer.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
@@ -28,7 +28,10 @@ The agent downloads the package, runs this whole guide, asks you for the
 decisions that are yours, and verifies the result. The steps below are the
 same flow, by hand.
 
-Before first setup, follow the
+Before first setup, read the full
+[four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
+then describe your sensitivity preferences and choose how to handle secure data.
+For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
 local models, and embedding dimensions. Shipped models use their registered
@@ -95,8 +98,8 @@ You should see `Installed plugin: olympus`. On `2026.9.1` the gateway may
 reload on its own at this point, so olympus can appear in its boot line
 before you restart anything. That only registers the plugin: with no
 posture, no keys and no sources, Olympus reads nothing and sends nothing
-until you connect a source in step 4. The deliberate restart in step 5 is
-still required — it is what loads the plugin against your finished config.
+until you choose and connect a source in step 5. The deliberate restart in
+step 4 is still required — it is what loads the plugin against your finished config.
 
 Both flags are required on OpenClaw `2026.8.1+`. `--accept-capabilities`
 supplies the capability consent a non-TTY install cannot be prompted for;
@@ -208,8 +211,10 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a secure lane) |
 
   In `private-cloud-only`, secure answers are served by the approved Venice
-  Private model, with no local-model prerequisite or fallback. `local-first`
-  explicitly orders local before Venice; a pool without `order` selects equal
+  Private model, with no local-model prerequisite or fallback. “Only” describes
+  secure-data handling: Gemini still handles public and ordinary-private
+  embeddings, while secure search stays on this machine as keyword search.
+  `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
   release claim. Secure search remains lexical-only in `private-cloud-only`;
@@ -293,37 +298,14 @@ Do not restart the worker for ordinary credential, scope, pairing, Disconnect,
 partial-sync, or missing source-dependency recovery. Follow the dashboard card
 or `olympus doctor` action for that source.
 
-## 4. Connect your sources
+## 4. Validate and restart the gateway
 
-```bash
-olympus connect google --client-id <google-oauth-client-id>
-olympus connect dropbox --client-id <dropbox-oauth-client-id>
-
-olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready
-olympus connect whatsapp --session-path ~/.local/share/olympus/whatsapp --session-ready
-
-printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
-printf '%s' "$READWISE_TOKEN" | olympus connect readwise --api-key-stdin
-```
-
-Connect as few or as many as you like, one source at a time. Connecting records
-the credentials and runtime handles Olympus needs. All seven declared sources
-use the canonical connector-store runtime; each lane activates when its
-credential or paired session, scope, and source-specific prerequisites are
-ready. No source requires a legacy read-authority flag or migration utility.
-
-X uses a user-owned developer application so its API usage is not billed to
-Olympus. Complete X setup in the dashboard. The current supported fallback is
-a confidential client ID and secret entered locally; client-ID-only PKCE is
-not promised until its refresh/rotation/restart path is qualified.
-
-Tokens live in an encrypted local secret store by default, or in an explicitly
-configured OS/1Password secret store when supported, never in plain text or
-logs. Omit `--session-ready` for Telegram or WhatsApp if the
-local session still needs the Telethon or WhatsApp pairing helper; Olympus will
-record the handle as `reauth_required`.
-
-## 5. Validate and restart the gateway
+Before this restart, select and prepare the dashboard described in Step 5.
+If the artifact supports native Control UI, handle its Labs opt-in and Gateway
+origin now through the authorized configuration workflow. On the tested Air,
+WebKit rejects the Secure plugin cookie over plain loopback HTTP; use Chrome
+on loopback or an existing trusted HTTPS route. Do not weaken authentication
+or change certificate trust just to make the plugin page load.
 
 ```bash
 openclaw config validate
@@ -360,14 +342,32 @@ If the line is not there because the log rotated since the last restart,
 the other two checks stand on their own — do not restart again just to
 produce it.
 
-## 6. Watch it ingest
+## 5. Optionally connect a source
+
+Base installation is ready when the chosen model prerequisites, worker health,
+and plugin/tool activation above are verified. No source connection is needed
+for that result. You can stop here and connect a source later.
+
+On OpenClaw **2026.9.2**, open **Olympus** in the Control UI sidebar when the
+installed Olympus artifact includes native Control UI support. The host version
+alone does not prove support. This requires **Settings → Labs → Custom plugin
+UI** and the Gateway activation completed in Step 4, followed by a browser
+reload. The native page uses your signed-in permissions and
+keeps the worker bearer on the server, so no worker-token paste is needed.
+Native OAuth also needs `gateway.publicOrigin` to name the Gateway's HTTPS or
+localhost/loopback origin; follow the managed change procedure to configure it.
+See the [agent guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
+
+If the artifact lacks that integration, or you choose direct access, use the
+standalone dashboard. A declared native UI that fails to load needs diagnosis;
+backend health alone is not a successful UI handoff:
 
 ```bash
 olympus dashboard
 ```
 
-The command prints three fields: the dashboard `url`, whether it `opened` a
-browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
+The standalone command prints three fields: the dashboard `url`, whether it
+`opened` a browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
 token — and that is the URL that works. A browser cannot send a bearer
 header from the address bar, so the bare `/dashboard` path returns 401; copy
 the URL whole. Your browser lands on a local, token-protected dashboard:
@@ -382,22 +382,24 @@ accepted on exactly two routes — `GET /dashboard` and `GET /dashboard.json`
 with the link can read your dashboard, so treat the URL like the screen
 itself rather than like a secret to be scrubbed.
 
-Changing anything (connecting, reauthenticating, sync now) asks once for the
-**worker token**, which is a different value and is a real secret:
+In the standalone dashboard, changing anything (connecting, reauthenticating,
+sync now) asks once for the **worker token**, which is a different value and is a real secret:
 `<rootDir>/bin/olympus dashboard token` prints it — `rootDir` comes from
 `openclaw plugins inspect olympus --json`, because `olympus` is not on PATH
 after a clean install. It authorizes changes, so keep it out of chat logs
 and notes —
-or ask your agent for it with the prompt behind the dashboard's "Where is my
-token?" button. The setup page follows one journey: security preset → dependencies →
-credential or pairing → scope → initial sync → source health → cited-answer
-readiness. Every blocked or degraded source names the next supported action.
+or ask your agent for the command using the dashboard's "Where is my token?"
+button. The agent must never retrieve and relay the value through chat.
+
+Choose the source you want now; the source roster is not an all-seven checklist. Follow its credential or pairing → scope → initial sync → source
+health → cited-answer readiness journey. Other sources can be added later.
+Every blocked or degraded source names the next supported action.
 Each connected source shows its canonical sync and coverage state, and eligible
 cards have a **Sync now** button for an immediate run. Dropbox starts from a
 neutral account-root metadata listing until you install a narrower
 operator-approved ingestion policy.
 
-To repeat the split, because it is the thing people get wrong: the URL
+For standalone access, the URL
 carries the read-only dashboard token and nothing more. The first mutable
 action asks for the worker bearer once, exchanges it for a signed HttpOnly
 local control session, and discards the pasted value; origin and CSRF checks
@@ -405,34 +407,40 @@ protect every control request. The page does not put the worker bearer in
 browser storage, and pasting the `dash_` URL token into the unlock field is
 refused.
 
-Every OAuth card walks you through registering Olympus's callback on your own
-provider app, in numbered steps above the Client ID field: the console page to
-open, the app type and permissions it needs, the exact setting the callback goes
-in — Google's **Authorized redirect URIs**, Dropbox's **OAuth 2 → Redirect
-URIs**, X's **Settings → Callback URI / Redirect URL** — with the exact URL
-and a copy button, and what to bring back to the card. Every bring-your-own
-client has to do this once. The URL is derived from the address you are reading
-the dashboard on, so a dashboard reached over a proxy or tunnel has a different
-one from a loopback dashboard and needs its own registration; a loopback
-dashboard says there is nothing to register. "Ask your agent to walk you through
-it" under the form still hands you the same instructions as a copyable prompt.
+Connect only the source you chose, using its dashboard card and the
+[per-source guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
+Google's packaged shared pilot client requests Gmail or Drive scopes only when
+you choose that source; Gmail is not required for installation. X uses your own
+developer application, with plan availability and possible cost shown before
+consent. v0.4 supports one connected account per provider.
 
-Connect opens the provider's authorization page in a **new tab**, so the
-dashboard stays where it is and picks the connection up on its own; the
-authorization tab tells you when you can close it. While an attempt is pending
-the card offers **Cancel**, and its Client ID stays editable — pressing Connect
-again starts a fresh attempt with whatever key is in the field, rather than
-repeating the one the provider refused. If a provider does refuse, the card
-says which code it returned and which URI to register.
+All seven declared sources use the canonical connector-store runtime. Each
+chosen lane becomes ready when its credential or paired session, scope, and
+source-specific prerequisites are satisfied; no legacy read-authority flag or
+migration utility is needed. Omit `--session-ready` for Telegram or WhatsApp
+until its local pairing helper is ready; otherwise it records `reauth_required`.
 
-Google setup uses the packaged shared pilot client by default, labels it
-unverified, and requests Gmail and Drive scopes contextually. The advanced BYO
-fallback needs only a Client ID because Olympus uses PKCE — a **Desktop app**
-client for a loopback dashboard, a **Web application** client for a dashboard
-served over https, since a Desktop app client cannot register an https redirect
-URI. The card states which one your dashboard needs. X setup uses your developer
-application and makes plan availability, rate ceilings, and possible cost
-visible.
+<details>
+<summary>CLI fallback reference for a chosen source</summary>
+
+Use only the command for the source currently being connected. These examples
+are alternatives, not an installation checklist. The dashboard is the normal
+path, including Google's packaged client; the Google client ID below is an
+explicitly chosen advanced BYO fallback.
+
+```bash
+olympus connect google --client-id <google-oauth-client-id>
+olympus connect dropbox --client-id <dropbox-oauth-client-id>
+olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready
+olympus connect whatsapp --session-path ~/.local/share/olympus/whatsapp --session-ready
+printf '%s' "$READWISE_TOKEN" | olympus connect readwise --api-key-stdin
+```
+
+Tokens use the supported local secret store. Never paste secrets into chat or
+invent storage commands; use the selected password-manager method and the
+[documented stdin flow](../INSTALL_FOR_AGENTS.md#step-3--prerequisites-and-secrets).
+
+</details>
 
 **Disconnect** stops scheduled and manual reads and removes the local account
 grant without a worker restart. It retains indexed data and reusable app
@@ -451,12 +459,16 @@ the capture service first if it is running, keep in mind that indexed messages
 and captured media stay, and remove the linked device yourself in Telegram
 active sessions or WhatsApp linked devices.
 
-## 7. Ask your first question
+## 6. Verify a cited answer from your chosen source
 
-In your OpenClaw chat:
+Wait until the source you chose reports a successful initial sync and answer
+readiness. Ask a normal question whose answer you expect in that source, then
+check the returned citations. With no source connected, this proof is pending;
+an empty-source answer does not verify retrieval.
 
-> *"Using my sources, what did I commit to this week across email and
-> Telegram?"*
+In your OpenClaw chat, for example:
+
+> *"Using the source I just connected, what did I commit to this week?"*
 
 Your agent calls `source_answer` and gets back a cited, privacy-gated answer —
 never raw documents, never content from a tier you didn't approve.
@@ -509,8 +521,8 @@ connect the key, `olympus worker restart`, done. If it did not answer, they
 say `not reachable at http://127.0.0.1:8010/v1` and the fix is
 `olympus worker start` (step 3), not the credential.
 
-One more expected red on a fresh install: with no mailbox connected,
-`email_worker` reports `configured=false`, and the worker's health detail
-says why — `No email account is connected yet. Connect Gmail from the
-Olympus dashboard to enable email answers.` Connect Gmail in step 4; there
-is nothing to configure.
+Zero connected sources is a normal starting state. Doctor keeps base-worker
+health green when the worker is healthy and no credentials are degraded;
+mailbox configuration is not a prerequisite. Choose sources in the dashboard
+when you are ready. A selected source's connection/sync problems remain visible
+as source-readiness problems.

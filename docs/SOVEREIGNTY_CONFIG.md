@@ -37,10 +37,15 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Non-secure embeddings | Secure search | Secure answers | You supply |
 |---|---|---|---|---|
-| `private-cloud-only` — beta default when you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
+| `private-cloud-only` — recommended after you confirm you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
 | `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
 | `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
 | `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key |
+
+“Private cloud only” describes **secure-data handling**: secure answers use
+Venice, and secure search is local keyword search. It does not route all
+Olympus traffic through Venice; Gemini serves public and ordinary-private
+embeddings. Explain that distinction before asking for either provider key.
 
 `local-only` describes the handling of **secure** data; the shipped preset
 still uses Gemini for non-secure embeddings. It is not an all-offline preset.
@@ -73,6 +78,26 @@ are outside this release.
 > a key was accepted. Stop at any missing prerequisite and explain the next
 > supported action.
 
+### Choose your password-manager method
+
+Choose the route before the agent asks for an item reference:
+
+- **Web and manual paste:** open your password manager's website and paste the
+  key yourself into a supported local dashboard field or silent terminal input.
+  Gemini uses the documented stdin command below. This route requires no
+  password-manager desktop app or CLI; never paste the key into chat.
+- **Authenticated CLI:** if you want the agent to fetch it, first verify the
+  manager CLI is installed and authenticated. For 1Password, an exact
+  `op://vault/item/field` reference requires authenticated `op` access. Being
+  signed in to the website does not authenticate the CLI. Configure CLI access
+  through its supported procedure or use the manual route instead.
+
+Approve each credential separately, with its purpose and any known caveat
+explained first. The agent fetches only the exact item and field you name,
+once, directly into the documented stdin connect flow. It never lists/searches
+the vault or types a fetched secret into the browser. An item reference is not
+permission to read it; keep the value out of output, files, notes, and logs.
+
 ### Gemini: create and connect your own key
 
 1. Open [Google AI Studio's API Keys page](https://aistudio.google.com/apikey)
@@ -85,8 +110,10 @@ are outside this release.
    without your own approval. Set appropriate quota/billing alerts; an alert
    alone is not a spending cap.
 3. Create a key for this installation, keep it in your password manager, and
-   give the agent its exact item/field reference. The agent fetches it once
-   and runs `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect gemini --api-key-stdin`,
+   use the method you chose above. For an authorized CLI fetch, give the agent
+   its exact item/field reference. For manual input, enter it silently in your
+   own terminal. The selected route supplies `KEY` to
+   `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect gemini --api-key-stdin`,
    using the executable resolved from `openclaw plugins inspect olympus --json`.
    `KEY` represents an in-memory manager read or your silent terminal input,
    never a value pasted into a command, file, chat, or log. Unset it afterward.
@@ -119,7 +146,7 @@ This step applies to `private-cloud-only` and `local-first`.
    Create an **Inference Only** key named for this Olympus installation and
    set a consumption limit you accept. Save the one-time key display in your
    password manager. An Admin key is unnecessary.
-4. Authorize the named-item read and have your agent run
+4. Use your chosen manual-input or authorized named-item CLI route with
    `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect venice --api-key-stdin`, then
    unset `KEY`. This writes Olympus's `store:venice.api_key` entry. It does not
    purchase credits or silently change your privacy preset.
@@ -164,9 +191,12 @@ embedding inputs.
 
 Have the agent check these as separate results: the chosen preset and data
 destinations; each required credential, endpoint and dimension; successful
-worker activation and `olympus doctor`; then one user-selected source, a
-bounded initial sync, and a normal question with checked citations. Report
-keyword-only operation honestly. No indexed data means no answer proof yet.
+worker activation, plugin/tool activation and `olympus doctor`. That verifies
+base installation. Then optionally connect one user-selected source, run a
+bounded initial sync, and ask a normal question with checked citations. Report
+keyword-only operation honestly. No indexed data means no answer proof yet;
+leaving source setup for later is a valid completed base install. Do not choose
+Gmail or connect every source merely to make a readiness check green.
 
 The v0.4 dashboard handles source connections and shows progress/credential
 problems, but it has no complete model-account or embedding-configuration
