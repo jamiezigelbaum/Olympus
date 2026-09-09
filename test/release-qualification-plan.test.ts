@@ -48,8 +48,11 @@ describe('Slice 3F exact qualification plan', () => {
     expect(plan.normal_install_rule).toContain('user or their AI');
     expect(plan.normal_install_rule).toContain('without code, database, config-file, service-manager, or undocumented repair work');
     expect(plan.rollback_baseline).toMatchObject({ source_commit: '911caf3f834433f3547049ca07a7bb8d8d268ee7', artifact_sha256: '65eab956e30c60dad513cb504c64709a0d64490a8b50911700b04b122d054f0c', artifact_bytes: 670223 });
+    // The historical rollback artifact predates both optional UI assets.
     expect([...plan.rollback_baseline.package_files].sort()).toEqual(
-      V0_4_PUBLIC_PACKAGE_FILES.filter((path) => path !== 'dist/control-ui/index.js').sort(),
+      V0_4_PUBLIC_PACKAGE_FILES
+        .filter((path) => !['assets/icon.png', 'dist/control-ui/index.js'].includes(path))
+        .sort(),
     );
     expect(plan.assertion_contracts.rollback).toEqual(['previous_digest_restored', 'service_state_restored', 'config_retained', 'credentials_retained', 'indexed_data_retained']);
     expect(plan.assertion_contracts.real_provider_end_to_end).toEqual(['install', 'dashboard_onboarding', 'scope', 'automatic_sync', 'extraction_accounting', 'retrieval', 'citations', 'honest_gaps', 'fail_closed_security', 'restart_resume']);
