@@ -26,9 +26,13 @@ import {
   createOAuthRelayStateKey,
   signOAuthRelayState,
   DEFAULT_OAUTH_RELAY_URL,
+  DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL,
   OAUTH_RELAY_STATE_TTL_MS,
 } from '../src/core/oauth-relay.ts';
-import { DEFAULT_DROPBOX_PUBLISHER_APP_KEY } from '../src/core/publisher-oauth-client.ts';
+import {
+  DEFAULT_DROPBOX_PUBLISHER_APP_KEY,
+  DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+} from '../src/core/publisher-oauth-client.ts';
 import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
 import {
   PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -44,6 +48,9 @@ import {
 
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
+const LOOPBACK_HTTPS_ORIGIN = 'https://127.0.0.1:18789';
+const LOOPBACK_HTTP_ORIGIN = 'http://127.0.0.1:18789';
+const PILOT_CLIENT_ID = '123456789012-olympusdesktopfixture.apps.googleusercontent.com';
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
@@ -63,6 +70,7 @@ interface Fixture {
   fetch: (request: Request) => Promise<Response>;
   secretStore: SecretStore;
   exchanges: Array<URLSearchParams>;
+  exchangeUrls: string[];
   registryPath: string;
 }
 
@@ -74,8 +82,19 @@ function fixture(
   dirs.push(dir);
   const secretStore = memorySecretStore(initialSecrets);
   const exchanges: URLSearchParams[] = [];
-  const oauthFetch: OAuthFetch = async (_url, init) => {
-    exchanges.push(new URLSearchParams(String(init?.body ?? '')));
+  const exchangeUrls: string[] = [];
+  const oauthFetch: OAuthFetch = async (url, init) => {
+    exchangeUrls.push(String(url));
+    const body = String(init?.body ?? '');
+    const contentType = new Headers(init?.headers).get('content-type');
+    if (contentType?.includes('application/json')) {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      exchanges.push(new URLSearchParams(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+      ));
+    } else {
+      exchanges.push(new URLSearchParams(body));
+    }
     return new Response(JSON.stringify({
       access_token: 'dropbox-access-token-fixture',
       refresh_token: 'dropbox-refresh-token-fixture',
@@ -110,6 +129,7 @@ function fixture(
     fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
     secretStore,
     exchanges,
+    exchangeUrls,
     registryPath,
   };
 }
@@ -484,7 +504,7 @@ describe('publisher-client relay flow', () => {
         },
       });
       const fetchWithAuth = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
-      await startConnect({ fetch: fetchWithAuth, secretStore, exchanges: [], registryPath: join(dir, 'handles.json') });
+      await startConnect({ fetch: fetchWithAuth, secretStore, exchanges: [], exchangeUrls: [], registryPath: join(dir, 'handles.json') });
       return { fetch: fetchWithAuth, state: captured.state! };
     }
 
@@ -545,12 +565,70 @@ describe('publisher-client relay flow', () => {
   });
 });
 
+describe('scheme-aware Google publisher flow', () => {
+  test('HTTPS loopback uses the publisher Web client, signed relay, and HTTPS target for Gmail and Drive', async () => {
+    await withPilotClient(async () => {
+      for (const source of ['gmail', 'google-drive'] as const) {
+        const instance = fixture();
+        const started = await authorizationUrl(await startConnect(instance, { source }, LOOPBACK_HTTPS_ORIGIN));
+        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        const state = started.searchParams.get('state')!;
+        expect(statePayload(state)).toMatchObject({
+          origin: LOOPBACK_HTTPS_ORIGIN,
+          source,
+        });
+
+        const callback = await instance.fetch(new Request(
+          `${LOOPBACK_HTTPS_ORIGIN}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+        ));
+        expect(callback.status).toBe(303);
+        const location = callback.headers.get('Location')!;
+        expect(location).toBe(`/oauth/callback/${source}/done`);
+        const done = await instance.fetch(new Request(`${LOOPBACK_HTTPS_ORIGIN}${location}`));
+        expect(done.status).toBe(200);
+        expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+        expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+      }
+    });
+  });
+
+  test('HTTP loopback preserves the Desktop pilot client and direct callback exchange', async () => {
+    await withPilotClient(async () => {
+      const instance = fixture();
+      const started = await authorizationUrl(await startConnect(instance, { source: 'gmail' }, LOOPBACK_HTTP_ORIGIN));
+      expect(started.searchParams.get('client_id')).toBe(PILOT_CLIENT_ID);
+      expect(started.searchParams.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
+      const state = started.searchParams.get('state')!;
+      expect(state).not.toContain('.');
+
+      const callback = await instance.fetch(new Request(
+        `${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail?code=gmail-http-code&state=${encodeURIComponent(state)}`,
+      ));
+      expect(callback.status).toBe(303);
+      expect(instance.exchangeUrls).toEqual(['https://oauth2.googleapis.com/token']);
+      expect(instance.exchanges[0]!.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
+    });
+  });
+});
+
 async function dashboardJson(instance: Fixture, origin = DASHBOARD_ORIGIN) {
   const response = await instance.fetch(new Request(`${origin}/dashboard.json`, {
     headers: { Authorization: 'Bearer dashboard-secret' },
   }));
   expect(response.status).toBe(200);
   return await response.json();
+}
+
+async function withPilotClient(run: () => Promise<void>): Promise<void> {
+  const previous = process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+  process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = PILOT_CLIENT_ID;
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
+    else process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
+  }
 }
 
 function dropboxAction(view: { sources: Array<Record<string, any>> }): Record<string, any> {
