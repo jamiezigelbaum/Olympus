@@ -621,7 +621,7 @@ export async function loadOpenClawGatewayConfig(
   } catch {
     return undefined;
   }
-  const timer = setTimeout(() => child.kill(), 5_000);
+  const timer = setTimeout(() => child.kill(), 15_000);
   try {
     const [stdout, code] = await Promise.all([
       new Response(child.stdout as unknown as BodyInit).text(),
@@ -645,7 +645,24 @@ export async function loadOpenClawGatewayConfig(
     if (!record || record.ok === false) {
       throw new Error('OpenClaw gateway configuration was refused.');
     }
-    return record;
+    // `config get gateway` prints the selected gateway object directly. Keep
+    // only the fields this transport is allowed to consume and put them into
+    // the shape used by the resolver; never retain auth, remote, or channel
+    // configuration in the worker's transport settings.
+    const tls = asRecord(record.tls);
+    return {
+      gateway: {
+        ...(record.port !== undefined ? { port: record.port } : {}),
+        ...(tls
+          ? {
+              tls: {
+                ...(tls.enabled !== undefined ? { enabled: tls.enabled } : {}),
+                ...(tls.certPath !== undefined ? { certPath: tls.certPath } : {}),
+              },
+            }
+          : {}),
+      },
+    } satisfies SourceWatchGatewayConfig;
   } finally {
     clearTimeout(timer);
   }
@@ -827,16 +844,20 @@ function requestVerifiedHttps(
         const chunks: Buffer[] = [];
         incoming.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)));
         incoming.on('end', () => {
-          const responseHeaders = new Headers();
-          for (const [key, value] of Object.entries(incoming.headers)) {
-            if (Array.isArray(value)) value.forEach((item) => responseHeaders.append(key, item));
-            else if (value !== undefined) responseHeaders.set(key, value);
+          try {
+            const responseHeaders = new Headers();
+            for (const [key, value] of Object.entries(incoming.headers)) {
+              if (Array.isArray(value)) value.forEach((item) => responseHeaders.append(key, item));
+              else if (value !== undefined) responseHeaders.set(key, value);
+            }
+            succeed(new Response(Buffer.concat(chunks), {
+              status: incoming.statusCode ?? 0,
+              statusText: incoming.statusMessage ?? '',
+              headers: responseHeaders,
+            }));
+          } catch (error) {
+            fail(error);
           }
-          succeed(new Response(Buffer.concat(chunks), {
-            status: incoming.statusCode ?? 0,
-            statusText: incoming.statusMessage ?? '',
-            headers: responseHeaders,
-          }));
         });
         incoming.on('error', fail);
       });
