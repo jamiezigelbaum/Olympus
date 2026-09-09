@@ -1148,13 +1148,21 @@ does not define that handler, and no external catalog submission is authorized.
 
 ## Step 6 — Optional source setup
 
-**Base installation is complete before source choice.** First report the
-chosen posture, model prerequisites, worker health, and successful plugin/tool
-activation from Steps 1–5. No connected source is required for that result.
-Then offer to connect a source now or leave Olympus ready for later. Do not
-present all seven sources as a checklist or choose Gmail to satisfy a health
-hint. Ask which source the operator wants; proceed only with that source and
-its approved scope.
+**Base installation is complete before source choice.** Report the selected
+posture, model prerequisites, worker health, and successful plugin/tool and
+selected-dashboard activation from Steps 1–5. No connected source is required.
+Open the selected dashboard, then deliver this required user-facing handoff:
+
+> Setup is complete. In the Olympus dashboard, connect the sources you use.
+> You can start with one and add others whenever you like. I'll help if any
+> connection needs extra setup.
+
+Source selection happens in the dashboard. Do not turn all supported providers
+into a checklist, choose Gmail to satisfy a health hint, or add a chat question
+asking which source to start before the user has chosen a card. Provide help
+for the source the operator selects and only its approved scope. If the
+operator explicitly needs the documented headless fallback, ask which source
+that fallback should connect.
 
 On OpenClaw **2026.9.2**, prefer **Olympus** in the Control UI sidebar **when
 the installed Olympus artifact includes native Control UI support**. Host
@@ -1184,9 +1192,7 @@ to reconnect sources or reinstall the package blindly:
 olympus dashboard
 ```
 
-Say: "Olympus is ready. You can connect a source now or come back later.
-Choose the source you want in the dashboard; I'll help with its setup and
-watch the first sync."
+Use the required handoff above once the selected dashboard is open.
 
 The standalone `olympus dashboard` command prints `url`, `opened` (whether it
 opened a browser), and `hint`. Hand the printed `url` to the operator exactly

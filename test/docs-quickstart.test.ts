@@ -45,6 +45,9 @@ describe('first-run docs', () => {
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
+    expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
+    expect(install).not.toContain('Ask which sources they want now');
     expect(install).toContain('Keep the selected Olympus dashboard open as the operator-facing progress view.');
     expect(install).toContain('MUST explain the credential in one plain sentence before asking for it.');
     expect(install).toContain('MUST NOT show internal config keys such as');
