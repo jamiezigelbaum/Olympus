@@ -44,9 +44,9 @@ skills, cron, services), in this order:
    upstream audit bodies and errors are never copied into restart output.
 4. **Restart ONLY via the sanctioned wrapper:**
    `scripts/ops/openclaw-safe-restart.sh` (merged 2026-07-16) — it runs the
-   quota preflight, the validate/lint gates, exactly one
-   `openclaw gateway restart`, and proves the current boot with three required
-   facts: **identity** — complete, active `MainPID`, `InvocationID`, and
+   platform-appropriate credential preflight, the validate/lint gates, and
+   exactly one official `openclaw gateway restart` command. On Linux it proves the current boot
+   with three required facts: **identity** — complete, active `MainPID`, `InvocationID`, and
    `ActiveEnterTimestamp` from `systemctl show`; **function** — the Gateway HTTP
    port returns a successful status to a bounded request on loopback; and
    **corroboration** — any exact
@@ -63,8 +63,11 @@ skills, cron, services), in this order:
    register HTTP routes — providers and tool-result middleware load
    without ever appearing there (2026-07-25: `openai`, the primary model
    provider, absent from the line while serving live turns). A claim that
-   a specific plugin loaded requires `openclaw plugins inspect <name>` →
-   `Status: loaded`, never the boot line. On failed boot: `openclaw gateway
+   a specific plugin loaded requires a capability check against the actual
+   authenticated Gateway, never the boot line. In OpenClaw 2026.9.2, plain
+   `plugins inspect` is a cold registry check and `--runtime` loads the plugin
+   in the inspecting CLI process; neither proves the running Gateway adopted
+   that artifact. On failed boot: `openclaw gateway
    stability --bundle latest`; note a broken-config restart poisons
    `last-good`, so the `config set` `.bak.*` rotation is the real undo, not
    `doctor --fix`.
@@ -140,6 +143,105 @@ skills, cron, services), in this order:
    processed and inspected live — 2026-07-07 VLM incident).
 6. **Every incident becomes a gate, a subtraction, or a deletion — prose
    only when no gate is possible.**
+
+## Darwin controlled activation
+
+The native Darwin branch of `scripts/ops/openclaw-safe-restart.sh` is scoped to
+OpenClaw 2026.9.2 and its existing, active default-profile LaunchAgent
+`ai.openclaw.gateway`. It uses `lib/gateway-darwin-proof.mjs`; it never emulates
+systemd output or invokes a launchctl lifecycle action directly. Its one
+official `openclaw gateway restart --preserve-definition` command keeps the
+inspected LaunchAgent definition intact; the qualified CLI otherwise may
+rewrite it. This is a one-command guarantee, not a claim of one launchctl
+mutation: OpenClaw owns the command's internal lifecycle operations, including
+stale-PID cleanup and any service restart retry. The wrapper never issues a
+second restart command. Managed startup inputs must remain unchanged across
+the command. Other host
+versions, profiles, service wrappers, or incomplete native metadata refuse
+until their contracts are independently qualified.
+
+Before installing or replacing plugin code, the platform owner records the
+original `gateway.reload` setting and uses the blessed configuration CLI to
+set `gateway.reload.mode` to `off`. Verify that authored setting before the
+managed plugin install. On 2026.9.2, code/install metadata changes require a
+Gateway restart and hybrid reload schedules it automatically; enablement or
+ordinary plugin configuration reload does not rescan plugin code. The wrapper
+requires `off` so installation cannot delegate an unreviewed extra restart to
+the watcher. After the one wrapper restart and boot proof, restore the original
+reload setting through the blessed CLI, including `unset` when it was absent.
+Changing `gateway.reload` itself is not restart-triggering on the qualified
+host. Never use raw config writes or an extra restart to restore the setting.
+
+The Darwin preflight obtains the official `gateway status --no-probe --json`
+service descriptor, verifies its default-profile plist, and accepts only the
+exact native generated literal environment wrapper (`env_file="$1"`, with
+its qualified quoting and whitespace) followed by the declared Node
+OpenClaw entry point. It parses the owner-only environment file without
+executing shell syntax, does not borrow unrelated operator-shell credentials,
+and rechecks managed input bytes before mutation. The CLI must report valid,
+matching CLI/daemon config paths. Plaintext environment values and audit
+bodies are never printed or placed in a temporary file.
+
+Credential readiness is mandatory on every Darwin restart, including when no
+credential edit was requested: native `config validate`, noninteractive error
+lint, then `secrets audit --check --json` **without `--allow-exec`**. The audit
+must match the supported complete v1 shape, report zero skipped exec refs,
+zero plaintext/unresolved/shadowed findings, and only the exact native OAuth
+information already permitted by step 3. Local env/file/store SecretRefs are
+resolved by the installed native auditor; native OAuth is not falsely treated
+as a broken SecretRef. Any exec reference, external broker environment, custom
+startup loader, incomplete audit, or unrecognized wrapper refuses before the
+restart. It requires a deployment-owned credential readiness procedure; the
+absence of a Linux broker client is never a waiver. The qualified Air metadata
+has four file refs and no exec provider, so this native audit is the relevant
+credential gate. No credential contents are part of that qualification record.
+
+A successful Darwin boot proof requires all of the following together:
+
+- The real launchd job is running and supplies its PID. Native process metadata
+  binds that PID to the expected Node executable, user, and process start time
+  captured in UTC. The PID/start pair must differ from the captured pre-restart process.
+- Native `lsof` reports the exact expected loopback listener owned by that PID,
+  with no unexpected process or wildcard listener on the configured port.
+- A bounded, proxy-free loopback HTTP request returns a 2xx response when
+  effective `gateway.tls.enabled` is false. When it is true, the proof uses
+  Node's built-in HTTPS client with the configured public `certPath` as its
+  trust anchor, normal hostname validation (`rejectUnauthorized: true`), and
+  a TLS 1.3 minimum. It never reads `keyPath`, uses `caPath` as an outbound
+  trust shortcut, follows redirects, or consults proxy environment variables.
+  `OPENCLAW_GATEWAY_URL`, port, and any supported TLS environment overrides
+  must resolve to the exact managed `127.0.0.1` endpoint and effective config;
+  a mismatch refuses.
+- The managed stdout log, held open before restart, contains an exact complete
+  timestamped listening line in bytes appended after the captured frontier.
+  Its timestamp must be at or after the next whole second beyond the FINAL
+  process's captured UTC start and no later than the observation time. Native
+  `ps` reports seconds, so this conservative margin rejects ambiguous
+  same-birth-second lines as well as older predecessor lines. An untimestamped
+  line, a genuine startup that logged within that ambiguous first second, log
+  rotation/truncation, oversized append, or missing/partial line fails closed.
+- PID, start time, executable, listener ownership, and watched certificate
+  inputs remain the same after the HTTP(S)/log checks. The log corroborates
+  that identity and function; it does not certify either on its own or identify
+  the loaded plugin artifact.
+
+`--dry-run` performs no checks. Darwin `--preflight-only` reads the native
+service context needed for credential validation but never restarts or claims
+a new boot. Failure after the single official command reports an unproven
+boot and requires diagnosis; the wrapper does not automatically reissue it.
+The final PID/start fence and current-process log-time check apply even if
+OpenClaw internally replaced an earlier startup attempt during that command. Root/platform custody
+owns live adoption and the authenticated plugin capability check. Fixture tests
+qualify the parsers and refusal branches only; they are not a real rehearsal.
+
+Gate owner: platform operations. Failure prevented: a foreign listener, stale
+process/log, or unproved credential dependency being accepted as successful
+activation. Runtime budget: bounded native preflight commands plus the
+configured boot deadline (90 seconds by default, at most 600). Unsupported
+metadata or log rotation intentionally refuses rather than guessing. Retire or
+extend these version/format bounds only after independent review and real
+qualification of the replacement platform contract. Linux credential and
+systemd proof behavior remains unchanged.
 
 ## Known sharp edges (dated)
 
