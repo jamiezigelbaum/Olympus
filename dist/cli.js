@@ -73687,8 +73687,10 @@ function dashboardPublisherOAuthSources(dashboardOrigin, ownClientIds) {
 }
 function dashboardLoopbackOrigin(origin) {
   try {
-    const hostname = new URL(origin).hostname;
-    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+    const url = new URL(origin);
+    if (url.protocol !== "http:")
+      return false;
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   } catch {
     return false;
   }
