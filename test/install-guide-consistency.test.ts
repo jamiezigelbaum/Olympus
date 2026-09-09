@@ -7,6 +7,32 @@ const ROOT = join(import.meta.dir, '..');
 // Repeated clean-install failures came from copied commands drifting apart.
 // Keep the commands in the public entry points on the qualified package path.
 describe('pilot installation entry points', () => {
+  test('the repo and quickstart offer the same self-contained installation prompt', () => {
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    const prompt = readme.match(/^> Install Olympus by reading .+$/m)?.[0];
+    expect(prompt).toBeDefined();
+    expect(prompt).toContain('https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md');
+    expect(quickstart).toContain(prompt!);
+    expect(readme).not.toContain('Give it those files');
+    expect(quickstart).not.toContain('supplied\nreceipt');
+  });
+
+  test('the agent obtains exact package identity without a user receipt or authentication', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'));
+    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1');
+    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz');
+    expect(download).toContain('without authentication');
+    expect(download).toContain('Select exactly one uploaded asset');
+    expect(download).toContain('Do not use `/releases/latest`');
+    expect(download).toContain('Do not extract,\n   execute, or install an archive unless both match');
+    expect(download).toContain('missing digest, ambiguous asset, or checksum/size mismatch stops installation');
+    expect(download).toContain('retaining\n   the existing-install and consent checks');
+    expect(download).toContain('The Olympus pilot download is not\navailable yet; the maintainer needs to publish it.');
+    expect(install).not.toContain('**ASK THE OPERATOR** for the candidate and receipt');
+  });
+
   for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md', 'docs/V0_4_RELEASE.md']) {
     test(`${path} installs the qualified archive with host-version consent guidance`, () => {
       const document = readFileSync(join(ROOT, path), 'utf8');

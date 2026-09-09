@@ -21,6 +21,15 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-09 — Prompt-only pilot installation.** A tester copies one prompt
+  from the repository into their agent. The agent downloads the designated
+  GitHub prerelease package and checks its SHA-256 and byte count against
+  GitHub's asset metadata automatically. No manually supplied tarball or
+  checksum receipt is required. `INSTALL_FOR_AGENTS.md#pilot-download` owns
+  candidate selection and the download procedure. GitHub prerelease hosting
+  makes the internal rehearsal package retrievable; it does not claim full
+  release qualification or replace the existing gates before inviting beta
+  testers. ClawHub publication remains after qualification and beta feedback.
 - **2026-08-26 — Product boundary.** Olympus is the OpenClaw plugin. Private deployment, credentials, incident response, and host maintenance belong in a private ops repository. The supported v0.4 topology is same-host macOS or Linux.
 - **2026-08-26 — Shared Google OAuth.** The pilot ships a publisher-owned Google Desktop OAuth client ID for Gmail and Drive. Google documents installed applications as public clients and accepts the authorization-code exchange with client ID plus PKCE; no client secret is required or packaged. Users click Connect, sign in, and consent. The dashboard names the unverified-app warning honestly. User grants and refresh tokens remain local; a client-ID-only BYO path remains an advanced fallback.
 - **2026-08-26 — Converge, verify, delete.** Preserve useful existing connector stores. Complete bounded replay/import only where legacy stores contain useful data absent from the canonical store, reuse embeddings only when identity and dimensions prove exact compatibility, re-fetch only missing/corrupt/unverifiable portions, then delete transition machinery. No general migration system ships.
@@ -372,16 +381,20 @@ that clean-install real-provider or pilot qualification has passed.
   passed the Slice 3 exit; do not substitute a source checkout or rebuilt
   artifact. The upgrade/rollback fixture uses the immediately preceding Slice
   3 artifact as its synthetic prior public version.
-- Before ClawHub publication, give testers one access-controlled download of
-  that exact `.tgz`, together with its SHA-256 and byte count. They install it
-  through the documented managed
+- Before ClawHub publication, host the exact public-only `.tgz` as a
+  designated GitHub prerelease asset. The repo-page prompt sends the agent
+  to `INSTALL_FOR_AGENTS.md#pilot-download`; the agent retrieves the package
+  and its SHA-256 and byte count from GitHub without a file/receipt handoff
+  or a tester GitHub login. It verifies the downloaded bytes before using
+  the packaged guide and installs through the documented managed
   `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
   command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
   hosts `--force` also overwrites an existing plugin, so the install guide's
   existing-install checks still apply. No tester builds a package or installs
   from a source checkout. README, Quickstart, and the agent install guide use
-  this same path and require the artifact digest and byte count in the install
-  report so feedback can be tied to the qualified candidate.
+  this same path. The agent records the release tag, asset ID, artifact digest,
+  and byte count in the install report so feedback can be tied to the exact
+  candidate. Download verification does not substitute for qualification.
 - Before inviting testers, internally prove the same packaged product on clean
   Apple Silicon macOS and x86_64 Ubuntu LTS installations. On both operating
   systems, every declared source must complete install, onboarding, configured
@@ -532,7 +545,7 @@ file edits or an agent-only repair.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
+| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. The prompt-only install handoff delegates package download and verification to the agent; publication of the designated GitHub pilot asset and its anonymous download proof remain required before that handoff is usable. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,

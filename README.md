@@ -107,15 +107,14 @@ exhausted policy chain refuses rather than silently downgrading.
 (`>=22.22.3 <23`, `>=24.15.0 <25`, or `>=25.9.0` — its installer refuses any
 other), plus [Bun](https://bun.sh) `1.2+`. macOS or Linux.
 
-The pilot uses the exact qualified `olympus-0.4.0.tgz` supplied by the
-maintainer, together with its SHA-256 and byte count. Let your agent do the
-install. Give it those files and paste this into any agent with a terminal
-(OpenClaw, Claude Code, Codex):
+Paste this into OpenClaw, or another agent with a terminal:
 
-> Verify the supplied Olympus tarball against its SHA-256 and byte count.
-> Read `package/INSTALL_FOR_AGENTS.md` from that archive and follow it step by
-> step, including the existing-install check before installing. Use those exact
-> package bytes and record their identity in the install report.
+> Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
+
+Your agent downloads the designated pilot package, checks it automatically,
+and guides you through setup. You do not need to download files, find a
+checksum receipt, or have a GitHub account. The SHA-256 and byte count come
+from GitHub's release metadata and stay in the agent's install report.
 
 `openclaw plugins install clawhub:olympus` becomes the one-line public path
 once Olympus is published to ClawHub, which happens **after** the pilot. The
@@ -134,7 +133,7 @@ without logging them, and verifies the install end to end. About ten minutes
 plus OAuth clicks.
 
 Prefer to drive it yourself? Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)**,
-starting with the archive identity and existing-install checks. Its install
+starting with the automatic download and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
