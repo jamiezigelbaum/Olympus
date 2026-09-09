@@ -199,16 +199,16 @@ prompt. Do not ask them to supply a tarball, a checksum receipt, or GitHub
 credentials. Download the designated pilot through GitHub's public release
 API without authentication:
 
-`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.1`
+`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.2`
 
 The repository guide pins the designated candidate below. These are agent-only
 verification inputs, not a receipt to request from the operator:
 
-- SHA-256: `97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267`
-- Byte count: `703157`
+- SHA-256: `baf11e4a040360fab3c04731f6ea2935d70c95bf0fe53f3a3d98efda42f08ef5`
+- Byte count: `705776`
 
 1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
-   response, `tag_name` equal to `v0.4.0-pilot.1`, `prerelease` equal to `true`,
+   response, `tag_name` equal to `v0.4.0-pilot.2`, `prerelease` equal to `true`,
    and `draft` equal to `false`.
    Do not use `/releases/latest`: GitHub excludes prereleases there, and a
    later release is not automatically this pilot's candidate.
@@ -216,7 +216,7 @@ verification inputs, not a receipt to request from the operator:
    Require `state: "uploaded"`, a positive integer `id` and `size`, and a
    `digest` of the form `sha256:` followed by 64 hexadecimal characters.
    Its `browser_download_url` must be exactly
-   `https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.1/olympus-0.4.0.tgz`.
+   `https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.2/olympus-0.4.0.tgz`.
    Require the metadata's digest and size to match the pinned values above;
    a replacement upload under the same tag/name is not a qualified candidate.
    GitHub's generated source-code archives are not the plugin package.
