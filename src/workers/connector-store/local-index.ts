@@ -6943,6 +6943,7 @@ export interface ConnectorCorpusOptions {
   family: SourceFamily;
   trustDomain: SourceTrustDomain;
   activationMode?: SourceIndexActivationMode;
+  embeddingPolicy?: SourceIndexCorpusDefinition['embeddingPolicy'];
 }
 
 export function defineConnectorCorpus(options: ConnectorCorpusOptions): SourceIndexCorpusDefinition {
@@ -6951,6 +6952,7 @@ export function defineConnectorCorpus(options: ConnectorCorpusOptions): SourceIn
     family: options.family,
     trustDomain: options.trustDomain,
     activationMode: options.activationMode ?? 'lexical_only',
+    ...(options.embeddingPolicy ? { embeddingPolicy: options.embeddingPolicy } : {}),
     description: 'Shared connector-store corpus: generic local index over a Contract 1 SourceConnector.',
   });
 }

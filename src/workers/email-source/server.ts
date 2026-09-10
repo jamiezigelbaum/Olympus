@@ -1844,8 +1844,12 @@ export async function main(): Promise<void> {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   }
-  const secureEmbeddingCloudApproved = secureLocalPolicyEmbeddingProvider?.backend === 'cloud'
-    && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider);
+  // Policy truth is independent of credential readiness: a selected Venice
+  // profile stays visible as the intended secure embedding lane even when its
+  // secret is currently missing and the runtime provider is unavailable.
+  const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile('secure_local');
+  const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === 'venice'
+    && secureEmbeddingProfile.profile.trust === 'encrypted_cloud';
   const fullCorpusDefinitions = [
     defineGmailSecureLocalCorpus(),
     defineInternalEmailCorpus(),

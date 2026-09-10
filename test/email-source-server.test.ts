@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import {
   createCloudSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromEnv,
@@ -65,6 +66,26 @@ describe('canonical source-worker server configuration', () => {
       id: 'local-source-embedding',
       profile: { provider: 'local-openai-compatible', trust: 'local', purpose: 'embedding' },
     });
+  });
+
+  test('missing private-cloud Venice embedding secret records a degraded embedding profile', () => {
+    const resolver = new WorkerBootSecretResolver({
+      schedule: () => undefined,
+      warn: () => undefined,
+    });
+    const provider = createSourceIndexEmbeddingProviderFromSovereignty(
+      createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
+      'secure_local',
+      {},
+      resolver,
+    );
+    expect(provider).toBeUndefined();
+    expect(resolver.status()).toEqual([
+      expect.objectContaining({
+        affected_profiles: ['venice-source-embedding'],
+        affected_capabilities: ['embedding'],
+      }),
+    ]);
   });
 
   test('registered local defaults give the env and preset factories the existing identity', () => {
