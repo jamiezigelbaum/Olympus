@@ -1650,6 +1650,7 @@ describe('multi-source source dashboard', () => {
     const worker = createEmailSourceWorker({
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
+        fileSourceScopes: approvedFolderScopesFixture(),
         async triggerSourceSync(request) {
           dashboardSyncRequests.push(request);
           return { status: 'started', source: request.source };
@@ -1725,6 +1726,7 @@ describe('multi-source source dashboard', () => {
       xBookmarksConnectorStoreSync: xStoreSyncFixture(xRequests),
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
+        fileSourceScopes: approvedFolderScopesFixture(),
         // The product server's hook, in miniature: it serves Dropbox and
         // declines everything else with the shared typed error.
         async triggerSourceSync(request) {
@@ -1784,7 +1786,7 @@ describe('multi-source source dashboard', () => {
 
   test('a worker with the scheduler switched off says so, rather than naming the source as unsupported', async () => {
     const worker = createEmailSourceWorker({
-      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine() },
+      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine(), fileSourceScopes: approvedFolderScopesFixture() },
     });
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
 
@@ -4945,5 +4947,16 @@ function gmailSyncFixture(requests: unknown[], handle: string): GmailConnectorSt
     },
     lastStoreRunCompletedAt: () => undefined,
     requestBudgetStatus: () => undefined,
+  };
+}
+
+function approvedFolderScopesFixture() {
+  return {
+    summaries: () => ([
+      { source_id: 'google_drive.docs' as const, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'approved' as const, account_generation: 'a'.repeat(64), scope_revision: '11111111-1111-4111-8111-111111111111', selections: [{ key: 'approved-folder', state: 'metadata_only' as const }] },
+      { source_id: 'dropbox.files' as const, disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'approved' as const, account_generation: 'b'.repeat(64), scope_revision: '22222222-2222-4222-8222-222222222222', selections: [{ key: '/approved', state: 'metadata_only' as const }] },
+    ]),
+    async browse() { throw new Error('Browsing is not part of this dispatch fixture'); },
+    async approveAndStart() { throw new Error('Approval is not part of this dispatch fixture'); },
   };
 }

@@ -509,16 +509,20 @@ test('direct connector-store search fails closed while file scope is pending', a
   store.close();
 });
 
-test('manual sync cannot run a connected file source while scope is pending', async () => {
+for (const provider of [
+  { sourceId: 'dropbox.files', corpusId: 'secure_local.dropbox.files', dashboardSource: 'dropbox' },
+  { sourceId: 'google_drive.docs', corpusId: 'internal.drive.docs', dashboardSource: 'google-drive' },
+] as const) {
+test.each(['missing', 'pending', 'empty', 'approved'] as const)(`${provider.sourceId} manual sync routes enforce explicit file scope: %s`, async (scopeCase) => {
   let taskRuns = 0;
   const scheduler = new SourceScheduler({
     enabled: true,
     tickMs: 1_000,
     errorBackoffMs: 1_000,
-    maxTransientRetries: 0,
+    maxTransientRetries: 1,
     sources: [{
-      sourceId: 'dropbox.files',
-      corpusId: 'secure_local.dropbox.files',
+      sourceId: provider.sourceId,
+      corpusId: provider.corpusId,
       cadence: 'manual',
       intervalMs: 60_000,
       freshnessThresholdHours: 1,
@@ -533,24 +537,30 @@ test('manual sync cannot run a connected file source while scope is pending', as
     sourceDashboard: {
       sovereigntyEngine: {} as never,
       registryAdoptionIntervalMs: 0,
-      fileSourceScopes: {
+      ...(scopeCase !== 'missing' ? { fileSourceScopes: {
         summaries: () => [{
-          source_id: 'dropbox.files', disposition_source_id: 'dropbox', label: 'Dropbox',
-          connected: true, status: 'scope_pending', scope_revision: 'pending',
+          source_id: provider.sourceId, disposition_source_id: 'dropbox', label: 'Dropbox',
+          connected: true, status: scopeCase === 'pending' ? 'scope_pending' : 'approved', scope_revision: 'revision',
+          selections: scopeCase === 'approved' ? [{ key: '/work', state: 'metadata_only' }] : [],
         }],
         async browse() { throw new Error('not used'); },
         async approveAndStart() { throw new Error('not used'); },
-      },
+      } } : {}),
     },
   });
-  const response = await worker.fetch(new Request('http://worker.test/dashboard/sync-now', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: 'dropbox' }),
-  }));
-  expect(response.status).toBe(403);
-  expect(taskRuns).toBe(0);
+  for (const [path, body] of [
+    ['/dashboard/sync-now', { source: provider.dashboardSource }],
+    ['/v1/source/index/sync', { corpus_id: provider.corpusId }],
+  ] as const) {
+    const response = await worker.fetch(new Request(`http://worker.test${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    expect(response.status).toBe(scopeCase === 'approved' ? 200 : 403);
+  }
+  expect(taskRuns).toBe(scopeCase === 'approved' ? 2 : 0);
   worker.close();
 });
+}
 
 test('queued scheduler work is revision-bound and refuses an account switch before running', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-scope-'));

@@ -2071,6 +2071,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(400, 'invalid_request', 'corpus_id is required for source sync.');
           }
           const schedulerSourceId = sourceSchedulerSourceIdForCorpus(corpusId);
+          assertFileSourceSyncApproved(schedulerSourceId);
           const schedulerHasSource = schedulerSourceId !== undefined
             && sourceScheduler?.status().sources.some((source) => source.source_id === schedulerSourceId) === true;
           if (schedulerSourceId && schedulerHasSource && corpusId !== X_BOOKMARKS_CORPUS_ID) {
@@ -2567,22 +2568,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     }
   }
 
-  async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
-    const fileSourceId = request.source === 'google-drive'
-      ? 'google_drive.docs'
-      : request.source === 'dropbox'
-        ? 'dropbox.files'
-        : undefined;
-    if (fileSourceId && sourceDashboard?.fileSourceScopes) {
-      const scope = sourceDashboard.fileSourceScopes.summaries()
-        .find((candidate) => candidate.source_id === fileSourceId);
-      if (!scope || scope.status !== 'approved' || !scope.connected) {
+  function assertFileSourceSyncApproved(sourceId: string | undefined): void {
+    if (sourceId === 'google_drive.docs' || sourceId === 'dropbox.files') {
+      const scope = sourceDashboard?.fileSourceScopes?.summaries()
+        .find((candidate) => candidate.source_id === sourceId);
+      const hasSelectedFolders = scope?.whole_account_selected === true
+        || scope?.selections?.some((selection) => selection.state !== 'exclude') === true;
+      if (!scope || scope.status !== 'approved' || !scope.connected || !hasSelectedFolders) {
         throw new OperationError(
           'source_index_policy_violation',
           'Choose and approve this file source scope before starting ingestion.',
         );
       }
     }
+  }
+
+  async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
+    assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
