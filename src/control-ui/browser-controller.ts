@@ -180,10 +180,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function releaseSubmittedOAuthPanel(
     form: HTMLFormElement,
     submittedValues: Record<string, string> | undefined,
-  ): void {
+  ): boolean {
     const sheet = form.closest<HTMLElement>('.sheet');
-    const active = activeElement();
     const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
+    if (!unchanged) return false;
+    // The submitted values are now owned by the backend. Reset before the
+    // panel is released so a password/client secret cannot become a reflected
+    // HTML value attribute on a later DOM serialization.
+    form.reset();
+    const active = activeElement();
     if (sheet) {
       sheet.classList.remove('on');
       sheet.setAttribute('aria-hidden', 'true');
@@ -195,26 +200,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         });
       }
     }
-    // The submitted values are no longer a draft. Keep them visible while the
-    // immediate refresh runs, but let the normal dirty-input guard protect any
-    // value changed after the submit began.
-    if (unchanged) {
-      form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-        'input:not([type="hidden"]),textarea,select',
-      ).forEach((field) => {
-        if (field instanceof HTMLSelectElement) {
-          Array.from(field.options).forEach((option) => { option.defaultSelected = option.selected; });
-        } else if (field instanceof HTMLInputElement
-          && (field.type === 'checkbox' || field.type === 'radio')) {
-          field.defaultChecked = field.checked;
-        } else {
-          field.defaultValue = field.value;
-        }
-      });
-    }
     if (active && (active === form || form.contains(active)) && active instanceof HTMLElement) {
       active.blur();
     }
+    return true;
   }
 
   function controlParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
@@ -356,12 +345,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (authorizationTab) {
           authorizationTab.location.href = authorizationUrl;
           say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus.');
-          releaseSubmittedOAuthPanel(form, submittedValues);
-          void refreshNow(false, true);
+          if (releaseSubmittedOAuthPanel(form, submittedValues)) void refreshNow(false, true);
         } else if (openAuthorizationExternally(authorizationUrl)) {
           say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus.');
-          releaseSubmittedOAuthPanel(form, submittedValues);
-          void refreshNow(false, true);
+          if (releaseSubmittedOAuthPanel(form, submittedValues)) void refreshNow(false, true);
         } else {
           say(form, 'Open the authorization page to continue.');
           showAuthorizationFallback(form, authorizationUrl);

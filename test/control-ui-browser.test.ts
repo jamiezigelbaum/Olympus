@@ -219,11 +219,45 @@ describe('OAuth browser handoff', () => {
     controller.dispose();
   });
 
+  test('resets an accepted password before releasing it without reflecting the secret into HTML', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
+      + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
+      + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="gmail">'
+      + '<input name="client_secret" type="password"><button type="submit">Connect</button>'
+      + '<span data-action-message></span></form></div>';
+    document.body.append(root);
+    const form = root.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"]')!;
+    const secret = form.querySelector<HTMLInputElement>('input[name="client_secret"]')!;
+    secret.value = 'oauth-secret-entered-by-owner';
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    Object.defineProperty(window, 'open', { configurable: true, value: () => popup });
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult('https://accounts.google.com/o/oauth2/auth?state=oauth-state') },
+      navigate() {},
+      async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(secret.value).toBe('');
+    expect(root.innerHTML).not.toContain('oauth-secret-entered-by-owner');
+    expect(root.querySelector('.sheet.on')).toBeNull();
+    controller.dispose();
+  });
+
   test('releases the submitted sheet but preserves edits made while the RPC is pending', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
       + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
       + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="gmail">'
+      + '<input name="client_id" value="initial-client">'
       + '<button type="submit">Connect</button><span data-action-message></span></form></div>'
       + '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
       + '<input name="api_key" type="password"><button type="submit">Save draft</button></form>';
@@ -255,14 +289,19 @@ describe('OAuth browser handoff', () => {
     draft.focus();
     draft.dispatchEvent(new Event('input', { bubbles: true }));
     oauth.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    const oauthClientId = oauth.querySelector<HTMLInputElement>('input[name="client_id"]')!;
+    oauthClientId.value = 'edited-while-pending';
+    oauthClientId.focus();
+    oauthClientId.dispatchEvent(new Event('input', { bubbles: true }));
     resolveControl(oauthResult(authorizationUrl));
     await happyWindow.happyDOM.waitUntilComplete();
 
     expect(refreshes).toBe(0);
     expect(root.querySelector('#connected')).toBeNull();
-    expect(root.querySelector('.sheet.on')).toBeNull();
+    expect(root.querySelector('.sheet.on')).not.toBeNull();
+    expect(oauthClientId.value).toBe('edited-while-pending');
     expect(draft.value).toBe('draft-secret');
-    expect(document.activeElement).toBe(draft);
+    expect(document.activeElement).toBe(oauthClientId);
     controller.dispose();
   });
 });
