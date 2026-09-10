@@ -8886,6 +8886,7 @@ function defineConnectorCorpus(options) {
     family: options.family,
     trustDomain: options.trustDomain,
     activationMode: options.activationMode ?? "lexical_only",
+    ...options.embeddingPolicy ? { embeddingPolicy: options.embeddingPolicy } : {},
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
@@ -74560,7 +74561,8 @@ async function main() {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   }
-  const secureEmbeddingCloudApproved = secureLocalPolicyEmbeddingProvider?.backend === "cloud" && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider);
+  const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
+  const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === "venice" && secureEmbeddingProfile.profile.trust === "encrypted_cloud";
   const fullCorpusDefinitions = [
     defineGmailSecureLocalCorpus(),
     defineInternalEmailCorpus(),

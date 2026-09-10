@@ -36,8 +36,9 @@ testers have exercised the normal product journey without custom engineering.
   an embedding-ledger receipt. Local-only secure data stays local; Gemini
   remains restricted to non-secure embeddings. Provider readiness must be
   established before source Connect. The implementation passes typechecking
-  and 209 focused runtime/store tests. Independent review, artifact delivery,
-  and live activation proof remain pending.
+  and focused runtime/store tests, including missing-credential and dynamic
+  corpus status regressions. Live activation and real-provider proof remain
+  pending; code delivery alone must preserve existing saved configuration.
 
 - **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
   setup and worker/Gateway activation before optional dashboard source choice.
