@@ -103,6 +103,7 @@ export const EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = 'source_bytes_hash_mismatc
 export const EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = 'extractor_empty_output';
 export const EXTRACTION_ERROR_KIND_SINK_FAILED = 'sink_write_failed';
 export const EXTRACTION_ERROR_KIND_LEASE_LOST = 'lease_lost';
+export const EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = 'source_scope_superseded';
 
 /**
  * Egress refusals, split by WHY rather than collapsed into one token. An
@@ -219,6 +220,10 @@ export interface ExtractionRunnerCorpus {
    */
   egressPolicy?: ExtractionEgressPolicy;
   trustTiers?: ExtractionTrustTierReader;
+  /** Live account/scope fence, rechecked at every external/write boundary. */
+  authorization?: {
+    assertCurrent(ref: ExtractionItemRef): void | Promise<void>;
+  };
 }
 
 export interface FileExtractionRunnerOptions {
@@ -724,6 +729,9 @@ async function settleOneJob(input: {
   if (!extractor) {
     return { status: 'failed_terminal', errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
   }
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
 
   // The gate runs before the bytes are fetched. Doing it here rather than at
   // the call site inside the extractor is what makes it a boundary: the remote
@@ -802,6 +810,9 @@ async function settleOneJob(input: {
   // it is deliberate rather than an oversight. This is the catch that turns
   // those into settled jobs.
   let output: ExtractorOutput;
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
   try {
     output = await extractor.extract(extractorInput);
   } catch (error) {
@@ -854,6 +865,9 @@ async function settleOneJob(input: {
   }
 
   let accepted;
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
   try {
     accepted = await corpus.sink.accept({
       ref: job.ref,
@@ -917,6 +931,19 @@ async function settleOneJob(input: {
     ...(output.derivations ? { derivations: output.derivations } : {}),
     ...(output.egressDestination ? { egressDestination: output.egressDestination } : {}),
   };
+}
+
+async function extractionAuthorizationCurrent(
+  corpus: ExtractionRunnerCorpus,
+  ref: ExtractionItemRef,
+): Promise<boolean> {
+  if (!corpus.authorization) return true;
+  try {
+    await corpus.authorization.assertCurrent(ref);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

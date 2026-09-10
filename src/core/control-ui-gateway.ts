@@ -6,6 +6,9 @@ import {
   type OlympusDashboardControlParams,
   type OlympusDashboardControlResult,
   type OlympusDashboardOAuthSource,
+  type OlympusFolderScopeBrowseResult,
+  type OlympusFolderScopeNode,
+  type OlympusSourceScopeSelection,
   type OlympusDashboardReadParams,
   type OlympusDashboardReadResult,
   type OlympusDashboardSourceId,
@@ -156,6 +159,42 @@ export async function requestDashboardRead(input: {
   timeoutMs?: number;
 }): Promise<OlympusDashboardReadResult> {
   const authToken = requireWorkerAuthToken(input.config);
+  if (input.params.view === 'dispositions'
+    && 'action' in input.params
+    && input.params.action === 'browse_folder_scope') {
+    if (!input.canWrite) {
+      throw new DashboardGatewayInvalidRequestError('Operator write scope is required to browse private folders.');
+    }
+    const encoded = JSON.stringify({
+      action: input.params.action,
+      source_id: input.params.source_id,
+      ...(input.params.parent_key ? { parent_key: input.params.parent_key } : {}),
+      ...(input.params.cursor ? { cursor: input.params.cursor } : {}),
+    });
+    const { response, text: body } = await boundedWorkerRequest({
+      fetchImpl: input.fetchImpl ?? fetch,
+      url: workerRootUrl(input.config, '/dashboard/dispositions'),
+      init: {
+        method: 'POST',
+        headers: workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig), true),
+        body: encoded,
+        redirect: 'error',
+      },
+      timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
+      maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    if (!response.ok) {
+      throw new DashboardGatewayUnavailableError(`Olympus dashboard worker returned HTTP ${response.status}.`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
+    }
+    return parseDashboardReadResult(parsed, input.canWrite);
+  }
   const url = workerRootUrl(input.config, '/dashboard/ui');
   url.searchParams.set('native', '1');
   url.searchParams.set('view', input.params.view);
@@ -223,17 +262,34 @@ export async function requestDashboardControl(input: {
 }
 
 export function parseDashboardReadParams(value: unknown): OlympusDashboardReadParams {
-  const record = exactRecord(value, ['view', 'source_id']);
+  const record = exactRecord(value, ['view', 'source_id', 'action', 'parent_key', 'cursor']);
   if (!OLYMPUS_DASHBOARD_VIEWS.includes(record.view as never)) {
     throw new DashboardGatewayInvalidRequestError('Unknown Olympus dashboard view.');
   }
   const view = record.view as OlympusDashboardReadParams['view'];
+  if (record.action === 'browse_folder_scope') {
+    if (view !== 'dispositions') {
+      throw new DashboardGatewayInvalidRequestError('Folder browsing is available only in the dispositions view.');
+    }
+    const parentKey = optionalBoundedString(record.parent_key, 4_096, 'parent_key', false);
+    const cursor = optionalBoundedString(record.cursor, 8_192, 'cursor', false);
+    return {
+      view,
+      action: 'browse_folder_scope',
+      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
+      ...(parentKey ? { parent_key: parentKey } : {}),
+      ...(cursor ? { cursor } : {}),
+    };
+  }
+  if (record.action !== undefined || record.parent_key !== undefined || record.cursor !== undefined) {
+    throw new DashboardGatewayInvalidRequestError('Unexpected folder browse parameters.');
+  }
   const sourceId = record.source_id === undefined ? undefined : boundedString(record.source_id, 256, 'source_id');
   if (view === 'source' && sourceId === undefined) {
     throw new DashboardGatewayInvalidRequestError('source_id is required for the source view.');
   }
-  if (view !== 'source' && sourceId !== undefined) {
-    throw new DashboardGatewayInvalidRequestError('source_id is allowed only for the source view.');
+  if (view !== 'source' && view !== 'dispositions' && sourceId !== undefined) {
+    throw new DashboardGatewayInvalidRequestError('source_id is allowed only for the source view or dispositions view.');
   }
   return { view, ...(sourceId ? { source_id: sourceId } : {}) };
 }
@@ -241,6 +297,62 @@ export function parseDashboardReadParams(value: unknown): OlympusDashboardReadPa
 export function parseDashboardControlParams(value: unknown): OlympusDashboardControlParams {
   const outer = recordValue(value);
   const action = outer.action;
+  if (action === 'browse_folder_scope') {
+    const record = exactRecord(outer, ['action', 'source_id', 'parent_key', 'cursor']);
+    const parentKey = optionalBoundedString(record.parent_key, 4_096, 'parent_key', false);
+    const cursor = optionalBoundedString(record.cursor, 8_192, 'cursor', false);
+    return {
+      action,
+      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
+      ...(parentKey ? { parent_key: parentKey } : {}),
+      ...(cursor ? { cursor } : {}),
+    };
+  }
+  if (action === 'approve_source_scope_and_start') {
+    const record = exactRecord(outer, [
+      'action',
+      'source_id',
+      'account_generation',
+      'expected_scope_revision',
+      'selections',
+      'whole_account',
+      'explicit_whole_account_confirmation',
+    ]);
+    if (!Array.isArray(record.selections) || record.selections.length > 100) {
+      throw new DashboardGatewayInvalidRequestError('selections must be an array of at most 100 folders.');
+    }
+    const selections = record.selections.map((value): OlympusSourceScopeSelection => {
+      const selection = exactRecord(value, ['key', 'state', 'ancestor_keys']);
+      if (selection.state !== 'ingest' && selection.state !== 'metadata_only' && selection.state !== 'exclude') {
+        throw new DashboardGatewayInvalidRequestError('Unknown source scope disposition.');
+      }
+      let ancestorKeys: string[] | undefined;
+      if (selection.ancestor_keys !== undefined) {
+        if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
+          throw new DashboardGatewayInvalidRequestError('ancestor_keys must be an array of at most 100 folder keys.');
+        }
+        ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4_096, 'ancestor_keys[]', false));
+      }
+      return {
+        key: boundedString(selection.key, 4_096, 'key', false),
+        state: selection.state,
+        ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
+      };
+    });
+    if (typeof record.whole_account !== 'boolean'
+      || typeof record.explicit_whole_account_confirmation !== 'boolean') {
+      throw new DashboardGatewayInvalidRequestError('Whole-account fields must be true or false.');
+    }
+    return {
+      action,
+      source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
+      account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
+      expected_scope_revision: boundedString(record.expected_scope_revision, 256, 'expected_scope_revision', false),
+      selections,
+      whole_account: record.whole_account,
+      explicit_whole_account_confirmation: record.explicit_whole_account_confirmation,
+    };
+  }
   if (action === 'save_dispositions') {
     const record = exactRecord(outer, ['action', 'source', 'edits']);
     const source = boundedString(record.source, 256, 'source');
@@ -520,6 +632,16 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
   body: Record<string, unknown>;
 } {
   switch (params.action) {
+    case 'browse_folder_scope':
+      return {
+        path: '/dashboard/dispositions',
+        body: {
+          action: params.action,
+          source_id: params.source_id,
+          ...(params.parent_key ? { parent_key: params.parent_key } : {}),
+          ...(params.cursor ? { cursor: params.cursor } : {}),
+        },
+      };
     case 'save_dispositions':
       return { path: '/dashboard/dispositions', body: { source: params.source, edits: params.edits } };
     case 'start_oauth':
@@ -537,6 +659,19 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
       return { path: '/dashboard/connect/api-key', body: { source: params.source, api_key: params.api_key } };
     case 'sync_now':
       return { path: '/dashboard/sync-now', body: { source: params.source } };
+    case 'approve_source_scope_and_start':
+      return {
+        path: '/dashboard/dispositions',
+        body: {
+          action: params.action,
+          source_id: params.source_id,
+          account_generation: params.account_generation,
+          expected_scope_revision: params.expected_scope_revision,
+          selections: params.selections,
+          whole_account: params.whole_account,
+          explicit_whole_account_confirmation: params.explicit_whole_account_confirmation,
+        },
+      };
     case 'set_embedding_priority':
       return { path: '/dashboard/embedding-priority', body: { on: params.on } };
     case 'disconnect':
@@ -555,6 +690,7 @@ function parseDashboardReadResult(value: unknown, expectedCanWrite: boolean): Ol
     'can_write',
     'signature',
     'poll_interval_ms',
+    'scope_browser',
   ]);
   if (!Number.isInteger(record.status) || (record.status as number) < 100 || (record.status as number) > 599) {
     throw new DashboardGatewayUnavailableError('Olympus dashboard worker returned an invalid response.');
@@ -584,6 +720,72 @@ function parseDashboardReadResult(value: unknown, expectedCanWrite: boolean): Ol
     can_write: expectedCanWrite,
     signature,
     poll_interval_ms: record.poll_interval_ms as number,
+    ...(record.scope_browser === undefined
+      ? {}
+      : { scope_browser: parseFolderScopeBrowseResult(record.scope_browser) }),
+  };
+}
+
+function parseFolderScopeBrowseResult(value: unknown): OlympusFolderScopeBrowseResult {
+  const record = exactRecord(value, [
+    'source_id', 'account_generation', 'scope_revision', 'status', 'nodes',
+    'next_cursor', 'selections', 'whole_account_selected',
+  ]);
+  if (record.status !== 'scope_pending' && record.status !== 'approved') {
+    throw new DashboardGatewayUnavailableError('Olympus folder scope status is invalid.');
+  }
+  if (!Array.isArray(record.nodes) || record.nodes.length > 1_000) {
+    throw new DashboardGatewayUnavailableError('Olympus folder scope nodes are invalid.');
+  }
+  const nodes = record.nodes.map((value): OlympusFolderScopeNode => {
+    const node = exactRecord(value, ['key', 'parent_key', 'name', 'kind', 'has_children', 'selectable']);
+    if (node.kind !== 'folder' || typeof node.has_children !== 'boolean' || typeof node.selectable !== 'boolean') {
+      throw new DashboardGatewayUnavailableError('Olympus folder scope node is invalid.');
+    }
+    const parentKey = optionalBoundedString(node.parent_key, 4_096, 'parent_key', false);
+    return {
+      key: boundedString(node.key, 4_096, 'key', false),
+      ...(parentKey ? { parent_key: parentKey } : {}),
+      name: boundedString(node.name, 1_024, 'name', false),
+      kind: 'folder',
+      has_children: node.has_children,
+      selectable: node.selectable,
+    };
+  });
+  if (!Array.isArray(record.selections) || record.selections.length > 100) {
+    throw new DashboardGatewayUnavailableError('Olympus folder scope selections are invalid.');
+  }
+  const selections = record.selections.map((value): OlympusSourceScopeSelection => {
+    const selection = exactRecord(value, ['key', 'state', 'ancestor_keys']);
+    if (selection.state !== 'ingest' && selection.state !== 'metadata_only' && selection.state !== 'exclude') {
+      throw new DashboardGatewayUnavailableError('Olympus folder scope selection is invalid.');
+    }
+    let ancestorKeys: string[] | undefined;
+    if (selection.ancestor_keys !== undefined) {
+      if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
+        throw new DashboardGatewayUnavailableError('Olympus folder scope ancestry is invalid.');
+      }
+      ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4_096, 'ancestor_keys[]', false));
+    }
+    return {
+      key: boundedString(selection.key, 4_096, 'key', false),
+      state: selection.state,
+      ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
+    };
+  });
+  if (typeof record.whole_account_selected !== 'boolean') {
+    throw new DashboardGatewayUnavailableError('Olympus whole-account scope state is invalid.');
+  }
+  const nextCursor = optionalBoundedString(record.next_cursor, 8_192, 'next_cursor', false);
+  return {
+    source_id: enumValue(record.source_id, ['google_drive.docs', 'dropbox.files'] as const, 'source_id'),
+    account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
+    scope_revision: boundedString(record.scope_revision, 256, 'scope_revision', false),
+    status: record.status,
+    nodes,
+    ...(nextCursor ? { next_cursor: nextCursor } : {}),
+    selections,
+    whole_account_selected: record.whole_account_selected,
   };
 }
 

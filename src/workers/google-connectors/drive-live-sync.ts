@@ -223,6 +223,17 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     const sync = {
       fetchContent: true,
       classification,
+      ...(options.scope
+        ? {
+            sourceScopeObservation: (item: import('../../core/contracts.ts').RawItem) => ({
+              accountGeneration: options.scope!.generation,
+              scopeRevision: options.scope!.revision,
+              folderKeys: Array.isArray(item.metadata['folderAncestorIds'])
+                ? item.metadata['folderAncestorIds'].filter((key): key is string => typeof key === 'string')
+                : [],
+            }),
+          }
+        : {}),
       ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
       ...(input.cursor ? { cursor: input.cursor } : {}),
       ...(input.reconcile

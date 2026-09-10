@@ -1936,6 +1936,7 @@ describe('multi-source source dashboard', () => {
       'dropbox.personal.oauth.client_id': 'dropbox-client-id-fixture',
     });
     let tokenExchangeBody = '';
+    const syncRequests: unknown[] = [];
     const oauthFetch: OAuthFetch = async (_url, init) => {
       tokenExchangeBody = String(init?.body ?? '');
       return new Response(JSON.stringify({
@@ -1959,6 +1960,9 @@ describe('multi-source source dashboard', () => {
         registryPath,
         secretStore,
         oauthFetch,
+        async triggerSourceSync(request) {
+          syncRequests.push(request);
+        },
       },
     });
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
@@ -2009,6 +2013,7 @@ describe('multi-source source dashboard', () => {
       provider: 'dropbox',
       allowedCapabilities: ['dropbox.files.sync'],
     });
+    expect(syncRequests).toEqual([]);
 
     const dashboard = await fetch(new Request('http://worker.test/dashboard', {
       headers: { Authorization: 'Bearer dashboard-secret' },

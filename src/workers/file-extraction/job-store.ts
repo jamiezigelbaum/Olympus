@@ -502,6 +502,19 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * Drop work that was authorized by a superseded file-source scope. Settled
+   * rows and their artifacts remain; only never-finished queue state moves.
+   */
+  invalidateUnsettledForCorpus(corpusId: string): number {
+    this.assertWritable('scope queue invalidation');
+    const id = requireBoundedString(corpusId, 'corpusId');
+    return this.db.query(`
+      DELETE FROM extraction_jobs
+      WHERE corpus_id = ? AND status IN ('queued', 'leased')
+    `).run(id).changes;
+  }
+
+  /**
    * Create or refresh jobs for a batch of refs.
    *
    * There is no "missing item" outcome here, unlike the queue this ports: the

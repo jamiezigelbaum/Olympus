@@ -18,6 +18,7 @@ import type { CredentialBroker, CredentialBrokerFetch } from '../credential-brok
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import {
   createDropboxSourceConnector,
+  type DropboxContentScope,
 } from './connector.ts';
 import {
   isDropboxCursorResetError,
@@ -93,6 +94,7 @@ export interface DropboxProviderStoreSyncHandlerOptions {
   contentBaseUrl?: string;
   /** Kept here so construction rejects an unsafe secure-lane provider early. */
   embeddingProvider?: SourceEmbeddingProvider;
+  scope?: DropboxContentScope;
 }
 
 export function createDropboxProviderStoreSyncHandler(
@@ -132,6 +134,7 @@ export function createDropboxProviderStoreSyncHandler(
           ...(options.fetch ? { fetch: options.fetch } : {}),
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.contentBaseUrl ? { contentBaseUrl: options.contentBaseUrl } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
           deletedItemIdentityResolver: options.store,
           onPageDigestRestart: () => {
             pageDigestRestarts += 1;
@@ -139,6 +142,15 @@ export function createDropboxProviderStoreSyncHandler(
         }));
         const sync = await options.store.syncFromConnector(observed.connector, {
           fetchContent: false,
+          ...(options.scope
+            ? {
+                sourceScopeObservation: () => ({
+                  accountGeneration: options.scope!.generation,
+                  scopeRevision: options.scope!.revision,
+                  folderKeys: [],
+                }),
+              }
+            : {}),
           ...(maxItems !== undefined ? { maxItems } : {}),
           ...(cursor ? { cursor } : {}),
         });

@@ -89,6 +89,48 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     expect(JSON.stringify(calls)).not.toContain('worker-secret');
   });
 
+  test('folder browse uses a POST body and preserves the validated scope envelope', async () => {
+    const result = await requestDashboardRead({
+      params: {
+        view: 'dispositions', action: 'browse_folder_scope', source_id: 'dropbox.files',
+        parent_key: '/private folder', cursor: 'opaque-cursor',
+      },
+      canWrite: true,
+      config: configuredWorker(),
+      fetchImpl: async (url, init) => {
+        expect(String(url)).toBe('http://source-worker.test/dashboard/dispositions');
+        expect(init?.method).toBe('POST');
+        expect(String(url)).not.toContain('private');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          action: 'browse_folder_scope', source_id: 'dropbox.files',
+          parent_key: '/private folder', cursor: 'opaque-cursor',
+        });
+        return Response.json({
+          status: 200,
+          title: 'Olympus / Choose folders',
+          body: '<main></main>',
+          controller: 'dispositions',
+          can_write: true,
+          signature: 'revision-1',
+          poll_interval_ms: 15_000,
+          scope_browser: {
+            source_id: 'dropbox.files',
+            account_generation: 'a'.repeat(64),
+            scope_revision: 'revision-1',
+            status: 'scope_pending',
+            nodes: [{ key: '/work', name: 'Work', kind: 'folder', has_children: true, selectable: true }],
+            selections: [],
+            whole_account_selected: false,
+          },
+        });
+      },
+    });
+    expect(result.scope_browser).toEqual(expect.objectContaining({
+      source_id: 'dropbox.files',
+      nodes: [expect.objectContaining({ key: '/work', name: 'Work' })],
+    }));
+  });
+
   test('callbacks defensively reject missing scopes and executable worker markup', async () => {
     const registrations = gatewayRegistrations(async () => Response.json({
       status: 200,
@@ -271,6 +313,9 @@ describe('OpenClaw native dashboard Gateway bridge', () => {
     expect(() => parseDashboardReadParams({ view: 'embedding_ledger' })).toThrow('Unknown Olympus dashboard view');
     expect(() => parseDashboardReadParams({ view: 'source' })).toThrow('source_id is required');
     expect(() => parseDashboardReadParams({ view: 'home', source_id: 'x' })).toThrow('only for the source view');
+    expect(() => parseDashboardReadParams({
+      view: 'dispositions', action: 'browse_folder_scope', source_id: 'gmail.email',
+    })).toThrow('source_id');
     expect(resolveGatewayPublicOrigin({ gateway: { publicOrigin: 'https://gateway.example/' } }))
       .toBe('https://gateway.example');
     expect(resolveGatewayPublicOrigin({ gateway: { publicOrigin: 'http://gateway.example' } })).toBeUndefined();

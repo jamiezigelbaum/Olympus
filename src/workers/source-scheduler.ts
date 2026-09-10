@@ -119,6 +119,7 @@ export type SourceSchedulerConstructionReason =
   | 'lane_ready'
   | 'no_handle'
   | 'lane_disabled'
+  | 'scope_pending'
   | 'handle_rebound'
   | 'no_store_sync'
   | 'no_tasks';

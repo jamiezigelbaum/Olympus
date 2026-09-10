@@ -132,6 +132,9 @@ import {
 import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
 import {
   OLYMPUS_DASHBOARD_VIEWS,
+  type OlympusFolderScopeBrowseResult,
+  type OlympusFolderScopeSourceId,
+  type OlympusSourceScopeSelection,
   type OlympusDashboardReadParams,
 } from '../../control-ui-contract.ts';
 import {
@@ -168,6 +171,7 @@ import {
   readSourceIngestionExclusionsFile,
   saveSourceDispositions,
   type SourceDispositionsSource,
+  type SourceFolderScopeSummary,
 } from '../source-dispositions.ts';
 import type { SourceDispositionEdit, SourceDispositionState } from '../../core/source-disposition-tree.ts';
 import type { SourceExclusionCriterionKind } from '../../core/source-ingestion-exclusions.ts';
@@ -203,6 +207,7 @@ import {
   unsupportedConnectorStoreFilterFields,
   type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreResultProjector,
+  type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
@@ -369,6 +374,16 @@ export interface EmailSourceWorkerOptions {
   connectorStorePrincipals?: ReadonlyMap<string, ConnectorStoreDeclaredPrincipal>;
   /** Test/integration override; shipped declarations use the module registry above. */
   connectorStoreFilterCapabilities?: ConnectorStoreFilterCapabilityRegistry;
+  /** Mandatory account-bound retrieval scope for mounted file corpora. */
+  connectorStoreReadScope?: (
+    store: LocalConnectorStore,
+  ) => { allowed: false } | {
+    allowed: true;
+    accountScope?: string;
+    filters?: ConnectorStoreSearchFilters;
+    contentAllowed?: boolean;
+    contentFilters?: ConnectorStoreSearchFilters;
+  };
   sourceScheduler?: SourceScheduler;
   sourceWatch?: {
     store: LocalSourceWatchStore;
@@ -444,6 +459,22 @@ export interface EmailSourceWorkerOptions {
      * tree that reads as "you have no folders".
      */
     ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    fileSourceScopes?: {
+      summaries(): SourceFolderScopeSummary[];
+      browse(input: {
+        sourceId: OlympusFolderScopeSourceId;
+        parentKey?: string;
+        cursor?: string;
+      }): Promise<OlympusFolderScopeBrowseResult>;
+      approveAndStart(input: {
+        sourceId: OlympusFolderScopeSourceId;
+        accountGeneration: string;
+        expectedRevision: string;
+        selections: OlympusSourceScopeSelection[];
+        wholeAccount: boolean;
+        explicitWholeAccountConfirmation: boolean;
+      }): Promise<Record<string, unknown>>;
+    };
   };
   credentialDegradations?: () => WorkerCredentialDegradation[];
   recheckCredentials?: () => WorkerCredentialDegradation[];
@@ -590,6 +621,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map();
   const connectorStoreFilterCapabilities = options.connectorStoreFilterCapabilities
     ?? CONNECTOR_STORE_FILTER_CAPABILITIES;
+  const connectorStoreReadScope = options.connectorStoreReadScope;
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
@@ -848,11 +880,60 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the ingestion-dispositions picker configured.',
             );
           }
+          const nativeBrowse = dashboardUi?.params.view === 'dispositions'
+            && 'action' in dashboardUi.params
+            && dashboardUi.params.action === 'browse_folder_scope'
+            ? dashboardUi.params
+            : undefined;
+          const postBody = request.method === 'POST' ? await parseObjectBody(request) : undefined;
+          if (nativeBrowse || postBody?.action === 'browse_folder_scope') {
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope browsing is not configured.');
+            }
+            const input = nativeBrowse ?? postBody!;
+            const sourceId = parseFolderScopeSourceId(input.source_id);
+            const parentKey = asOptionalString(input.parent_key);
+            const cursor = asOptionalString(input.cursor);
+            const scopeBrowser = await sourceDashboard.fileSourceScopes.browse({
+              sourceId,
+              ...(parentKey ? { parentKey } : {}),
+              ...(cursor ? { cursor } : {}),
+            });
+            return json({
+              status: 200,
+              title: 'Olympus / Choose folders',
+              body: '<main></main>',
+              controller: 'dispositions',
+              can_write: true,
+              signature: scopeBrowser.scope_revision,
+              poll_interval_ms: 15_000,
+              scope_browser: scopeBrowser,
+            });
+          }
+          if (postBody?.action === 'approve_source_scope_and_start') {
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope approval is not configured.');
+            }
+            const sourceId = parseFolderScopeSourceId(postBody.source_id);
+            const accountGeneration = asOptionalString(postBody.account_generation);
+            const expectedRevision = asOptionalString(postBody.expected_scope_revision);
+            if (!accountGeneration || !expectedRevision) {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'account_generation and expected_scope_revision are required.');
+            }
+            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
+              sourceId,
+              accountGeneration,
+              expectedRevision,
+              selections: parseSourceScopeSelections(postBody.selections),
+              wholeAccount: postBody.whole_account === true,
+              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true,
+            }));
+          }
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
             if (request.method === 'POST') {
-              const body = await parseObjectBody(request);
+              const body = postBody ?? await parseObjectBody(request);
               const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(body, runtime.sources));
               return json({
                 ok: true,
@@ -875,6 +956,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const file = readSourceIngestionExclusionsFile(rulesPath);
             const view = buildSourceDispositionsView({
               sources: runtime.sources,
+              folderScopes: sourceDashboard.fileSourceScopes?.summaries() ?? [],
               document: file.document,
               rulesPath,
               rulesPresent: file.present,
@@ -991,6 +1073,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // The dispatch chain is this worker's to know. Without it the card
             // offered Sync now for a source nothing here can sync.
             syncNowAvailable: dashboardSourceSyncAvailable,
+            ...(sourceDashboard.fileSourceScopes
+              ? {
+                  fileSourceScopeStatus: Object.fromEntries(
+                    sourceDashboard.fileSourceScopes.summaries()
+                      .map((scope) => [scope.source_id, scope.status]),
+                  ),
+                  fileSourceScopeIngestionEnabled: Object.fromEntries(
+                    sourceDashboard.fileSourceScopes.summaries().map((scope) => [
+                      scope.source_id,
+                      scope.status === 'approved' && (
+                        scope.whole_account_selected === true
+                        || scope.selections?.some((selection) => selection.state !== 'exclude') === true
+                      ),
+                    ]),
+                  ),
+                }
+              : {}),
             ...(sensitivityMap ? { sensitivityMap } : {}),
           });
           assertNoRawEmailFields(view);
@@ -1180,10 +1279,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               await attempt.pending.completeCallback({ state, code });
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
               markDashboardSourceConnected(source, dashboardDisconnectedSources);
-              await triggerDashboardPostConnectSync({
-                source,
-                reason: 'post_connect',
-              });
+              // Folder-capable sources stop at connected + scope_pending.
+              // OAuth consent is credential consent, not corpus consent.
+              if (source !== 'google-drive' && source !== 'dropbox') {
+                await triggerDashboardPostConnectSync({
+                  source,
+                  reason: 'post_connect',
+                });
+              }
             });
           } catch (error) {
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
@@ -2224,6 +2327,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
+            const mandatoryScope = connectorStoreReadScope?.(connectorStore);
+            if (mandatoryScope?.allowed === false) {
+              throw new EmailSourceWorkerError(
+                403,
+                'source_index_policy_violation',
+                'This file source is unavailable until its folder scope is approved for the connected account.',
+              );
+            }
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
               record,
               connectorStore,
@@ -2236,11 +2347,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
             const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
               ?? sourceIndexEmbeddingProvider;
+            const combinedFilters = searchRequest.filters || mandatoryScope?.filters
+              ? normalizeConnectorStoreSearchFilters({
+                  ...searchRequest.filters,
+                  ...mandatoryScope?.filters,
+                })
+              : undefined;
             const adapter = createConnectorStoreCorpusAdapter({
               store: connectorStore,
               retrievalMode: searchRequest.retrievalMode,
-              ...(searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
-              ...(searchRequest.filters ? { filters: searchRequest.filters } : {}),
+              ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
+                ? { accountScope: mandatoryScope.accountScope }
+                : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
+              ...(combinedFilters ? { filters: combinedFilters } : {}),
               ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
               ...(connectorStoreEmbeddingProvider
                 && (connectorStore.trustDomain !== 'secure_local'
@@ -2449,6 +2568,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
+    const fileSourceId = request.source === 'google-drive'
+      ? 'google_drive.docs'
+      : request.source === 'dropbox'
+        ? 'dropbox.files'
+        : undefined;
+    if (fileSourceId && sourceDashboard?.fileSourceScopes) {
+      const scope = sourceDashboard.fileSourceScopes.summaries()
+        .find((candidate) => candidate.source_id === fileSourceId);
+      if (!scope || scope.status !== 'approved' || !scope.connected) {
+        throw new OperationError(
+          'source_index_policy_violation',
+          'Choose and approve this file source scope before starting ingestion.',
+        );
+      }
+    }
     await refreshDashboardSchedulerSources();
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
@@ -3978,6 +4112,37 @@ function parseDashboardSyncSource(value: unknown): DashboardConnectSource {
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gmail, google-drive, dropbox, x, or readwise.');
 }
 
+function parseFolderScopeSourceId(value: unknown): OlympusFolderScopeSourceId {
+  if (value === 'google_drive.docs' || value === 'dropbox.files') return value;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must name a folder-capable source.');
+}
+
+function parseSourceScopeSelections(value: unknown): OlympusSourceScopeSelection[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'selections must be an array of at most 100 folders.');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Every scope selection must be an object.');
+    }
+    const record = entry as Record<string, unknown>;
+    const key = asOptionalString(record.key);
+    if (!key || !['ingest', 'metadata_only', 'exclude'].includes(String(record.state))) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Every scope selection requires a folder key and disposition.');
+    }
+    const ancestorKeys = record.ancestor_keys === undefined
+      ? undefined
+      : Array.isArray(record.ancestor_keys)
+        ? record.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor): ancestor is string => Boolean(ancestor))
+        : undefined;
+    return {
+      key,
+      state: record.state as OlympusSourceScopeSelection['state'],
+      ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
+    };
+  });
+}
+
 function parseDashboardDisconnectSource(value: unknown): V04PublicSourceId {
   const source = asOptionalString(value);
   if (
@@ -4697,8 +4862,8 @@ function parseDashboardControlUiRequest(
   if (view === 'source' && !sourceId) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source view requires source_id.');
   }
-  if (view !== 'source' && sourceId) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source_id is allowed only for the source view.');
+  if (view !== 'source' && view !== 'dispositions' && sourceId) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source_id is allowed only for the source or dispositions view.');
   }
   return {
     params: { view, ...(sourceId ? { source_id: sourceId } : {}) },
