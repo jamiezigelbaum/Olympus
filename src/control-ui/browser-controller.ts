@@ -119,7 +119,38 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     slot.appendChild(link);
   }
 
+  function nativeExternalLinkPoster(): ((message: unknown) => void) | undefined {
+    // OpenClaw's native Control UI host installs this documented WebKit bridge.
+    // Probe it here so the standalone browser keeps its normal popup behavior.
+    try {
+      const handler = (window as unknown as {
+        webkit?: { messageHandlers?: { openclawLink?: { postMessage?: (message: unknown) => void } } };
+      }).webkit?.messageHandlers?.openclawLink;
+      if (!handler || typeof handler.postMessage !== 'function') return undefined;
+      return handler.postMessage.bind(handler);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function openAuthorizationExternally(url: string): boolean {
+    const postMessage = nativeExternalLinkPoster();
+    if (!postMessage) return false;
+    try {
+      // Match OpenClaw's native handoff helper: parse before crossing the
+      // bridge and pass the canonical URL to the host validator.
+      postMessage({ type: 'open-link', url: new URL(url).href, target: 'external' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function openAuthorizationTab(): Window | null {
+    // WKWebView intentionally blocks script-created windows in the native
+    // host. Let its trusted bridge launch the provider in the default browser
+    // once the Gateway returns the URL instead of reserving a dead tab.
+    if (nativeExternalLinkPoster()) return null;
     let tab: Window | null = null;
     try { tab = window.open('', '_blank'); } catch { tab = null; }
     if (tab) {
@@ -275,6 +306,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (authorizationTab) {
           authorizationTab.location.href = authorizationUrl;
           say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus.');
+        } else if (openAuthorizationExternally(authorizationUrl)) {
+          say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus.');
         } else {
           say(form, 'Open the authorization page to continue.');
           showAuthorizationFallback(form, authorizationUrl);

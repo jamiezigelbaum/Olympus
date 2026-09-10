@@ -69,6 +69,114 @@ function result(body: string, signature: string, canWrite = true): OlympusDashbo
 
 const noControl = async (): Promise<OlympusDashboardControlResult> => ({ status: 200, body: { ok: true } });
 
+function oauthFormRoot(): { root: HTMLDivElement; form: HTMLFormElement } {
+  const root = document.createElement('div');
+  root.innerHTML = '<form data-connect-kind="oauth">'
+    + '<input name="source" type="hidden" value="gmail">'
+    + '<button type="submit">Connect</button>'
+    + '<span data-action-message></span><span data-authorization-fallback></span></form>';
+  document.body.append(root);
+  return { root, form: root.querySelector('form')! };
+}
+
+function oauthResult(url: string): OlympusDashboardControlResult {
+  return { status: 200, body: { ok: true, authorization_url: url } };
+}
+
+describe('OAuth browser handoff', () => {
+  test('uses OpenClaw native handoff without opening a WebKit popup', async () => {
+    const { root, form } = oauthFormRoot();
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state&code=auth-code';
+    const messages: unknown[] = [];
+    Object.defineProperty(window, 'webkit', {
+      configurable: true,
+      value: { messageHandlers: { openclawLink: { postMessage: (message: unknown) => messages.push(message) } } },
+    });
+    let popupAttempts = 0;
+    Object.defineProperty(window, 'open', {
+      configurable: true,
+      value: () => { popupAttempts += 1; return null; },
+    });
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(popupAttempts).toBe(0);
+    expect(messages).toEqual([{ type: 'open-link', url: authorizationUrl, target: 'external' }]);
+    expect(root.querySelector('[data-action-message]')?.textContent)
+      .toBe('Authorization opened in your default browser. Approve it there, then come back to Olympus.');
+    expect(root.textContent).not.toContain(authorizationUrl);
+    expect(root.querySelector('[data-authorization-fallback] a')).toBeNull();
+    controller.dispose();
+  });
+
+  test('keeps the browser popup isolated and carries the authorization URL only to it', async () => {
+    const { root, form } = oauthFormRoot();
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    let openArgs: unknown[] | undefined;
+    Object.defineProperty(window, 'open', {
+      configurable: true,
+      value: (...args: unknown[]) => { openArgs = args; return popup; },
+    });
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(openArgs).toEqual(['', '_blank']);
+    expect(popup.opener).toBeNull();
+    expect(popup.location.href).toBe(authorizationUrl);
+    expect(root.textContent).not.toContain(authorizationUrl);
+    controller.dispose();
+  });
+
+  test('retains the checked fallback link when neither handoff is available', async () => {
+    const { root, form } = oauthFormRoot();
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    Object.defineProperty(window, 'open', { configurable: true, value: () => null });
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    const fallback = root.querySelector<HTMLAnchorElement>('[data-authorization-fallback] a');
+    expect(fallback?.href).toBe(authorizationUrl);
+    expect(fallback?.target).toBe('_blank');
+    expect(fallback?.rel).toBe('noopener noreferrer');
+    expect(root.textContent).not.toContain(authorizationUrl);
+    controller.dispose();
+  });
+});
+
 describe('dashboard controller DOM lifetime', () => {
   test('a dirty draft survives refresh after any focus age and permission revoke/regrant', async () => {
     const root = document.createElement('div');
