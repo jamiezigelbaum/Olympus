@@ -55,8 +55,9 @@ type ControlUiHost = {
 
 function routeFromProps(props: Readonly<Record<string, string>>): OlympusDashboardReadParams {
   const view = props.view;
+  if (view === 'dispositions') return { view, ...(props.source_id ? { source_id: props.source_id } : {}) };
   if (view === 'setup' || view === 'background'
-    || view === 'sensitivity' || view === 'dispositions') return { view };
+    || view === 'sensitivity') return { view };
   if (view === 'source' && props.source_id) return { view, source_id: props.source_id };
   return { view: 'home' };
 }
@@ -65,7 +66,10 @@ function routeFromHref(href: string): OlympusDashboardReadParams | undefined {
   if (!href.startsWith('/dashboard') || href.startsWith('//')) return undefined;
   let url: URL;
   try { url = new URL(href, 'https://olympus.invalid'); } catch { return undefined; }
-  if (url.pathname === '/dashboard/dispositions') return { view: 'dispositions' };
+  if (url.pathname === '/dashboard/dispositions') {
+    const sourceId = url.searchParams.get('source_id');
+    return { view: 'dispositions', ...(sourceId ? { source_id: sourceId } : {}) };
+  }
   if (url.pathname !== '/dashboard') return undefined;
   const sourceId = url.searchParams.get('source');
   if (sourceId) return { view: 'source', source_id: sourceId };
@@ -186,7 +190,10 @@ function createDashboardPage() {
             : mountDashboardController;
           controller = mount({
             root,
-            transport: { control },
+            transport: {
+              control,
+              read: (params) => context.host.request(OLYMPUS_DASHBOARD_READ_METHOD, { ...params }),
+            },
             navigate,
             refresh: read,
             returnUrl: context.host.navigation.pageHref(targetFor(route)),

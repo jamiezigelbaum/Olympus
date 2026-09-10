@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import type {
   OlympusDashboardControlParams,
   OlympusDashboardReadParams,
+  OlympusDashboardReadResult,
+  OlympusFolderScopeSourceId,
 } from '../src/control-ui-contract.ts';
 import { renderDashboardControlUi } from '../src/workers/dashboard/index.ts';
 import {
@@ -107,6 +109,27 @@ export function buildDispositionsPreviewView(): SourceDispositionsView {
 
 function readResult(params: OlympusDashboardReadParams, canWrite: boolean) {
   if (params.view === 'dispositions') {
+    if (params.source_id === 'dropbox.files' || params.source_id === 'google_drive.docs') {
+      const source = params.source_id as OlympusFolderScopeSourceId;
+      const view = buildDispositionsPreviewView();
+      view.sources = [];
+      view.folder_scopes = [{ source_id: source, disposition_source_id: source, label: source === 'dropbox.files' ? 'Dropbox' : 'Google Drive', connected: true, status: 'scope_pending', account_generation: 'preview-account', scope_revision: 'preview-revision' }];
+      const result: OlympusDashboardReadResult = renderSourceDispositionsControlUi(view, canWrite);
+      if (params.action === 'browse_folder_scope' && canWrite) {
+        const root = !params.parent_key;
+        result.scope_browser = { source_id: source, account_generation: 'preview-account', scope_revision: 'preview-revision', status: 'scope_pending', selections: [], whole_account_selected: false,
+          nodes: root ? [
+            { key: 'preview-areas', name: '2 Areas', kind: 'folder', has_children: true, selectable: true },
+            { key: 'preview-projects', name: 'Projects', kind: 'folder', has_children: true, selectable: true },
+            { key: 'preview-archive', name: 'Archive', kind: 'folder', has_children: false, selectable: true },
+          ] : [
+            { key: 'preview-finances', parent_key: params.parent_key!, name: 'Finances', kind: 'folder', has_children: false, selectable: true },
+            { key: 'preview-health', parent_key: params.parent_key!, name: 'Health', kind: 'folder', has_children: false, selectable: true },
+          ],
+        };
+      }
+      return result;
+    }
     return renderSourceDispositionsControlUi(buildDispositionsPreviewView(), canWrite);
   }
   return renderDashboardControlUi({

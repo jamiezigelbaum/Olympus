@@ -107,10 +107,19 @@ describe('dashboard detail scope', () => {
       })],
     });
 
-    expect(withPicker).toContain('data-control-link="/dashboard/dispositions"');
+    expect(withPicker).toContain('data-control-link="/dashboard/dispositions?source_id=google_drive.docs"');
     expect(withPicker).not.toContain('href="/dashboard/dispositions"');
-    expect(withPicker).toContain('needs the worker token');
+    expect(withPicker).toContain('review scope before starting ingestion');
     expect(withoutPicker).not.toContain('/dashboard/dispositions');
+  });
+
+  test('offers folder scope before any rules or indexed folders exist', () => {
+    const html = detailHtml({ pickerAvailable: true, scopeSelection: { required: true, status: 'scope_pending', connected: true } });
+    expect(html).toContain('Choose folders and ingestion scope');
+    expect(html).toContain('data-control-link="/dashboard/dispositions?source_id=google_drive.docs"');
+    const readOnly = detailHtml({ pickerAvailable: true, readOnly: true, scopeSelection: { required: true, status: 'scope_pending', connected: true } });
+    expect(readOnly).toContain('unlock controls in Setup');
+    expect(readOnly).not.toContain('data-control-link="/dashboard/dispositions');
   });
 
   test('renders no scope section for a source no rule names', () => {
@@ -506,6 +515,7 @@ interface DetailFixtureInput {
   needsReview?: NeedsReviewFixture;
   tierComposition?: DashboardSourceCard['tier_composition'];
   pickerAvailable?: boolean;
+  scopeSelection?: DashboardSourceCard['scope_selection'];
   basePath?: string;
   readOnly?: boolean;
   connection?: DashboardSourceCard['connection'];
@@ -514,6 +524,7 @@ interface DetailFixtureInput {
 function detailHtml(input: DetailFixtureInput): string {
   const card: DashboardSourceCard = {
     ...fixtureCard(),
+    ...(input.scopeSelection ? { scope_selection: input.scopeSelection } : {}),
     ...(input.tierComposition === undefined ? {} : { tier_composition: input.tierComposition }),
     ...(input.needsReview === undefined ? {} : { needs_review: needsReviewFixture(input.needsReview) }),
     ...(input.connection === undefined ? {} : { connection: input.connection }),

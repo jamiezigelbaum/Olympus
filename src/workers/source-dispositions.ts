@@ -47,7 +47,7 @@ import {
 import { OperationError } from '../core/operation-error.ts';
 import { DASHBOARD_THEME_CSS } from './dashboard/theme.ts';
 import { dashboardPageSignature } from './dashboard/components.ts';
-import type { OlympusDashboardReadResult } from '../control-ui-contract.ts';
+import type { OlympusDashboardReadResult, OlympusFolderScopeSourceId, OlympusSourceScopeStatus, OlympusSourceScopeSelection } from '../control-ui-contract.ts';
 import { mountDispositionsController } from '../control-ui/browser-controller.ts';
 import {
   defaultSourceIngestionExclusionsPath,
@@ -114,6 +114,19 @@ export interface SourceDispositionsSourceView {
   error?: string;
 }
 
+export interface SourceFolderScopeSummary {
+  source_id: OlympusFolderScopeSourceId;
+  disposition_source_id: string;
+  label: string;
+  connected: boolean;
+  status: OlympusSourceScopeStatus;
+  account_generation?: string;
+  scope_revision?: string;
+  selections?: OlympusSourceScopeSelection[];
+  whole_account_selected?: boolean;
+  error?: string;
+}
+
 export interface SourceDispositionsView {
   kind: 'source_dispositions';
   generated_at: string;
@@ -122,6 +135,8 @@ export interface SourceDispositionsView {
   schema_version: typeof SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION;
   rule_count: number;
   sources: SourceDispositionsSourceView[];
+  /** Private, status-only scope setup. Rendering never contacts a provider. */
+  folder_scopes?: SourceFolderScopeSummary[];
   /**
    * What the owner has to run at a terminal to settle what is already stored.
    * Printed, never executed: this page changes configuration and nothing else.
@@ -139,7 +154,7 @@ export interface SourceDispositionsView {
   };
   policy: {
     folder_paths_returned: true;
-    writes_config_only: true;
+    writes_config_only: boolean;
     deletes_store_content: false;
     runs_purge_or_strip: false;
   };
@@ -151,6 +166,7 @@ export const SOURCE_DISPOSITIONS_STRIP_COMMAND = 'bun run source-exclusions:purg
 
 export interface SourceDispositionsBuildOptions {
   sources: readonly SourceDispositionsSource[];
+  folderScopes?: readonly SourceFolderScopeSummary[];
   document: SourceIngestionExclusions;
   rulesPath?: string;
   rulesPresent?: boolean;
@@ -163,7 +179,8 @@ export function buildSourceDispositionsView(
   options: SourceDispositionsBuildOptions,
 ): SourceDispositionsView {
   const now = options.now ?? new Date();
-  const sources = options.sources.map((source): SourceDispositionsSourceView => {
+  const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
+  const sources = options.sources.filter((source) => !scopeSourceIds.has(source.source_id)).map((source): SourceDispositionsSourceView => {
     const tree = buildSourceDispositionTree({
       matcher: source.matcher,
       items: source.items?.() ?? [],
@@ -198,6 +215,7 @@ export function buildSourceDispositionsView(
     schema_version: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION,
     rule_count: options.document.rules.length,
     sources,
+    ...(options.folderScopes ? { folder_scopes: [...options.folderScopes] } : {}),
     cleanup: {
       dry_run_command: SOURCE_DISPOSITIONS_DRY_RUN_COMMAND,
       purge_command: SOURCE_DISPOSITIONS_PURGE_COMMAND,
@@ -208,7 +226,7 @@ export function buildSourceDispositionsView(
     },
     policy: {
       folder_paths_returned: true,
-      writes_config_only: true,
+      writes_config_only: !options.folderScopes?.length,
       deletes_store_content: false,
       runs_purge_or_strip: false,
     },
@@ -496,12 +514,15 @@ export function renderSourceDispositionsHtml(
 }
 
 export function renderSourceDispositionsFragment(view: SourceDispositionsView): string {
-  const sources = view.sources.map((source) => renderDispositionSource(source)).join('');
+  const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
+  const sources = (view.folder_scopes ?? []).map(renderFolderScopeSource).join('')
+    + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join('');
   return `<main class="picker-page">
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
-        <p>New connections start with <strong>Full ingestion</strong>. Choose <strong>Metadata only</strong>
+        <p>Connecting an account does not start indexing. Browse folders, choose what Olympus may use,
+        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
         processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
         entirely. New files inherit the nearest folder choice.</p>
@@ -509,6 +530,50 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView): 
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
     </main>`;
+}
+
+function renderFolderScopeSource(source: SourceFolderScopeSummary): string {
+  const unavailable = !source.connected || Boolean(source.error);
+  return `<section class="source-dispositions">
+    <form data-folder-scope-source="${escapeHtml(source.source_id)}"
+      data-connected="${source.connected}" data-account-generation="${escapeHtml(source.account_generation ?? '')}"
+      data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
+      data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}">
+      <div class="finder-window">
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p><div class="location selected"><span class="folder-icon">◆</span><span>${escapeHtml(source.label)}</span></div>
+          <p class="scope-connection">${source.connected ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection' : 'Disconnected'}</p>
+        </aside>
+        <section class="finder-main">
+          <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
+          <div class="scope-browser-toolbar"><button type="button" data-scope-browse-root${unavailable ? ' disabled' : ''}>Browse folders</button>
+            <span data-scope-location>Folders</span></div>
+          <p class="scope-browser-note">${source.error ? escapeHtml(source.error) : source.connected
+            ? 'Browsing lists folder names only. No file contents are read or indexed until you confirm your scope.'
+            : 'Connect this account first, then return here to choose folders. Connecting will not start ingestion.'}</p>
+          ${source.connected ? '' : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
+          <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
+          <button type="button" data-scope-more hidden>Show more folders</button>
+          <label class="scope-whole-account"><input type="checkbox" data-scope-whole-account${source.whole_account_selected ? ' checked' : ''}${unavailable ? ' disabled' : ''}> Use the entire account, including future folders, except choices below</label>
+          <label class="scope-whole-confirm"${source.whole_account_selected ? '' : ' hidden'}><input type="checkbox" data-scope-whole-confirm${unavailable ? ' disabled' : ''}> I explicitly approve using the entire account</label>
+          <details class="scope-review"><summary>Review your folder choices</summary><ul data-scope-selections></ul></details>
+        </section>
+        <aside class="finder-inspector" aria-label="Folder choice">
+          <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
+          <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
+          <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
+          <div class="choice-stack" aria-label="Ingestion choice">
+            <button type="button" data-scope-state="ingest" disabled>Full ingestion<span>Read and index contents</span></button>
+            <button type="button" data-scope-state="metadata_only" disabled>Metadata only<span>Index names and dates; never contents</span></button>
+            <button type="button" data-scope-state="exclude" disabled>No ingestion<span>Keep this folder out</span></button>
+          </div><p class="inspector-note" data-scope-selected-note></p></div>
+        </aside>
+        <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
+          <span class="footer-actions"><button type="button" class="secondary" data-scope-cancel>Cancel changes</button>
+            <button type="submit" data-scope-start disabled>Save scope and start</button></span></footer>
+      </div>
+      <p class="action-message" data-scope-message role="status" aria-live="polite">Nothing starts until you confirm.</p>
+    </form>
+  </section>`;
 }
 
 export function renderSourceDispositionsControlUi(
@@ -542,14 +607,26 @@ function standaloneSourceDispositionsControllerScript(csrfTokenJson: string): st
       var controller = mount({
         root: root,
         transport: {
+          async read(params) {
+            var response = await fetch('/dashboard/dispositions', {
+              method: 'POST', cache: 'no-store', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'browse_folder_scope', source_id: params.source_id,
+                parent_key: params.parent_key, cursor: params.cursor }),
+            });
+            var body = await json(response);
+            return Object.assign({}, body, { status: response.status });
+          },
           async control(params) {
-            if (params.action !== 'save_dispositions') {
+            if (params.action !== 'save_dispositions' && params.action !== 'approve_source_scope_and_start') {
               return { status: 400, body: { error: { message: 'Unsupported picker action.' } } };
             }
             var response = await fetch('/dashboard/dispositions', {
               method: 'POST', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ source: params.source, edits: params.edits }),
+              body: JSON.stringify(params.action === 'save_dispositions'
+                ? { source: params.source, edits: params.edits }
+                : params),
             });
             return { status: response.status, body: await json(response) };
           },
