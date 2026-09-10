@@ -61543,6 +61543,7 @@ function mountDashboardController(options) {
   let deferredSince = 0;
   let presented = options.presented !== false;
   const root = options.root;
+  const oauthSubmittedValues = new WeakMap;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -61646,6 +61647,34 @@ function mountDashboardController(options) {
   function formRecord(form) {
     return Object.fromEntries(Array.from(new FormData(form).entries()).filter((entry) => typeof entry[1] === "string"));
   }
+  function sameFormRecord(form, expected) {
+    const actual = formRecord(form);
+    const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+    return [...keys].every((key) => actual[key] === expected[key]);
+  }
+  function releaseSubmittedOAuthPanel(form, submittedValues) {
+    const sheet = form.closest(".sheet");
+    const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
+    if (!unchanged)
+      return false;
+    form.reset();
+    const active = activeElement();
+    if (sheet) {
+      sheet.classList.remove("on");
+      sheet.setAttribute("aria-hidden", "true");
+      if (sheet.id) {
+        queryAll("[data-sheet-toggle]").forEach((toggle) => {
+          if (toggle.dataset.sheetToggle === `#${sheet.id}`) {
+            toggle.setAttribute("aria-expanded", "false");
+          }
+        });
+      }
+    }
+    if (active && (active === form || form.contains(active)) && active instanceof HTMLElement) {
+      active.blur();
+    }
+    return true;
+  }
   function controlParams(form) {
     const body = formRecord(form);
     const connect = form.dataset.connectKind;
@@ -61736,7 +61765,7 @@ function mountDashboardController(options) {
     applyWriteCapability();
     await refreshNow(true);
   }
-  async function submitControl(form, authorizationTab) {
+  async function submitControl(form, authorizationTab, submittedValues) {
     if (!canWrite && !csrfToken) {
       closeAuthorizationTab(authorizationTab);
       say(form, "Your OpenClaw connection has read-only access.");
@@ -61781,8 +61810,12 @@ function mountDashboardController(options) {
         if (authorizationTab) {
           authorizationTab.location.href = authorizationUrl;
           say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus.");
+          if (releaseSubmittedOAuthPanel(form, submittedValues))
+            refreshNow(false, true);
         } else if (openAuthorizationExternally(authorizationUrl)) {
           say(form, "Authorization opened in your default browser. Approve it there, then come back to Olympus.");
+          if (releaseSubmittedOAuthPanel(form, submittedValues))
+            refreshNow(false, true);
         } else {
           say(form, "Open the authorization page to continue.");
           showAuthorizationFallback(form, authorizationUrl);
@@ -61922,8 +61955,11 @@ function mountDashboardController(options) {
     if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind]"))
       return;
     event.preventDefault();
+    const submittedValues = form.dataset.connectKind === "oauth" ? formRecord(form) : undefined;
+    if (submittedValues)
+      oauthSubmittedValues.set(form, submittedValues);
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
-    submitControl(form, tab);
+    submitControl(form, tab, submittedValues);
   }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
@@ -61978,6 +62014,19 @@ function mountDashboardController(options) {
     const anchor = target.closest("a[href]");
     if (!anchor)
       return;
+    const fallback = target.closest("[data-authorization-fallback] a");
+    if (fallback) {
+      const form = fallback.closest('form[data-connect-kind="oauth"]');
+      const submittedValues = form ? oauthSubmittedValues.get(form) : undefined;
+      if (form && submittedValues) {
+        setTimeout(() => {
+          if (disposed || !releaseSubmittedOAuthPanel(form, submittedValues))
+            return;
+          refreshNow(false, true);
+        }, 0);
+      }
+      return;
+    }
     const href = anchor.dataset.olympusNav || anchor.getAttribute("href") || "";
     const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
     if (href.startsWith("/dashboard") && !modified) {
