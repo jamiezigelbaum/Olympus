@@ -1097,6 +1097,49 @@ does not define that handler, and no external catalog submission is authorized.
 
 ## Step 6 — Optional source setup
 
+**Pre-source completion receipt — mandatory before inviting Connect.** Do not
+say "Setup is complete" or invite the operator to click a source's Connect
+button until this receipt is green. It proves that the selected posture's
+model/provider wiring is usable by the worker; it does not choose a source,
+and it does not require any source to be connected yet.
+
+Use the provider-specific connect and readiness checks already documented in
+Step 3, then prove the worker consumes that wiring with the existing
+`olympus doctor` and `olympus worker status` checks. The receipt must name:
+
+- **Gemini — every posture.** Its wiring is for public and ordinary-private
+  embeddings. Gemini is not the secure-answer provider and is never a secure
+  embedding requirement.
+- **Venice — only when the posture uses it.** `local-first` uses Venice as
+  the approved secure-answer escalation; `private-cloud-only` uses Venice for
+  secure answers. `local-only` and `no-sensitive` do not require Venice, so do
+  not ask for or block on a Venice key for those postures. Venice is never a
+  secure embedding provider. In `private-cloud-only`, secure search remains
+  local keyword search; do not invent a secure embedding prerequisite.
+- **Worker consumer proof.** The existing Doctor output must show the relevant
+  `sovereignty_prerequisites`, `worker_credential_lanes`, `source_index_status`,
+  and `email_worker` checks green, and `olympus worker status` must show the
+  worker reachable without degraded credentials. Use the posture's existing
+  remedies when one is red, then rerun the same checks.
+
+A provider key being present, a configured model profile, or a check reported
+as **Skipped** is not readiness. A Venice key also does not prove usable API
+balance. Do not add a new CLI/API/billing probe or a source connection to make
+the receipt look complete. If a required check is not green, say which provider
+wiring remains open and keep source Connect unopened.
+
+Give the operator this honest summary before the source handoff, adapting only
+the observed facts:
+
+> Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
+> for public and ordinary-private embeddings: `<verified or still open>`.
+> Venice secure-answer wiring: `<verified, not required for this posture, or
+> still open>`. Worker consumer checks: `<green or name the open check>`. No
+> source is connected yet, and I will wait to invite Connect until every
+> required provider check is green.
+
+Only after the receipt is green deliver the required handoff below.
+
 **Base installation is complete before source choice.** Report the selected
 posture, model prerequisites, worker health, and successful plugin/tool and
 selected-dashboard activation from Steps 1–5. No connected source is required.

@@ -44,4 +44,22 @@ describe('pilot installation entry points', () => {
     expect(document).toContain('olympus() { "$OLYMPUS_BIN" "$@"; }');
     expect(resolution).toBeLessThan(document.indexOf('\nolympus sensitivity validate'));
   });
+
+  test('the agent guide requires provider readiness before source Connect', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const receipt = document.indexOf('**Pre-source completion receipt — mandatory before inviting Connect.**');
+    const handoff = document.indexOf('> Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    expect(receipt).toBeGreaterThan(0);
+    expect(receipt).toBeLessThan(handoff);
+    const section = document.slice(receipt, handoff);
+    expect(section).toContain('Gemini — every posture');
+    expect(section).toContain('Venice — only when the posture uses it');
+    expect(section).toContain('local keyword search');
+    expect(section).toContain('worker_credential_lanes');
+    expect(section).toContain('source_index_status');
+    expect(section).toContain('email_worker');
+    expect(section).toContain('Skipped');
+    expect(section).toContain('key being present');
+    expect(section).toContain('keep source Connect unopened');
+  });
 });
