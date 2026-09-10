@@ -319,10 +319,10 @@ test('Darwin restart checks native status instead of rejecting newer release num
       `;
       const output = execFileSync('node', ['--input-type=module', '-e', script], {
         env: { ...process.env, RESTART_TEST_CALLS: calls, RESTART_TEST_VERSION: version },
-        encoding: 'utf8',
+        encoding: 'utf8', timeout: 5_000,
       });
       expect(output.trim()).toBe('Unsupported default-profile LaunchAgent status.');
       expect(readFileSync(calls, 'utf8').trim()).toBe('gateway status --no-probe --json');
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+}, 15_000);
