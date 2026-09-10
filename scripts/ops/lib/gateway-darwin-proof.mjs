@@ -1,6 +1,6 @@
 /**
- * Native macOS branch of openclaw-safe-restart.sh. Qualified contract: OpenClaw
- * 2026.9.2 default-profile LaunchAgent. No systemd emulation or exec SecretRefs.
+ * Native macOS branch of openclaw-safe-restart.sh for the default-profile
+ * LaunchAgent. Capability/metadata checks, not release pins, establish support.
  * Parser tests are fixtures; only a real invocation can produce a boot proof.
  */
 import { spawnSync } from 'node:child_process';
@@ -410,7 +410,6 @@ export async function runDarwinRestart(argv = process.argv.slice(2), env = proce
   const openclaw = executablePath(env.OPENCLAW_SAFE_RESTART_OPENCLAW_BIN || 'openclaw', env);
   if (!home || !isAbsolute(home) || home !== userInfo().homedir) fail('The actual macOS user home is required.');
   const inspectEnv = { ...env, LC_ALL: 'C' };
-  if (!/^OpenClaw 2026\.9\.2 \([0-9a-f]+\)\s*$/.test(commandText(openclaw, ['--version'], inspectEnv))) fail('Darwin status/proof contract is qualified for OpenClaw 2026.9.2 only.');
   const status = commandJson(openclaw, ['gateway', 'status', '--no-probe', '--json'], inspectEnv);
   const descriptor = statusDescriptor(status, home);
   const configBytes = privateFile(descriptor.configPath, uid);

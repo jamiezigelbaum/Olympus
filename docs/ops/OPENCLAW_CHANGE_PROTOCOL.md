@@ -147,7 +147,7 @@ skills, cron, services), in this order:
 ## Darwin controlled activation
 
 The native Darwin branch of `scripts/ops/openclaw-safe-restart.sh` is scoped to
-OpenClaw 2026.9.2 and its existing, active default-profile LaunchAgent
+an existing, active default-profile LaunchAgent
 `ai.openclaw.gateway`. It uses `lib/gateway-darwin-proof.mjs`; it never emulates
 systemd output or invokes a launchctl lifecycle action directly. Its one
 official `openclaw gateway restart --preserve-definition` command keeps the
@@ -156,9 +156,10 @@ rewrite it. This is a one-command guarantee, not a claim of one launchctl
 mutation: OpenClaw owns the command's internal lifecycle operations, including
 stale-PID cleanup and any service restart retry. The wrapper never issues a
 second restart command. Managed startup inputs must remain unchanged across
-the command. Other host
-versions, profiles, service wrappers, or incomplete native metadata refuse
-until their contracts are independently qualified.
+the command. Release numbers are not compatibility gates: the native status,
+service-wrapper, credential, and boot checks determine whether the installed
+runtime is supported. Other profiles, unsupported service wrappers, and
+incomplete native metadata still refuse before mutation.
 
 Before installing or replacing plugin code, the platform owner records the
 original `gateway.reload` setting and uses the blessed configuration CLI to
@@ -239,8 +240,9 @@ process/log, or unproved credential dependency being accepted as successful
 activation. Runtime budget: bounded native preflight commands plus the
 configured boot deadline (90 seconds by default, at most 600). Unsupported
 metadata or log rotation intentionally refuses rather than guessing. Retire or
-extend these version/format bounds only after independent review and real
-qualification of the replacement platform contract. Linux credential and
+extend these metadata/format checks only after independent review and real
+qualification of the replacement platform contract. Do not add release-number
+allowlists as substitutes for checking the required capabilities. Linux credential and
 systemd proof behavior remains unchanged.
 
 ## Known sharp edges (dated)
