@@ -171,6 +171,52 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     );
   }
 
+  function sameFormRecord(form: HTMLFormElement, expected: Record<string, string>): boolean {
+    const actual = formRecord(form);
+    const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+    return [...keys].every((key) => actual[key] === expected[key]);
+  }
+
+  function releaseSubmittedOAuthPanel(
+    form: HTMLFormElement,
+    submittedValues: Record<string, string> | undefined,
+  ): void {
+    const sheet = form.closest<HTMLElement>('.sheet');
+    const active = activeElement();
+    const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
+    if (sheet) {
+      sheet.classList.remove('on');
+      sheet.setAttribute('aria-hidden', 'true');
+      if (sheet.id) {
+        queryAll<HTMLElement>('[data-sheet-toggle]').forEach((toggle) => {
+          if (toggle.dataset.sheetToggle === `#${sheet.id}`) {
+            toggle.setAttribute('aria-expanded', 'false');
+          }
+        });
+      }
+    }
+    // The submitted values are no longer a draft. Keep them visible while the
+    // immediate refresh runs, but let the normal dirty-input guard protect any
+    // value changed after the submit began.
+    if (unchanged) {
+      form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+        'input:not([type="hidden"]),textarea,select',
+      ).forEach((field) => {
+        if (field instanceof HTMLSelectElement) {
+          Array.from(field.options).forEach((option) => { option.defaultSelected = option.selected; });
+        } else if (field instanceof HTMLInputElement
+          && (field.type === 'checkbox' || field.type === 'radio')) {
+          field.defaultChecked = field.checked;
+        } else {
+          field.defaultValue = field.value;
+        }
+      });
+    }
+    if (active && (active === form || form.contains(active)) && active instanceof HTMLElement) {
+      active.blur();
+    }
+  }
+
   function controlParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
     const body = formRecord(form);
     const connect = form.dataset.connectKind;
@@ -262,7 +308,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     await refreshNow(true);
   }
 
-  async function submitControl(form: HTMLFormElement, authorizationTab: Window | null): Promise<void> {
+  async function submitControl(
+    form: HTMLFormElement,
+    authorizationTab: Window | null,
+    submittedValues?: Record<string, string>,
+  ): Promise<void> {
     if (!canWrite && !csrfToken) {
       closeAuthorizationTab(authorizationTab);
       say(form, 'Your OpenClaw connection has read-only access.');
@@ -306,8 +356,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (authorizationTab) {
           authorizationTab.location.href = authorizationUrl;
           say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus.');
+          releaseSubmittedOAuthPanel(form, submittedValues);
+          void refreshNow(false, true);
         } else if (openAuthorizationExternally(authorizationUrl)) {
           say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus.');
+          releaseSubmittedOAuthPanel(form, submittedValues);
+          void refreshNow(false, true);
         } else {
           say(form, 'Open the authorization page to continue.');
           showAuthorizationFallback(form, authorizationUrl);
@@ -451,7 +505,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     )) return;
     event.preventDefault();
     const tab = form.dataset.connectKind === 'oauth' ? openAuthorizationTab() : null;
-    void submitControl(form, tab);
+    const submittedValues = form.dataset.connectKind === 'oauth' ? formRecord(form) : undefined;
+    void submitControl(form, tab, submittedValues);
   }
 
   function onClick(event: Event): void {

@@ -175,6 +175,96 @@ describe('OAuth browser handoff', () => {
     expect(root.textContent).not.toContain(authorizationUrl);
     controller.dispose();
   });
+
+  test('refreshes connected state after handoff and releases the submitted sheet and focus', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
+      + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
+      + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="gmail">'
+      + '<button type="submit">Connect</button><span data-action-message></span></form></div>'
+      + '<details data-poll-key="advanced" open><summary>Advanced</summary><p>Keep open</p></details>';
+    document.body.append(root);
+    const form = root.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"]')!;
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    submit.focus();
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    Object.defineProperty(window, 'open', { configurable: true, value: () => popup });
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    let refreshes = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() {
+        refreshes += 1;
+        return result('<p id="connected">Gmail · Connected</p>'
+          + '<details data-poll-key="advanced"><summary>Advanced</summary><p>Keep open</p></details>', 'connected');
+      },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(refreshes).toBe(1);
+    expect(root.querySelector('#connected')?.textContent).toBe('Gmail · Connected');
+    expect(root.querySelector('.sheet.on')).toBeNull();
+    expect(root.querySelector('[data-sheet-toggle]')).toBeNull();
+    expect(document.activeElement).not.toBe(submit);
+    expect(root.querySelector('details')?.open).toBe(true);
+    controller.dispose();
+  });
+
+  test('releases the submitted sheet but preserves edits made while the RPC is pending', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
+      + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
+      + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="gmail">'
+      + '<button type="submit">Connect</button><span data-action-message></span></form></div>'
+      + '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
+      + '<input name="api_key" type="password"><button type="submit">Save draft</button></form>';
+    document.body.append(root);
+    const oauth = root.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"]')!;
+    const draft = root.querySelector<HTMLInputElement>('input[name="api_key"]')!;
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    Object.defineProperty(window, 'open', { configurable: true, value: () => popup });
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    let resolveControl!: (value: OlympusDashboardControlResult) => void;
+    const control = new Promise<OlympusDashboardControlResult>((resolve) => { resolveControl = resolve; });
+    let refreshes = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: () => control },
+      navigate() {},
+      async refresh() {
+        refreshes += 1;
+        return result('<p id="connected">Gmail · Connected</p>', 'connected');
+      },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    draft.value = 'draft-secret';
+    draft.focus();
+    draft.dispatchEvent(new Event('input', { bubbles: true }));
+    oauth.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    resolveControl(oauthResult(authorizationUrl));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(refreshes).toBe(0);
+    expect(root.querySelector('#connected')).toBeNull();
+    expect(root.querySelector('.sheet.on')).toBeNull();
+    expect(draft.value).toBe('draft-secret');
+    expect(document.activeElement).toBe(draft);
+    controller.dispose();
+  });
 });
 
 describe('dashboard controller DOM lifetime', () => {
