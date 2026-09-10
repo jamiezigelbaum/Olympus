@@ -298,3 +298,31 @@ describe('native Darwin safe-restart proof contracts', () => {
     }
   }, 30_000);
 });
+
+
+test('Darwin restart checks native status instead of rejecting newer release numbers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'restart-release-'));
+  try {
+    const executable = join(root, 'openclaw');
+    const calls = join(root, 'calls');
+    writeFileSync(executable, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RESTART_TEST_CALLS"\nif [ "$1" = "--version" ]; then printf "%s\\n" "$RESTART_TEST_VERSION"; else printf "{}\\n"; fi\n', { mode: 0o755 });
+    for (const version of ['OpenClaw 2026.9.3 (1391f7c)', 'OpenClaw 2030.1.1 (abcdef0)']) {
+      writeFileSync(calls, '');
+      const script = `
+        import { userInfo } from 'node:os';
+        import { runDarwinRestart } from ${JSON.stringify(new URL('../scripts/ops/lib/gateway-darwin-proof.mjs', import.meta.url).href)};
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        try {
+          await runDarwinRestart(['--preflight-only'], { ...process.env, HOME: userInfo().homedir, OPENCLAW_PROFILE: '', OPENCLAW_SAFE_RESTART_OPENCLAW_BIN: ${JSON.stringify(executable)} });
+          process.exitCode = 1;
+        } catch (error) { console.log(error.message); }
+      `;
+      const output = execFileSync('node', ['--input-type=module', '-e', script], {
+        env: { ...process.env, RESTART_TEST_CALLS: calls, RESTART_TEST_VERSION: version },
+        encoding: 'utf8', timeout: 5_000,
+      });
+      expect(output.trim()).toBe('Unsupported default-profile LaunchAgent status.');
+      expect(readFileSync(calls, 'utf8').trim()).toBe('gateway status --no-probe --json');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 15_000);

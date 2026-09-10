@@ -32,7 +32,7 @@ Canonical owner: `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo
 skill). Read it before every live change. If it is unavailable, stop: do not
 mutate the live system from a remembered digest.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9c49536d15699b634439a40f6cf3368d83de80f0524ca239f63de70a702282ce -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9559da364606d3bd06475b7b66fd139b7ebbe12174836380fc13b35d6cd024b7 -->
 
 Before touching live OpenClaw config, secrets, plugins, skills, cron, services,
 gateway state, install state, or workspace context, follow this order:
