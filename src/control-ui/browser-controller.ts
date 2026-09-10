@@ -56,6 +56,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   let deferredSince = 0;
   let presented = options.presented !== false;
   const root = options.root;
+  const oauthSubmittedValues = new WeakMap<HTMLFormElement, Record<string, string>>();
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -491,8 +492,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind]',
     )) return;
     event.preventDefault();
-    const tab = form.dataset.connectKind === 'oauth' ? openAuthorizationTab() : null;
     const submittedValues = form.dataset.connectKind === 'oauth' ? formRecord(form) : undefined;
+    if (submittedValues) oauthSubmittedValues.set(form, submittedValues);
+    const tab = form.dataset.connectKind === 'oauth' ? openAuthorizationTab() : null;
     void submitControl(form, tab, submittedValues);
   }
 
@@ -541,6 +543,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     const anchor = target.closest<HTMLAnchorElement>('a[href]');
     if (!anchor) return;
+    const fallback = target.closest<HTMLAnchorElement>('[data-authorization-fallback] a');
+    if (fallback) {
+      const form = fallback.closest<HTMLFormElement>('form[data-connect-kind="oauth"]');
+      const submittedValues = form ? oauthSubmittedValues.get(form) : undefined;
+      if (form && submittedValues) {
+        // Keep the fallback anchor available for the browser's default action;
+        // release the panel only after that navigation has been dispatched.
+        setTimeout(() => {
+          if (disposed || !releaseSubmittedOAuthPanel(form, submittedValues)) return;
+          void refreshNow(false, true);
+        }, 0);
+      }
+      return;
+    }
     const href = anchor.dataset.olympusNav || anchor.getAttribute('href') || '';
     const modified = event instanceof MouseEvent
       && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);

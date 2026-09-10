@@ -252,7 +252,53 @@ describe('OAuth browser handoff', () => {
     controller.dispose();
   });
 
-  test('releases the submitted sheet but preserves edits made while the RPC is pending', async () => {
+  test('releases the sheet after the owner activates the fallback link', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
+      + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
+      + '<form data-connect-kind="oauth"><input name="source" type="hidden" value="gmail">'
+      + '<button type="submit">Connect</button><span data-action-message></span>'
+      + '<span data-authorization-fallback></span></form></div>';
+    document.body.append(root);
+    const form = root.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"]')!;
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    Object.defineProperty(window, 'open', { configurable: true, value: () => null });
+    let refreshes = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() {
+        refreshes += 1;
+        return result('<p id="connected">Gmail · Connected</p>', 'connected');
+      },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    const fallback = root.querySelector<HTMLAnchorElement>('[data-authorization-fallback] a')!;
+    expect(fallback.target).toBe('_blank');
+    expect(fallback.rel).toBe('noopener noreferrer');
+    expect(refreshes).toBe(0);
+
+    fallback.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    // The link remains available for the browser's default navigation before
+    // the deferred release runs.
+    expect(root.contains(fallback)).toBe(true);
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(refreshes).toBe(1);
+    expect(root.querySelector('#connected')?.textContent).toBe('Gmail · Connected');
+    expect(root.querySelector('[data-authorization-fallback] a')).toBeNull();
+    controller.dispose();
+  });
+
+  test('keeps the submitted sheet open and preserves edits made while the RPC is pending', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<button type="button" data-sheet-toggle="#connect-gmail" aria-expanded="true">Reauthenticate</button>'
       + '<div class="sheet on" id="connect-gmail" aria-hidden="false">'
