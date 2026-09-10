@@ -215,3 +215,40 @@ describe('extraction runner: the lease grant, not the worker id, separates two r
     expect(result.records[0]!.leaseLost).toBeUndefined();
   });
 });
+
+describe('extraction runner: revoked folder scope fences in-flight work', () => {
+  test.each(['before_fetch', 'after_fetch', 'after_extract'] as const)('%s prevents the next content boundary', async (revokeAt) => {
+    const { jobs } = newStore();
+    let authorized = revokeAt !== 'before_fetch';
+    const calls = { fetch: 0, extract: 0, sink: 0 };
+    const runner = createFileExtractionRunner({
+      jobs,
+      registry: buildExtractorRegistry([textExtractor({
+        async extract() {
+          calls.extract += 1;
+          if (revokeAt === 'after_extract') authorized = false;
+          return { status: 'indexed', text: 'private extracted text' };
+        },
+      })]),
+      corpora: [{
+        corpusId: CORPUS_ID, trustDomain: 'secure_local',
+        source: {
+          ...source([ref(1)]),
+          async fetch() {
+            calls.fetch += 1;
+            if (revokeAt === 'after_fetch') authorized = false;
+            return { bytes: new TextEncoder().encode('private fixture bytes'), mimeType: 'text/plain' };
+          },
+        },
+        sink: { async accept() { calls.sink += 1; return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 1 }; } },
+        authorization: { assertCurrent() { if (!authorized) throw new Error('scope revoked'); } },
+      }],
+    });
+    jobs.enqueue({ refs: [ref(1)], extractorKind: FAKE_KIND, extractorVersion: FAKE_VERSION, policyDecision: 'index_allowed' });
+    const result = await runner.run({ ...LANE });
+    expect(result.records).toHaveLength(1);
+    expect(result.records[0]).toMatchObject({ status: 'blocked_policy', errorKind: 'source_scope_superseded' });
+    expect(calls).toEqual({ fetch: revokeAt === 'before_fetch' ? 0 : 1, extract: revokeAt === 'after_extract' ? 1 : 0, sink: 0 });
+    expect(jobs.get(result.records[0]!.jobId)?.status).toBe('blocked_policy');
+  });
+});

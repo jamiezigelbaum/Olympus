@@ -27,6 +27,20 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-10 — File-source consent before ingestion.** Drive and Dropbox
+  connections must stop at scope selection. Reuse the reviewed Finder-style
+  folder tree and its Full ingestion / Metadata only / No ingestion inspector;
+  expose it before the first sync and support Drive folder identities. Browse
+  metadata only on an explicit request, without indexing file content. An
+  explicit scope confirmation starts ingestion; empty/default configuration
+  and account authentication never authorize the whole account. Unapproved
+  cached file content is unavailable to retrieval, extraction, and embedding.
+  Preserve existing data and vectors until separately authorized cleanup.
+  Metadata progress must distinguish a completed bounded pass from a completed
+  traversal, and extraction is working only when execution evidence says so.
+  Implementation and adversarial validation are in progress; affected live
+  sources remain disconnected while the worker is paused.
+
 - **2026-09-10 — Secure embedding fallback.** Use a catalog-approved Venice
   Private embedding model when no local embedding provider is configured.
   The proposed default is Qwen3 Embedding 8B, 4096 dimensions; the live

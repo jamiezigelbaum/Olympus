@@ -1162,6 +1162,24 @@ for the source the operator selects and only its approved scope. If the
 operator explicitly needs the documented headless fallback, ask which source
 that fallback should connect.
 
+**Drive and Dropbox require scope approval before ingestion.** Connecting an
+account grants access for the folder browser; it does not approve indexing the
+account. Open **Choose folders** on the source card. Use the existing
+Finder-style tree and inspector to choose **Full ingestion**, **Metadata only**,
+or **No ingestion**, then have the operator press **Save scope and start**.
+Browsing lists folder names without indexing or reading file contents.
+Unselected folders stay out; using the entire account requires an explicit
+selection and confirmation. Never select the whole account, confirm scope, or
+press Start for the operator without their instruction.
+
+An empty rule set, a built-in root, a connected credential, or previously cached
+items are not scope approval. Unapproved cached file content remains unavailable
+to search and answers. Reconnection requires review of the current account's
+scope. Preserve retained data; changing scope is not permission to purge it.
+Do not reconnect a source the operator disconnected while resolving a problem.
+Provider/model readiness and any required cost approval remain separate from
+permission to use selected folders.
+
 This candidate artifact includes native Control UI support. On OpenClaw
 **2026.9.2**, use **Olympus** in the Control UI sidebar. Native plugin pages need
 **Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable

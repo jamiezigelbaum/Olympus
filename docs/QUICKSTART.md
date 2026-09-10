@@ -404,6 +404,13 @@ you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.
 
+For Drive and Dropbox, **Connect** only connects the account. Open **Choose
+folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
+only**, and **No ingestion** choices, then explicitly **Save scope and start**.
+The folder browser lists names without indexing or reading file contents.
+Unselected folders stay out. Entire-account ingestion requires an explicit
+selection and confirmation; a default configuration is not permission.
+
 All seven declared sources use the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or
