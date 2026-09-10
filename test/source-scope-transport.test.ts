@@ -104,25 +104,28 @@ test('native RPC reaches the same worker hooks without exposing auth or folder p
   expect(JSON.stringify(responses)).not.toContain('fixture-worker-secret');
 });
 
-test('metadata-only worker searches names without exposing or matching retained content', async () => {
+test.each([false, true])('metadata-only worker searches stay isolated with mixed full ingestion=%s', async (mixed) => {
   const { LocalConnectorStore } = await import('../src/workers/connector-store/index.ts');
-  const { fileSourceScopeMetadataFilters } = await import('../src/workers/source-scope-runtime.ts');
+  const { fileSourceScopeMetadataFilters, fileSourceScopeContentFilters } = await import('../src/workers/source-scope-runtime.ts');
   const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'secure_local.dropbox.files', family: 'file', trustDomain: 'secure_local' });
   cleanups.push(() => store.close());
   const raw = {
     identity: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'fixture-file', providerFileId: 'fixture-file', localItemId: 'personal:fixture-file', sourceVersion: 'rev1' },
-    mimeType: 'text/plain', content: { kind: 'text' as const, text: 'cachedsensitivebody confidential contents' },
+    mimeType: 'text/plain', content: { kind: 'text' as const, text: 'cachedsensitivebody sharedbody confidential contents' },
     metadata: Object.freeze({ name: 'Publicfilename.txt', pathDisplay: '/work/Publicfilename.txt' }),
     fetchedAt: '2026-09-10T10:00:00.000Z',
   };
+  const full = { ...raw, identity: { ...raw.identity, providerItemId: 'full-file', providerFileId: 'full-file', localItemId: 'personal:full-file' }, content: { kind: 'text' as const, text: 'allowedcontentbody sharedbody' }, metadata: Object.freeze({ name: 'Fullfilename.txt', pathDisplay: '/full/Fullfilename.txt' }) };
   await store.syncFromConnector({
     id: 'scope-transport-fixture', family: 'file', async authenticate() {},
-    async *listItems() { yield { items: [raw], done: true }; }, async fetchItem() { return raw; },
+    async *listItems() { yield { items: mixed ? [raw, full] : [raw], done: true }; }, async fetchItem(id) { return id === full.identity.localItemId ? full : raw; },
     classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
-  }, { fetchContent: true, sourceScopeObservation: () => ({ accountGeneration: generation }) });
-  const metadataScope = fileSourceScopeMetadataFilters({ sourceId: 'dropbox.files', status: 'approved', accountGeneration: generation, revision, selections: [{ key: '/work', state: 'metadata_only' }], wholeAccount: false });
+  }, { fetchContent: true, sourceScopeObservation: () => ({ accountGeneration: generation, scopeRevision: revision }) });
+  const selected = { sourceId: 'dropbox.files' as const, status: 'approved' as const, accountGeneration: generation, revision, selections: [{ key: '/work', state: 'metadata_only' as const }, ...(mixed ? [{ key: '/full', state: 'ingest' as const }] : [])], wholeAccount: false };
+  const metadataScope = fileSourceScopeMetadataFilters(selected);
+  const contentScope = fileSourceScopeContentFilters(selected);
   if (!metadataScope.allowed) throw new Error('fixture scope must allow metadata');
-  const worker = createEmailSourceWorker({ connectorStores: [store], connectorStoreReadScope: () => ({ allowed: true, accountScope: 'personal', filters: metadataScope.filters, contentAllowed: false }) });
+  const worker = createEmailSourceWorker({ connectorStores: [store], connectorStoreReadScope: () => ({ allowed: true, accountScope: 'personal', filters: metadataScope.filters, contentAllowed: contentScope.allowed, ...(contentScope.allowed ? { contentFilters: contentScope.filters } : {}) }) });
   cleanups.push(() => worker.close());
   const query = async (text: string) => {
     const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ corpus_id: store.corpusId, query: text }) }));
@@ -132,4 +135,6 @@ test('metadata-only worker searches names without exposing or matching retained 
   expect(filename.hits).toHaveLength(1);
   expect(JSON.stringify(filename)).not.toContain('cachedsensitivebody');
   expect((await query('cachedsensitivebody')).hits).toHaveLength(0);
+  expect((await query('sharedbody')).hits).toHaveLength(mixed ? 1 : 0);
+  if (mixed) expect((await query('allowedcontentbody')).hits).toMatchObject([{ sourceItem: { providerItemId: 'full-file' } }]);
 });

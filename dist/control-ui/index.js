@@ -554,6 +554,412 @@ function mountDispositionsController(options) {
     metadata_only: "Metadata only",
     exclude: "No ingestion"
   };
+  const scopeDrafts = new Map;
+  function scopeMessage(form, text) {
+    const slot = form.querySelector("[data-scope-message]");
+    if (slot)
+      slot.textContent = text;
+  }
+  function scopeDraft(form) {
+    let draft = scopeDrafts.get(form);
+    if (!draft) {
+      draft = {
+        generation: form.dataset.accountGeneration || "",
+        revision: form.dataset.scopeRevision || "",
+        selections: new Map,
+        names: new Map,
+        ancestors: new Map,
+        nodes: [],
+        catalog: new Map,
+        branches: new Map,
+        branchCursors: new Map,
+        expanded: new Set,
+        loaded: false,
+        busy: false,
+        invalid: false,
+        edited: false,
+        whole: form.querySelector("[data-scope-whole-account]")?.checked === true
+      };
+      scopeDrafts.set(form, draft);
+    }
+    return draft;
+  }
+  function scopeAllowed(form, draft) {
+    return canWrite && form.dataset.connected === "true" && !draft.busy && !draft.invalid;
+  }
+  function inheritedScopeState(draft, key) {
+    let state = draft.whole ? "ingest" : undefined;
+    for (const ancestor of draft.ancestors.get(key) || []) {
+      const choice = draft.selections.get(ancestor);
+      if (choice === "exclude")
+        return "exclude";
+      if (choice === "metadata_only")
+        state = "metadata_only";
+      else if (choice === "ingest" && state === undefined)
+        state = "ingest";
+    }
+    return state;
+  }
+  function effectiveScopeState(draft, key) {
+    const inherited = inheritedScopeState(draft, key);
+    const own = draft.selections.get(key);
+    if (inherited === "exclude" || own === "exclude")
+      return "exclude";
+    if (inherited === "metadata_only")
+      return "metadata_only";
+    return own || inherited || "exclude";
+  }
+  function scopeChoiceAllowed(draft, state) {
+    if (!draft.selected?.selectable)
+      return false;
+    const inherited = inheritedScopeState(draft, draft.selected.key);
+    if (inherited === "exclude")
+      return state === "exclude";
+    if (inherited === "metadata_only")
+      return state === "metadata_only" || state === "exclude";
+    return state === "ingest" || state === "metadata_only" || state === "exclude";
+  }
+  function scopeControls(form, draft) {
+    const allowed = scopeAllowed(form, draft);
+    form.querySelectorAll("button").forEach((button) => {
+      button.disabled = !allowed;
+    });
+    form.querySelectorAll("input").forEach((input) => {
+      input.disabled = !allowed || !draft.loaded;
+    });
+    form.querySelectorAll("[data-scope-state]").forEach((button) => {
+      button.disabled = !allowed || !scopeChoiceAllowed(draft, button.dataset.scopeState || "");
+      button.classList.toggle("on", draft.selected !== undefined && effectiveScopeState(draft, draft.selected.key) === button.dataset.scopeState);
+    });
+    const hasSelection = Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
+    const confirmation = form.querySelector("[data-scope-whole-confirm]");
+    const submit = form.querySelector("[data-scope-start]");
+    if (submit)
+      submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !hasSelection && !draft.edited || draft.whole && confirmation?.checked !== true;
+    if (submit)
+      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (no ingestion)";
+    const cancel = form.querySelector("[data-scope-cancel]");
+    if (cancel)
+      cancel.disabled = draft.busy;
+    const confirmationLabel = form.querySelector(".scope-whole-confirm");
+    if (confirmationLabel)
+      confirmationLabel.hidden = !draft.whole;
+  }
+  function renderScopeReview(form, draft) {
+    const summary = form.querySelector("[data-scope-summary]");
+    if (summary)
+      summary.textContent = draft.whole ? "Entire account, including future folders, except the choices below." : `${Array.from(draft.selections.keys()).filter((key) => effectiveScopeState(draft, key) !== "exclude").length} folder(s) selected. All other folders stay out.`;
+    const list = form.querySelector("[data-scope-selections]");
+    if (list) {
+      list.replaceChildren();
+      for (const [key, state] of draft.selections) {
+        const item = root.ownerDocument.createElement("li");
+        item.textContent = `${labels[effectiveScopeState(draft, key)]} — ${draft.names.get(key) || key}`;
+        list.appendChild(item);
+      }
+    }
+    scopeControls(form, draft);
+  }
+  function updateScopeRows(form, draft) {
+    form.querySelectorAll(".scope-folder").forEach((row) => {
+      const key = row.querySelector("[data-scope-select]")?.dataset.scopeSelect;
+      if (!key)
+        return;
+      row.classList.toggle("selected", draft.selected?.key === key);
+      const status = row.querySelector(".scope-folder-status");
+      const inherited = inheritedScopeState(draft, key);
+      if (status)
+        status.textContent = draft.selections.has(key) || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+    });
+    renderScopeReview(form, draft);
+  }
+  function scopeTrail(draft, key) {
+    return [...draft.ancestors.get(key) || [], key].map((ancestor) => ({ key: ancestor, name: draft.catalog.get(ancestor)?.name || ancestor }));
+  }
+  function renderScopeNodes(form, draft) {
+    const list = form.querySelector("[data-scope-nodes]");
+    if (!list)
+      return;
+    list.replaceChildren();
+    const appendNodes = (host, nodes, seen = new Set) => {
+      for (const node of nodes) {
+        if (seen.has(node.key))
+          continue;
+        const wrapper = root.ownerDocument.createElement("div");
+        wrapper.className = "node";
+        const row = root.ownerDocument.createElement("div");
+        row.className = "folder-row scope-folder";
+        row.setAttribute("role", "listitem");
+        row.classList.toggle("selected", draft.selected?.key === node.key);
+        const disclosure = root.ownerDocument.createElement(node.has_children ? "button" : "span");
+        disclosure.className = "disclosure";
+        if (disclosure instanceof HTMLButtonElement) {
+          disclosure.type = "button";
+          disclosure.dataset.scopeOpen = node.key;
+          disclosure.textContent = draft.expanded.has(node.key) ? "▾" : "▸";
+          disclosure.setAttribute("aria-label", `${draft.expanded.has(node.key) ? "Collapse" : "Expand"} ${node.name}`);
+          disclosure.setAttribute("aria-expanded", String(draft.expanded.has(node.key)));
+        }
+        const select = root.ownerDocument.createElement("button");
+        select.type = "button";
+        select.dataset.scopeSelect = node.key;
+        select.textContent = node.name;
+        const status = root.ownerDocument.createElement("span");
+        status.className = "scope-folder-status";
+        const inherited = inheritedScopeState(draft, node.key);
+        status.textContent = draft.selections.has(node.key) || inherited ? `${labels[effectiveScopeState(draft, node.key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+        const icon = root.ownerDocument.createElement("span");
+        icon.className = "folder-icon";
+        icon.textContent = "▰";
+        row.append(disclosure, icon, select, status);
+        wrapper.appendChild(row);
+        if (draft.expanded.has(node.key)) {
+          const children = root.ownerDocument.createElement("div");
+          children.className = "children";
+          children.setAttribute("role", "group");
+          children.setAttribute("aria-label", node.name);
+          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
+          if (draft.branchCursors.has(node.key)) {
+            const more2 = root.ownerDocument.createElement("button");
+            more2.type = "button";
+            more2.dataset.scopeMore = node.key;
+            more2.textContent = "Show more folders";
+            children.appendChild(more2);
+          }
+          wrapper.appendChild(children);
+        }
+        host.appendChild(wrapper);
+      }
+    };
+    appendNodes(list, draft.nodes);
+    if (draft.nodes.length === 0) {
+      const empty = root.ownerDocument.createElement("p");
+      empty.textContent = "No folders returned in this page.";
+      list.appendChild(empty);
+    }
+    const needle = form.querySelector("[data-scope-search]")?.value.trim().toLowerCase() || "";
+    list.querySelectorAll(".scope-folder").forEach((row) => {
+      row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
+    });
+    const more = form.querySelector('[data-scope-more=""]');
+    if (more)
+      more.hidden = !draft.nextCursor;
+    renderScopeReview(form, draft);
+  }
+  async function browseScope(form, trail, append = false) {
+    const draft = scopeDraft(form);
+    if (!scopeAllowed(form, draft) || !options.transport.read)
+      return;
+    const parent = trail.at(-1)?.key;
+    const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
+    draft.busy = true;
+    scopeControls(form, draft);
+    scopeMessage(form, "Listing folder names…");
+    try {
+      const result = await options.transport.read({
+        view: "dispositions",
+        action: "browse_folder_scope",
+        source_id: form.dataset.folderScopeSource,
+        ...parent ? { parent_key: parent } : {},
+        ...cursor ? { cursor } : {}
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status === 401 || result.status === 403 || !result.can_write) {
+        canWrite = false;
+        scopeMessage(form, "Write access expired. Reconnect before browsing private folders.");
+        return;
+      }
+      const page = result.scope_browser;
+      if (result.status < 200 || result.status >= 300 || !page || page.source_id !== form.dataset.folderScopeSource || !page.account_generation || !page.scope_revision || !Array.isArray(page.nodes) || page.nodes.some((node) => typeof node.key !== "string" || typeof node.name !== "string" || node.kind !== "folder" || typeof node.selectable !== "boolean")) {
+        scopeMessage(form, "Could not list folders. Check the connection and reopen this picker.");
+        return;
+      }
+      if (draft.loaded && (draft.generation !== page.account_generation || draft.revision !== page.scope_revision)) {
+        draft.invalid = true;
+        scopeMessage(form, "The account or saved scope changed. Reopen this picker before applying choices.");
+        return;
+      }
+      if (!draft.loaded) {
+        draft.generation = page.account_generation;
+        draft.revision = page.scope_revision;
+        draft.selections = new Map(page.selections.map((selection) => [selection.key, selection.state]));
+        page.selections.forEach((selection) => draft.ancestors.set(selection.key, selection.ancestor_keys || []));
+        draft.whole = page.whole_account_selected;
+        const whole = form.querySelector("[data-scope-whole-account]");
+        if (whole)
+          whole.checked = draft.whole;
+      }
+      if (page.nodes.some((node) => trail.some((ancestor) => ancestor.key === node.key))) {
+        scopeMessage(form, "The folder listing contains a cycle. Reopen the picker before continuing.");
+        draft.invalid = true;
+        return;
+      }
+      draft.loaded = true;
+      const previous = parent ? draft.branches.get(parent) || [] : draft.nodes;
+      const nodes = append ? [...previous, ...page.nodes.filter((node) => !previous.some((old) => old.key === node.key))] : page.nodes;
+      if (parent) {
+        draft.branches.set(parent, nodes);
+        draft.expanded.add(parent);
+        if (page.next_cursor)
+          draft.branchCursors.set(parent, page.next_cursor);
+        else
+          draft.branchCursors.delete(parent);
+      } else {
+        draft.nodes = nodes;
+        draft.nextCursor = page.next_cursor;
+      }
+      page.nodes.forEach((node) => {
+        draft.catalog.set(node.key, node);
+        draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(" / "));
+        draft.ancestors.set(node.key, trail.map((entry) => entry.key));
+      });
+      renderScopeNodes(form, draft);
+      scopeMessage(form, "Only folder names were listed. Review your choices, then save and start.");
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
+    } finally {
+      draft.busy = false;
+      if (!disposed && root.contains(form))
+        scopeControls(form, draft);
+    }
+  }
+  async function approveScope(form) {
+    const draft = scopeDraft(form);
+    const confirmation = form.querySelector("[data-scope-whole-confirm]")?.checked === true;
+    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !draft.edited && !Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude") || draft.whole && !confirmation) {
+      scopeMessage(form, "Choose folders first. Entire-account access also needs explicit confirmation.");
+      return;
+    }
+    draft.busy = true;
+    scopeControls(form, draft);
+    scopeMessage(form, "Saving your approved scope…");
+    try {
+      const result = await options.transport.control({
+        action: "approve_source_scope_and_start",
+        source_id: form.dataset.folderScopeSource,
+        account_generation: draft.generation,
+        expected_scope_revision: draft.revision,
+        selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
+        whole_account: draft.whole,
+        explicit_whole_account_confirmation: confirmation
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        if (result.status === 401 || result.status === 403)
+          canWrite = false;
+        if (result.status === 409)
+          draft.invalid = true;
+        const error = result.body.error;
+        const message2 = error && typeof error === "object" ? error.message : undefined;
+        scopeMessage(form, typeof message2 === "string" ? message2 : "Scope was not activated. Your choices are still here.");
+        return;
+      }
+      draft.edited = false;
+      scopeMessage(form, "Scope saved. Opening the source status…");
+      if (!dirty && !Array.from(scopeDrafts.values()).some((other) => other.edited)) {
+        options.navigate(`/dashboard?source=${encodeURIComponent(form.dataset.folderScopeSource || "")}`);
+      }
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Could not confirm the result. Reopen the picker to check saved scope before retrying.");
+    } finally {
+      draft.busy = false;
+      if (!disposed && root.contains(form))
+        scopeControls(form, draft);
+    }
+  }
+  function scopeClick(target) {
+    const form = target.closest("form[data-folder-scope-source]");
+    if (!form || !root.contains(form))
+      return false;
+    const draft = scopeDraft(form);
+    if (target.closest("[data-scope-cancel]")) {
+      if (draft.busy)
+        return true;
+      scopeDrafts.delete(form);
+      const list = form.querySelector("[data-scope-nodes]");
+      list?.replaceChildren();
+      form.querySelectorAll("input").forEach((input) => {
+        input.checked = input.defaultChecked;
+      });
+      const empty = form.querySelector("[data-scope-inspector-empty]");
+      if (empty)
+        empty.hidden = false;
+      const content = form.querySelector("[data-scope-inspector-content]");
+      if (content)
+        content.hidden = true;
+      form.querySelectorAll("[data-scope-more]").forEach((element) => {
+        element.hidden = true;
+      });
+      const location = form.querySelector("[data-scope-location]");
+      if (location)
+        location.textContent = "Top level";
+      const fresh = scopeDraft(form);
+      renderScopeReview(form, fresh);
+      scopeMessage(form, "Changes cancelled. Browse again to review the saved scope.");
+      return true;
+    }
+    if (!scopeAllowed(form, draft))
+      return true;
+    if (target.closest("[data-scope-browse-root]")) {
+      browseScope(form, []);
+      return true;
+    }
+    const more = target.closest("[data-scope-more]");
+    if (more) {
+      const key = more.dataset.scopeMore;
+      if (key && draft.branchCursors.has(key))
+        browseScope(form, scopeTrail(draft, key), true);
+      else if (!key && draft.nextCursor)
+        browseScope(form, [], true);
+      return true;
+    }
+    const open = target.closest("[data-scope-open]");
+    if (open) {
+      const node = draft.catalog.get(open.dataset.scopeOpen || "");
+      if (node && draft.expanded.has(node.key)) {
+        draft.expanded.delete(node.key);
+        renderScopeNodes(form, draft);
+      } else if (node && draft.branches.has(node.key)) {
+        draft.expanded.add(node.key);
+        renderScopeNodes(form, draft);
+      } else if (node)
+        browseScope(form, scopeTrail(draft, node.key));
+      return true;
+    }
+    const select = target.closest("[data-scope-select]");
+    if (select) {
+      draft.selected = draft.catalog.get(select.dataset.scopeSelect || "");
+      const empty = form.querySelector("[data-scope-inspector-empty]");
+      if (empty)
+        empty.hidden = !!draft.selected;
+      const content = form.querySelector("[data-scope-inspector-content]");
+      if (content)
+        content.hidden = !draft.selected;
+      const name = form.querySelector("[data-scope-selected-name]");
+      if (name)
+        name.textContent = draft.selected?.name || "";
+      const path = form.querySelector("[data-scope-selected-path]");
+      if (path)
+        path.textContent = draft.selected ? draft.names.get(draft.selected.key) || draft.selected.name : "";
+      const note = form.querySelector("[data-scope-selected-note]");
+      if (note)
+        note.textContent = "This choice applies to this folder and its contents. Review narrower choices before starting.";
+      updateScopeRows(form, draft);
+      return true;
+    }
+    const choice = target.closest("[data-scope-state]");
+    const state = choice?.dataset.scopeState;
+    if (draft.selected?.selectable && state && scopeChoiceAllowed(draft, state) && (state === "ingest" || state === "metadata_only" || state === "exclude")) {
+      draft.selections.set(draft.selected.key, state);
+      draft.edited = true;
+      updateScopeRows(form, draft);
+    }
+    return true;
+  }
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -599,6 +1005,7 @@ function mountDispositionsController(options) {
       slot.textContent = text;
   }
   function applyWriteCapability() {
+    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => scopeControls(form, scopeDraft(form)));
     if (appliedCanWrite === canWrite)
       return;
     appliedCanWrite = canWrite;
@@ -672,6 +1079,8 @@ function mountDispositionsController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    if (scopeClick(target))
+      return;
     const row = target.closest(".folder-row");
     if (row) {
       selectFolder(row);
@@ -711,6 +1120,8 @@ function mountDispositionsController(options) {
     navigator.clipboard.writeText(source.value);
   }
   function onKeydown(event) {
+    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]"))
+      return;
     if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ")
       return;
     const row = event.target instanceof Element ? event.target.closest(".folder-row") : null;
@@ -720,6 +1131,27 @@ function mountDispositionsController(options) {
     selectFolder(row);
   }
   function onInput(event) {
+    if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
+      const form2 = event.target.closest("form[data-folder-scope-source]");
+      if (form2 && event.target.matches("[data-scope-search]")) {
+        renderScopeNodes(form2, scopeDraft(form2));
+        return;
+      }
+      if (form2 && (event.target.matches("[data-scope-whole-account]") || event.target.matches("[data-scope-whole-confirm]"))) {
+        const draft = scopeDraft(form2);
+        if (!scopeAllowed(form2, draft) || !draft.loaded)
+          return;
+        draft.whole = form2.querySelector("[data-scope-whole-account]")?.checked === true;
+        if (!draft.whole) {
+          const confirm = form2.querySelector("[data-scope-whole-confirm]");
+          if (confirm)
+            confirm.checked = false;
+        }
+        draft.edited = true;
+        renderScopeReview(form2, draft);
+        return;
+      }
+    }
     const input = event.target instanceof HTMLInputElement && event.target.matches("[data-folder-search]") ? event.target : null;
     if (!input || !root.contains(input))
       return;
@@ -731,7 +1163,14 @@ function mountDispositionsController(options) {
   }
   function onSubmit(event) {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
-    if (!form || !root.contains(form) || !form.hasAttribute("data-dispositions-source"))
+    if (!form || !root.contains(form))
+      return;
+    if (form.hasAttribute("data-folder-scope-source")) {
+      event.preventDefault();
+      approveScope(form);
+      return;
+    }
+    if (!form.hasAttribute("data-dispositions-source"))
       return;
     event.preventDefault();
     save(form);
@@ -748,7 +1187,7 @@ function mountDispositionsController(options) {
     } catch {}
   }
   async function refreshNow(force) {
-    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty))
+    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy)))
       return;
     inFlight = true;
     try {
@@ -756,7 +1195,7 @@ function mountDispositionsController(options) {
       if (!result || disposed || options.signal.aborted)
         return;
       canWrite = result.can_write;
-      if (!force && dirty) {
+      if (!force && (dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy))) {
         applyWriteCapability();
         return;
       }
@@ -791,6 +1230,7 @@ function mountDispositionsController(options) {
       else
         root.innerHTML = result.body;
       dirty = false;
+      scopeDrafts.clear();
       signature = result.signature;
       appliedCanWrite = undefined;
       root.querySelectorAll("details").forEach((node) => {
@@ -1370,6 +1810,23 @@ var DISPOSITIONS_CSS = `
       .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
+      .scope-connection, .scope-browser-note { color: var(--t3); font-size: 12px; padding: 8px 12px; }
+      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
+      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
+      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
+      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
+      .scope-folder.selected [data-scope-select] { background: transparent; }
+      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
+      .scope-folder-status { color: var(--t3); font-size: 11px; }
+      .scope-folder.selected .scope-folder-status { color: var(--t1); }
+      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: 12px; color: var(--t2); }
+      .scope-whole-account { display: block; }
+      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
+      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
+      [data-folder-scope-source] [hidden] { display: none !important; }
+      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: 12px; }
+      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
+      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
       @media (max-width: 860px) {
         .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
@@ -1403,7 +1860,9 @@ var OLYMPUS_CONTROL_UI_CSS = forShadowRoot([
 // src/control-ui.ts
 function routeFromProps(props) {
   const view = props.view;
-  if (view === "setup" || view === "background" || view === "sensitivity" || view === "dispositions")
+  if (view === "dispositions")
+    return { view, ...props.source_id ? { source_id: props.source_id } : {} };
+  if (view === "setup" || view === "background" || view === "sensitivity")
     return { view };
   if (view === "source" && props.source_id)
     return { view, source_id: props.source_id };
@@ -1418,8 +1877,10 @@ function routeFromHref(href) {
   } catch {
     return;
   }
-  if (url.pathname === "/dashboard/dispositions")
-    return { view: "dispositions" };
+  if (url.pathname === "/dashboard/dispositions") {
+    const sourceId2 = url.searchParams.get("source_id");
+    return { view: "dispositions", ...sourceId2 ? { source_id: sourceId2 } : {} };
+  }
   if (url.pathname !== "/dashboard")
     return;
   const sourceId = url.searchParams.get("source");
@@ -1530,7 +1991,10 @@ function createDashboardPage() {
           const mount = result.controller === "dispositions" ? mountDispositionsController : mountDashboardController;
           controller = mount({
             root,
-            transport: { control },
+            transport: {
+              control,
+              read: (params) => context.host.request(OLYMPUS_DASHBOARD_READ_METHOD, { ...params })
+            },
             navigate,
             refresh: read,
             returnUrl: context.host.navigation.pageHref(targetFor(route)),

@@ -723,6 +723,28 @@ describe('folder scope before ingestion', () => {
     controller.dispose();
   });
 
+  test.each([true, false])('narrowing a parent saves inherited restrictions for saved children, expanded=%s', async (expandChild) => {
+    const { root, form } = scopeRoot(); const writes: unknown[] = [];
+    const controller = mountDispositionsController({ root,
+      transport: { async read(params) {
+        const response = page('parent_key' in params && params.parent_key ? 'opaque-folder-B' : 'opaque-folder-A');
+        response.scope_browser!.selections = [{ key: 'opaque-folder-A', state: 'ingest', ancestor_keys: [] }, { key: 'opaque-folder-B', state: 'ingest', ancestor_keys: ['opaque-folder-A'] }];
+        return response;
+      }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
+      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
+    if (expandChild) { click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete(); }
+    click(root, '[data-scope-select="opaque-folder-A"]'); click(root, '[data-scope-state="metadata_only"]');
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await happyWindow.happyDOM.waitUntilComplete();
+    expect((writes[0] as { selections: unknown[] }).selections).toEqual([
+      { key: 'opaque-folder-A', state: 'metadata_only', ancestor_keys: [] },
+      { key: 'opaque-folder-B', state: 'metadata_only', ancestor_keys: ['opaque-folder-A'] },
+    ]);
+    controller.dispose();
+  });
+
   test('refuses stale account/scope responses and never activates merely by cancelling', async () => {
     const { root, form } = scopeRoot(); let count = 0; let writes = 0;
     const controller = mountDispositionsController({ root,

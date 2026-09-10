@@ -38,8 +38,9 @@ testers have exercised the normal product journey without custom engineering.
   Preserve existing data and vectors until separately authorized cleanup.
   Metadata progress must distinguish a completed bounded pass from a completed
   traversal, and extraction is working only when execution evidence says so.
-  Implementation and adversarial validation are in progress; affected live
-  sources remain disconnected while the worker is paused.
+  The candidate includes the scope gate and focused consent regression tests.
+  Live folder-selection proof and the held-out source eval await the owner's
+  approved scope; affected sources stay disconnected until that choice.
 
 - **2026-09-10 — Secure embedding fallback.** Use a catalog-approved Venice
   Private embedding model when no local embedding provider is configured.

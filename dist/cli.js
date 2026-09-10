@@ -6010,6 +6010,18 @@ function createDropboxSourceConnector(options) {
   let cachedSession;
   let cachedMetadataClient = options.metadataClient;
   let cachedDownloadClient = options.downloadClient;
+  const contentAllowedByLocalItemId = new Map;
+  const scopedItems = (entries, fetchedAt) => entries.flatMap((entry) => {
+    const path = entry.pathLower ?? entry.pathDisplay;
+    if (options.scope) {
+      options.scope.assertCurrent();
+      if (!path || !options.scope.allowsMetadata(path))
+        return [];
+    }
+    const item = rawItemFromDropboxEntry(entry, account, fetchedAt, options.deletedItemIdentityResolver);
+    contentAllowedByLocalItemId.set(item.identity.localItemId, entry.tag === "file" && (!options.scope || options.scope.allowsContent(path)));
+    return [item];
+  });
   const ensureSession = async () => {
     if (cachedSession)
       return cachedSession;
@@ -6115,7 +6127,7 @@ function createDropboxSourceConnector(options) {
               pageDigest: metadataPageDigest(page)
             });
             yield {
-              items: accepted.map((entry) => rawItemFromDropboxEntry(entry, account, nowIso(), options.deletedItemIdentityResolver)),
+              items: scopedItems(accepted, nowIso()),
               nextCursor: resumeCursor,
               done: false,
               truncated: true
@@ -6123,7 +6135,7 @@ function createDropboxSourceConnector(options) {
             return;
           }
           yield {
-            items: accepted.map((entry) => rawItemFromDropboxEntry(entry, account, nowIso(), options.deletedItemIdentityResolver)),
+            items: scopedItems(accepted, nowIso()),
             ...nextCursor ? { nextCursor } : {},
             done: !hasMore
           };
@@ -6135,7 +6147,6 @@ function createDropboxSourceConnector(options) {
     },
     async fetchItem(localItemId) {
       const providerItemId = providerItemIdFromLocalItemId(localItemId, account);
-      const downloader = await ensureDownloadClient();
       const fetchedAt = nowIso();
       const identity = {
         family: "file",
@@ -6145,6 +6156,19 @@ function createDropboxSourceConnector(options) {
         providerFileId: providerItemId,
         localItemId
       };
+      if (options.scope) {
+        options.scope.assertCurrent();
+        if (contentAllowedByLocalItemId.get(localItemId) !== true) {
+          return {
+            identity,
+            mimeType: UNKNOWN_MIME_TYPE,
+            content: { kind: "metadata_only" },
+            metadata: Object.freeze({ scopeContentDenied: true }),
+            fetchedAt
+          };
+        }
+      }
+      const downloader = await ensureDownloadClient();
       try {
         const downloaded = await downloader.download({
           job: {
@@ -7207,6 +7231,7 @@ function createDropboxProviderStoreSyncHandler(options) {
           ...options.fetch ? { fetch: options.fetch } : {},
           ...options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {},
           ...options.contentBaseUrl ? { contentBaseUrl: options.contentBaseUrl } : {},
+          ...options.scope ? { scope: options.scope } : {},
           deletedItemIdentityResolver: options.store,
           onPageDigestRestart: () => {
             pageDigestRestarts += 1;
@@ -7214,6 +7239,13 @@ function createDropboxProviderStoreSyncHandler(options) {
         }));
         const sync2 = await options.store.syncFromConnector(observed.connector, {
           fetchContent: false,
+          ...options.scope ? {
+            sourceScopeObservation: () => ({
+              accountGeneration: options.scope.generation,
+              scopeRevision: options.scope.revision,
+              folderKeys: []
+            })
+          } : {},
           ...maxItems !== undefined ? { maxItems } : {},
           ...cursor ? { cursor } : {}
         });
@@ -8728,10 +8760,19 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 11,
       name: "connector_store_locator_identity_index",
       up(db) {
         createConnectorStoreLocatorIdentityIndex(db);
+      }
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: "connector_store_trusted_source_scope_observation",
+      up(db) {
+        addColumnIfMissing(db, "items", "source_scope_generation", "TEXT");
+        addColumnIfMissing(db, "items", "source_scope_revision", "TEXT");
+        addColumnIfMissing(db, "items", "source_scope_folder_keys_json", "TEXT");
       }
     }
   ];
@@ -9187,6 +9228,8 @@ function createConnectorStoreContentProvider(options) {
       }
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId)
+        return;
+      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
         return;
       const content = store.localContent(localItemId, request.maxChars);
       if (!content)
@@ -9796,6 +9839,8 @@ function normalizeConnectorStoreSearchFilters(value) {
     return;
   const provider = normalizeBoundedFilterString(value.provider, "provider");
   const locatorPathScope = normalizeConnectorStoreLocatorPathScope(value.locatorPathScope);
+  const locatorPathScopes = normalizeScopePaths(value.locatorPathScopes);
+  const locatorPathExcludedScopes = normalizeScopePaths(value.locatorPathExcludedScopes);
   const conversationId = normalizeBoundedFilterString(value.conversationId, "conversation id");
   const senderId = normalizeBoundedFilterString(value.senderId, "sender id");
   const senderLabel = normalizeBoundedFilterString(value.senderLabel, "sender label");
@@ -9808,15 +9853,29 @@ function normalizeConnectorStoreSearchFilters(value) {
     throw new Error("Connector store authoredAfter must not be later than authoredBefore.");
   }
   const searchTextExactLines = normalizeBoundedFilterStrings(value.searchTextExactLines, "exact search-context line");
+  const sourceScopeGeneration = normalizeScopeGeneration(value.sourceScopeGeneration);
+  const sourceScopeRevision = normalizeScopeRevision(value.sourceScopeRevision);
+  const sourceScopeFolderAnyKeys = normalizeScopeFolderKeys(value.sourceScopeFolderAnyKeys);
+  const sourceScopeFolderNoneKeys = normalizeScopeFolderKeys(value.sourceScopeFolderNoneKeys);
+  const metadataOnlyLocatorPathScopes = normalizeScopePaths(value.metadataOnlyLocatorPathScopes);
+  const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
+    ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
+    ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
     ...conversationId ? { conversationId } : {},
     ...senderId ? { senderId } : {},
     ...senderLabel ? { senderLabel } : {},
     ...authoredAfter ? { authoredAfter } : {},
     ...authoredBefore ? { authoredBefore } : {},
-    ...searchTextExactLines.length > 0 ? { searchTextExactLines } : {}
+    ...searchTextExactLines.length > 0 ? { searchTextExactLines } : {},
+    ...sourceScopeGeneration ? { sourceScopeGeneration } : {},
+    ...sourceScopeRevision ? { sourceScopeRevision } : {},
+    ...sourceScopeFolderAnyKeys.length > 0 ? { sourceScopeFolderAnyKeys } : {},
+    ...sourceScopeFolderNoneKeys.length > 0 ? { sourceScopeFolderNoneKeys } : {},
+    ...metadataOnlyLocatorPathScopes.length > 0 ? { metadataOnlyLocatorPathScopes } : {},
+    ...metadataOnlySourceScopeFolderKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys } : {}
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -9830,6 +9889,28 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
   }
+  if (normalized.sourceScopeGeneration) {
+    clauses.push("AND i.source_scope_generation = ?");
+    params.push(normalized.sourceScopeGeneration);
+  }
+  if (normalized.sourceScopeRevision) {
+    clauses.push("AND i.source_scope_revision = ?");
+    params.push(normalized.sourceScopeRevision);
+  }
+  if (normalized.sourceScopeFolderAnyKeys?.length) {
+    clauses.push(`AND EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderAnyKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.sourceScopeFolderAnyKeys);
+  }
+  if (normalized.sourceScopeFolderNoneKeys?.length) {
+    clauses.push(`AND NOT EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderNoneKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.sourceScopeFolderNoneKeys);
+  }
   if (normalized.locatorPathScope) {
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
@@ -9838,6 +9919,29 @@ function connectorStoreFilterSql(filters) {
     } else {
       clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.locatorPathScopes?.length) {
+    const alternatives = [];
+    clauses.push("AND i.locator_uri IS NOT NULL");
+    for (const locatorPath of normalized.locatorPathScopes) {
+      if (locatorPath === "/") {
+        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      } else {
+        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
+    }
+    clauses.push(`AND (${alternatives.join(" OR ")})`);
+  }
+  if (normalized.locatorPathExcludedScopes?.length) {
+    for (const locatorPath of normalized.locatorPathExcludedScopes) {
+      if (locatorPath === "/") {
+        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+      } else {
+        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
     }
   }
   if (normalized.conversationId) {
@@ -9866,6 +9970,103 @@ function connectorStoreFilterSql(filters) {
   }
   return { sql: clauses.join(`
 `), params };
+}
+function connectorStoreFtsScopeSql(filters) {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  const contentRow = `(
+    connector_store_fts.chunk_pk IS NOT NULL
+    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
+  )`;
+  if (!normalized)
+    return { sql: `AND ${contentRow}`, params: [] };
+  const metadataOnly = [];
+  const params = [];
+  for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
+    if (locatorPath === "/") {
+      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+    } else {
+      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.metadataOnlySourceScopeFolderKeys?.length) {
+    metadataOnly.push(`EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) metadata_folder
+      WHERE metadata_folder.value IN (${normalized.metadataOnlySourceScopeFolderKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.metadataOnlySourceScopeFolderKeys);
+  }
+  if (metadataOnly.length === 0)
+    return { sql: `AND ${contentRow}`, params: [] };
+  const metadataExpression = `(${metadataOnly.join(" OR ")})`;
+  return {
+    sql: `AND (
+      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      OR (NOT ${metadataExpression} AND ${contentRow})
+    )`,
+    params: [...params, ...params]
+  };
+}
+function connectorStoreVectorScopeFilters(filters) {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  if (!normalized)
+    return;
+  return normalizeConnectorStoreSearchFilters({
+    ...normalized,
+    locatorPathExcludedScopes: [
+      ...normalized.locatorPathExcludedScopes ?? [],
+      ...normalized.metadataOnlyLocatorPathScopes ?? []
+    ],
+    sourceScopeFolderNoneKeys: [
+      ...normalized.sourceScopeFolderNoneKeys ?? [],
+      ...normalized.metadataOnlySourceScopeFolderKeys ?? []
+    ]
+  });
+}
+function normalizeScopePaths(values) {
+  if (values === undefined)
+    return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error("Connector store locator path scopes must be an array of at most 100 strings.");
+  }
+  return [...new Set(values.map((value) => normalizeConnectorStoreLocatorPathScope(value)))];
+}
+function normalizeScopeGeneration(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error("Connector store source scope generation must be a 64-character lowercase digest.");
+  }
+  return value;
+}
+function normalizeScopeRevision(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new Error("Connector store source scope revision must be a lowercase UUID v4.");
+  }
+  return value;
+}
+function normalizeSourceScopeObservation(value) {
+  const accountGeneration = normalizeScopeGeneration(value.accountGeneration);
+  if (!accountGeneration)
+    throw new Error("Connector store source scope observation requires an account generation.");
+  const scopeRevision = normalizeScopeRevision(value.scopeRevision);
+  if (!scopeRevision)
+    throw new Error("Connector store source scope observation requires a scope revision.");
+  return {
+    accountGeneration,
+    scopeRevision,
+    folderKeys: normalizeScopeFolderKeys(value.folderKeys)
+  };
+}
+function normalizeScopeFolderKeys(values) {
+  if (values === undefined)
+    return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error("Connector store source scope folder keys must be an array of at most 100 strings.");
+  }
+  return [...new Set(values.map((value) => normalizeBoundedFilterString(value, "source scope folder key")))];
 }
 function normalizeBoundedFilterStrings(values, label) {
   if (values === undefined)
@@ -10236,6 +10437,8 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV9Schema(db);
   if (version === 10)
     validateConnectorStoreV10Schema(db);
+  if (version === 11)
+    validateConnectorStoreV11Schema(db);
   if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION)
     validateConnectorStoreSchema(db);
 }
@@ -10244,17 +10447,26 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreFtsOwnership(db, "v6");
 }
 function validateConnectorStoreSchema(db) {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, "v12");
+  assertExactTableColumns(db, "embedding_models", CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, false, "v12");
+  assertExactTableColumns(db, "item_write_claims", CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, false, "v12");
+  validateConnectorStoreLocatorIdentitySchema(db, "v12");
+}
+function validateConnectorStoreV11Schema(db) {
   validateConnectorStoreV10Schema(db);
-  assertExactTableColumns(db, "item_locator_identities", ["item_pk", "provider", "account_scope", "normalized_conversation", "normalized_locator"], false, "v11");
-  assertExactTableColumns(db, "locator_identity_index_state", ["singleton", "cursor_item_pk", "completed"], false, "v11");
-  assertIndexColumns(db, "idx_connector_store_locator_identity", ["provider", "account_scope", "normalized_conversation", "normalized_locator", "item_pk"], "v11");
-  assertTriggerExists(db, "connector_store_locator_identity_insert", "v11");
-  assertTriggerExists(db, "connector_store_locator_identity_update", "v11");
+  validateConnectorStoreLocatorIdentitySchema(db, "v11");
+}
+function validateConnectorStoreLocatorIdentitySchema(db, versionLabel) {
+  assertExactTableColumns(db, "item_locator_identities", ["item_pk", "provider", "account_scope", "normalized_conversation", "normalized_locator"], false, versionLabel);
+  assertExactTableColumns(db, "locator_identity_index_state", ["singleton", "cursor_item_pk", "completed"], false, versionLabel);
+  assertIndexColumns(db, "idx_connector_store_locator_identity", ["provider", "account_scope", "normalized_conversation", "normalized_locator", "item_pk"], versionLabel);
+  assertTriggerExists(db, "connector_store_locator_identity_insert", versionLabel);
+  assertTriggerExists(db, "connector_store_locator_identity_update", versionLabel);
   const stateRows = Number(db.query(`
     SELECT COUNT(*) AS count FROM locator_identity_index_state WHERE singleton = 1
   `).get().count);
   if (stateRows !== 1)
-    throw new Error("Connector store locator identity index state is missing for v11.");
+    throw new Error(`Connector store locator identity index state is missing for ${versionLabel}.`);
 }
 function validateConnectorStoreV10Schema(db) {
   validateConnectorStoreV9Schema(db, "v10");
@@ -10687,13 +10899,13 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 11, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -10808,6 +11020,19 @@ var init_local_index = __esm(() => {
     }
     close() {
       closeSqliteStore(this.db);
+    }
+    itemMatchesSearchFilters(localItemId, accountScope, filters) {
+      const predicate = connectorStoreFilterSql(filters);
+      const row = this.db.query(`
+      SELECT 1 AS matched
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""}
+        ${predicate.sql}
+      LIMIT 1
+    `).get(localItemId, ...accountScope ? [accountScope] : [], ...predicate.params);
+      return row?.matched === 1;
     }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
@@ -11278,7 +11503,7 @@ var init_local_index = __esm(() => {
       const exactChunks = chunks.filter((chunk) => chunk.chunk_index >= 0 && chunk.chunk_index < expectation.chunkContentHashes.length && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]);
       const chunksIndexed = exactChunks.length;
       const chunksEmbeddingCurrent = exactChunks.filter((chunk) => chunk.embedding_current === 1).length;
-      const expectedFtsRows = Math.max(1, chunks.length);
+      const expectedFtsRows = chunks.length + 1;
       const ftsRows = this.db.query(`
       SELECT COUNT(*) AS count
       FROM connector_store_fts_rows
@@ -11404,7 +11629,7 @@ var init_local_index = __esm(() => {
       const finishItem = () => {
         if (currentItemPk === undefined)
           return;
-        if (currentChunkUnmapped || currentFtsRows !== Math.max(1, currentChunkCount)) {
+        if (currentChunkUnmapped || currentFtsRows !== currentChunkCount + 1) {
           counts.itemsWithFtsDeficiency += 1;
           if (samples.ftsDeficientLocalItemIds.length < sampleLimit) {
             samples.ftsDeficientLocalItemIds.push(currentLocalItemId);
@@ -12478,7 +12703,8 @@ var init_local_index = __esm(() => {
               gaps.push(secretsTierExcludedGap(itemForStorage));
               continue;
             }
-            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only");
+            const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
+            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation);
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
@@ -12608,7 +12834,7 @@ var init_local_index = __esm(() => {
         }
       };
     }
-    upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false) {
+    upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
       const exclusion = this.exclusions.evaluateMetadata(item.metadata);
       if (exclusion.excluded)
         throw new ConnectorStoreExclusionViolationError(exclusion.ruleId);
@@ -12633,15 +12859,19 @@ var init_local_index = __esm(() => {
       const reactionsJson = serializeSourceReactions(reactions);
       const emittedSearchText = itemSearchText(item, title, renderSourceReactionLine(reactions));
       const searchText = preserveStoredSearchText ? mergeSearchTextLines(existing?.search_text, emittedSearchText, storedSearchTextLiteralEscapes(item.metadata), preserveStoredSearchTextOwnedFacets) : emittedSearchText;
+      const sourceScopeGeneration = sourceScopeObservation?.accountGeneration;
+      const sourceScopeRevision = sourceScopeObservation?.scopeRevision;
+      const sourceScopeFolderKeysJson = sourceScopeObservation ? JSON.stringify(sourceScopeObservation.folderKeys) : undefined;
       const applied = this.db.query(`
       INSERT INTO items (
         provider, family, account_scope, provider_item_id, provider_thread_id, provider_conversation_id,
         provider_file_id, provider_event_id, local_item_id, source_version, title, search_text,
-        reactions_json, sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
+        reactions_json, source_scope_generation, source_scope_revision, source_scope_folder_keys_json,
+        sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
         authored_at, updated_at,
         fetched_at, indexed_at, content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
         provider_thread_id = excluded.provider_thread_id,
         provider_conversation_id = excluded.provider_conversation_id,
@@ -12652,6 +12882,9 @@ var init_local_index = __esm(() => {
         title = excluded.title,
         search_text = excluded.search_text,
         reactions_json = excluded.reactions_json,
+        source_scope_generation = COALESCE(excluded.source_scope_generation, items.source_scope_generation),
+        source_scope_revision = COALESCE(excluded.source_scope_revision, items.source_scope_revision),
+        source_scope_folder_keys_json = COALESCE(excluded.source_scope_folder_keys_json, items.source_scope_folder_keys_json),
         sender_id = excluded.sender_id,
         sender_label = excluded.sender_label,
         sender_is_owner = excluded.sender_is_owner,
@@ -12666,7 +12899,7 @@ var init_local_index = __esm(() => {
         tombstoned = 0,
         deleted_at = NULL,
         sync_run_id = excluded.sync_run_id
-    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
+    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
       const itemPk = existing?.item_pk ?? Number(applied.lastInsertRowid);
       const ftsMetadataChanged = existing === null || existing.tombstoned === 1 || existing.title !== (title ?? null) || existing.search_text !== (searchText ?? null);
       return {
@@ -12675,11 +12908,15 @@ var init_local_index = __esm(() => {
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
-    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false) {
+    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
       return this.db.transaction(() => {
-        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash);
+        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
         this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
-        if (upsert.ftsMetadataChanged)
+        const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
+          SELECT 1 AS present FROM connector_store_fts_rows
+          WHERE item_pk = ? AND chunk_pk IS NULL LIMIT 1
+        `).get(upsert.itemPk)?.present;
+        if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
           this.refreshFtsForItem(upsert.itemPk);
         return upsert;
       })();
@@ -12999,14 +13236,11 @@ var init_local_index = __esm(() => {
         const title = item.title ?? "";
         const searchText = item.search_text ?? "";
         const chunks = this.db.query("SELECT chunk_pk, bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(itemPk);
-        if (chunks.length === 0) {
-          this.insertFtsRow(title, connectorStoreFtsText(searchText, ""), itemPk, null);
-          return 1;
-        }
+        this.insertFtsRow(title, connectorStoreFtsText(searchText, ""), itemPk, null);
         for (const chunk of chunks) {
           this.insertFtsRow(title, connectorStoreFtsText(searchText, chunk.bounded_text), itemPk, chunk.chunk_pk);
         }
-        return chunks.length;
+        return chunks.length + 1;
       })();
     }
     async embedChunks(options) {
@@ -13428,6 +13662,7 @@ var init_local_index = __esm(() => {
     }
     async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      const vectorFilters = connectorStoreVectorScopeFilters(filters);
       const trimmed = query.trim();
       if (!trimmed)
         return { rows: [] };
@@ -13446,7 +13681,7 @@ var init_local_index = __esm(() => {
         beforeToken: before.token,
         maxResults,
         ...accountScope !== undefined ? { accountScope } : {},
-        ...filters ? { filters } : {},
+        ...vectorFilters ? { filters: vectorFilters } : {},
         ...deadlineAtMs !== undefined ? { deadlineAtMs } : {}
       });
     }
@@ -13607,6 +13842,7 @@ var init_local_index = __esm(() => {
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
+      const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
         return [];
@@ -13635,10 +13871,11 @@ var init_local_index = __esm(() => {
         AND i.tombstoned = 0
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
+        ${selectedFtsScope.sql}
       GROUP BY i.item_pk
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
-    `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, fetchLimit);
+    `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
       let selected = rows;
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
@@ -13646,9 +13883,13 @@ var init_local_index = __esm(() => {
         const matchedGroups = new Map;
         for (const group of groups) {
           const hits = this.db.query(`
-          SELECT DISTINCT item_pk FROM connector_store_fts
-          WHERE connector_store_fts MATCH ? AND item_pk IN (${placeholders})
-        `).all(sourceIndexFtsGroupQuery(group), ...pks);
+          SELECT DISTINCT connector_store_fts.item_pk
+          FROM connector_store_fts
+          JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ?
+            AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
           }
@@ -13939,6 +14180,12 @@ var init_local_index = __esm(() => {
   CONNECTOR_STORE_V9_ITEM_COLUMNS = [
     ...CONNECTOR_STORE_V7_ITEM_COLUMNS,
     "reactions_json"
+  ];
+  CONNECTOR_STORE_V12_ITEM_COLUMNS = [
+    ...CONNECTOR_STORE_V9_ITEM_COLUMNS,
+    "source_scope_generation",
+    "source_scope_revision",
+    "source_scope_folder_keys_json"
   ];
   CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
     "item_pk",
@@ -19644,6 +19891,7 @@ class GoogleDriveSourceConnector {
   contentReadFailures = 0;
   itemsByLocalId = new Map;
   exclusions;
+  scope;
   ancestry;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -19667,6 +19915,7 @@ class GoogleDriveSourceConnector {
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
     this.exclusions = options.exclusions;
+    this.scope = options.scope;
   }
   async authenticate() {
     await this.clientForRequest();
@@ -19694,24 +19943,28 @@ class GoogleDriveSourceConnector {
       });
       const files = page.files.filter((file) => file.id);
       const items = [];
+      let processedFiles = 0;
       for (const file of files) {
         if (items.length >= remaining)
           break;
+        processedFiles += 1;
         const read = await this.rawItemFromDriveFile(file);
-        this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
-        items.push(read.item);
+        if (read) {
+          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
+          items.push(read.item);
+        }
         if (file.modifiedTime) {
           if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
             highWater = file.modifiedTime;
           }
-          if (read.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
+          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
             deferredFloor = file.modifiedTime;
           }
         }
       }
       remaining -= items.length;
       pageToken = page.nextPageToken;
-      const pageTruncated = items.length < files.length;
+      const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
       const nextCursor = done ? encodeDriveCursor(promoted ? { watermark: promoted } : {}) : encodeDriveCursor({
@@ -19779,8 +20032,13 @@ class GoogleDriveSourceConnector {
       ...folderAncestorIds ? { folderAncestorIds } : {},
       ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
     });
+    if (!folderAncestorIds && this.scope)
+      return;
+    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? []))
+      return;
     const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
-    const read = excluded || this.contentReads >= this.maxContentFiles ? { deferred: !excluded } : await this.tryReadText(file);
+    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
+    const read = excluded || !contentAllowed ? {} : this.contentReads >= this.maxContentFiles ? { deferred: true } : await this.tryReadText(file);
     const text = read.text;
     if (text !== undefined)
       this.contentReads += 1;
@@ -19807,7 +20065,7 @@ class GoogleDriveSourceConnector {
     };
   }
   async resolveFolderAncestry(file) {
-    if (this.exclusions?.identityActive !== true)
+    if (this.exclusions?.identityActive !== true && !this.scope)
       return;
     const client = await this.clientForRequest();
     this.ancestry ??= new GoogleDriveFolderAncestry(client);
@@ -20331,6 +20589,13 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
     const sync = {
       fetchContent: true,
       classification,
+      ...options.scope ? {
+        sourceScopeObservation: (item) => ({
+          accountGeneration: options.scope.generation,
+          scopeRevision: options.scope.revision,
+          folderKeys: Array.isArray(item.metadata["folderAncestorIds"]) ? item.metadata["folderAncestorIds"].filter((key) => typeof key === "string") : []
+        })
+      } : {},
       ...input.maxItems !== undefined ? { maxItems: input.maxItems } : {},
       ...input.cursor ? { cursor: input.cursor } : {},
       ...input.reconcile ? {
@@ -34756,6 +35021,21 @@ function dashboardSourceProgress(source, options = {}) {
   const extraction = extractionPhase(source, settledPass, metadata);
   const embedding = embeddingPhase(source, settledPass, extraction, dashboardWorkingSummary(source));
   const bare = [metadata, extraction, embedding];
+  const scopeInactive = source.scope_selection?.required === true && (source.scope_selection.status === "scope_pending" || source.scope_selection.ingestion_enabled === false);
+  if (scopeInactive) {
+    const stateWords = source.scope_selection.status === "scope_pending" ? "Waiting · choose folders to start" : "Waiting · ingestion is off";
+    return {
+      phases: bare.map((phase) => ({
+        ...phase,
+        measure: { kind: "indeterminate", done: 0 },
+        scope: "corpus",
+        state: "waiting",
+        state_words: stateWords
+      })),
+      settled: false,
+      delta: false
+    };
+  }
   const phases = bare.map((phase, index) => withState(phase, index, bare, source, now, options.embeddingRuntime));
   return {
     phases,
@@ -34764,6 +35044,8 @@ function dashboardSourceProgress(source, options = {}) {
   };
 }
 function dashboardHasSettledPass(source) {
+  if (source.last_run?.traversal_complete === false)
+    return false;
   if (source.connection.state === "waiting_for_first_sync")
     return false;
   if (source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL)
@@ -34927,8 +35209,7 @@ function laneReportsLive(source, id, embeddingRuntime) {
     if (source.content_arrives_extracted === true) {
       return source.connection.state === "syncing" || source.schedule?.running === true;
     }
-    const drainActive = source.ingestion_health.last_drain_activity_hours;
-    return source.queue_health.active > 0 || drainActive !== undefined && drainActive * 60 <= 5;
+    return source.queue_health.active > 0;
   }
   const state = embeddingRuntime?.state;
   return state === "running" || state === "operator_priority";
@@ -35662,7 +35943,7 @@ function buildSourceDashboardViewModel(options) {
     const corpora = options.sourceIndexStatus.corpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    const card = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id));
+    const card = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false);
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" ? definition.connect_action.source : undefined;
     if (options.syncNowAvailable === undefined || syncSource === undefined)
       return card;
@@ -35760,7 +36041,7 @@ function answerLaneFromDefinition(definition, registry, credentialHealth, apiKey
     }
   };
 }
-function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired) {
+function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
   const schedulers = [
     ...corpora.map((corpus) => schedulerByCorpus.get(corpus.corpus_id)).filter((value) => !!value),
@@ -35782,17 +36063,24 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const baseConnection = connectionFromDefinition(definition, registry, credentialHealth, coverage, queue, freshness, corpora.some(corpusSyncRunning), oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, providerRefusing, now, registryUnreadable, unpaired);
   const pairedSession = definition.connect_action.kind === "guided_session";
   const unpairable = pairedSession && unpaired === undefined && (baseConnection.handles.length > 0 || baseConnection.state !== "not_connected");
+  const connectedFolderSource = fileSourceScopeStatus !== undefined && baseConnection.handles.length > 0 && baseConnection.state !== "reauth_required";
   const connection = {
     ...baseConnection,
+    ...connectedFolderSource && fileSourceScopeStatus === "scope_pending" ? { state: "connected", label: "connected · choose folders to start", action: { kind: "none" } } : {},
     ...!pairedSession && baseConnection.handles.length > 0 ? { disconnect: dashboardDisconnectAction(definition.source_id, definition.label) } : {},
     ...unpairable ? { unpair: dashboardUnpairAction(definition.source_id, definition.label) } : {}
   };
   const trustDomain = cardTrustDomain(definition, corpora);
   const configured = connection.state === "connected" || connection.state === "waiting_for_first_sync" || connection.state === "syncing" || connection.state === "synced";
   const notConnected = !configured && connection.state !== "reauth_required";
-  const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
+  const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : connectedFolderSource && fileSourceScopeStatus === "scope_pending" ? { state: "empty", label: "Choose folders to start" } : connectedFolderSource && fileSourceScopeStatus === "approved" && !fileSourceScopeIngestionEnabled ? { state: "empty", label: "Ingestion is off for this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
-  const lastRun = lastRunFromCorpora(corpora);
+  const lastRunBase = lastRunFromCorpora(corpora);
+  const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
+  const lastRun = lastRunBase ? {
+    ...lastRunBase,
+    ...traversalComplete === undefined ? {} : { traversal_complete: traversalComplete }
+  } : undefined;
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
   const embeddingRequired = embeddingRequiredFromCorpora(corpora);
   const vlmQueued = vlmExtractionQueued(ingestionLedgerRow);
@@ -35804,6 +36092,14 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     family: definition.family,
     trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id),
+    ...fileSourceScopeStatus !== undefined ? {
+      scope_selection: {
+        required: true,
+        status: fileSourceScopeStatus,
+        connected: connectedFolderSource,
+        ingestion_enabled: fileSourceScopeIngestionEnabled
+      }
+    } : {},
     configured,
     freshness,
     coverage,
@@ -35875,6 +36171,14 @@ function dashboardSourceSetupStatus(card) {
       stage: "credential_or_pairing",
       condition: "blocked",
       next_action: `Reauthenticate ${card.label} from this page, then run the initial sync again.`,
+      dependencies
+    };
+  }
+  if (card.scope_selection?.connected && card.scope_selection.status === "scope_pending") {
+    return {
+      stage: "scope",
+      condition: "blocked",
+      next_action: `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
       dependencies
     };
   }
@@ -36814,6 +37118,15 @@ function schedulerTaskCounts(scheduler) {
     }
   }
   return output;
+}
+function metadataTraversalCompleteFromSchedulers(schedulers) {
+  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "sync"));
+  if (tasks.length === 0)
+    return;
+  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
+  if (signals.some((value) => typeof value !== "number" || !Number.isFinite(value)))
+    return false;
+  return signals.every((value) => value === 1);
 }
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
@@ -55031,6 +55344,14 @@ class LocalFileExtractionJobStore {
   close() {
     closeSqliteStore(this.db);
   }
+  invalidateUnsettledForCorpus(corpusId) {
+    this.assertWritable("scope queue invalidation");
+    const id = requireBoundedString(corpusId, "corpusId");
+    return this.db.query(`
+      DELETE FROM extraction_jobs
+      WHERE corpus_id = ? AND status IN ('queued', 'leased')
+    `).run(id).changes;
+  }
   enqueue(request) {
     this.assertWritable("enqueue");
     const extractorKind = requireToken2(request.extractorKind, "extractorKind");
@@ -58905,6 +59226,9 @@ async function settleOneJob(input) {
   if (!extractor) {
     return { status: "failed_terminal", errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
   }
+  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
+    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
   const trustTier = extractor.egress === "approved_remote" ? await readTrustTier(corpus, job.ref) : undefined;
   const egress = evaluateExtractionEgress({
     egress: extractor.egress,
@@ -58967,6 +59291,9 @@ async function settleOneJob(input) {
     ...resolvedSizeBytes !== undefined ? { sizeBytes: resolvedSizeBytes } : {}
   };
   let output;
+  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
+    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
   try {
     output = await extractor.extract(extractorInput);
   } catch (error2) {
@@ -59005,6 +59332,9 @@ async function settleOneJob(input) {
     };
   }
   let accepted;
+  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
+    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  }
   try {
     accepted = await corpus.sink.accept({
       ref: job.ref,
@@ -59051,6 +59381,16 @@ async function settleOneJob(input) {
     ...output.derivations ? { derivations: output.derivations } : {},
     ...output.egressDestination ? { egressDestination: output.egressDestination } : {}
   };
+}
+async function extractionAuthorizationCurrent(corpus, ref) {
+  if (!corpus.authorization)
+    return true;
+  try {
+    await corpus.authorization.assertCurrent(ref);
+    return true;
+  } catch {
+    return false;
+  }
 }
 async function recordOutcome(jobs, job, workerId, outcome) {
   const base = {
@@ -59215,7 +59555,7 @@ function summarizeEgressDestinations(values) {
 function hashToken(value) {
   return createHash29("sha256").update(value).digest("hex");
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
   init_types();
   init_file_extraction_source();
@@ -59258,7 +59598,34 @@ function createFileExtractionRuntime(options) {
     corpora.push({
       corpusId: config2.corpusId,
       trustDomain: store.trustDomain,
-      source: () => buildSource({ config: config2, store }),
+      source: async () => {
+        options.scopeGuard?.assertAuthorized({ config: config2, store });
+        const source = await buildSource({ config: config2, store });
+        if (!options.scopeGuard)
+          return source;
+        const guard = options.scopeGuard;
+        return {
+          id: source.id,
+          corpusId: source.corpusId,
+          provider: source.provider,
+          async listCandidates(listOptions) {
+            guard.assertAuthorized({ config: config2, store });
+            const page = await source.listCandidates(listOptions);
+            return {
+              ...page,
+              candidates: page.candidates.filter((ref) => guard.allowsRef({ config: config2, store, ref }))
+            };
+          },
+          async fetch(ref, fetchOptions) {
+            guard.assertAuthorized({ config: config2, store });
+            if (!guard.allowsRef({ config: config2, store, ref })) {
+              throw new FileExtractionSourceError("source_permission_denied");
+            }
+            return source.fetch(ref, fetchOptions);
+          },
+          ...source.verifyBytes ? { verifyBytes: (ref, bytes) => source.verifyBytes(ref, bytes) } : {}
+        };
+      },
       sink: createConnectorStoreExtractionSink({
         store,
         classify: (item) => buildSourceSensitivity({
@@ -59278,7 +59645,17 @@ function createFileExtractionRuntime(options) {
       } : {},
       trustTiers: {
         itemTrustTier: (ref) => store.localContent(ref.localItemId, 1)?.trustTier
-      }
+      },
+      ...options.scopeGuard ? {
+        authorization: {
+          assertCurrent(ref) {
+            options.scopeGuard.assertAuthorized({ config: config2, store });
+            if (!options.scopeGuard.allowsRef({ config: config2, store, ref })) {
+              throw new FileExtractionSourceError("source_permission_denied");
+            }
+          }
+        }
+      } : {}
     });
   }
   if (corpora.length === 0) {
@@ -59315,6 +59692,7 @@ function fileExtractionCorporaRoster(input) {
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       provider: "dropbox",
       scopes: input.dropbox.extractionScopes,
+      ...input.dropbox.resolveExtractionScopes ? { resolveScopes: input.dropbox.resolveExtractionScopes } : {},
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
       ownerConnectorId: "dropbox",
       ...configuredDropbox?.maxTrustTierForRemote ? {
@@ -59389,7 +59767,7 @@ function defaultSourceFactories(env, deps = {}) {
         provider: input.config.provider,
         candidates: connectorStoreExtractionCandidateReader(input.store),
         locators: input.store,
-        scopes: input.config.scopes.map((approvedScopeKey) => ({ approvedScopeKey })),
+        scopes: (input.config.resolveScopes?.() ?? input.config.scopes).map((approvedScopeKey) => ({ approvedScopeKey })),
         token,
         ...localRoots.length > 0 ? { localRoots } : {}
       });
@@ -59497,6 +59875,7 @@ var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRAC
 var init_file_extraction_runtime = __esm(() => {
   init_credential_broker();
   init_types();
+  init_file_extraction_source();
   init_connector_store2();
   init_extraction_source2();
   init_drive();
@@ -61618,6 +61997,23 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
       .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
       .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
       .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
+      .scope-connection, .scope-browser-note { color: var(--t3); font-size: 12px; padding: 8px 12px; }
+      .scope-browser-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line2); }
+      .scope-browser-toolbar button, .scope-browser-list button, [data-scope-more] { color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; }
+      .scope-browser-list .scope-folder { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
+      .scope-folder [data-scope-select] { flex: 1; border: 0; background: transparent; padding: 0; color: inherit; text-align: left; overflow-wrap: anywhere; }
+      .scope-folder.selected [data-scope-select] { background: transparent; }
+      .scope-folder [data-scope-open] { padding: 0; width: 14px; border: 0; background: transparent; color: inherit; }
+      .scope-folder-status { color: var(--t3); font-size: 11px; }
+      .scope-folder.selected .scope-folder-status { color: var(--t1); }
+      .scope-whole-account, .scope-whole-confirm { margin: 12px; font-size: 12px; color: var(--t2); }
+      .scope-whole-account { display: block; }
+      .scope-whole-confirm:not([hidden]) { display: block; color: var(--warn); }
+      [data-folder-scope-source] input[type="checkbox"] { width: auto; display: inline-block; margin: 0 6px 0 0; vertical-align: middle; }
+      [data-folder-scope-source] [hidden] { display: none !important; }
+      .scope-review { border-top: 1px solid var(--line2); margin: 12px; padding-top: 12px; font-size: 12px; }
+      .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
+      [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
       @media (max-width: 860px) {
         .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
@@ -62178,6 +62574,412 @@ function mountDispositionsController(options) {
     metadata_only: "Metadata only",
     exclude: "No ingestion"
   };
+  const scopeDrafts = new Map;
+  function scopeMessage(form, text) {
+    const slot = form.querySelector("[data-scope-message]");
+    if (slot)
+      slot.textContent = text;
+  }
+  function scopeDraft(form) {
+    let draft = scopeDrafts.get(form);
+    if (!draft) {
+      draft = {
+        generation: form.dataset.accountGeneration || "",
+        revision: form.dataset.scopeRevision || "",
+        selections: new Map,
+        names: new Map,
+        ancestors: new Map,
+        nodes: [],
+        catalog: new Map,
+        branches: new Map,
+        branchCursors: new Map,
+        expanded: new Set,
+        loaded: false,
+        busy: false,
+        invalid: false,
+        edited: false,
+        whole: form.querySelector("[data-scope-whole-account]")?.checked === true
+      };
+      scopeDrafts.set(form, draft);
+    }
+    return draft;
+  }
+  function scopeAllowed(form, draft) {
+    return canWrite && form.dataset.connected === "true" && !draft.busy && !draft.invalid;
+  }
+  function inheritedScopeState(draft, key) {
+    let state = draft.whole ? "ingest" : undefined;
+    for (const ancestor of draft.ancestors.get(key) || []) {
+      const choice = draft.selections.get(ancestor);
+      if (choice === "exclude")
+        return "exclude";
+      if (choice === "metadata_only")
+        state = "metadata_only";
+      else if (choice === "ingest" && state === undefined)
+        state = "ingest";
+    }
+    return state;
+  }
+  function effectiveScopeState(draft, key) {
+    const inherited = inheritedScopeState(draft, key);
+    const own = draft.selections.get(key);
+    if (inherited === "exclude" || own === "exclude")
+      return "exclude";
+    if (inherited === "metadata_only")
+      return "metadata_only";
+    return own || inherited || "exclude";
+  }
+  function scopeChoiceAllowed(draft, state) {
+    if (!draft.selected?.selectable)
+      return false;
+    const inherited = inheritedScopeState(draft, draft.selected.key);
+    if (inherited === "exclude")
+      return state === "exclude";
+    if (inherited === "metadata_only")
+      return state === "metadata_only" || state === "exclude";
+    return state === "ingest" || state === "metadata_only" || state === "exclude";
+  }
+  function scopeControls(form, draft) {
+    const allowed = scopeAllowed(form, draft);
+    form.querySelectorAll("button").forEach((button) => {
+      button.disabled = !allowed;
+    });
+    form.querySelectorAll("input").forEach((input) => {
+      input.disabled = !allowed || !draft.loaded;
+    });
+    form.querySelectorAll("[data-scope-state]").forEach((button) => {
+      button.disabled = !allowed || !scopeChoiceAllowed(draft, button.dataset.scopeState || "");
+      button.classList.toggle("on", draft.selected !== undefined && effectiveScopeState(draft, draft.selected.key) === button.dataset.scopeState);
+    });
+    const hasSelection = Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude");
+    const confirmation = form.querySelector("[data-scope-whole-confirm]");
+    const submit = form.querySelector("[data-scope-start]");
+    if (submit)
+      submit.disabled = !allowed || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !hasSelection && !draft.edited || draft.whole && confirmation?.checked !== true;
+    if (submit)
+      submit.textContent = draft.whole || hasSelection ? "Save scope and start" : "Save scope (no ingestion)";
+    const cancel = form.querySelector("[data-scope-cancel]");
+    if (cancel)
+      cancel.disabled = draft.busy;
+    const confirmationLabel = form.querySelector(".scope-whole-confirm");
+    if (confirmationLabel)
+      confirmationLabel.hidden = !draft.whole;
+  }
+  function renderScopeReview(form, draft) {
+    const summary = form.querySelector("[data-scope-summary]");
+    if (summary)
+      summary.textContent = draft.whole ? "Entire account, including future folders, except the choices below." : `${Array.from(draft.selections.keys()).filter((key) => effectiveScopeState(draft, key) !== "exclude").length} folder(s) selected. All other folders stay out.`;
+    const list = form.querySelector("[data-scope-selections]");
+    if (list) {
+      list.replaceChildren();
+      for (const [key, state] of draft.selections) {
+        const item = root.ownerDocument.createElement("li");
+        item.textContent = `${labels[effectiveScopeState(draft, key)]} — ${draft.names.get(key) || key}`;
+        list.appendChild(item);
+      }
+    }
+    scopeControls(form, draft);
+  }
+  function updateScopeRows(form, draft) {
+    form.querySelectorAll(".scope-folder").forEach((row) => {
+      const key = row.querySelector("[data-scope-select]")?.dataset.scopeSelect;
+      if (!key)
+        return;
+      row.classList.toggle("selected", draft.selected?.key === key);
+      const status = row.querySelector(".scope-folder-status");
+      const inherited = inheritedScopeState(draft, key);
+      if (status)
+        status.textContent = draft.selections.has(key) || inherited ? `${labels[effectiveScopeState(draft, key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+    });
+    renderScopeReview(form, draft);
+  }
+  function scopeTrail(draft, key) {
+    return [...draft.ancestors.get(key) || [], key].map((ancestor) => ({ key: ancestor, name: draft.catalog.get(ancestor)?.name || ancestor }));
+  }
+  function renderScopeNodes(form, draft) {
+    const list = form.querySelector("[data-scope-nodes]");
+    if (!list)
+      return;
+    list.replaceChildren();
+    const appendNodes = (host, nodes, seen = new Set) => {
+      for (const node of nodes) {
+        if (seen.has(node.key))
+          continue;
+        const wrapper = root.ownerDocument.createElement("div");
+        wrapper.className = "node";
+        const row = root.ownerDocument.createElement("div");
+        row.className = "folder-row scope-folder";
+        row.setAttribute("role", "listitem");
+        row.classList.toggle("selected", draft.selected?.key === node.key);
+        const disclosure = root.ownerDocument.createElement(node.has_children ? "button" : "span");
+        disclosure.className = "disclosure";
+        if (disclosure instanceof HTMLButtonElement) {
+          disclosure.type = "button";
+          disclosure.dataset.scopeOpen = node.key;
+          disclosure.textContent = draft.expanded.has(node.key) ? "▾" : "▸";
+          disclosure.setAttribute("aria-label", `${draft.expanded.has(node.key) ? "Collapse" : "Expand"} ${node.name}`);
+          disclosure.setAttribute("aria-expanded", String(draft.expanded.has(node.key)));
+        }
+        const select = root.ownerDocument.createElement("button");
+        select.type = "button";
+        select.dataset.scopeSelect = node.key;
+        select.textContent = node.name;
+        const status = root.ownerDocument.createElement("span");
+        status.className = "scope-folder-status";
+        const inherited = inheritedScopeState(draft, node.key);
+        status.textContent = draft.selections.has(node.key) || inherited ? `${labels[effectiveScopeState(draft, node.key)]}${inherited ? " · inherited" : ""}` : "Not selected";
+        const icon = root.ownerDocument.createElement("span");
+        icon.className = "folder-icon";
+        icon.textContent = "▰";
+        row.append(disclosure, icon, select, status);
+        wrapper.appendChild(row);
+        if (draft.expanded.has(node.key)) {
+          const children = root.ownerDocument.createElement("div");
+          children.className = "children";
+          children.setAttribute("role", "group");
+          children.setAttribute("aria-label", node.name);
+          appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
+          if (draft.branchCursors.has(node.key)) {
+            const more2 = root.ownerDocument.createElement("button");
+            more2.type = "button";
+            more2.dataset.scopeMore = node.key;
+            more2.textContent = "Show more folders";
+            children.appendChild(more2);
+          }
+          wrapper.appendChild(children);
+        }
+        host.appendChild(wrapper);
+      }
+    };
+    appendNodes(list, draft.nodes);
+    if (draft.nodes.length === 0) {
+      const empty = root.ownerDocument.createElement("p");
+      empty.textContent = "No folders returned in this page.";
+      list.appendChild(empty);
+    }
+    const needle = form.querySelector("[data-scope-search]")?.value.trim().toLowerCase() || "";
+    list.querySelectorAll(".scope-folder").forEach((row) => {
+      row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
+    });
+    const more = form.querySelector('[data-scope-more=""]');
+    if (more)
+      more.hidden = !draft.nextCursor;
+    renderScopeReview(form, draft);
+  }
+  async function browseScope(form, trail, append = false) {
+    const draft = scopeDraft(form);
+    if (!scopeAllowed(form, draft) || !options.transport.read)
+      return;
+    const parent = trail.at(-1)?.key;
+    const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
+    draft.busy = true;
+    scopeControls(form, draft);
+    scopeMessage(form, "Listing folder names…");
+    try {
+      const result = await options.transport.read({
+        view: "dispositions",
+        action: "browse_folder_scope",
+        source_id: form.dataset.folderScopeSource,
+        ...parent ? { parent_key: parent } : {},
+        ...cursor ? { cursor } : {}
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status === 401 || result.status === 403 || !result.can_write) {
+        canWrite = false;
+        scopeMessage(form, "Write access expired. Reconnect before browsing private folders.");
+        return;
+      }
+      const page = result.scope_browser;
+      if (result.status < 200 || result.status >= 300 || !page || page.source_id !== form.dataset.folderScopeSource || !page.account_generation || !page.scope_revision || !Array.isArray(page.nodes) || page.nodes.some((node) => typeof node.key !== "string" || typeof node.name !== "string" || node.kind !== "folder" || typeof node.selectable !== "boolean")) {
+        scopeMessage(form, "Could not list folders. Check the connection and reopen this picker.");
+        return;
+      }
+      if (draft.loaded && (draft.generation !== page.account_generation || draft.revision !== page.scope_revision)) {
+        draft.invalid = true;
+        scopeMessage(form, "The account or saved scope changed. Reopen this picker before applying choices.");
+        return;
+      }
+      if (!draft.loaded) {
+        draft.generation = page.account_generation;
+        draft.revision = page.scope_revision;
+        draft.selections = new Map(page.selections.map((selection) => [selection.key, selection.state]));
+        page.selections.forEach((selection) => draft.ancestors.set(selection.key, selection.ancestor_keys || []));
+        draft.whole = page.whole_account_selected;
+        const whole = form.querySelector("[data-scope-whole-account]");
+        if (whole)
+          whole.checked = draft.whole;
+      }
+      if (page.nodes.some((node) => trail.some((ancestor) => ancestor.key === node.key))) {
+        scopeMessage(form, "The folder listing contains a cycle. Reopen the picker before continuing.");
+        draft.invalid = true;
+        return;
+      }
+      draft.loaded = true;
+      const previous = parent ? draft.branches.get(parent) || [] : draft.nodes;
+      const nodes = append ? [...previous, ...page.nodes.filter((node) => !previous.some((old) => old.key === node.key))] : page.nodes;
+      if (parent) {
+        draft.branches.set(parent, nodes);
+        draft.expanded.add(parent);
+        if (page.next_cursor)
+          draft.branchCursors.set(parent, page.next_cursor);
+        else
+          draft.branchCursors.delete(parent);
+      } else {
+        draft.nodes = nodes;
+        draft.nextCursor = page.next_cursor;
+      }
+      page.nodes.forEach((node) => {
+        draft.catalog.set(node.key, node);
+        draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(" / "));
+        draft.ancestors.set(node.key, trail.map((entry) => entry.key));
+      });
+      renderScopeNodes(form, draft);
+      scopeMessage(form, "Only folder names were listed. Review your choices, then save and start.");
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
+    } finally {
+      draft.busy = false;
+      if (!disposed && root.contains(form))
+        scopeControls(form, draft);
+    }
+  }
+  async function approveScope(form) {
+    const draft = scopeDraft(form);
+    const confirmation = form.querySelector("[data-scope-whole-confirm]")?.checked === true;
+    if (!scopeAllowed(form, draft) || !draft.loaded || !draft.generation || !draft.revision || !draft.whole && !draft.edited && !Array.from(draft.selections.keys()).some((key) => effectiveScopeState(draft, key) !== "exclude") || draft.whole && !confirmation) {
+      scopeMessage(form, "Choose folders first. Entire-account access also needs explicit confirmation.");
+      return;
+    }
+    draft.busy = true;
+    scopeControls(form, draft);
+    scopeMessage(form, "Saving your approved scope…");
+    try {
+      const result = await options.transport.control({
+        action: "approve_source_scope_and_start",
+        source_id: form.dataset.folderScopeSource,
+        account_generation: draft.generation,
+        expected_scope_revision: draft.revision,
+        selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
+        whole_account: draft.whole,
+        explicit_whole_account_confirmation: confirmation
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        if (result.status === 401 || result.status === 403)
+          canWrite = false;
+        if (result.status === 409)
+          draft.invalid = true;
+        const error2 = result.body.error;
+        const message2 = error2 && typeof error2 === "object" ? error2.message : undefined;
+        scopeMessage(form, typeof message2 === "string" ? message2 : "Scope was not activated. Your choices are still here.");
+        return;
+      }
+      draft.edited = false;
+      scopeMessage(form, "Scope saved. Opening the source status…");
+      if (!dirty && !Array.from(scopeDrafts.values()).some((other) => other.edited)) {
+        options.navigate(`/dashboard?source=${encodeURIComponent(form.dataset.folderScopeSource || "")}`);
+      }
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Could not confirm the result. Reopen the picker to check saved scope before retrying.");
+    } finally {
+      draft.busy = false;
+      if (!disposed && root.contains(form))
+        scopeControls(form, draft);
+    }
+  }
+  function scopeClick(target) {
+    const form = target.closest("form[data-folder-scope-source]");
+    if (!form || !root.contains(form))
+      return false;
+    const draft = scopeDraft(form);
+    if (target.closest("[data-scope-cancel]")) {
+      if (draft.busy)
+        return true;
+      scopeDrafts.delete(form);
+      const list = form.querySelector("[data-scope-nodes]");
+      list?.replaceChildren();
+      form.querySelectorAll("input").forEach((input) => {
+        input.checked = input.defaultChecked;
+      });
+      const empty = form.querySelector("[data-scope-inspector-empty]");
+      if (empty)
+        empty.hidden = false;
+      const content = form.querySelector("[data-scope-inspector-content]");
+      if (content)
+        content.hidden = true;
+      form.querySelectorAll("[data-scope-more]").forEach((element) => {
+        element.hidden = true;
+      });
+      const location = form.querySelector("[data-scope-location]");
+      if (location)
+        location.textContent = "Top level";
+      const fresh = scopeDraft(form);
+      renderScopeReview(form, fresh);
+      scopeMessage(form, "Changes cancelled. Browse again to review the saved scope.");
+      return true;
+    }
+    if (!scopeAllowed(form, draft))
+      return true;
+    if (target.closest("[data-scope-browse-root]")) {
+      browseScope(form, []);
+      return true;
+    }
+    const more = target.closest("[data-scope-more]");
+    if (more) {
+      const key = more.dataset.scopeMore;
+      if (key && draft.branchCursors.has(key))
+        browseScope(form, scopeTrail(draft, key), true);
+      else if (!key && draft.nextCursor)
+        browseScope(form, [], true);
+      return true;
+    }
+    const open4 = target.closest("[data-scope-open]");
+    if (open4) {
+      const node = draft.catalog.get(open4.dataset.scopeOpen || "");
+      if (node && draft.expanded.has(node.key)) {
+        draft.expanded.delete(node.key);
+        renderScopeNodes(form, draft);
+      } else if (node && draft.branches.has(node.key)) {
+        draft.expanded.add(node.key);
+        renderScopeNodes(form, draft);
+      } else if (node)
+        browseScope(form, scopeTrail(draft, node.key));
+      return true;
+    }
+    const select = target.closest("[data-scope-select]");
+    if (select) {
+      draft.selected = draft.catalog.get(select.dataset.scopeSelect || "");
+      const empty = form.querySelector("[data-scope-inspector-empty]");
+      if (empty)
+        empty.hidden = !!draft.selected;
+      const content = form.querySelector("[data-scope-inspector-content]");
+      if (content)
+        content.hidden = !draft.selected;
+      const name = form.querySelector("[data-scope-selected-name]");
+      if (name)
+        name.textContent = draft.selected?.name || "";
+      const path = form.querySelector("[data-scope-selected-path]");
+      if (path)
+        path.textContent = draft.selected ? draft.names.get(draft.selected.key) || draft.selected.name : "";
+      const note = form.querySelector("[data-scope-selected-note]");
+      if (note)
+        note.textContent = "This choice applies to this folder and its contents. Review narrower choices before starting.";
+      updateScopeRows(form, draft);
+      return true;
+    }
+    const choice = target.closest("[data-scope-state]");
+    const state = choice?.dataset.scopeState;
+    if (draft.selected?.selectable && state && scopeChoiceAllowed(draft, state) && (state === "ingest" || state === "metadata_only" || state === "exclude")) {
+      draft.selections.set(draft.selected.key, state);
+      draft.edited = true;
+      updateScopeRows(form, draft);
+    }
+    return true;
+  }
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -62223,6 +63025,7 @@ function mountDispositionsController(options) {
       slot.textContent = text;
   }
   function applyWriteCapability() {
+    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => scopeControls(form, scopeDraft(form)));
     if (appliedCanWrite === canWrite)
       return;
     appliedCanWrite = canWrite;
@@ -62296,6 +63099,8 @@ function mountDispositionsController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    if (scopeClick(target))
+      return;
     const row = target.closest(".folder-row");
     if (row) {
       selectFolder(row);
@@ -62335,6 +63140,8 @@ function mountDispositionsController(options) {
     navigator.clipboard.writeText(source.value);
   }
   function onKeydown(event) {
+    if (event.target instanceof Element && event.target.closest("form[data-folder-scope-source]"))
+      return;
     if (!(event instanceof KeyboardEvent) || event.key !== "Enter" && event.key !== " ")
       return;
     const row = event.target instanceof Element ? event.target.closest(".folder-row") : null;
@@ -62344,6 +63151,27 @@ function mountDispositionsController(options) {
     selectFolder(row);
   }
   function onInput(event) {
+    if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
+      const form2 = event.target.closest("form[data-folder-scope-source]");
+      if (form2 && event.target.matches("[data-scope-search]")) {
+        renderScopeNodes(form2, scopeDraft(form2));
+        return;
+      }
+      if (form2 && (event.target.matches("[data-scope-whole-account]") || event.target.matches("[data-scope-whole-confirm]"))) {
+        const draft = scopeDraft(form2);
+        if (!scopeAllowed(form2, draft) || !draft.loaded)
+          return;
+        draft.whole = form2.querySelector("[data-scope-whole-account]")?.checked === true;
+        if (!draft.whole) {
+          const confirm = form2.querySelector("[data-scope-whole-confirm]");
+          if (confirm)
+            confirm.checked = false;
+        }
+        draft.edited = true;
+        renderScopeReview(form2, draft);
+        return;
+      }
+    }
     const input = event.target instanceof HTMLInputElement && event.target.matches("[data-folder-search]") ? event.target : null;
     if (!input || !root.contains(input))
       return;
@@ -62355,7 +63183,14 @@ function mountDispositionsController(options) {
   }
   function onSubmit(event) {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
-    if (!form || !root.contains(form) || !form.hasAttribute("data-dispositions-source"))
+    if (!form || !root.contains(form))
+      return;
+    if (form.hasAttribute("data-folder-scope-source")) {
+      event.preventDefault();
+      approveScope(form);
+      return;
+    }
+    if (!form.hasAttribute("data-dispositions-source"))
       return;
     event.preventDefault();
     save(form);
@@ -62372,7 +63207,7 @@ function mountDispositionsController(options) {
     } catch {}
   }
   async function refreshNow(force) {
-    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty))
+    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy)))
       return;
     inFlight = true;
     try {
@@ -62380,7 +63215,7 @@ function mountDispositionsController(options) {
       if (!result || disposed || options.signal.aborted)
         return;
       canWrite = result.can_write;
-      if (!force && dirty) {
+      if (!force && (dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy))) {
         applyWriteCapability();
         return;
       }
@@ -62415,6 +63250,7 @@ function mountDispositionsController(options) {
       else
         root.innerHTML = result.body;
       dirty = false;
+      scopeDrafts.clear();
       signature = result.signature;
       appliedCanWrite = undefined;
       root.querySelectorAll("details").forEach((node) => {
@@ -64365,7 +65201,18 @@ var init_home = __esm(() => {
 
 // src/workers/dashboard/attention.ts
 function dashboardAttentionBanner(source, options) {
-  return credentialBanner(source, options) ?? terminalExtractionBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
+  return credentialBanner(source, options) ?? scopeApprovalBanner(source, options) ?? terminalExtractionBanner(source, options) ?? laneStuckBanner(source, options.now ?? new Date, options);
+}
+function scopeApprovalBanner(source, options) {
+  if (!source.scope_selection?.connected || source.scope_selection.status !== "scope_pending")
+    return;
+  const path = options.folderPickerPath;
+  const picker = path && !path.includes("source_id=") ? `${path}${path.includes("?") ? "&" : "?"}source_id=${encodeURIComponent(source.source_id)}` : path;
+  return {
+    kind: "scope",
+    sentence: `${source.label} is connected. Choose the folders Olympus may use before any indexing starts.`,
+    action: options.readOnly || !picker ? { kind: "link", label: "Choose folders →", href: `${options.setupPath}#dashboard-controls`, hint: "unlock controls in Setup" } : { kind: "control_link", label: "Choose folders →", href: picker, hint: "nothing starts before you confirm" }
+  };
 }
 function credentialBanner(source, options) {
   const label = source.label;
@@ -64377,6 +65224,8 @@ function credentialBanner(source, options) {
     };
   }
   const action = source.connection.action;
+  if (source.scope_selection?.status === "scope_pending" && source.scope_selection.connected && source.connection.state !== "reauth_required")
+    return;
   const healthy = HEALTHY_CONNECTION_STATES.has(source.connection.state);
   if (!healthy) {
     if (action.kind === "needs_setup") {
@@ -64657,7 +65506,7 @@ function renderDashboardDetailPage(view, sourceId, options) {
   const status = dashboardStatus({ source, degradedCredentials: degraded });
   const checked = dashboardCheckedLabel(view.generated_at, now);
   const scope = dashboardScopeForCard(view, source);
-  const folderPickerPath = view.folder_picker?.available === true ? view.folder_picker.path : undefined;
+  const folderPickerPath = view.folder_picker?.available === true && (scope !== undefined || source.scope_selection !== undefined) ? `${view.folder_picker.path}${view.folder_picker.path.includes("?") ? "&" : "?"}source_id=${encodeURIComponent(source.source_id)}` : undefined;
   return pageShell({
     title: "Olympus",
     crumb: source.label,
@@ -65097,26 +65946,26 @@ function renderChecksEvidence(passing) {
         </details>`;
 }
 function renderScope(scope, editPath, options) {
-  if (!scope)
+  if (!scope && editPath === undefined)
     return "";
-  const unenforceable = new Set(scope.unenforceable_rule_ids ?? []);
-  const rows = scope.entries.map((rule) => scopeRow({ ruleId: rule.rule_id, facts: scopeRuleFacts(rule, unenforceable.has(rule.rule_id)) }));
-  const debt = scopeDebtLines(scope);
-  if (rows.length === 0 && debt.length === 0)
+  const unenforceable = new Set(scope?.unenforceable_rule_ids ?? []);
+  const rows = (scope?.entries ?? []).map((rule) => scopeRow({ ruleId: rule.rule_id, facts: scopeRuleFacts(rule, unenforceable.has(rule.rule_id)) }));
+  const debt = scope ? scopeDebtLines(scope) : [];
+  if (rows.length === 0 && debt.length === 0 && editPath === undefined)
     return "";
   const legend = rows.length === 0 ? "" : `
         <div class="quiet">Invisible rules keep items out entirely; metadata-only rules index the` + " title and never read the content.</div>";
   const edit = editPath === undefined ? "" : `
         <div class="tiernote">${actionButton(options?.readOnly === true ? {
-    label: "Edit what gets ingested →",
+    label: "Choose folders and ingestion scope →",
     kind: "link",
     href: `${setupHref2(options?.basePath)}#dashboard-controls`,
     hint: "unlock controls in Setup"
   } : {
-    label: "Edit what gets ingested →",
+    label: "Choose folders and ingestion scope →",
     kind: "control_link",
     href: editPath,
-    hint: "needs the worker token"
+    hint: "review scope before starting ingestion"
   })}</div>`;
   return `
         <div class="dsect">Scope</div>${legend}
@@ -67232,7 +68081,8 @@ import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync25, lst
 import { dirname as dirname28 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
-  const sources = options.sources.map((source) => {
+  const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
+  const sources = options.sources.filter((source) => !scopeSourceIds.has(source.source_id)).map((source) => {
     const tree = buildSourceDispositionTree({
       matcher: source.matcher,
       items: source.items?.() ?? [],
@@ -67264,6 +68114,7 @@ function buildSourceDispositionsView(options) {
     schema_version: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION,
     rule_count: options.document.rules.length,
     sources,
+    ...options.folderScopes ? { folder_scopes: [...options.folderScopes] } : {},
     cleanup: {
       dry_run_command: SOURCE_DISPOSITIONS_DRY_RUN_COMMAND,
       purge_command: SOURCE_DISPOSITIONS_PURGE_COMMAND,
@@ -67274,7 +68125,7 @@ function buildSourceDispositionsView(options) {
     },
     policy: {
       folder_paths_returned: true,
-      writes_config_only: true,
+      writes_config_only: !options.folderScopes?.length,
       deletes_store_content: false,
       runs_purge_or_strip: false
     }
@@ -67403,12 +68254,14 @@ ${DISPOSITIONS_CSS}</style>
 </html>`;
 }
 function renderSourceDispositionsFragment(view) {
-  const sources = view.sources.map((source) => renderDispositionSource(source)).join("");
+  const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
+  const sources = (view.folder_scopes ?? []).map(renderFolderScopeSource).join("") + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join("");
   return `<main class="picker-page">
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
-        <p>New connections start with <strong>Full ingestion</strong>. Choose <strong>Metadata only</strong>
+        <p>Connecting an account does not start indexing. Browse folders, choose what Olympus may use,
+        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
         processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
         entirely. New files inherit the nearest folder choice.</p>
@@ -67416,6 +68269,47 @@ function renderSourceDispositionsFragment(view) {
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
     </main>`;
+}
+function renderFolderScopeSource(source) {
+  const unavailable = !source.connected || Boolean(source.error);
+  return `<section class="source-dispositions">
+    <form data-folder-scope-source="${escapeHtml2(source.source_id)}"
+      data-connected="${source.connected}" data-account-generation="${escapeHtml2(source.account_generation ?? "")}"
+      data-scope-revision="${escapeHtml2(source.scope_revision ?? "")}"
+      data-scope-selections="${escapeHtml2(JSON.stringify(source.selections ?? []))}">
+      <div class="finder-window">
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p><div class="location selected"><span class="folder-icon">◆</span><span>${escapeHtml2(source.label)}</span></div>
+          <p class="scope-connection">${source.connected ? source.status === "approved" ? "Scope approved" : "Waiting for your selection" : "Disconnected"}</p>
+        </aside>
+        <section class="finder-main">
+          <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
+          <div class="scope-browser-toolbar"><button type="button" data-scope-browse-root${unavailable ? " disabled" : ""}>Browse folders</button>
+            <span data-scope-location>Folders</span></div>
+          <p class="scope-browser-note">${source.error ? escapeHtml2(source.error) : source.connected ? "Browsing lists folder names only. No file contents are read or indexed until you confirm your scope." : "Connect this account first, then return here to choose folders. Connecting will not start ingestion."}</p>
+          ${source.connected ? "" : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml2(source.label)} →</a>`}
+          <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
+          <button type="button" data-scope-more hidden>Show more folders</button>
+          <label class="scope-whole-account"><input type="checkbox" data-scope-whole-account${source.whole_account_selected ? " checked" : ""}${unavailable ? " disabled" : ""}> Use the entire account, including future folders, except choices below</label>
+          <label class="scope-whole-confirm"${source.whole_account_selected ? "" : " hidden"}><input type="checkbox" data-scope-whole-confirm${unavailable ? " disabled" : ""}> I explicitly approve using the entire account</label>
+          <details class="scope-review"><summary>Review your folder choices</summary><ul data-scope-selections></ul></details>
+        </section>
+        <aside class="finder-inspector" aria-label="Folder choice">
+          <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
+          <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
+          <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
+          <div class="choice-stack" aria-label="Ingestion choice">
+            <button type="button" data-scope-state="ingest" disabled>Full ingestion<span>Read and index contents</span></button>
+            <button type="button" data-scope-state="metadata_only" disabled>Metadata only<span>Index names and dates; never contents</span></button>
+            <button type="button" data-scope-state="exclude" disabled>No ingestion<span>Keep this folder out</span></button>
+          </div><p class="inspector-note" data-scope-selected-note></p></div>
+        </aside>
+        <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
+          <span class="footer-actions"><button type="button" class="secondary" data-scope-cancel>Cancel changes</button>
+            <button type="submit" data-scope-start disabled>Save scope and start</button></span></footer>
+      </div>
+      <p class="action-message" data-scope-message role="status" aria-live="polite">Nothing starts until you confirm.</p>
+    </form>
+  </section>`;
 }
 function renderSourceDispositionsControlUi(view, canWrite) {
   const body = renderSourceDispositionsFragment(view);
@@ -67444,14 +68338,26 @@ function standaloneSourceDispositionsControllerScript(csrfTokenJson) {
       var controller = mount({
         root: root,
         transport: {
+          async read(params) {
+            var response = await fetch('/dashboard/dispositions', {
+              method: 'POST', cache: 'no-store', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'browse_folder_scope', source_id: params.source_id,
+                parent_key: params.parent_key, cursor: params.cursor }),
+            });
+            var body = await json(response);
+            return Object.assign({}, body, { status: response.status });
+          },
           async control(params) {
-            if (params.action !== 'save_dispositions') {
+            if (params.action !== 'save_dispositions' && params.action !== 'approve_source_scope_and_start') {
               return { status: 400, body: { error: { message: 'Unsupported picker action.' } } };
             }
             var response = await fetch('/dashboard/dispositions', {
               method: 'POST', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ source: params.source, edits: params.edits }),
+              body: JSON.stringify(params.action === 'save_dispositions'
+                ? { source: params.source, edits: params.edits }
+                : params),
             });
             return { status: response.status, body: await json(response) };
           },
@@ -67873,6 +68779,7 @@ function createEmailSourceWorker(options = {}) {
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map;
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map;
   const connectorStoreFilterCapabilities = options.connectorStoreFilterCapabilities ?? CONNECTOR_STORE_FILTER_CAPABILITIES;
+  const connectorStoreReadScope = options.connectorStoreReadScope;
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
@@ -68042,11 +68949,56 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(501, "ingestion_dispositions_not_supported", "Private source worker does not have the ingestion-dispositions picker configured.");
           }
+          const nativeBrowse = dashboardUi?.params.view === "dispositions" && "action" in dashboardUi.params && dashboardUi.params.action === "browse_folder_scope" ? dashboardUi.params : undefined;
+          const postBody = request.method === "POST" ? await parseObjectBody(request) : undefined;
+          if (nativeBrowse || postBody?.action === "browse_folder_scope") {
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Folder scope browsing is not configured.");
+            }
+            const input = nativeBrowse ?? postBody;
+            const sourceId = parseFolderScopeSourceId(input.source_id);
+            const parentKey = asOptionalString(input.parent_key);
+            const cursor = asOptionalString(input.cursor);
+            const scopeBrowser = await sourceDashboard.fileSourceScopes.browse({
+              sourceId,
+              ...parentKey ? { parentKey } : {},
+              ...cursor ? { cursor } : {}
+            });
+            return json({
+              status: 200,
+              title: "Olympus / Choose folders",
+              body: "<main></main>",
+              controller: "dispositions",
+              can_write: true,
+              signature: scopeBrowser.scope_revision,
+              poll_interval_ms: 15000,
+              scope_browser: scopeBrowser
+            });
+          }
+          if (postBody?.action === "approve_source_scope_and_start") {
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Folder scope approval is not configured.");
+            }
+            const sourceId = parseFolderScopeSourceId(postBody.source_id);
+            const accountGeneration = asOptionalString(postBody.account_generation);
+            const expectedRevision = asOptionalString(postBody.expected_scope_revision);
+            if (!accountGeneration || !expectedRevision) {
+              throw new EmailSourceWorkerError(400, "invalid_request", "account_generation and expected_scope_revision are required.");
+            }
+            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
+              sourceId,
+              accountGeneration,
+              expectedRevision,
+              selections: parseSourceScopeSelections(postBody.selections),
+              wholeAccount: postBody.whole_account === true,
+              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
+            }));
+          }
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
             if (request.method === "POST") {
-              const body = await parseObjectBody(request);
+              const body = postBody ?? await parseObjectBody(request);
               const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(body, runtime.sources));
               return json({
                 ok: true,
@@ -68069,6 +69021,7 @@ function createEmailSourceWorker(options = {}) {
             const file = readSourceIngestionExclusionsFile(rulesPath);
             const view = buildSourceDispositionsView({
               sources: runtime.sources,
+              folderScopes: sourceDashboard.fileSourceScopes?.summaries() ?? [],
               document: file.document,
               rulesPath,
               rulesPresent: file.present
@@ -68134,6 +69087,13 @@ function createEmailSourceWorker(options = {}) {
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
             ingestionDispositionsAvailable: sourceDashboard.ingestionDispositions !== undefined,
             syncNowAvailable: dashboardSourceSyncAvailable,
+            ...sourceDashboard.fileSourceScopes ? {
+              fileSourceScopeStatus: Object.fromEntries(sourceDashboard.fileSourceScopes.summaries().map((scope) => [scope.source_id, scope.status])),
+              fileSourceScopeIngestionEnabled: Object.fromEntries(sourceDashboard.fileSourceScopes.summaries().map((scope) => [
+                scope.source_id,
+                scope.status === "approved" && (scope.whole_account_selected === true || scope.selections?.some((selection) => selection.state !== "exclude") === true)
+              ]))
+            } : {},
             ...sensitivityMap ? { sensitivityMap } : {}
           });
           assertNoRawEmailFields(view);
@@ -68229,10 +69189,12 @@ function createEmailSourceWorker(options = {}) {
               await attempt.pending.completeCallback({ state, code });
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
               markDashboardSourceConnected(source, dashboardDisconnectedSources);
-              await triggerDashboardPostConnectSync({
-                source,
-                reason: "post_connect"
-              });
+              if (source !== "google-drive" && source !== "dropbox") {
+                await triggerDashboardPostConnectSync({
+                  source,
+                  reason: "post_connect"
+                });
+              }
             });
           } catch (error2) {
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
@@ -68901,13 +69863,21 @@ function createEmailSourceWorker(options = {}) {
           const corpusId = canonicalRequestCorpusId(record3);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
+            const mandatoryScope = connectorStoreReadScope?.(connectorStore);
+            if (mandatoryScope?.allowed === false) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source is unavailable until its folder scope is approved for the connected account.");
+            }
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord(record3, connectorStore, connectorStoreAccountScopes.get(connectorStore.corpusId), connectorStore.family === "chat" ? connectorStorePrincipals.get(connectorStore.corpusId) : undefined, connectorStorePrincipals.get(connectorStore.corpusId), connectorStoreFilterCapabilities);
             const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId) ?? sourceIndexEmbeddingProvider;
+            const combinedFilters = searchRequest.filters || mandatoryScope?.filters ? normalizeConnectorStoreSearchFilters({
+              ...searchRequest.filters,
+              ...mandatoryScope?.filters
+            }) : undefined;
             const adapter = createConnectorStoreCorpusAdapter({
               store: connectorStore,
               retrievalMode: searchRequest.retrievalMode,
-              ...searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
-              ...searchRequest.filters ? { filters: searchRequest.filters } : {},
+              ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
+              ...combinedFilters ? { filters: combinedFilters } : {},
               ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
               ...connectorStoreEmbeddingProvider && (connectorStore.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? { embeddingProvider: connectorStoreEmbeddingProvider } : {}
             });
@@ -69059,6 +70029,13 @@ function createEmailSourceWorker(options = {}) {
     }
   }
   async function runDashboardSourceSync(request) {
+    const fileSourceId = request.source === "google-drive" ? "google_drive.docs" : request.source === "dropbox" ? "dropbox.files" : undefined;
+    if (fileSourceId && sourceDashboard?.fileSourceScopes) {
+      const scope = sourceDashboard.fileSourceScopes.summaries().find((candidate) => candidate.source_id === fileSourceId);
+      if (!scope || scope.status !== "approved" || !scope.connected) {
+        throw new OperationError("source_index_policy_violation", "Choose and approve this file source scope before starting ingestion.");
+      }
+    }
     await refreshDashboardSchedulerSources();
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
@@ -70082,6 +71059,32 @@ function parseDashboardSyncSource(value) {
     return source;
   throw new EmailSourceWorkerError(400, "invalid_request", "source must be gmail, google-drive, dropbox, x, or readwise.");
 }
+function parseFolderScopeSourceId(value) {
+  if (value === "google_drive.docs" || value === "dropbox.files")
+    return value;
+  throw new EmailSourceWorkerError(400, "invalid_request", "source_id must name a folder-capable source.");
+}
+function parseSourceScopeSelections(value) {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "selections must be an array of at most 100 folders.");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection must be an object.");
+    }
+    const record3 = entry;
+    const key = asOptionalString(record3.key);
+    if (!key || !["ingest", "metadata_only", "exclude"].includes(String(record3.state))) {
+      throw new EmailSourceWorkerError(400, "invalid_request", "Every scope selection requires a folder key and disposition.");
+    }
+    const ancestorKeys = record3.ancestor_keys === undefined ? undefined : Array.isArray(record3.ancestor_keys) ? record3.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor) => Boolean(ancestor)) : undefined;
+    return {
+      key,
+      state: record3.state,
+      ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
+    };
+  });
+}
 function parseDashboardDisconnectSource(value) {
   const source = asOptionalString(value);
   if (source === "gmail.email" || source === "google_drive.docs" || source === "dropbox.files" || source === "x.bookmarks" || source === "telegram.messages" || source === "whatsapp.personal.messages" || source === "readwise.library")
@@ -70457,8 +71460,8 @@ function parseDashboardControlUiRequest(url, headers) {
   if (view === "source" && !sourceId) {
     throw new EmailSourceWorkerError(400, "invalid_request", "Native source view requires source_id.");
   }
-  if (view !== "source" && sourceId) {
-    throw new EmailSourceWorkerError(400, "invalid_request", "Native source_id is allowed only for the source view.");
+  if (view !== "source" && view !== "dispositions" && sourceId) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "Native source_id is allowed only for the source or dispositions view.");
   }
   return {
     params: { view, ...sourceId ? { source_id: sourceId } : {} },
@@ -73546,6 +74549,646 @@ var init_source_scheduler = __esm(() => {
   ]);
 });
 
+// src/core/source-scope-approval.ts
+import { createHash as createHash35, randomUUID as randomUUID16 } from "node:crypto";
+import { existsSync as existsSync27, readFileSync as readFileSync30 } from "node:fs";
+import { dirname as dirname30, join as join45 } from "node:path";
+function defaultFileSourceScopeStatePath(handleRegistryPath) {
+  return join45(dirname30(handleRegistryPath), "file-source-scopes.json");
+}
+function isFileSourceScopeId(value) {
+  return FILE_SOURCE_SCOPE_IDS.includes(value);
+}
+function connectedFileSourceAccountGeneration(sourceId, registry2) {
+  const capability = FILE_SOURCE_SCOPE_CAPABILITIES[sourceId];
+  const handles = registry2.handles.filter((handle2) => handle2.provider === capability.provider && handle2.allowedCapabilities.includes(capability.credentialCapability) && handle2.backendState?.status !== "reauth_required");
+  if (handles.length !== 1)
+    return;
+  const handle = handles[0];
+  const generation = createHash35("sha256").update(JSON.stringify([
+    sourceId,
+    handle.handle,
+    handle.providerAccountId ?? "",
+    handle.accountRole ?? "",
+    handle.connectedAt
+  ])).digest("hex");
+  return { generation, handle };
+}
+function readFileSourceScopeApproval(input) {
+  const account = connectedFileSourceAccountGeneration(input.sourceId, input.registry);
+  if (!account) {
+    return pendingSnapshot(input.sourceId, "not-connected", undefined, "not_connected");
+  }
+  const read = readState(input.statePath);
+  if (read.kind === "missing") {
+    return pendingSnapshot(input.sourceId, `missing:${account.generation}`, account.generation, "missing");
+  }
+  if (read.kind === "malformed") {
+    return pendingSnapshot(input.sourceId, `malformed:${read.digest}`, account.generation, "malformed");
+  }
+  const approval = read.state.approvals.find((candidate) => candidate.source_id === input.sourceId);
+  if (!approval) {
+    return pendingSnapshot(input.sourceId, `missing:${account.generation}`, account.generation, "missing");
+  }
+  if (approval.account_generation !== account.generation) {
+    return pendingSnapshot(input.sourceId, `stale:${approval.revision}:${account.generation}`, account.generation, "account_changed");
+  }
+  return {
+    sourceId: input.sourceId,
+    status: "approved",
+    accountGeneration: account.generation,
+    revision: approval.revision,
+    selections: approval.selections,
+    wholeAccount: approval.whole_account
+  };
+}
+function approveFileSourceScope(input) {
+  return withFileLeaseSync(input.statePath, (lease) => {
+    const current = readFileSourceScopeApproval({
+      sourceId: input.sourceId,
+      registry: input.registry,
+      statePath: input.statePath
+    });
+    if (!current.accountGeneration || current.accountGeneration !== input.accountGeneration) {
+      throw new OperationError("source_index_policy_violation", "The connected account changed. Browse the current account and choose its scope again.");
+    }
+    if (current.revision !== input.expectedRevision) {
+      throw new OperationError("source_index_policy_violation", "The source scope changed. Reload it before saving.");
+    }
+    if (input.wholeAccount && input.explicitWholeAccountConfirmation !== true) {
+      throw new OperationError("invalid_request", "Whole-account access requires its visible confirmation.");
+    }
+    const selections = normalizeSelections(input.selections);
+    if (!input.wholeAccount && selections.some((selection) => selection.key === "/" || input.sourceId === "google_drive.docs" && selection.key.toLowerCase() === "root")) {
+      throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
+    }
+    const existing = readState(input.statePath);
+    const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
+    const revision = randomUUID16();
+    approvals.push({
+      source_id: input.sourceId,
+      account_generation: input.accountGeneration,
+      revision,
+      status: "approved",
+      selections,
+      whole_account: input.wholeAccount,
+      approved_at: (input.now ?? new Date).toISOString()
+    });
+    const state = { version: 1, approvals };
+    lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}
+`));
+    return {
+      sourceId: input.sourceId,
+      status: "approved",
+      accountGeneration: input.accountGeneration,
+      revision,
+      selections,
+      wholeAccount: input.wholeAccount
+    };
+  });
+}
+function assertFileSourceScopeApproved(input) {
+  const approval = readFileSourceScopeApproval(input);
+  if (approval.status !== "approved" || input.expectedAccountGeneration !== undefined && approval.accountGeneration !== input.expectedAccountGeneration || input.expectedRevision !== undefined && approval.revision !== input.expectedRevision) {
+    throw new OperationError("source_index_policy_violation", "File-source scope approval is required for this connected account.");
+  }
+  return approval;
+}
+function fileSourceScopeAllowsContent(approval, itemScopeKeys) {
+  if (approval.status !== "approved")
+    return false;
+  const matching = matchingSelections(approval, itemScopeKeys);
+  if (matching.some((selection) => selection.state !== "ingest"))
+    return false;
+  if (approval.wholeAccount)
+    return true;
+  return matching.some((selection) => selection.state === "ingest") && matching.every((selection) => selection.state === "ingest");
+}
+function fileSourceScopeAllowsMetadata(approval, itemScopeKeys) {
+  if (approval.status !== "approved")
+    return false;
+  const matching = matchingSelections(approval, itemScopeKeys);
+  if (matching.some((selection) => selection.state === "exclude"))
+    return false;
+  if (approval.wholeAccount)
+    return true;
+  return matching.some((selection) => selection.state !== "exclude") && matching.every((selection) => selection.state !== "exclude");
+}
+function matchingSelections(approval, itemScopeKeys) {
+  const byKey = new Map(approval.selections.map((selection) => [selection.key, selection]));
+  return itemScopeKeys.map((key) => byKey.get(key)).filter((selection) => selection !== undefined);
+}
+function pendingSnapshot(sourceId, revision, accountGeneration, reason) {
+  return {
+    sourceId,
+    status: "scope_pending",
+    ...accountGeneration ? { accountGeneration } : {},
+    revision,
+    selections: [],
+    wholeAccount: false,
+    reason
+  };
+}
+function normalizeSelections(input) {
+  const byKey = new Map;
+  for (const selection of input) {
+    const key = selection.key.trim();
+    if (!key || key.length > 1024)
+      throw new OperationError("invalid_request", "Every selected folder requires a valid key.");
+    if (!["ingest", "metadata_only", "exclude"].includes(selection.state)) {
+      throw new OperationError("invalid_request", "Every selected folder requires a valid disposition.");
+    }
+    if (byKey.has(key))
+      throw new OperationError("invalid_request", "A folder may be selected only once.");
+    const ancestorKeys = selection.ancestorKeys === undefined ? undefined : normalizeAncestorKeys(selection.ancestorKeys);
+    byKey.set(key, { state: selection.state, ...ancestorKeys?.length ? { ancestorKeys } : {} });
+  }
+  return [...byKey].sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => ({ key, ...value }));
+}
+function normalizeAncestorKeys(input) {
+  if (!Array.isArray(input) || input.length > 100) {
+    throw new OperationError("invalid_request", "Folder ancestry is invalid.");
+  }
+  const keys = input.map((value) => value.trim());
+  if (keys.some((value) => !value || value.length > 1024)) {
+    throw new OperationError("invalid_request", "Folder ancestry is invalid.");
+  }
+  return [...new Set(keys)];
+}
+function readState(path) {
+  if (!existsSync27(path))
+    return { kind: "missing" };
+  let raw;
+  try {
+    raw = readFileSync30(path, "utf8");
+  } catch {
+    return { kind: "malformed", digest: "unreadable" };
+  }
+  const digest = createHash35("sha256").update(raw).digest("hex");
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("record");
+    const record3 = parsed;
+    if (record3.version !== 1 || !Array.isArray(record3.approvals))
+      throw new Error("version");
+    const approvals = record3.approvals.map(parseApproval);
+    if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length)
+      throw new Error("duplicate");
+    return { kind: "valid", state: { version: 1, approvals } };
+  } catch {
+    return { kind: "malformed", digest };
+  }
+}
+function parseApproval(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("approval");
+  const record3 = value;
+  if (typeof record3.source_id !== "string" || !isFileSourceScopeId(record3.source_id) || typeof record3.account_generation !== "string" || !/^[a-f0-9]{64}$/.test(record3.account_generation) || typeof record3.revision !== "string" || !/^[a-f0-9-]{36}$/.test(record3.revision) || record3.status !== "approved" || typeof record3.whole_account !== "boolean" || typeof record3.approved_at !== "string" || !Number.isFinite(Date.parse(record3.approved_at)) || !Array.isArray(record3.selections))
+    throw new Error("approval");
+  const selections = normalizeSelections(record3.selections.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("selection");
+    const selection = entry;
+    if (typeof selection.key !== "string" || typeof selection.state !== "string")
+      throw new Error("selection");
+    const ancestorKeys = selection.ancestorKeys;
+    if (ancestorKeys !== undefined && (!Array.isArray(ancestorKeys) || ancestorKeys.some((key) => typeof key !== "string")))
+      throw new Error("selection");
+    return {
+      key: selection.key,
+      state: selection.state,
+      ...ancestorKeys ? { ancestorKeys } : {}
+    };
+  }));
+  return {
+    source_id: record3.source_id,
+    account_generation: record3.account_generation,
+    revision: record3.revision,
+    status: "approved",
+    selections,
+    whole_account: record3.whole_account,
+    approved_at: record3.approved_at
+  };
+}
+var FILE_SOURCE_SCOPE_IDS, FILE_SOURCE_SCOPE_CAPABILITIES;
+var init_source_scope_approval = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  FILE_SOURCE_SCOPE_IDS = ["google_drive.docs", "dropbox.files"];
+  FILE_SOURCE_SCOPE_CAPABILITIES = {
+    "google_drive.docs": {
+      sourceId: "google_drive.docs",
+      provider: "google_drive",
+      credentialCapability: "google_drive.docs.sync",
+      scopeRequirement: "explicit_folder_scope"
+    },
+    "dropbox.files": {
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      credentialCapability: "dropbox.files.sync",
+      scopeRequirement: "explicit_folder_scope"
+    }
+  };
+});
+
+// src/workers/source-scope-runtime.ts
+class FileSourceScopeAuthority {
+  registryPath;
+  statePath;
+  readRegistry;
+  constructor(options = {}) {
+    this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
+    this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
+    this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+  }
+  snapshot(sourceId) {
+    try {
+      return readFileSourceScopeApproval({
+        sourceId,
+        registry: this.readRegistry(),
+        statePath: this.statePath
+      });
+    } catch {
+      return {
+        sourceId,
+        status: "scope_pending",
+        revision: "unreadable",
+        selections: [],
+        wholeAccount: false,
+        reason: "malformed"
+      };
+    }
+  }
+  approve(input) {
+    return approveFileSourceScope({
+      ...input,
+      registry: this.readRegistry(),
+      statePath: this.statePath
+    });
+  }
+  assertCurrent(ref) {
+    return assertFileSourceScopeApproved({
+      sourceId: ref.sourceId,
+      registry: this.readRegistry(),
+      statePath: this.statePath,
+      expectedAccountGeneration: ref.accountGeneration,
+      expectedRevision: ref.revision
+    });
+  }
+  policyRef(sourceId) {
+    const snapshot = this.snapshot(sourceId);
+    if (snapshot.status !== "approved" || !snapshot.accountGeneration)
+      return;
+    return {
+      sourceId,
+      accountGeneration: snapshot.accountGeneration,
+      revision: snapshot.revision
+    };
+  }
+}
+function fileSourceScopeContentFilters(approval) {
+  if (approval.status !== "approved" || !approval.accountGeneration)
+    return { allowed: false };
+  const deniedKeys = approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key);
+  if (approval.wholeAccount) {
+    return {
+      allowed: true,
+      filters: {
+        provider: approval.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+        sourceScopeGeneration: approval.accountGeneration,
+        sourceScopeRevision: approval.revision,
+        ...approval.sourceId === "dropbox.files" && deniedKeys.length > 0 ? { locatorPathExcludedScopes: deniedKeys } : {},
+        ...approval.sourceId === "google_drive.docs" && deniedKeys.length > 0 ? { sourceScopeFolderNoneKeys: deniedKeys } : {}
+      }
+    };
+  }
+  const ingestKeys = approval.selections.filter((selection) => selection.state === "ingest").map((selection) => selection.key);
+  if (ingestKeys.length === 0)
+    return { allowed: false };
+  return approval.sourceId === "dropbox.files" ? {
+    allowed: true,
+    filters: {
+      provider: "dropbox",
+      sourceScopeGeneration: approval.accountGeneration,
+      sourceScopeRevision: approval.revision,
+      locatorPathScopes: ingestKeys,
+      ...deniedKeys.length > 0 ? { locatorPathExcludedScopes: deniedKeys } : {}
+    }
+  } : {
+    allowed: true,
+    filters: {
+      provider: "google_drive",
+      sourceScopeGeneration: approval.accountGeneration,
+      sourceScopeRevision: approval.revision,
+      sourceScopeFolderAnyKeys: ingestKeys,
+      ...deniedKeys.length > 0 ? { sourceScopeFolderNoneKeys: deniedKeys } : {}
+    }
+  };
+}
+function fileSourceScopeMetadataFilters(approval) {
+  if (approval.status !== "approved" || !approval.accountGeneration)
+    return { allowed: false };
+  const excludedKeys = approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key);
+  const metadataOnlyKeys = approval.selections.filter((selection) => selection.state === "metadata_only").map((selection) => selection.key);
+  const base = {
+    provider: approval.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+    sourceScopeGeneration: approval.accountGeneration,
+    sourceScopeRevision: approval.revision,
+    ...approval.sourceId === "dropbox.files" && excludedKeys.length > 0 ? { locatorPathExcludedScopes: excludedKeys } : {},
+    ...approval.sourceId === "google_drive.docs" && excludedKeys.length > 0 ? { sourceScopeFolderNoneKeys: excludedKeys } : {},
+    ...approval.sourceId === "dropbox.files" && metadataOnlyKeys.length > 0 ? { metadataOnlyLocatorPathScopes: metadataOnlyKeys } : {},
+    ...approval.sourceId === "google_drive.docs" && metadataOnlyKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys: metadataOnlyKeys } : {}
+  };
+  if (approval.wholeAccount)
+    return { allowed: true, filters: base };
+  const includedKeys = approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => selection.key);
+  if (includedKeys.length === 0)
+    return { allowed: false };
+  return {
+    allowed: true,
+    filters: {
+      ...base,
+      ...approval.sourceId === "dropbox.files" ? { locatorPathScopes: includedKeys } : { sourceScopeFolderAnyKeys: includedKeys }
+    }
+  };
+}
+function fileSourceScopeMetadataEnabled(approval) {
+  return approval.status === "approved" && (approval.wholeAccount || approval.selections.some((selection) => selection.state !== "exclude"));
+}
+function fileSourceScopeDropboxPolicy(base, approval) {
+  if (approval.sourceId !== "dropbox.files" || approval.status !== "approved") {
+    return { ...base, roots: [] };
+  }
+  const roots = approval.wholeAccount ? [{
+    path: "/",
+    approved_scope_key: `${base.source}:/`,
+    default_action: "full_extract"
+  }] : approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => ({
+    path: normalizeDropboxScopePath(selection.key),
+    approved_scope_key: `${base.source}:${normalizeDropboxScopePath(selection.key)}`,
+    default_action: selection.state === "ingest" ? "full_extract" : "metadata_only"
+  }));
+  return { ...base, roots };
+}
+function createScopeBoundGoogleDriveContentScope(input) {
+  const current = () => input.authority.assertCurrent(input.ref);
+  return {
+    generation: input.ref.accountGeneration,
+    revision: input.ref.revision,
+    allowsMetadata(folderAncestorIds) {
+      return fileSourceScopeAllowsMetadata(current(), folderAncestorIds);
+    },
+    allowsContent(folderAncestorIds) {
+      return fileSourceScopeAllowsContent(current(), folderAncestorIds);
+    }
+  };
+}
+function createScopeBoundDropboxContentScope(input) {
+  const current = () => input.authority.assertCurrent(input.ref);
+  const matching = (path) => {
+    const normalized = normalizeDropboxScopePath(path);
+    return current().selections.filter((selection) => {
+      const root = normalizeDropboxScopePath(selection.key);
+      return normalized === root || root !== "/" && normalized.startsWith(`${root}/`) || root === "/";
+    });
+  };
+  return {
+    generation: input.ref.accountGeneration,
+    revision: input.ref.revision,
+    assertCurrent() {
+      current();
+    },
+    allowsMetadata(path) {
+      const approval = current();
+      const selected = matching(path);
+      if (selected.some((entry) => entry.state === "exclude"))
+        return false;
+      return approval.wholeAccount || selected.some((entry) => entry.state !== "exclude");
+    },
+    allowsContent(path) {
+      const approval = current();
+      const selected = matching(path);
+      if (selected.some((entry) => entry.state !== "ingest"))
+        return false;
+      return approval.wholeAccount || selected.some((entry) => entry.state === "ingest");
+    }
+  };
+}
+function normalizeDropboxScopePath(path) {
+  const normalized = path.trim().replace(/\/{2,}/g, "/").toLowerCase();
+  return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+}
+function scopeBoundEmbeddingProvider(provider, authority, ref) {
+  return {
+    ...provider,
+    async embed(inputs, options) {
+      authority.assertCurrent(ref);
+      return provider.embed(inputs, options);
+    }
+  };
+}
+function scopeBoundSchedulerSource(input) {
+  const suffix = input.ref.revision.replaceAll("-", "").slice(0, 16);
+  return {
+    ...input.source,
+    tasks: input.source.tasks.map((task) => ({
+      ...task,
+      id: `${task.id}:scope:${suffix}`,
+      async run(context) {
+        input.authority.assertCurrent(input.ref);
+        return task.run(context);
+      }
+    }))
+  };
+}
+var init_source_scope_runtime = __esm(() => {
+  init_source_scope_approval();
+  init_connected_handles();
+});
+
+// src/workers/source-scope-browser.ts
+function createGoogleDriveFolderScopeBrowser(options) {
+  const connector = new GoogleDriveSourceConnector({
+    credentialHandle: options.credentialHandle,
+    ...options.account ? { account: options.account } : {},
+    ...options.credentialBroker ? { credentialBroker: options.credentialBroker } : {},
+    ...options.fetch ? { fetch: options.fetch } : {},
+    ...options.apiClient ? { apiClient: options.apiClient } : {},
+    ...options.requestBudget ? { requestBudget: options.requestBudget } : {},
+    provenance: "operator"
+  });
+  return {
+    sourceId: "google_drive.docs",
+    async browse(request) {
+      const parent = normalizeDriveParent(request.parentKey);
+      const providerCursor = decodeCursor2("google_drive.docs", parent, request.cursor);
+      const client = await connector.apiClientForTooling();
+      const page = await client.listFiles({
+        pageSize: BROWSE_PAGE_SIZE,
+        ...providerCursor ? { pageToken: providerCursor } : {},
+        query: `trashed = false and mimeType = '${GOOGLE_FOLDER_MIME_TYPE}' and '${parent}' in parents`
+      });
+      return {
+        nodes: page.files.filter((file) => file.id && file.mimeType === GOOGLE_FOLDER_MIME_TYPE).map((file) => ({
+          key: file.id,
+          ...request.parentKey ? { parent_key: parent } : {},
+          name: file.name?.trim() || "Untitled folder",
+          kind: "folder",
+          has_children: true,
+          selectable: true
+        })),
+        ...page.nextPageToken ? { nextCursor: encodeCursor2("google_drive.docs", parent, page.nextPageToken) } : {}
+      };
+    },
+    async validateSelections(selections) {
+      const client = await connector.apiClientForTooling();
+      if (!client.getFolder)
+        throw new Error("Google Drive folder validation is unavailable.");
+      const ancestry = new GoogleDriveFolderAncestry(client);
+      const ancestorsByKey = new Map;
+      for (const selection of selections) {
+        const key = normalizeDriveParent(selection.key);
+        if (key === "root")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        const folder = await client.getFolder(key);
+        if (folder.id !== key || !folder.parents || folder.parents.length === 0) {
+          throw new Error("A selected Google Drive folder could not be verified below the account root.");
+        }
+        const ancestors = await ancestry.resolve({ parents: folder.parents });
+        if (!ancestors)
+          throw new Error("A selected Google Drive folder ancestry could not be verified.");
+        ancestorsByKey.set(key, ancestors);
+      }
+      return effectiveSelections(selections, (key) => ancestorsByKey.get(key) ?? []);
+    }
+  };
+}
+function createDropboxFolderScopeBrowser(options) {
+  const broker = options.credentialBroker ?? createEnvCredentialBroker({
+    ...options.fetch ? { fetch: options.fetch } : {}
+  });
+  let client = options.metadataClient;
+  const metadataClient = async () => {
+    if (client)
+      return client;
+    const session = requireBearerTokenCredentialSession(await broker.issueSession({
+      handle: options.credentialHandle,
+      provider: "dropbox",
+      capability: "dropbox.files.sync",
+      trustDomain: "secure_local",
+      purpose: "Browse Dropbox folders before source-scope approval."
+    }), options.credentialHandle);
+    client = new DropboxApiMetadataClient({
+      token: session.token,
+      ...options.fetch ? { fetch: options.fetch } : {}
+    });
+    return client;
+  };
+  return {
+    sourceId: "dropbox.files",
+    async browse(request) {
+      const parent = normalizeDropboxParent(request.parentKey);
+      const providerCursor = decodeCursor2("dropbox.files", parent, request.cursor);
+      const api2 = await metadataClient();
+      const page = providerCursor ? await api2.listFolderContinue({ cursor: providerCursor, limit: BROWSE_PAGE_SIZE }) : await api2.listFolder({
+        path: parent === "/" ? "" : parent,
+        recursive: false,
+        limit: BROWSE_PAGE_SIZE,
+        includeDeleted: false
+      });
+      return {
+        nodes: page.entries.filter((entry) => entry.tag === "folder").map((entry) => ({
+          key: normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`),
+          ...request.parentKey ? { parent_key: parent } : {},
+          name: entry.name,
+          kind: "folder",
+          has_children: true,
+          selectable: true
+        })),
+        ...page.hasMore && page.cursor ? { nextCursor: encodeCursor2("dropbox.files", parent, page.cursor) } : {}
+      };
+    },
+    async validateSelections(selections) {
+      const api2 = await metadataClient();
+      for (const selection of selections) {
+        const key = normalizeDropboxNodeKey(selection.key);
+        if (key === "/")
+          throw new Error("Whole-account access requires explicit confirmation.");
+        await api2.listFolder({ path: key, recursive: false, limit: 1, includeDeleted: false });
+      }
+      return effectiveSelections(selections.map((selection) => ({ ...selection, key: normalizeDropboxNodeKey(selection.key) })), (key) => dropboxAncestorPaths(normalizeDropboxNodeKey(key)));
+    }
+  };
+}
+function effectiveSelections(selections, ancestorsFor) {
+  const states = new Map(selections.map((selection) => [selection.key, selection.state]));
+  return selections.map((selection) => {
+    const ancestorKeys = [...ancestorsFor(selection.key)];
+    const ancestorStates = ancestorKeys.map((key) => states.get(key)).filter((state2) => state2 !== undefined);
+    const state = ancestorStates.includes("exclude") ? "exclude" : ancestorStates.includes("metadata_only") && selection.state === "ingest" ? "metadata_only" : selection.state;
+    return { key: selection.key, state, ancestorKeys };
+  });
+}
+function dropboxAncestorPaths(path) {
+  const parts = path.split("/").filter(Boolean);
+  const ancestors = [];
+  for (let index = 1;index < parts.length; index += 1) {
+    ancestors.push(`/${parts.slice(0, index).join("/")}`);
+  }
+  return ancestors;
+}
+function encodeCursor2(source, parent, providerCursor) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    source,
+    parent,
+    provider_cursor: providerCursor
+  })).toString("base64url");
+}
+function decodeCursor2(source, parent, value) {
+  if (value === undefined)
+    return;
+  if (!value || value.length > 8192)
+    throw new Error("Folder browse cursor is invalid.");
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (parsed.version !== 1 || parsed.source !== source || parsed.parent !== parent || typeof parsed.provider_cursor !== "string" || !parsed.provider_cursor || parsed.provider_cursor.length > 6000)
+      throw new Error("shape");
+    return parsed.provider_cursor;
+  } catch {
+    throw new Error("Folder browse cursor is invalid for this source and parent.");
+  }
+}
+function normalizeDriveParent(value) {
+  if (value === undefined)
+    return "root";
+  const parent = value.trim();
+  if (!parent || parent.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(parent)) {
+    throw new Error("Google Drive folder key is invalid.");
+  }
+  return parent;
+}
+function normalizeDropboxParent(value) {
+  if (value === undefined)
+    return "/";
+  return normalizeDropboxNodeKey(value);
+}
+function normalizeDropboxNodeKey(value) {
+  const trimmed2 = value.trim().replace(/\/{2,}/g, "/");
+  if (!trimmed2.startsWith("/") || trimmed2.length > 4096 || trimmed2.includes("\x00")) {
+    throw new Error("Dropbox folder key is invalid.");
+  }
+  return trimmed2.length > 1 && trimmed2.endsWith("/") ? trimmed2.slice(0, -1).toLowerCase() : trimmed2.toLowerCase();
+}
+var GOOGLE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder", BROWSE_PAGE_SIZE = 100;
+var init_source_scope_browser = __esm(() => {
+  init_credential_broker();
+  init_drive();
+  init_provider_client();
+});
+
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
@@ -73585,7 +75228,7 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync27 } from "node:fs";
+import { existsSync as existsSync28 } from "node:fs";
 import { isAbsolute as isAbsolute7 } from "node:path";
 function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
@@ -73869,7 +75512,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync27(store.dbPath))
+        if (!existsSync28(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -74293,6 +75936,8 @@ async function main() {
   const sourceIndexAccount = process.env.OLYMPUS_SOURCE_INDEX_ACCOUNT ?? process.env.OLYMPUS_EMAIL_SOURCE_ACCOUNT;
   const dropboxFilesAccount = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT?.trim() || accountFromDropboxCredentialHandle(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE);
   const connectedHandles = readActiveConnectedHandles(process.env);
+  const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
+  const fileSourceScopeAuthority = connectedHandleRegistryPath ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath }) : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
@@ -74425,11 +76070,13 @@ async function main() {
   const dropboxConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
   const dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim() || dropboxFilesAccount || "personal";
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle ? createDropboxProviderStoreSyncHandler({
+  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
+  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
     store: dropboxConnectorStore,
     account: dropboxProviderAccount,
     credentialHandle: dropboxHandle.handle,
-    ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
+    scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
+    ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) } : {}
   }) : undefined;
   const whatsappConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
   const whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
@@ -74471,6 +76118,12 @@ async function main() {
     ...dropboxConnectorStore ? {
       dropbox: {
         extractionScopes: dropboxExtractionScopes,
+        resolveExtractionScopes: () => {
+          const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
+          if (!ref || !fileSourceScopeAuthority)
+            return [];
+          return dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref)));
+        },
         resolveCredentialHandle: () => selectedSourceCredentialHandle({
           env: process.env,
           pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
@@ -74490,6 +76143,28 @@ async function main() {
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
+    scopeGuard: {
+      assertAuthorized({ config: config2 }) {
+        const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
+        if (!sourceId)
+          return;
+        const ref = fileSourceScopeAuthority?.policyRef(sourceId);
+        if (!ref || !fileSourceScopeAuthority) {
+          throw new OperationError("source_index_policy_violation", "File-source scope approval is required.");
+        }
+        fileSourceScopeAuthority.assertCurrent(ref);
+      },
+      allowsRef({ config: config2, store, ref }) {
+        const sourceId = config2.provider === "dropbox" ? "dropbox.files" : config2.provider === "google_drive" ? "google_drive.docs" : undefined;
+        if (!sourceId)
+          return true;
+        const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+        if (!approval)
+          return false;
+        const scope = fileSourceScopeContentFilters(approval);
+        return scope.allowed && store.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
+      }
+    },
     extractors: {
       ...process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } } : {},
       ...fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined || fileExtractionMaxBoundedTextChars !== undefined ? {
@@ -74561,6 +76236,34 @@ async function main() {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   }
+  const connectorStoreReadScope = (store) => {
+    const sourceId = store === dropboxConnectorStore ? "dropbox.files" : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore ? "google_drive.docs" : undefined;
+    if (!sourceId)
+      return { allowed: true, contentAllowed: true };
+    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+    if (!approval || approval.status !== "approved")
+      return { allowed: false };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    if (!metadataScope.allowed)
+      return { allowed: false };
+    const contentScope = fileSourceScopeContentFilters(approval);
+    const handle = selectedSourceCredentialHandle({
+      env: process.env,
+      pinEnvName: sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+      provider: sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+      capability: sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
+      handles: readActiveConnectedHandles(process.env)
+    });
+    if (!handle)
+      return { allowed: false };
+    return {
+      allowed: true,
+      accountScope: handle.accountRole?.trim() || "personal",
+      filters: metadataScope.filters,
+      contentAllowed: contentScope.allowed,
+      ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
+    };
+  };
   const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
   const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === "venice" && secureEmbeddingProfile.profile.trust === "encrypted_cloud";
   const fullCorpusDefinitions = [
@@ -74636,16 +76339,21 @@ async function main() {
     ...handle?.handle ? { credentialHandle: handle.handle } : {},
     ...handle?.accountRole ? { account: handle.accountRole } : {}
   }) : undefined;
-  const createGoogleDriveConnectorStoreSyncForHandle = (handle) => handle && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore && googleDriveRequestBudget ? createGoogleDriveConnectorStoreSyncHandler({
-    internalStore: googleDriveInternalConnectorStore,
-    secureStore: googleDriveSecureConnectorStore,
-    requestBudget: googleDriveRequestBudget,
-    ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {},
-    ...googleDriveDocsEmbeddingProvider ? { internalEmbeddingProvider: googleDriveDocsEmbeddingProvider } : {},
-    ...secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? { secureEmbeddingProvider: secureLocalPolicyEmbeddingProvider } : {},
-    ...handle?.handle ? { credentialHandle: handle.handle } : {},
-    ...handle?.accountRole ? { account: handle.accountRole } : {}
-  }) : undefined;
+  const createGoogleDriveConnectorStoreSyncForHandle = (handle) => {
+    const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
+    const scopeSnapshot = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrent(scopeRef) : undefined;
+    return handle && scopeRef && fileSourceScopeAuthority && scopeSnapshot && fileSourceScopeMetadataEnabled(scopeSnapshot) && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore && googleDriveRequestBudget ? createGoogleDriveConnectorStoreSyncHandler({
+      internalStore: googleDriveInternalConnectorStore,
+      secureStore: googleDriveSecureConnectorStore,
+      requestBudget: googleDriveRequestBudget,
+      scope: createScopeBoundGoogleDriveContentScope({ authority: fileSourceScopeAuthority, ref: scopeRef }),
+      ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {},
+      ...googleDriveDocsEmbeddingProvider ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(googleDriveDocsEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
+      ...secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
+      ...handle?.handle ? { credentialHandle: handle.handle } : {},
+      ...handle?.accountRole ? { account: handle.accountRole } : {}
+    }) : undefined;
+  };
   const sourceIndexAnswerMaxResults = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS");
   const sourceIndexAnswerMaxCharsPerCandidate = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE");
   const sourceIndexTrustedAnalystTimeoutMs = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS, "OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS");
@@ -74725,6 +76433,9 @@ async function main() {
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = (request) => {
         const connectorStoreAdapter = (store) => {
+          const mandatoryScope = connectorStoreReadScope(store);
+          if (!mandatoryScope.allowed)
+            return;
           const principal = connectorStorePrincipals.get(store.corpusId);
           const scope = connectorStoreAnswerScope({
             store,
@@ -74734,13 +76445,13 @@ async function main() {
           if (scope.kind === "skip")
             return;
           const connectorStoreEmbedding = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
-          const connectorStoreAccount = scope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
+          const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
           return createConnectorStoreCorpusAdapter({
             store,
             retrievalMode: request.retrieval_mode ?? "keyword",
             ...store.corpusId === X_BOOKMARKS_CORPUS_ID ? { semanticRelevanceBar: xBookmarksSemanticRelevanceBar } : {},
             ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-            ...scope.filters ? { filters: scope.filters } : {},
+            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {},
             ...connectorStoreEmbedding && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbedding)) ? { embeddingProvider: connectorStoreEmbedding } : {}
           });
         };
@@ -74753,10 +76464,14 @@ async function main() {
             }))
           },
           contentProviders: {
-            ...Object.fromEntries(readConnectorStores.map((store) => [
-              store.corpusId,
-              createConnectorStoreContentProvider({ store })
-            ]))
+            ...Object.fromEntries(readConnectorStores.flatMap((store) => {
+              const mandatoryScope = connectorStoreReadScope(store);
+              return mandatoryScope.allowed && mandatoryScope.contentAllowed !== false ? [[store.corpusId, createConnectorStoreContentProvider({
+                store,
+                ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
+                ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}
+              })]] : [];
+            }))
           }
         };
       }
@@ -74853,13 +76568,23 @@ async function main() {
       handles
     });
     const currentGmailConnectorStoreSync = createGmailConnectorStoreSyncForHandle(currentGmailHandle);
+    const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
-    const currentDropboxProviderStoreSync = currentDropboxHandle && dropboxConnectorStore ? currentDropboxHandle.handle === dropboxHandle?.handle && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
+    const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore ? currentDropboxHandle.handle === dropboxHandle?.handle && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
       store: dropboxConnectorStore,
       account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
       credentialHandle: currentDropboxHandle.handle,
-      ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
+      scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef }),
+      ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) } : {}
     }) : undefined;
+    const currentDropboxPolicy = currentDropboxScopeRef && fileSourceScopeAuthority ? fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, fileSourceScopeAuthority.assertCurrent(currentDropboxScopeRef)) : fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, {
+      sourceId: "dropbox.files",
+      status: "scope_pending",
+      revision: "pending",
+      selections: [],
+      wholeAccount: false
+    });
     const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined && currentReadwiseHandle.handle === readwiseHandle?.handle && readwiseConnectorStoreSync !== undefined;
     const xBookmarksSkipReason = !currentXBookmarksHandle ? "no_handle" : !xBookmarksConnectorStoreSync ? "no_store_sync" : currentXBookmarksHandle.handle !== xBookmarksHandle?.handle ? "handle_rebound" : undefined;
     const sources = [
@@ -74869,20 +76594,26 @@ async function main() {
         ...gmailInternalConnectorStore ? { internalStore: gmailInternalConnectorStore } : {},
         ...gmailSecureConnectorStore ? { secureStore: gmailSecureConnectorStore } : {}
       })),
-      recordLane(SCHEDULER_SOURCE_IDS.googleDrive, currentGoogleDriveHandle ? undefined : "no_handle", () => createGoogleDriveConnectorStoreSchedulerSource({
-        config: olympusConfig,
-        ...currentGoogleDriveConnectorStoreSync ? { liveSync: currentGoogleDriveConnectorStoreSync } : {},
-        ...googleDriveInternalConnectorStore ? { internalStore: googleDriveInternalConnectorStore } : {},
-        ...googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {}
-      })),
-      recordLane(SCHEDULER_SOURCE_IDS.dropbox, !currentDropboxHandle ? "no_handle" : !currentDropboxProviderStoreSync || !dropboxConnectorStore ? "no_store_sync" : undefined, () => createCanonicalDropboxSchedulerSource({
-        policy: dropboxIngestionPolicy,
-        config: olympusConfig,
-        ...currentDropboxProviderStoreSync ? { providerSync: currentDropboxProviderStoreSync } : {},
-        ...dropboxConnectorStore ? { store: dropboxConnectorStore } : {},
-        ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-        ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
-      })),
+      recordLane(SCHEDULER_SOURCE_IDS.googleDrive, !currentGoogleDriveHandle ? "no_handle" : !currentGoogleDriveScopeRef ? "scope_pending" : undefined, () => {
+        const source = createGoogleDriveConnectorStoreSchedulerSource({
+          config: olympusConfig,
+          ...currentGoogleDriveConnectorStoreSync ? { liveSync: currentGoogleDriveConnectorStoreSync } : {},
+          ...googleDriveInternalConnectorStore ? { internalStore: googleDriveInternalConnectorStore } : {},
+          ...googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {}
+        });
+        return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef }) : undefined;
+      }),
+      recordLane(SCHEDULER_SOURCE_IDS.dropbox, !currentDropboxHandle ? "no_handle" : !currentDropboxScopeRef ? "scope_pending" : !currentDropboxProviderStoreSync || !dropboxConnectorStore ? "no_store_sync" : undefined, () => {
+        const source = createCanonicalDropboxSchedulerSource({
+          policy: currentDropboxPolicy,
+          config: olympusConfig,
+          ...currentDropboxProviderStoreSync ? { providerSync: currentDropboxProviderStoreSync } : {},
+          ...dropboxConnectorStore ? { store: dropboxConnectorStore } : {},
+          ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
+          ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) && currentDropboxScopeRef && fileSourceScopeAuthority ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) } : {}
+        });
+        return source && currentDropboxScopeRef && fileSourceScopeAuthority ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef }) : undefined;
+      }),
       recordLane(SCHEDULER_SOURCE_IDS.readwise, readwiseStoreLaneEnabled ? undefined : "lane_disabled", () => createReadwiseSchedulerSource({
         config: olympusConfig,
         ...readwiseStoreLaneEnabled && readwiseConnectorStoreSync ? { liveSync: readwiseConnectorStoreSync } : {},
@@ -74932,6 +76663,127 @@ async function main() {
   }) : undefined;
   const sourceAnswerLatencyLogPath = sourceAnswer ? resolveSourceAnswerLatencyLogPath(process.env) : undefined;
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath) : undefined;
+  const fileSourceScopes = fileSourceScopeAuthority ? {
+    summaries: () => [
+      ["google_drive.docs", GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE, "Google Drive"],
+      ["dropbox.files", DROPBOX_INGESTION_EXCLUSION_SOURCE, "Dropbox"]
+    ].map(([sourceId, dispositionSourceId, label]) => {
+      const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
+      return {
+        source_id: sourceId,
+        disposition_source_id: dispositionSourceId,
+        label,
+        connected: snapshot.accountGeneration !== undefined,
+        status: snapshot.status,
+        ...snapshot.accountGeneration ? { account_generation: snapshot.accountGeneration } : {},
+        scope_revision: snapshot.revision,
+        selections: snapshot.selections.map((selection) => ({
+          key: selection.key,
+          state: selection.state,
+          ...selection.ancestorKeys ? { ancestor_keys: selection.ancestorKeys } : {}
+        })),
+        whole_account_selected: snapshot.wholeAccount,
+        ...snapshot.reason === "malformed" ? { error: "Saved scope state is unreadable. Review and save the scope again." } : {}
+      };
+    }),
+    browse: async (input) => {
+      const before = fileSourceScopeAuthority.snapshot(input.sourceId);
+      const accountGeneration = before.accountGeneration;
+      if (!accountGeneration) {
+        throw new OperationError("source_index_policy_violation", "Connect this source before browsing folders.");
+      }
+      const handles = readActiveConnectedHandles(process.env);
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: input.sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+        provider: input.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+        capability: input.sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
+        handles
+      });
+      if (!handle) {
+        throw new OperationError("source_index_policy_violation", "The connected source credential is unavailable.");
+      }
+      const browser = input.sourceId === "dropbox.files" ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle }) : createGoogleDriveFolderScopeBrowser({
+        credentialHandle: handle.handle,
+        ...handle.accountRole ? { account: handle.accountRole } : {},
+        ...googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}
+      });
+      const page = await browser.browse({
+        ...input.parentKey ? { parentKey: input.parentKey } : {},
+        ...input.cursor ? { cursor: input.cursor } : {}
+      });
+      const after = fileSourceScopeAuthority.snapshot(input.sourceId);
+      if (after.accountGeneration !== accountGeneration || after.revision !== before.revision) {
+        throw new OperationError("source_index_policy_violation", "The account or saved scope changed while folders were being listed. Reload the picker.");
+      }
+      return {
+        source_id: input.sourceId,
+        account_generation: accountGeneration,
+        scope_revision: before.revision,
+        status: before.status,
+        nodes: page.nodes,
+        ...page.nextCursor ? { next_cursor: page.nextCursor } : {},
+        selections: before.selections.map((selection) => ({
+          key: selection.key,
+          state: selection.state,
+          ...selection.ancestorKeys ? { ancestor_keys: selection.ancestorKeys } : {}
+        })),
+        whole_account_selected: before.wholeAccount
+      };
+    },
+    approveAndStart: async (input) => {
+      const selections = input.selections.map((selection) => ({
+        key: input.sourceId === "dropbox.files" ? selection.key.trim().toLowerCase() : selection.key.trim(),
+        state: selection.state
+      }));
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: input.sourceId === "dropbox.files" ? "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE" : "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+        provider: input.sourceId === "dropbox.files" ? "dropbox" : "google_drive",
+        capability: input.sourceId === "dropbox.files" ? "dropbox.files.sync" : "google_drive.docs.sync",
+        handles: readActiveConnectedHandles(process.env)
+      });
+      if (!handle) {
+        throw new OperationError("source_index_policy_violation", "The connected source credential is unavailable.");
+      }
+      const browser = input.sourceId === "dropbox.files" ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle }) : createGoogleDriveFolderScopeBrowser({
+        credentialHandle: handle.handle,
+        ...handle.accountRole ? { account: handle.accountRole } : {},
+        ...googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}
+      });
+      const verifiedSelections = await browser.validateSelections(selections);
+      const approval = fileSourceScopeAuthority.approve({
+        sourceId: input.sourceId,
+        accountGeneration: input.accountGeneration,
+        expectedRevision: input.expectedRevision,
+        selections: verifiedSelections,
+        wholeAccount: input.wholeAccount,
+        explicitWholeAccountConfirmation: input.explicitWholeAccountConfirmation
+      });
+      let invalidatedJobs = 0;
+      if (fileExtractionRuntime) {
+        const corpora = input.sourceId === "dropbox.files" ? [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID] : [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID];
+        invalidatedJobs = corpora.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
+      }
+      let started = false;
+      if (sourceScheduler) {
+        sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
+        if (fileSourceScopeMetadataEnabled(approval) && sourceScheduler.status().sources.some((source) => source.source_id === input.sourceId)) {
+          await sourceScheduler.runSource(input.sourceId, undefined, "operator");
+          started = true;
+        }
+      }
+      return {
+        ok: true,
+        kind: "file_source_scope_approved",
+        source_id: input.sourceId,
+        status: approval.status,
+        scope_revision: approval.revision,
+        ingestion_started: started,
+        invalidated_queued_jobs: invalidatedJobs
+      };
+    }
+  } : undefined;
   const worker = createEmailSourceWorker({
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
@@ -74947,6 +76799,7 @@ async function main() {
     ...connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {},
     ...connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {},
     ...connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {},
+    connectorStoreReadScope,
     ...sourceScheduler ? { sourceScheduler } : {},
     ...sourceWatchPass ? {
       sourceWatch: {
@@ -74960,6 +76813,7 @@ async function main() {
         registryPath: handleRegistryPathFromEnv(process.env, true),
         ...sourceDashboardHistory ? { history: sourceDashboardHistory } : {},
         ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
+        ...fileSourceScopes ? { fileSourceScopes } : {},
         enforceConnectedSourceReads: true,
         refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env)).sources,
         triggerSourceSyncSources: ["dropbox"],
@@ -75474,6 +77328,8 @@ var init_server4 = __esm(async () => {
   init_source_dashboard();
   init_source_ingestion_ledger();
   init_connected_handles();
+  init_source_scope_runtime();
+  init_source_scope_browser();
   init_unpaired_sources();
   INGESTION_DISPOSITION_SOURCES = [
     {
@@ -75516,7 +77372,7 @@ var init_server4 = __esm(async () => {
 // src/cli.ts
 init_config();
 import { randomBytes as randomBytes6 } from "node:crypto";
-import { readFileSync as readFileSync30 } from "node:fs";
+import { readFileSync as readFileSync31 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -77866,7 +79722,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync30("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync31("/dev/stdin", "utf8");
   }
   return params;
 }

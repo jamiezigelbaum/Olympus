@@ -868,7 +868,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       const result = await options.transport.control({
         action: 'approve_source_scope_and_start', source_id: form.dataset.folderScopeSource as OlympusFolderScopeSourceId,
         account_generation: draft.generation, expected_scope_revision: draft.revision,
-        selections: Array.from(draft.selections, ([key, state]) => ({ key, state, ancestor_keys: draft.ancestors.get(key) || [] })),
+        selections: Array.from(draft.selections.keys(), (key) => ({ key, state: effectiveScopeState(draft, key), ancestor_keys: draft.ancestors.get(key) || [] })),
         whole_account: draft.whole, explicit_whole_account_confirmation: confirmation,
       });
       if (disposed || options.signal.aborted || !root.contains(form)) return;
