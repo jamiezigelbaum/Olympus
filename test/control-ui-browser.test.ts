@@ -615,6 +615,15 @@ describe('native host subscription', () => {
   });
 });
 
+test('Setup card background navigates while embedded controls remain independent', () => {
+  const root = document.createElement('div'); root.innerHTML = '<div data-dashboard-href="/dashboard?source=dropbox.files"><span class="card-copy">Dropbox status</span><button type="button">Connect</button></div>'; document.body.append(root);
+  const navigation: string[] = [];
+  const controller = mountDashboardController({ root, transport: { async control() { return { status: 200, body: { ok: true } }; } }, navigate: (href) => navigation.push(href), refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+  root.querySelector('.card-copy')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  root.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  expect(navigation).toEqual(['/dashboard?source=dropbox.files']); controller.dispose();
+});
+
 describe('folder scope before ingestion', () => {
   function scopeRoot(canWrite = true) {
     const view = buildDispositionsPreviewView();
@@ -643,6 +652,44 @@ describe('folder scope before ingestion', () => {
     expect(target).not.toBeNull();
     target!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
+
+  test('opens Dropbox directly, switches providers without ingestion, and routes native exit links', async () => {
+    const view = buildDispositionsPreviewView(); view.sources = [];
+    view.folder_scopes = [
+      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: false, status: 'scope_pending' },
+      { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: 'account-one', scope_revision: 'revision-one' },
+    ];
+    const root = document.createElement('div'); root.innerHTML = renderSourceDispositionsControlUi(view, true, 'dropbox.files').body; document.body.append(root);
+    const reads: unknown[] = []; const writes: unknown[] = []; const navigation: string[] = [];
+    const controller = mountDispositionsController({ root,
+      transport: { async read(params) { reads.push(params); const response = page(); response.scope_browser!.source_id = params.source_id as 'dropbox.files'; return response; }, async control(params) { writes.push(params); return { status: 200, body: { ok: true } }; } },
+      navigate: (href) => navigation.push(href), refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    const drive = root.querySelector<HTMLElement>('[data-scope-panel="google_drive.docs"]')!;
+    const dropbox = root.querySelector<HTMLElement>('[data-scope-panel="dropbox.files"]')!;
+    expect(dropbox.hidden).toBe(false); expect(drive.hidden).toBe(true);
+    expect(Array.from(dropbox.querySelectorAll('.location'), (node) => node.textContent)).toEqual(['◆Google Drive', '◆Dropbox']);
+    expect(reads).toHaveLength(0);
+    click(dropbox, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
+    click(dropbox, '[data-scope-select]'); click(dropbox, '[data-scope-state="metadata_only"]');
+    click(dropbox, '[data-scope-switch="google_drive.docs"]');
+    expect(drive.hidden).toBe(false); expect(dropbox.hidden).toBe(true);
+    const connect = Array.from(drive.querySelectorAll<HTMLAnchorElement>('a')).find((node) => node.textContent?.startsWith('Connect Google'))!;
+    connect.dataset.olympusNav = connect.getAttribute('href')!; connect.href = 'https://gateway.test/native-page';
+    connect.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
+    click(root, '.dnav a[href="/dashboard"]');
+    click(drive, '.scope-back a');
+    expect(navigation.slice(1)).toEqual(['/dashboard', '/dashboard?source=google_drive.docs']);
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true });
+    connect.dispatchEvent(modified); expect(modified.defaultPrevented).toBe(false);
+    click(drive, '[data-scope-switch="dropbox.files"]');
+    expect(dropbox.hidden).toBe(false);
+    expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
+    expect(reads).toHaveLength(1); expect(writes).toHaveLength(0);
+    controller.dispose();
+  });
 
   test('retains the Finder layout and does no browse or ingestion until explicit actions', async () => {
     const { root, form } = scopeRoot();

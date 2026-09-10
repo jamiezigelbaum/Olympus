@@ -113,8 +113,8 @@ function readResult(params: OlympusDashboardReadParams, canWrite: boolean) {
       const source = params.source_id as OlympusFolderScopeSourceId;
       const view = buildDispositionsPreviewView();
       view.sources = [];
-      view.folder_scopes = [{ source_id: source, disposition_source_id: source, label: source === 'dropbox.files' ? 'Dropbox' : 'Google Drive', connected: true, status: 'scope_pending', account_generation: 'preview-account', scope_revision: 'preview-revision' }];
-      const result: OlympusDashboardReadResult = renderSourceDispositionsControlUi(view, canWrite);
+      view.folder_scopes = ['google_drive.docs', 'dropbox.files'].map((id) => ({ source_id: id as OlympusFolderScopeSourceId, disposition_source_id: id, label: id === 'dropbox.files' ? 'Dropbox' : 'Google Drive', connected: id === 'dropbox.files', status: 'scope_pending' as const, account_generation: 'preview-account', scope_revision: 'preview-revision' }));
+      const result: OlympusDashboardReadResult = renderSourceDispositionsControlUi(view, canWrite, source);
       if (params.action === 'browse_folder_scope' && canWrite) {
         const root = !params.parent_key;
         result.scope_browser = { source_id: source, account_generation: 'preview-account', scope_revision: 'preview-revision', status: 'scope_pending', selections: [], whole_account_selected: false,

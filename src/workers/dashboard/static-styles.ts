@@ -240,6 +240,9 @@ export const DISPOSITIONS_CSS = `
       .picker-header p { color: var(--t3); }
       .picker-header strong { color: var(--t2); }
       .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
+      .source-dispositions[hidden] { display: none !important; }
+      .scope-back { margin: 0 0 12px; }
+      .finder-sidebar a.location { text-decoration: none; }
       .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
       .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
       .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }

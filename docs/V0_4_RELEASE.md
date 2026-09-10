@@ -39,6 +39,9 @@ testers have exercised the normal product journey without custom engineering.
   Metadata progress must distinguish a completed bounded pass from a completed
   traversal, and extraction is working only when execution evidence says so.
   The candidate includes the scope gate and focused consent regression tests.
+  The picker opens the requested provider, keeps both providers in Locations,
+  and retains dashboard navigation and source-page return links. Setup cards
+  also link to source details.
   Live folder-selection proof and the held-out source eval await the owner's
   approved scope; affected sources stay disconnected until that choice.
 

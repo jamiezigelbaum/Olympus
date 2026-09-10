@@ -231,7 +231,7 @@ function renderGroup(
   if (sources.length === 0) return '';
   const rows = sources
     .map((source) => (
-      group.id === 'not_connected' ? renderSetupRow(source) : renderStateRow(group, source, degraded, basePath)))
+      group.id === 'not_connected' ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)))
     .join('\n');
   return `${sectionHeading(group.heading, sources.length, group.attention)}\n${rows}`;
 }
@@ -313,12 +313,13 @@ function renderStateRow(
   });
 }
 
-function renderSetupRow(source: DashboardSourceCard): string {
+function renderSetupRow(source: DashboardSourceCard, basePath?: string): string {
   const action = source.connection.action;
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
     const row = setupRow({
       label: source.label,
+      href: detailHref(source, basePath),
       blurb: setupBlurb(source),
       action: { label: 'Ask your agent', kind: 'none', sheet: sheetId },
     });
@@ -340,6 +341,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
     const link = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
+      href: detailHref(source, basePath),
       blurb: action.instructions.plain_intro,
       action: { label: action.label, kind: 'none', sheet: sheetId },
       ...(link === undefined ? {} : { blurbLink: link }),
@@ -357,6 +359,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
     if (connect) {
       const row = setupRow({
         label: source.label,
+      href: detailHref(source, basePath),
         blurb: setupBlurb(source),
         action: { label: action.label, kind: 'none', sheet: connect.sheetId },
       });
@@ -369,6 +372,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
   const link = action.kind === 'api_key' ? keyLocationLink(action.instructions) : undefined;
   return setupRow({
     label: source.label,
+      href: detailHref(source, basePath),
     blurb: setupBlurb(source),
     action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' },
     ...(link === undefined ? {} : { blurbLink: link }),

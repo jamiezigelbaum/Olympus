@@ -962,10 +962,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               rulesPresent: file.present,
             });
             if (dashboardUi?.params.view === 'dispositions') {
-              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite));
+              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite, dashboardUi.params.source_id));
             }
             if (url.pathname === '/dashboard/dispositions.json') return json(view);
             return html(renderSourceDispositionsHtml(view, {
+              selectedSourceId: url.searchParams.get('source_id') ?? undefined,
               csrfToken: request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined,
             }));
           } finally {

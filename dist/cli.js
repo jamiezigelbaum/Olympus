@@ -61946,6 +61946,9 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
       .picker-header p { color: var(--t3); }
       .picker-header strong { color: var(--t2); }
       .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
+      .source-dispositions[hidden] { display: none !important; }
+      .scope-back { margin: 0 0 12px; }
+      .finder-sidebar a.location { text-decoration: none; }
       .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
       .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
       .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
@@ -62503,8 +62506,15 @@ function mountDashboardController(options) {
       return;
     }
     const anchor = target.closest("a[href]");
-    if (!anchor)
+    if (!anchor) {
+      const row = target.closest("[data-dashboard-href]");
+      const modified2 = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+      if (row && !modified2 && !target.closest("button,input,select,textarea,label,form")) {
+        event.preventDefault();
+        options.navigate(row.dataset.dashboardHref);
+      }
       return;
+    }
     const fallback = target.closest("[data-authorization-fallback] a");
     if (fallback) {
       const form = fallback.closest('form[data-connect-kind="oauth"]');
@@ -63095,10 +63105,35 @@ function mountDispositionsController(options) {
       message(error2 instanceof Error ? error2.message : "Save failed.");
     }
   }
+  let activeScopeSource = root.querySelector("[data-scope-panel]:not([hidden])")?.dataset.scopePanel;
+  function showScopePanel(sourceId) {
+    const panels = Array.from(root.querySelectorAll("[data-scope-panel]"));
+    if (!panels.some((panel) => panel.dataset.scopePanel === sourceId))
+      return;
+    activeScopeSource = sourceId;
+    panels.forEach((panel) => {
+      panel.hidden = panel.dataset.scopePanel !== sourceId;
+    });
+  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const anchor = target.closest("a[href]");
+    const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+    if (anchor && !modified) {
+      if (anchor.dataset.scopeSwitch) {
+        event.preventDefault();
+        showScopePanel(anchor.dataset.scopeSwitch);
+        return;
+      }
+      const href = anchor.dataset.olympusNav || anchor.getAttribute("href") || "";
+      if (href.startsWith("/dashboard") && !href.startsWith("//")) {
+        event.preventDefault();
+        options.navigate(href);
+        return;
+      }
+    }
     if (scopeClick(target))
       return;
     const row = target.closest(".folder-row");
@@ -63251,6 +63286,8 @@ function mountDispositionsController(options) {
         root.innerHTML = result.body;
       dirty = false;
       scopeDrafts.clear();
+      if (activeScopeSource)
+        showScopePanel(activeScopeSource);
       signature = result.signature;
       appliedCanWrite = undefined;
       root.querySelectorAll("details").forEach((node) => {
@@ -63739,15 +63776,16 @@ function attentionRow(input) {
   }
   const name = href === undefined ? `<span class="name">${escapeHtml(input.label)}</span>` : `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>`;
   const go = href === undefined ? "" : `<a class="go" href="${escapeHtml(href)}" aria-label="${escapeHtml(`${input.label} details`)}">→</a>`;
-  return `<div class="${klass}">` + `<div class="grow">${name}${reason}${bar}</div>` + `${control}${go}` + `</div>`;
+  return `<div class="${klass}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `<div class="grow">${name}${reason}${bar}</div>` + `${control}${go}` + `</div>`;
 }
 function setupRow(input) {
+  const href = safeHref(input.href);
   const blurb = input.blurb.trim();
   const link = input.blurbLink === undefined ? "" : externalLink(input.blurbLink);
   const blurbText = blurb === "" ? "" : escapeHtml(blurb);
   const blurbBody = [blurbText, link].filter((part) => part !== "").join(" ");
   const blurbSpan = blurbBody === "" ? "" : `<span class="blurb">${blurbBody}</span>`;
-  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}">` + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}` + `<span class="name">${escapeHtml(input.label)}</span>` + `${blurbSpan}` + `${actionButton(input.action)}` + `</div>`;
+  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}` + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`) + `${blurbSpan}` + `${actionButton(input.action)}` + `</div>`;
 }
 function progressBar(input) {
   const percent = clampPercent2(input.percent);
@@ -66224,7 +66262,7 @@ function setupGroupOf(source, degraded) {
 function renderGroup(group, sources, degraded, basePath) {
   if (sources.length === 0)
     return "";
-  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source) : renderStateRow(group, source, degraded, basePath)).join(`
+  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)).join(`
 `);
   return `${sectionHeading2(group.heading, sources.length, group.attention)}
 ${rows}`;
@@ -66280,12 +66318,13 @@ ${connect.sheet}`;
     ...disconnect ? { secondaryAction: disconnect } : {}
   });
 }
-function renderSetupRow(source) {
+function renderSetupRow(source, basePath) {
   const action = source.connection.action;
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
     const row = setupRow({
       label: source.label,
+      href: detailHref2(source, basePath),
       blurb: setupBlurb(source),
       action: { label: "Ask your agent", kind: "none", sheet: sheetId }
     });
@@ -66304,6 +66343,7 @@ ${sheet}`;
     const link2 = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
+      href: detailHref2(source, basePath),
       blurb: action.instructions.plain_intro,
       action: { label: action.label, kind: "none", sheet: sheetId },
       ...link2 === undefined ? {} : { blurbLink: link2 }
@@ -66318,6 +66358,7 @@ ${sheet}`;
     if (connect) {
       const row = setupRow({
         label: source.label,
+        href: detailHref2(source, basePath),
         blurb: setupBlurb(source),
         action: { label: action.label, kind: "none", sheet: connect.sheetId }
       });
@@ -66328,6 +66369,7 @@ ${connect.sheet}`;
   const link = action.kind === "api_key" ? keyLocationLink(action.instructions) : undefined;
   return setupRow({
     label: source.label,
+    href: detailHref2(source, basePath),
     blurb: setupBlurb(source),
     action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" },
     ...link === undefined ? {} : { blurbLink: link }
@@ -68236,7 +68278,7 @@ function selectableDispositionStates(node, ancestorState) {
   return [...STATE_ORDER];
 }
 function renderSourceDispositionsHtml(view, options) {
-  const body = renderSourceDispositionsFragment(view);
+  const body = renderSourceDispositionsFragment(view, options?.selectedSourceId);
   const csrfToken = escapeScriptJson2(JSON.stringify(options?.csrfToken ?? ""));
   return `<!doctype html>
 <html lang="en">
@@ -68245,6 +68287,7 @@ function renderSourceDispositionsHtml(view, options) {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Olympus — Choose folders</title>
     <style>${DASHBOARD_THEME_CSS}
+${DASHBOARD_NAV_CSS}
 ${DISPOSITIONS_CSS}</style>
   </head>
   <body>
@@ -68253,10 +68296,13 @@ ${DISPOSITIONS_CSS}</style>
   </body>
 </html>`;
 }
-function renderSourceDispositionsFragment(view) {
+function renderSourceDispositionsFragment(view, selectedSourceId) {
+  const locations = view.folder_scopes ?? [];
+  const selected = locations.find((source) => source.source_id === selectedSourceId) ?? locations.find((source) => source.connected) ?? locations[0];
   const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
-  const sources = (view.folder_scopes ?? []).map(renderFolderScopeSource).join("") + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join("");
+  const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join("") + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join("");
   return `<main class="picker-page">
+      ${renderDashboardNav("home")}
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
@@ -68270,15 +68316,16 @@ function renderSourceDispositionsFragment(view) {
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
     </main>`;
 }
-function renderFolderScopeSource(source) {
+function renderFolderScopeSource(source, locations, selected) {
   const unavailable = !source.connected || Boolean(source.error);
-  return `<section class="source-dispositions">
+  return `<section class="source-dispositions" data-scope-panel="${escapeHtml2(source.source_id)}"${selected ? "" : " hidden"}>
+    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← Back to ${escapeHtml2(source.label)}</a></p>
     <form data-folder-scope-source="${escapeHtml2(source.source_id)}"
       data-connected="${source.connected}" data-account-generation="${escapeHtml2(source.account_generation ?? "")}"
       data-scope-revision="${escapeHtml2(source.scope_revision ?? "")}"
       data-scope-selections="${escapeHtml2(JSON.stringify(source.selections ?? []))}">
       <div class="finder-window">
-        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p><div class="location selected"><span class="folder-icon">◆</span><span>${escapeHtml2(source.label)}</span></div>
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${locations.map((location) => `<a class="location${location.source_id === source.source_id ? " selected" : ""}" href="/dashboard/dispositions?source_id=${encodeURIComponent(location.source_id)}" data-scope-switch="${escapeHtml2(location.source_id)}"${location.source_id === source.source_id ? ' aria-current="page"' : ""}><span class="folder-icon">◆</span><span>${escapeHtml2(location.label)}</span></a>`).join("")}
           <p class="scope-connection">${source.connected ? source.status === "approved" ? "Scope approved" : "Waiting for your selection" : "Disconnected"}</p>
         </aside>
         <section class="finder-main">
@@ -68311,8 +68358,8 @@ function renderFolderScopeSource(source) {
     </form>
   </section>`;
 }
-function renderSourceDispositionsControlUi(view, canWrite) {
-  const body = renderSourceDispositionsFragment(view);
+function renderSourceDispositionsControlUi(view, canWrite, selectedSourceId) {
+  const body = renderSourceDispositionsFragment(view, selectedSourceId);
   return {
     status: 200,
     title: "Olympus / Choose folders",
@@ -68504,6 +68551,7 @@ function escapeScriptJson2(value) {
 }
 var SOURCE_DISPOSITIONS_DRY_RUN_COMMAND = "bun run source-exclusions:purge -- --dry-run", SOURCE_DISPOSITIONS_PURGE_COMMAND = "bun run source-exclusions:purge -- --purge", SOURCE_DISPOSITIONS_STRIP_COMMAND = "bun run source-exclusions:purge -- --strip-metadata-only", STATE_ORDER, NOT_EDITABLE_BY_PATH_REASON, PICKER_STATE_LABELS;
 var init_source_dispositions = __esm(() => {
+  init_nav();
   init_atomic_file();
   init_source_disposition_tree();
   init_operation_error();
@@ -69027,11 +69075,12 @@ function createEmailSourceWorker(options = {}) {
               rulesPresent: file.present
             });
             if (dashboardUi?.params.view === "dispositions") {
-              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite));
+              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite, dashboardUi.params.source_id));
             }
             if (url.pathname === "/dashboard/dispositions.json")
               return json(view);
             return html(renderSourceDispositionsHtml(view, {
+              selectedSourceId: url.searchParams.get("source_id") ?? undefined,
               csrfToken: request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined
             }));
           } finally {

@@ -32,7 +32,7 @@ function fixture() {
       sovereigntyEngine: { config: { routes: {} } } as never, registryPath: join(dir, 'handles.json'), registryAdoptionIntervalMs: 0,
       ingestionDispositions: () => ({ rulesPath: rules, sources: [] }),
       fileSourceScopes: {
-        summaries: () => [{ source_id: SOURCE, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }],
+        summaries: () => [{ source_id: SOURCE, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }, { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }],
         async browse(input) { calls.browses.push(input); return browser; },
         async approveAndStart(input) { calls.approvals.push(input); return { ok: true, result: { approved: true } }; },
       },
@@ -89,6 +89,11 @@ test('native RPC reaches the same worker hooks without exposing auth or folder p
   const invoke = async (method: string, params: Record<string, unknown>, scopes = ['operator.write']) => {
     await methods.get(method)!({ params, client: { connect: { scopes } }, respond: (...args) => responses.push(args) });
   };
+  await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', source_id: 'dropbox.files' });
+  expect(responses.at(-1)?.[0]).toBe(true);
+  const picker = responses.at(-1)?.[1] as { body: string };
+  expect(picker.body).toContain('data-scope-panel="dropbox.files">');
+  expect(picker.body).toContain('data-scope-panel="google_drive.docs" hidden>');
   await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', source_id: SOURCE });
   expect(responses.at(-1)?.[0]).toBe(true); expect(f.calls.browses).toHaveLength(0);
   await invoke(OLYMPUS_DASHBOARD_READ_METHOD, { view: 'dispositions', action: 'browse_folder_scope', source_id: SOURCE, parent_key: 'private-parent' }, ['operator.read']);

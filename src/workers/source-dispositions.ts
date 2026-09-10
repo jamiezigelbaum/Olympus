@@ -1,3 +1,4 @@
+import { renderDashboardNav, DASHBOARD_NAV_CSS } from './dashboard/nav.ts';
 import { DISPOSITIONS_CSS } from './dashboard/static-styles.ts';
 export { DISPOSITIONS_CSS };
 // The ingestion-dispositions picker: the page the owner chooses folders on, and
@@ -494,9 +495,9 @@ export function selectableDispositionStates(
 
 export function renderSourceDispositionsHtml(
   view: SourceDispositionsView,
-  options?: { csrfToken?: string | undefined },
+  options?: { csrfToken?: string | undefined; selectedSourceId?: string | undefined },
 ): string {
-  const body = renderSourceDispositionsFragment(view);
+  const body = renderSourceDispositionsFragment(view, options?.selectedSourceId);
   const csrfToken = escapeScriptJson(JSON.stringify(options?.csrfToken ?? ''));
   return `<!doctype html>
 <html lang="en">
@@ -504,7 +505,7 @@ export function renderSourceDispositionsHtml(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Olympus — Choose folders</title>
-    <style>${DASHBOARD_THEME_CSS}\n${DISPOSITIONS_CSS}</style>
+    <style>${DASHBOARD_THEME_CSS}\n${DASHBOARD_NAV_CSS}\n${DISPOSITIONS_CSS}</style>
   </head>
   <body>
     <div data-olympus-dispositions-root>${body}</div>
@@ -513,11 +514,15 @@ export function renderSourceDispositionsHtml(
 </html>`;
 }
 
-export function renderSourceDispositionsFragment(view: SourceDispositionsView): string {
+export function renderSourceDispositionsFragment(view: SourceDispositionsView, selectedSourceId?: string): string {
+  const locations = view.folder_scopes ?? [];
+  const selected = locations.find((source) => source.source_id === selectedSourceId)
+    ?? locations.find((source) => source.connected) ?? locations[0];
   const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
-  const sources = (view.folder_scopes ?? []).map(renderFolderScopeSource).join('')
+  const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join('')
     + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join('');
   return `<main class="picker-page">
+      ${renderDashboardNav('home')}
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
@@ -532,15 +537,16 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView): 
     </main>`;
 }
 
-function renderFolderScopeSource(source: SourceFolderScopeSummary): string {
+function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: readonly SourceFolderScopeSummary[], selected: boolean): string {
   const unavailable = !source.connected || Boolean(source.error);
-  return `<section class="source-dispositions">
+  return `<section class="source-dispositions" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
+    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← Back to ${escapeHtml(source.label)}</a></p>
     <form data-folder-scope-source="${escapeHtml(source.source_id)}"
       data-connected="${source.connected}" data-account-generation="${escapeHtml(source.account_generation ?? '')}"
       data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
       data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}">
       <div class="finder-window">
-        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p><div class="location selected"><span class="folder-icon">◆</span><span>${escapeHtml(source.label)}</span></div>
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${locations.map((location) => `<a class="location${location.source_id === source.source_id ? ' selected' : ''}" href="/dashboard/dispositions?source_id=${encodeURIComponent(location.source_id)}" data-scope-switch="${escapeHtml(location.source_id)}"${location.source_id === source.source_id ? ' aria-current="page"' : ''}><span class="folder-icon">◆</span><span>${escapeHtml(location.label)}</span></a>`).join('')}
           <p class="scope-connection">${source.connected ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection' : 'Disconnected'}</p>
         </aside>
         <section class="finder-main">
@@ -579,8 +585,9 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary): string {
 export function renderSourceDispositionsControlUi(
   view: SourceDispositionsView,
   canWrite: boolean,
+  selectedSourceId?: string,
 ): OlympusDashboardReadResult {
-  const body = renderSourceDispositionsFragment(view);
+  const body = renderSourceDispositionsFragment(view, selectedSourceId);
   return {
     status: 200,
     title: 'Olympus / Choose folders',

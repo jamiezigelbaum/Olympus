@@ -483,8 +483,15 @@ function mountDashboardController(options) {
       return;
     }
     const anchor = target.closest("a[href]");
-    if (!anchor)
+    if (!anchor) {
+      const row = target.closest("[data-dashboard-href]");
+      const modified2 = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+      if (row && !modified2 && !target.closest("button,input,select,textarea,label,form")) {
+        event.preventDefault();
+        options.navigate(row.dataset.dashboardHref);
+      }
       return;
+    }
     const fallback = target.closest("[data-authorization-fallback] a");
     if (fallback) {
       const form = fallback.closest('form[data-connect-kind="oauth"]');
@@ -1075,10 +1082,35 @@ function mountDispositionsController(options) {
       message(error instanceof Error ? error.message : "Save failed.");
     }
   }
+  let activeScopeSource = root.querySelector("[data-scope-panel]:not([hidden])")?.dataset.scopePanel;
+  function showScopePanel(sourceId) {
+    const panels = Array.from(root.querySelectorAll("[data-scope-panel]"));
+    if (!panels.some((panel) => panel.dataset.scopePanel === sourceId))
+      return;
+    activeScopeSource = sourceId;
+    panels.forEach((panel) => {
+      panel.hidden = panel.dataset.scopePanel !== sourceId;
+    });
+  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const anchor = target.closest("a[href]");
+    const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+    if (anchor && !modified) {
+      if (anchor.dataset.scopeSwitch) {
+        event.preventDefault();
+        showScopePanel(anchor.dataset.scopeSwitch);
+        return;
+      }
+      const href = anchor.dataset.olympusNav || anchor.getAttribute("href") || "";
+      if (href.startsWith("/dashboard") && !href.startsWith("//")) {
+        event.preventDefault();
+        options.navigate(href);
+        return;
+      }
+    }
     if (scopeClick(target))
       return;
     const row = target.closest(".folder-row");
@@ -1231,6 +1263,8 @@ function mountDispositionsController(options) {
         root.innerHTML = result.body;
       dirty = false;
       scopeDrafts.clear();
+      if (activeScopeSource)
+        showScopePanel(activeScopeSource);
       signature = result.signature;
       appliedCanWrite = undefined;
       root.querySelectorAll("details").forEach((node) => {
@@ -1759,6 +1793,9 @@ var DISPOSITIONS_CSS = `
       .picker-header p { color: var(--t3); }
       .picker-header strong { color: var(--t2); }
       .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
+      .source-dispositions[hidden] { display: none !important; }
+      .scope-back { margin: 0 0 12px; }
+      .finder-sidebar a.location { text-decoration: none; }
       .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
       .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
       .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }

@@ -549,7 +549,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     const anchor = target.closest<HTMLAnchorElement>('a[href]');
-    if (!anchor) return;
+    if (!anchor) {
+      const row = target.closest<HTMLElement>('[data-dashboard-href]');
+      const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+      if (row && !modified && !target.closest('button,input,select,textarea,label,form')) {
+        event.preventDefault(); options.navigate(row.dataset.dashboardHref!);
+      }
+      return;
+    }
     const fallback = target.closest<HTMLAnchorElement>('[data-authorization-fallback] a');
     if (fallback) {
       const form = fallback.closest<HTMLFormElement>('form[data-connect-kind="oauth"]');
@@ -1062,9 +1069,28 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     }
   }
 
+  let activeScopeSource = root.querySelector<HTMLElement>('[data-scope-panel]:not([hidden])')?.dataset.scopePanel;
+  function showScopePanel(sourceId: string): void {
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[data-scope-panel]'));
+    if (!panels.some((panel) => panel.dataset.scopePanel === sourceId)) return;
+    activeScopeSource = sourceId;
+    panels.forEach((panel) => { panel.hidden = panel.dataset.scopePanel !== sourceId; });
+  }
+
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const anchor = target.closest<HTMLAnchorElement>('a[href]');
+    const modified = event instanceof MouseEvent && (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+    if (anchor && !modified) {
+      if (anchor.dataset.scopeSwitch) {
+        event.preventDefault(); showScopePanel(anchor.dataset.scopeSwitch); return;
+      }
+      const href = anchor.dataset.olympusNav || anchor.getAttribute('href') || '';
+      if (href.startsWith('/dashboard') && !href.startsWith('//')) {
+        event.preventDefault(); options.navigate(href); return;
+      }
+    }
     if (scopeClick(target)) return;
     const row = target.closest<HTMLElement>('.folder-row');
     if (row) {
@@ -1200,6 +1226,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       else root.innerHTML = result.body;
       dirty = false;
       scopeDrafts.clear();
+      if (activeScopeSource) showScopePanel(activeScopeSource);
       signature = result.signature;
       appliedCanWrite = undefined;
       root.querySelectorAll<HTMLDetailsElement>('details').forEach((node) => {

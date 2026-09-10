@@ -511,7 +511,7 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
   const go = href === undefined
     ? ''
     : `<a class="go" href="${escapeHtml(href)}" aria-label="${escapeHtml(`${input.label} details`)}">→</a>`;
-  return `<div class="${klass}">`
+  return `<div class="${klass}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
     + `<div class="grow">${name}${reason}${bar}</div>`
     + `${control}${go}`
     + `</div>`;
@@ -519,6 +519,7 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
 
 export interface DashboardSetupRowInput {
   label: string;
+  href?: string;
   /** One plain sentence about what connecting this source does. */
   blurb: string;
   action: DashboardActionInput;
@@ -530,6 +531,7 @@ export interface DashboardSetupRowInput {
 }
 
 export function setupRow(input: DashboardSetupRowInput): string {
+  const href = safeHref(input.href);
   // No blurb means no empty span and no empty grid column: the row closes up
   // (.setrow.noblurb) rather than holding a visible gap for absent copy.
   const blurb = input.blurb.trim();
@@ -542,9 +544,9 @@ export function setupRow(input: DashboardSetupRowInput): string {
   const blurbSpan = blurbBody === '' ? '' : `<span class="blurb">${blurbBody}</span>`;
   // The column closes up only when NOTHING is in it: a row whose whole blurb is
   // the key-location link still needs its column.
-  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}">`
+  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
     + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}`
-    + `<span class="name">${escapeHtml(input.label)}</span>`
+    + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`)
     + `${blurbSpan}`
     + `${actionButton(input.action)}`
     + `</div>`;
