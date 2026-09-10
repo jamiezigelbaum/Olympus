@@ -1,3 +1,4 @@
+import { htmlHasSelector } from './helpers/html-selector.ts';
 import { describe, expect, test } from 'bun:test';
 import { renderDashboardDetailPage } from '../src/workers/dashboard/pages/detail.ts';
 import type {
@@ -179,7 +180,7 @@ describe('dashboard detail connection action', () => {
     expect(html).toContain('class="attncard banner"');
     expect(html).toContain('Press Reauthenticate and approve Olympus on Google Drive&#39;s own consent page.');
     expect(html).toContain('(reauth required) == connected');
-    expect(html).toContain('data-connect-kind="oauth"');
+    expect(htmlHasSelector(html, 'form[data-connect-kind="oauth"]')).toBe(true);
     expect(html).toContain('<input type="hidden" name="source" value="google-drive">');
     expect(html).toContain('>Reauthenticate</button>');
   });
@@ -195,7 +196,7 @@ describe('dashboard detail connection action', () => {
       },
     });
 
-    expect(html).not.toContain('data-connect-kind="oauth"');
+    expect(htmlHasSelector(html, 'form[data-connect-kind="oauth"]')).toBe(false);
     expect(html).toContain('<a class="btn" href="/dashboard?setup">Reauthenticate</a>');
     expect(html).toContain('needs the worker token');
   });

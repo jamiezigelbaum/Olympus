@@ -13,8 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Secure search remains lexical-only in `private-cloud-only`');
-    expect(docs).toContain('local presets configure local secure embeddings');
+    expect(docs).toContain('secure search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Existing lexical-only installations require an approved');
+    expect(docs).toContain('Local presets configure local secure embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -132,7 +133,7 @@ describe('first-run docs', () => {
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(posture).toContain('Secure content goes only to Venice');
     expect(posture).toContain('public and ordinary-private search indexing');
-    expect(posture).toContain('keyword search');
+    expect(posture).toContain('Venice Private embeddings when no local provider is configured');
     expect(posture).toContain('secure content never goes to Gemini');
     expect(posture).toContain('“Only” describes secure-data handling');
   });
