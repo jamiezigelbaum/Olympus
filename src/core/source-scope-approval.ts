@@ -351,7 +351,8 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
   if (
     typeof record.source_id !== 'string' || !isFileSourceScopeId(record.source_id)
     || typeof record.account_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.account_generation)
-    || typeof record.revision !== 'string' || !/^[a-f0-9-]{36}$/.test(record.revision)
+    || typeof record.revision !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision)
     || record.status !== 'approved'
     || typeof record.whole_account !== 'boolean'
     || typeof record.approved_at !== 'string' || !Number.isFinite(Date.parse(record.approved_at))

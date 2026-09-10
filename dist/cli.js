@@ -74744,7 +74744,7 @@ function parseApproval(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("approval");
   const record3 = value;
-  if (typeof record3.source_id !== "string" || !isFileSourceScopeId(record3.source_id) || typeof record3.account_generation !== "string" || !/^[a-f0-9]{64}$/.test(record3.account_generation) || typeof record3.revision !== "string" || !/^[a-f0-9-]{36}$/.test(record3.revision) || record3.status !== "approved" || typeof record3.whole_account !== "boolean" || typeof record3.approved_at !== "string" || !Number.isFinite(Date.parse(record3.approved_at)) || !Array.isArray(record3.selections))
+  if (typeof record3.source_id !== "string" || !isFileSourceScopeId(record3.source_id) || typeof record3.account_generation !== "string" || !/^[a-f0-9]{64}$/.test(record3.account_generation) || typeof record3.revision !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record3.revision) || record3.status !== "approved" || typeof record3.whole_account !== "boolean" || typeof record3.approved_at !== "string" || !Number.isFinite(Date.parse(record3.approved_at)) || !Array.isArray(record3.selections))
     throw new Error("approval");
   const selections = normalizeSelections(record3.selections.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))

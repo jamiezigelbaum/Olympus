@@ -117,6 +117,17 @@ describe('file-source scope approval', () => {
       content: { default_extractor_kind: 'text', default_extractor_version: '1', plan_limit: 10, batch_size: 5 },
     };
     expect(fileSourceScopeDropboxPolicy(base, snapshot).roots).toEqual([]);
+
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      approvals: [{
+        source_id: 'dropbox.files', account_generation: 'a'.repeat(64), revision: 'a'.repeat(36),
+        status: 'approved', selections: [{ key: '/work', state: 'ingest' }], whole_account: false,
+        approved_at: '2026-09-10T10:00:00.000Z',
+      }],
+    }));
+    expect(readFileSourceScopeApproval({ sourceId: 'dropbox.files', registry: registry(), statePath }))
+      .toMatchObject({ status: 'scope_pending', reason: 'malformed' });
   });
 
   test('authority fails closed when the registry is unreadable', () => {
