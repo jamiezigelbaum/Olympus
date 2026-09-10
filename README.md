@@ -98,7 +98,8 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **secure-data handling**: Venice answers secure
-questions and secure search uses local keywords. Gemini still supplies
+questions and its approved Private embedding model provides secure semantic
+search when no local provider is configured. Gemini still supplies
 embeddings for public and ordinary-private content. Secure content never goes
 to Gemini.
 

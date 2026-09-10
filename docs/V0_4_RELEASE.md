@@ -27,6 +27,18 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-10 — Secure embedding fallback.** Use a catalog-approved Venice
+  Private embedding model when no local embedding provider is configured.
+  The proposed default is Qwen3 Embedding 8B, 4096 dimensions; the live
+  catalog quotes $0.0125 per million input tokens. This supersedes the
+  private-cloud-only keyword-only limit below. Existing installations and
+  vectors remain unchanged until explicit activation with cost approval and
+  an embedding-ledger receipt. Local-only secure data stays local; Gemini
+  remains restricted to non-secure embeddings. Provider readiness must be
+  established before source Connect. The implementation passes typechecking
+  and 209 focused runtime/store tests. Independent review, artifact delivery,
+  and live activation proof remain pending.
+
 - **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
   setup and worker/Gateway activation before optional dashboard source choice.
   No mailbox is required for base-worker health. Preserve the approved
@@ -137,10 +149,9 @@ testers have exercised the normal product journey without custom engineering.
   outside the release claim. The normal `private-cloud-only` route uses Venice
   through its ordinary API with a model that the live Venice catalog classifies
   as Private or plain TEE. Slice 4 adds no E2EE-specific mechanism. In this
-  posture, secure corpora remain lexical-only; the local presets configure
-  local secure embeddings. Adding a secure cloud embedding lane is deferred
-  and is not a Slice 4 gate. This accepted product limit must be visible in
-  setup, status, and the capability matrix.
+  posture, secure corpora originally remained lexical-only. The 2026-09-10
+  decision above supersedes that embedding limitation; the E2EE boundary
+  remains unchanged.
 - **2026-08-31 — Slice 4 beta shape.** The beta cohort is fluid; participant
   count is not a release constraint. Testers use whichever supported Mac or
   Linux machine they already have; Olympus does not assign them an operating

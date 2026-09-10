@@ -584,14 +584,15 @@ before the options name it:
 >
 > 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
 >    not run local models. Secure content goes only to Venice, on its
->    Private model path — currently `kimi-k3`. Requires: a
+>    Private model path — `kimi-k3` for answers and a separately approved
+>    private embedding model for secure search. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
 >    available) for public and ordinary-private search indexing. Secure search
->    stays on this machine as keyword search; secure content never goes to
->    Gemini. “Only” describes secure-data handling, not all Olympus traffic.
+>    uses Venice Private embeddings when no local provider is configured;
+>    secure content never goes to Gemini. “Only” describes secure-data handling, not all Olympus traffic.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
->    for secure answers, on that provider's word rather than on
+>    for secure answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
 > 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
@@ -672,9 +673,11 @@ report "your keys are set up" after the fact.
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
 before this step. It separates Gemini non-secure embeddings, local secure
-embeddings, Venice secure reasoning, and private-cloud-only's keyword search.
+embeddings, Venice secure reasoning, and the approved Venice secure embedding
+fallback when no local provider is configured.
 The worker uses registered dimensions for shipped models when there is no
-override (Gemini Embedding 2: 3072; registered local embedding model: 2560).
+override (Gemini Embedding 2: 3072; registered local embedding model: 2560;
+Venice Qwen3 Embedding 8B: 4096).
 Do not add a dimension flag or edit `worker.env` for those defaults. An unknown
 model still needs a verified explicit dimension; report unsupported custom
 configuration rather than inventing flags or declaring readiness from key
@@ -1112,10 +1115,12 @@ Step 3, then prove the worker consumes that wiring with the existing
   embedding requirement.
 - **Venice — only when the posture uses it.** `local-first` uses Venice as
   the approved secure-answer escalation; `private-cloud-only` uses Venice for
-  secure answers. `local-only` and `no-sensitive` do not require Venice, so do
-  not ask for or block on a Venice key for those postures. Venice is never a
-  secure embedding provider. In `private-cloud-only`, secure search remains
-  local keyword search; do not invent a secure embedding prerequisite.
+  secure answers and, without a local provider, secure embeddings. Verify the
+  embedding model separately: Private catalog classification, endpoint
+  readiness, matching dimensions, and approved cost. `local-only` and
+  `no-sensitive` do not require Venice, so do not ask for or block on a Venice
+  key for those postures. Preserve existing vectors and obtain activation or
+  backfill approval before changing a saved embedding profile.
 - **Worker consumer proof.** The existing Doctor output must show the relevant
   `sovereignty_prerequisites`, `worker_credential_lanes`, `source_index_status`,
   and `email_worker` checks green, and `olympus worker status` must show the
@@ -1133,7 +1138,8 @@ the observed facts:
 
 > Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
 > for public and ordinary-private embeddings: `<verified or still open>`.
-> Venice secure-answer wiring: `<verified, not required for this posture, or
+> Venice secure-answer and secure-embedding wiring, reported separately:
+> `<verified, not required for this posture, or
 > still open>`. Worker consumer checks: `<green or name the open check>`. No
 > source is connected yet, and I will wait to invite Connect until every
 > required provider check is green.

@@ -40,6 +40,9 @@ function isSecureTrustTier(trustTier) {
 }
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
+    if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
+      throw new Error("secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.");
+    }
     const profile = {
       trustDomain: input.trustDomain,
       placement: input.placement ?? "local_private",
@@ -114,9 +117,6 @@ function assertSecureLocalStorageProfile(profile) {
   }
   if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
     throw new Error("secure_local vector search must use a local SQLite-family vector lane.");
-  }
-  if (profile.embeddingBackend === "cloud") {
-    throw new Error("secure_local corpora cannot use cloud embeddings.");
   }
   if (profile.cloudQueryEligible) {
     throw new Error("secure_local corpora cannot be directly cloud-query eligible.");
@@ -222,9 +222,6 @@ function assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile) {
   }
   if (storageProfile.embeddingBackend === "local" && embeddingPolicy === "cloud_allowed") {
     throw new Error("Local embedding storage cannot use an always-cloud corpus embedding policy.");
-  }
-  if (storageProfile.trustDomain === "secure_local" && embeddingPolicy.startsWith("cloud_")) {
-    throw new Error("secure_local corpora cannot use cloud embedding policies.");
   }
 }
 var SOURCE_INDEX_ACTIVATION_MODES;
@@ -3250,10 +3247,25 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       secretRef: firstExistingSecretRef(env, ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "GEMINI_API_KEY"]) ?? "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
       purpose: "embedding"
     };
+  } else if (embeddingProvider === "venice") {
+    profiles["venice-source-embedding"] = {
+      provider: "venice",
+      trust: "encrypted_cloud",
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || "https://api.venice.ai/api/v1",
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || "text-embedding-qwen3-8b",
+      secretRef: firstExistingSecretRef(env, [
+        "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+        "VENICE_API_KEY",
+        "API_KEY_VENICE",
+        "Venice-API-Key"
+      ]) ?? "env:OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+      purpose: "embedding"
+    };
   }
   const defaultRoute = cloudEnabled ? ["cloud-openclaw-infer", "local-source-answer"] : ["local-source-answer"];
   const internalEmbeddingProfile = embeddingProvider === "google-gemini" ? "gemini-source-embedding" : embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
-  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
+  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "venice" ? "venice-source-embedding" : null;
+  const secureEmbeddingTrust = embeddingProvider === "venice" ? ["encrypted_cloud"] : ["local"];
   const secureAnalystMembers = profiles["venice-private"] ? ["local-source-answer", "venice-private"] : ["local-source-answer"];
   return {
     schemaVersion: SOVEREIGNTY_SCHEMA_VERSION,
@@ -3267,7 +3279,7 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       trustDomains: {
         secure_local: {
           minimumExecutionTrust: "local",
-          allowedEmbeddingTrust: ["local"],
+          allowedEmbeddingTrust: secureEmbeddingTrust,
           embeddingProfile: secureEmbeddingProfile,
           allowCloudQuery: false,
           activationMode: secureEmbeddingProfile ? "hybrid_shadow" : "lexical_only",
@@ -3468,8 +3480,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (policy.allowCloudQuery) {
       throw new OperationError("config_error", "secure_local retrieval cannot allow cloud query.");
     }
-    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local")) {
-      throw new OperationError("config_error", "secure_local embeddings may only use local trust in v1.", "encrypted_cloud embedding remains disallowed until a provider-specific approval exists.");
+    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local" && trust !== "encrypted_cloud")) {
+      throw new OperationError("config_error", "secure_local embeddings may use local or approved encrypted_cloud trust.", "Use a local profile or a Venice Private embedding profile; standard cloud remains disallowed.");
     }
   }
   if (policy.embeddingProfile) {
@@ -3477,8 +3489,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError("config_error", `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
-    if (domain === "secure_local" && resolved.profile.trust !== "local") {
-      throw new OperationError("config_error", "secure_local is never cloud-embedded.", "Use a local embedding profile or leave secure_local lexical/metadata-only.");
+    if (domain === "secure_local" && (resolved.profile.trust !== "local" && !(resolved.profile.trust === "encrypted_cloud" && resolved.profile.provider === "venice"))) {
+      throw new OperationError("config_error", "secure_local cloud embeddings require a Venice profile.", "Use a local embedding profile or an approved Venice Private embedding profile.");
     }
   }
 }
@@ -7421,6 +7433,11 @@ var init_embedding_identity = __esm(() => {
       providerKind: "google-gemini",
       epochProviderToken: "google-gemini",
       dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
     }
   ];
   CANONICAL_EMBEDDING_IDENTITIES = [
@@ -7435,6 +7452,12 @@ var init_embedding_identity = __esm(() => {
       modelId: "gemini-embedding-2",
       backend: "cloud",
       dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
     })
   ];
 });
@@ -8158,6 +8181,7 @@ var init_connector3 = __esm(() => {
 
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
+  init_embeddings();
   init_connector3();
   init_provider_client();
 });
@@ -8605,6 +8629,7 @@ var init_gmail_live_control = __esm(() => {
 // src/workers/google-connectors/gmail-live-sync.ts
 var init_gmail_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_gmail();
   init_gmail_live_control();
@@ -8622,6 +8647,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_drive();
   init_drive_live_control();

@@ -1,7 +1,7 @@
 # Sovereignty Configuration
 
 Status: active
-Updated: 2026-09-05
+Updated: 2026-09-10
 
 ## Agent-led model setup for the v0.4 beta
 
@@ -12,7 +12,8 @@ sourcing, existing-install safety, and restart procedures.
 
 **Shipped model defaults:** the worker uses Olympus's registered dimensions
 when no dimension override is supplied: Gemini Embedding 2 uses 3072 and the
-registered local `secure-local-qwen3-embed` model uses 2560. A fresh install
+registered local `secure-local-qwen3-embed` model uses 2560. The Venice
+`text-embedding-qwen3-8b` model uses 4096. A fresh install
 using those models needs no dimension flag or generated-file edit. Explicit
 settings retain precedence and invalid values still refuse startup.
 
@@ -37,13 +38,14 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Non-secure embeddings | Secure search | Secure answers | You supply |
 |---|---|---|---|---|
-| `private-cloud-only` — recommended after you confirm you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
+| `private-cloud-only` — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
 | `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
 | `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
 | `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key |
 
 “Private cloud only” describes **secure-data handling**: secure answers use
-Venice, and secure search is local keyword search. It does not route all
+Venice, and secure semantic search uses a separately configured Venice Private
+embedding model when no local provider is configured. It does not route all
 Olympus traffic through Venice; Gemini serves public and ordinary-private
 embeddings. Explain that distinction before asking for either provider key.
 
@@ -53,10 +55,20 @@ The ordinary answer path uses the host's configured inference route by default.
 Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
 
 Secure content never goes to Gemini. The private-cloud-only preset does not
-require a GPU or a local embedding server: its secure search stays lexical.
-Local presets support local secure embeddings; do not describe every v0.4
-preset as lexical-only. Venice E2EE integration and cloud secure embeddings
-are outside this release.
+require a GPU or a local embedding server. Local presets retain local secure
+embeddings; an unavailable local server does not silently change the vector
+model. Venice E2EE integration remains outside this release. Existing saved
+configurations are preserved: a previously lexical-only install needs explicit
+activation of its new embedding profile and a bounded backfill.
+
+The proposed Venice default is Qwen3 Embedding 8B, 4096 dimensions. Verify its
+current Private classification and price in the
+[Venice embedding catalog](https://api.venice.ai/api/v1/models?type=embedding).
+On 2026-09-10 the catalog quoted $0.0125 per million input tokens (1.25 cents);
+query embeddings also consume API usage. State the estimated cost and obtain
+approval before activation or backfill, then record the embedding-ledger entry.
+Preserve existing Gemini and local vectors. A key accepted for answers is not
+proof that the embedding endpoint, account balance, or dimensions work.
 
 ### Give your agent this prompt
 
@@ -423,8 +435,8 @@ Hard invariants remain enforced outside user control:
   chat fetch, and residual non-cooperative orphans are counted content-free
 - consecutive member failures open a worker-local cooldown breaker; skipped
   members are recorded in the analyst-leg trace without source content
-- secure data is never cloud-embedded; encrypted-cloud embedding is still
-  disallowed in v1
+- secure embeddings use loopback local providers or an explicitly selected,
+  catalog-approved Venice Private provider; other cloud providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
 

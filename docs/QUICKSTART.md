@@ -42,7 +42,7 @@ The preset prerequisites are:
 |---|---|
 | `local-first` | Gemini key for non-secure embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
 | `local-only` | Gemini key for non-secure embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers. Secure search is local keyword search, with no secure embedding model or local server required. |
+| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
 | `no-sensitive` | Gemini key for non-secure embeddings. Secure content is unavailable to answering. |
 
 A local runtime means a server actually answering at the effective policy's
@@ -202,12 +202,13 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   In `private-cloud-only`, secure answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. “Only” describes
   secure-data handling: Gemini still handles public and ordinary-private
-  embeddings, while secure search stays on this machine as keyword search.
+  embeddings, while secure search uses an approved Venice Private embedding model.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
-  release claim. Secure search remains lexical-only in `private-cloud-only`;
-  local presets configure local secure embeddings. Olympus never falls back
+  release claim. Existing lexical-only installations require an approved
+  embedding activation/backfill; preserve their current vectors and settings.
+  Local presets configure local secure embeddings. Olympus never falls back
   to an ordinary cloud embedding provider for secure data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
   sees secure data.
