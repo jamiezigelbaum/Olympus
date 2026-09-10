@@ -61599,7 +61599,30 @@ function mountDashboardController(options) {
     link.textContent = "If a new tab didn't open, open it here";
     slot.appendChild(link);
   }
+  function nativeExternalLinkPoster() {
+    try {
+      const handler = window.webkit?.messageHandlers?.openclawLink;
+      if (!handler || typeof handler.postMessage !== "function")
+        return;
+      return handler.postMessage.bind(handler);
+    } catch {
+      return;
+    }
+  }
+  function openAuthorizationExternally(url) {
+    const postMessage = nativeExternalLinkPoster();
+    if (!postMessage)
+      return false;
+    try {
+      postMessage({ type: "open-link", url: new URL(url).href, target: "external" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   function openAuthorizationTab() {
+    if (nativeExternalLinkPoster())
+      return null;
     let tab = null;
     try {
       tab = window.open("", "_blank");
@@ -61758,6 +61781,8 @@ function mountDashboardController(options) {
         if (authorizationTab) {
           authorizationTab.location.href = authorizationUrl;
           say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus.");
+        } else if (openAuthorizationExternally(authorizationUrl)) {
+          say(form, "Authorization opened in your default browser. Approve it there, then come back to Olympus.");
         } else {
           say(form, "Open the authorization page to continue.");
           showAuthorizationFallback(form, authorizationUrl);
