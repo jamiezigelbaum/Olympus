@@ -107,7 +107,10 @@ import {
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   isTelegramMessagesCorpusId,
 } from '../telegram-messages/index.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import type { SourceScheduler, SourceSchedulerSource } from '../source-scheduler.ts';
 import type { SovereigntyEngine } from '../../core/sovereignty.ts';
 import type {
@@ -2240,7 +2243,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(searchRequest.filters ? { filters: searchRequest.filters } : {}),
               ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
               ...(connectorStoreEmbeddingProvider
-                && (connectorStore.trustDomain !== 'secure_local' || connectorStoreEmbeddingProvider.backend === 'local')
+                && (connectorStore.trustDomain !== 'secure_local'
+                  || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
                 ? { embeddingProvider: connectorStoreEmbeddingProvider }
                 : {}),
             });

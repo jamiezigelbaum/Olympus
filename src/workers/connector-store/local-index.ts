@@ -85,6 +85,7 @@ import {
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
+  isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -6071,7 +6072,9 @@ export class LocalConnectorStore {
       model.dimension,
       model.backend,
       model.epochId,
-      Number(this.trustDomain !== 'secure_local' && model.backend === 'cloud'),
+      Number(model.backend === 'cloud' && (
+        this.trustDomain !== 'secure_local' || model.provider === 'venice'
+      )),
       recordedAt,
     );
   }
@@ -6994,7 +6997,7 @@ export function createConnectorStoreCorpusAdapter(
     let semanticSkippedReason: string | undefined;
     const useHybrid = options.retrievalMode ?? (embeddingProvider ? 'hybrid' : 'keyword');
     if (embeddingProvider && useHybrid === 'hybrid') {
-      if (store.trustDomain === 'secure_local' && embeddingProvider.backend !== 'local') {
+      if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
       } else if (!store.hasEmbeddings(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
@@ -7078,7 +7081,7 @@ export function createConnectorStoreCorpusAdapter(
     if (!embeddingProvider) {
       return { servable: false, reason: 'embedding_provider_unavailable' };
     }
-    if (store.trustDomain === 'secure_local' && embeddingProvider.backend !== 'local') {
+    if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
       return {
         servable: false,
         reason: 'embedding_provider_not_allowed',
@@ -8276,7 +8279,7 @@ function assertConnectorStoreEmbeddingProvider(
   trustDomain: SourceTrustDomain,
   provider: SourceEmbeddingProvider,
 ): void {
-  assertConnectorStoreEmbeddingBackend(trustDomain, provider.backend);
+  assertConnectorStoreEmbeddingBackend(trustDomain, provider);
   // A provider that has not been told its width cannot take part in an
   // authority-fenced lane at all: the fence compares the stored dimension
   // against this one BEFORE the first embed, so a provider that discovers its
@@ -8295,12 +8298,11 @@ function assertConnectorStoreEmbeddingProvider(
 // Backend half of the trust rule used by the normal computed-vector lane.
 function assertConnectorStoreEmbeddingBackend(
   trustDomain: SourceTrustDomain,
-  backend: SourceEmbeddingBackend,
+  provider: SourceEmbeddingProvider,
 ): void {
-  if (trustDomain === 'secure_local' && backend !== 'local') {
+  if (trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(provider)) {
     throw new Error(
-      'Connector store secure_local embeddings must use a local/private embedding provider '
-      + '(secure_local chunks are never cloud-embedding eligible).',
+      'Connector store secure_local embeddings must use a local/private provider or the approved Venice embedding lane.',
     );
   }
 }

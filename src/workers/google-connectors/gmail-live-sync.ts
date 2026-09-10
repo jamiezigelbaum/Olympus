@@ -26,7 +26,10 @@ import {
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
 import {
   GMAIL_PROVIDER,
@@ -182,8 +185,8 @@ export function createGmailConnectorStoreSyncHandler(
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
-  if (options.secureEmbeddingProvider && options.secureEmbeddingProvider.backend !== 'local') {
-    throw new Error('Gmail secure_local embeddings require a local/private embedding provider.');
+  if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
+    throw new Error('Gmail secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
   const classification = gmailConnectorStoreClassification(
     options.sensitivityMap ?? loadGoogleSensitivityMap(env),

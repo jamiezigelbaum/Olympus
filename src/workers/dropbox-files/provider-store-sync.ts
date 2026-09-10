@@ -10,7 +10,10 @@ import type {
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import {
@@ -96,8 +99,8 @@ export function createDropboxProviderStoreSyncHandler(
   options: DropboxProviderStoreSyncHandlerOptions,
 ): DropboxProviderStoreSyncHandler {
   const account = required(options.account, 'Dropbox connector-store account');
-  if (options.embeddingProvider && options.embeddingProvider.backend !== 'local') {
-    throw new Error('Dropbox secure_local embeddings require a local/private embedding provider.');
+  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
+    throw new Error('Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
 
   const connectorIdForScope = (approvedScopeKey: string): string =>

@@ -39,6 +39,34 @@ describe('canonical source-worker server configuration', () => {
     });
   });
 
+  test('builds the selectable Venice Private embedding provider with its canonical identity', () => {
+    const provider = createSourceIndexEmbeddingProviderFromEnv({
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'venice',
+      OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'fixture-venice-key',
+    });
+
+    expect(provider).toMatchObject({
+      provider: 'venice',
+      modelId: 'text-embedding-qwen3-8b',
+      backend: 'cloud',
+      dimension: 4096,
+      epochId: 'cloud:venice:text-embedding-qwen3-8b:4096',
+    });
+  });
+
+  test('private-cloud-only selects Venice for secure embeddings while local-only stays local', () => {
+    const privateCloud = createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only'));
+    expect(privateCloud.resolveEmbeddingProfile('secure_local')).toMatchObject({
+      id: 'venice-source-embedding',
+      profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
+    });
+    const localOnly = createSovereigntyEngine(loadSovereigntyPreset('local-only'));
+    expect(localOnly.resolveEmbeddingProfile('secure_local')).toMatchObject({
+      id: 'local-source-embedding',
+      profile: { provider: 'local-openai-compatible', trust: 'local', purpose: 'embedding' },
+    });
+  });
+
   test('registered local defaults give the env and preset factories the existing identity', () => {
     const env = {
       OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'local-openai-compatible',
