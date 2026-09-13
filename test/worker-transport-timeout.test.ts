@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
-import { DirectHttpDomainExpertTransport } from '../src/core/domain-expert-client.ts';
 import { DirectHttpEmailTransport } from '../src/core/email.ts';
 import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 
@@ -34,12 +33,6 @@ describe('direct worker HTTP transport timeouts', () => {
         transport: new DirectHttpCastorWorkspaceTransport(hangingFetch('Castor workspace'), 'worker-secret', timeoutMs),
         url: 'http://workspace.test/v1/workspace',
         expectedMessage: `Delegated workspace worker timed out at http://workspace.test/v1/workspace after ${timeoutMs}ms.`,
-      },
-      {
-        name: 'domain expert',
-        transport: new DirectHttpDomainExpertTransport(hangingFetch('domain expert'), 'worker-secret', timeoutMs),
-        url: 'http://domain.test/v1/domain',
-        expectedMessage: `Domain expert worker timed out at http://domain.test/v1/domain after ${timeoutMs}ms.`,
       },
     ];
 

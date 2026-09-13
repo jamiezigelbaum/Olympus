@@ -153,7 +153,7 @@ export async function connectGcpSource(options: ConnectGcpOptions = {}): Promise
       '--project',
       project,
       '--display-name',
-      'Olympus domain expert',
+      'Olympus GCP connector',
     ]);
     const approved = await approveAndRun({
       command: createSa,
@@ -250,7 +250,6 @@ export async function connectGcpSource(options: ConnectGcpOptions = {}): Promise
     providerAccountId: serviceAccount.email,
   }, registryPath);
   log(`Registered connected handle ${handle}.`);
-  log('Domain-expert worker wiring: set OLYMPUS_DOMAIN_EXPERT_GOOGLE_SERVICE_ACCOUNT_FIELD=service_account_json and point the runtime secret field at this stored service-account JSON.');
 
   return {
     ok: true,
@@ -258,7 +257,7 @@ export async function connectGcpSource(options: ConnectGcpOptions = {}): Promise
     handles: [handle],
     registryPath,
     secretRefs: [`store:${secretKey}`],
-    next: `Bootstrap a domain, create a Vertex RAG corpus in ${project}, then run the domain-expert worker with OLYMPUS_DOMAIN_EXPERT_GOOGLE_SERVICE_ACCOUNT_FIELD=service_account_json.`,
+    next: `Create a Vertex RAG corpus in ${project} when you are ready to use the stored service-account JSON.`,
     messages,
   };
 }
@@ -433,7 +432,7 @@ function buildPotentialMutatingPlan(options: { project: string; serviceAccount: 
   return [
     command('gcloud', ['projects', 'create', options.project]),
     command('gcloud', ['services', 'enable', ...REQUIRED_APIS, '--project', options.project]),
-    command('gcloud', ['iam', 'service-accounts', 'create', serviceAccount.id, '--project', options.project, '--display-name', 'Olympus domain expert']),
+    command('gcloud', ['iam', 'service-accounts', 'create', serviceAccount.id, '--project', options.project, '--display-name', 'Olympus GCP connector']),
     ...REQUIRED_ROLES.map((role) => command('gcloud', [
       'projects',
       'add-iam-policy-binding',

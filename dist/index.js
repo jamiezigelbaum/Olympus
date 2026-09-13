@@ -2241,24 +2241,6 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS) {
     config.castorWorkspace.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS");
   }
-  if (env.OLYMPUS_DOMAIN_EXPERT_ENABLED) {
-    config.domainExpert.enabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_ENABLED, "OLYMPUS_DOMAIN_EXPERT_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED) {
-    config.domainExpert.liveToolsEnabled = parseBoolean(env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED, "OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_BASE_URL) {
-    config.domainExpert.baseUrl = trimTrailingSlash(env.OLYMPUS_DOMAIN_EXPERT_BASE_URL);
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS) {
-    config.domainExpert.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) {
-    config.domainExpert.authToken = env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN.trim();
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
-    config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
-  }
 }
 function configFromPluginConfig(pluginConfig) {
   const config = defaultConfig();
@@ -2271,7 +2253,6 @@ function configFromPluginConfig(pluginConfig) {
   const sourceIndex = asRecord4(root?.sourceIndex);
   const fileDelivery = asRecord4(root?.fileDelivery);
   const castorWorkspace = asRecord4(root?.castorWorkspace);
-  const domainExpert = asRecord4(root?.domainExpert);
   if (sovereignty) {
     config.sovereignty = {};
     if (typeof sovereignty.configPath === "string" && sovereignty.configPath.trim()) {
@@ -2437,24 +2418,6 @@ function configFromPluginConfig(pluginConfig) {
   if (typeof castorWorkspace?.requestTimeoutSeconds === "number") {
     config.castorWorkspace.requestTimeoutSeconds = castorWorkspace.requestTimeoutSeconds;
   }
-  if (typeof domainExpert?.enabled === "boolean") {
-    config.domainExpert.enabled = domainExpert.enabled;
-  }
-  if (typeof domainExpert?.liveToolsEnabled === "boolean") {
-    config.domainExpert.liveToolsEnabled = domainExpert.liveToolsEnabled;
-  }
-  if (typeof domainExpert?.baseUrl === "string" && domainExpert.baseUrl.trim()) {
-    config.domainExpert.baseUrl = trimTrailingSlash(domainExpert.baseUrl.trim());
-  }
-  if (typeof domainExpert?.requestTimeoutSeconds === "number") {
-    config.domainExpert.requestTimeoutSeconds = domainExpert.requestTimeoutSeconds;
-  }
-  if (typeof domainExpert?.authToken === "string" && domainExpert.authToken.trim()) {
-    config.domainExpert.authToken = domainExpert.authToken.trim();
-  }
-  if (typeof domainExpert?.defaultDomainId === "string" && domainExpert.defaultDomainId.trim()) {
-    config.domainExpert.defaultDomainId = domainExpert.defaultDomainId.trim();
-  }
   validateConfig(config);
   return config;
 }
@@ -2612,30 +2575,6 @@ function validateConfig(config) {
   }
   assertBoolean(config.fileDelivery.enabled, "fileDelivery.enabled");
   assertBoolean(config.castorWorkspace.enabled, "castorWorkspace.enabled");
-  if (config.domainExpert.defaultDomainId !== undefined) {
-    if (typeof config.domainExpert.defaultDomainId !== "string") {
-      throw new OperationError("config_error", "domainExpert.defaultDomainId must be a string.");
-    }
-    const trimmed = config.domainExpert.defaultDomainId.trim();
-    if (trimmed) {
-      config.domainExpert.defaultDomainId = trimmed;
-    } else {
-      delete config.domainExpert.defaultDomainId;
-    }
-  }
-  if (config.domainExpert.authToken !== undefined) {
-    if (typeof config.domainExpert.authToken !== "string") {
-      throw new OperationError("config_error", "domainExpert.authToken must be a string.");
-    }
-    const trimmed = config.domainExpert.authToken.trim();
-    if (trimmed) {
-      config.domainExpert.authToken = trimmed;
-    } else {
-      delete config.domainExpert.authToken;
-    }
-  }
-  assertBoolean(config.domainExpert.enabled, "domainExpert.enabled");
-  assertBoolean(config.domainExpert.liveToolsEnabled, "domainExpert.liveToolsEnabled");
   if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
     throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
   }
@@ -2648,10 +2587,6 @@ function validateConfig(config) {
     throw new OperationError("config_error", "castorWorkspace.baseUrl must be an HTTP(S) URL.");
   }
   config.castorWorkspace.baseUrl = trimTrailingSlash(config.castorWorkspace.baseUrl);
-  if (typeof config.domainExpert.baseUrl !== "string" || !config.domainExpert.baseUrl.startsWith("http://") && !config.domainExpert.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "domainExpert.baseUrl must be an HTTP(S) URL.");
-  }
-  config.domainExpert.baseUrl = trimTrailingSlash(config.domainExpert.baseUrl);
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
   }
@@ -2660,9 +2595,6 @@ function validateConfig(config) {
   }
   if (typeof config.castorWorkspace.requestTimeoutSeconds !== "number" || !Number.isFinite(config.castorWorkspace.requestTimeoutSeconds) || config.castorWorkspace.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "castorWorkspace.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.domainExpert.requestTimeoutSeconds !== "number" || !Number.isFinite(config.domainExpert.requestTimeoutSeconds) || config.domainExpert.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "domainExpert.requestTimeoutSeconds must be greater than zero.");
   }
 }
 function parseSchedulerSourceIds(value) {
@@ -2855,12 +2787,6 @@ var init_config = __esm(() => {
       enabled: false,
       baseUrl: "http://127.0.0.1:8030/v1",
       requestTimeoutSeconds: 300
-    },
-    domainExpert: {
-      enabled: false,
-      liveToolsEnabled: false,
-      baseUrl: "http://127.0.0.1:8040/v1",
-      requestTimeoutSeconds: 600
     }
   };
   ARGUS_MODEL_PROFILES = [
@@ -3440,11 +3366,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord9(record.retrieval);
-  const trustDomainsRecord = asRecord9(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord8(record.retrieval);
+  const trustDomainsRecord = asRecord8(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord9(trustDomainsRecord?.[domain]);
+    const policy = asRecord8(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3456,19 +3382,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord9(value);
-  if (record?.sovereignty && asRecord9(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord8(value);
+  if (record?.sovereignty && asRecord8(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord9(item);
+    const profile = asRecord8(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3491,16 +3417,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord9(record[domain]);
+    const route = asRecord8(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord9(route.pool);
+    const poolRecord = asRecord8(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3710,7 +3636,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord9(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -6119,7 +6045,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord10(rawMap);
+  const root = asRecord9(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6178,11 +6104,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord10(record[tierName]);
+    const mapped = asRecord9(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6190,7 +6116,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6211,7 +6137,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord10(record.match);
+  const matchRecord = asRecord9(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6233,7 +6159,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord10(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7129,9 +7055,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord11(json, "Gmail messages list response");
+    const record = asRecord10(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord11(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord10(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7307,7 +7233,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord11(value, label) {
+function asRecord10(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7748,16 +7674,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive files list response");
+    const record = asRecord11(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord12(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord11(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive folder");
+    const record = asRecord11(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7852,7 +7778,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord12(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord11(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7880,7 +7806,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord12(value, label) {
+function asRecord11(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -12108,154 +12034,6 @@ function asRecord7(value) {
   return value;
 }
 
-// src/core/domain-expert-client.ts
-init_http_timeout();
-init_operation_error();
-var MAX_WORKER_ERROR_BODY_BYTES = 8 * 1024;
-var MAX_WORKER_ERROR_CODE_LENGTH = 64;
-var MAX_WORKER_ERROR_MESSAGE_LENGTH = 512;
-var MAX_WORKER_ERROR_SUGGESTION_LENGTH = 512;
-var GENERIC_WORKER_ERROR_SUGGESTION = "Check the Olympus domain expert worker logs.";
-var PASSTHROUGH_WORKER_ERROR_CODES = Object.freeze({
-  invalid_params: "invalid_params",
-  domain_expert_not_configured: "domain_expert_not_configured",
-  annas_archive_not_configured: "annas_archive_not_configured"
-});
-
-class DomainExpertClient {
-  config;
-  transport;
-  constructor(config, transport = createDomainExpertTransport(config)) {
-    this.config = config;
-    this.transport = transport;
-  }
-  async run(tool, params) {
-    if (!this.config.domainExpert.enabled) {
-      throw new OperationError("domain_expert_not_configured", "Domain expert worker is disabled.", "Configure the bounded domain expert worker before live Google/Gemini/Docs/Anna actions.");
-    }
-    const defaultDomainId = this.config.domainExpert.defaultDomainId;
-    const requestParams = defaultDomainId && params.domain_id === undefined ? { ...params, domain_id: defaultDomainId } : params;
-    const response = await this.transport.requestJson(`${this.config.domainExpert.baseUrl}/domain`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool, params: requestParams })
-    });
-    assertDomainExpertPolicy(response);
-    return response;
-  }
-}
-function domainExpertAuthTokenFromConfig(config, options = {}) {
-  return normalizeWorkerAuthToken(config.domainExpert.authToken) ?? normalizeWorkerAuthToken((options.env ?? process.env).OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? normalizeWorkerAuthToken(readWorkerSetupEnv(options)?.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) ?? workerAuthTokenFromConfig(config, options);
-}
-function createDomainExpertTransport(config) {
-  return new DirectHttpDomainExpertTransport(fetch, domainExpertAuthTokenFromConfig(config), config.domainExpert.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpDomainExpertTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error) {
-      if (isAbortError2(error)) {
-        throw new OperationError("domain_expert_unreachable", `Domain expert worker timed out at ${url} after ${this.timeoutMs}ms.`, "The domain expert worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("domain_expert_unreachable", `Domain expert worker is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Olympus domain expert worker is running.");
-    }
-    if (!response.ok) {
-      const workerError = response.status === 403 ? undefined : parseWorkerError(await safeText5(response));
-      throw new OperationError(response.status === 403 ? "domain_expert_policy_violation" : workerError?.code ?? "domain_expert_error", workerError?.message ?? `Domain expert worker returned HTTP ${response.status}.`, workerError?.suggestion ?? GENERIC_WORKER_ERROR_SUGGESTION);
-    }
-    return response.json();
-  }
-}
-function assertDomainExpertPolicy(value) {
-  const record = asRecord8(value);
-  const policy = asRecord8(record.policy);
-  const controlPlaneOnly = policy.olympus_control_plane_only === true || policy.expert_agents_control_plane_only === true;
-  if (!controlPlaneOnly || policy.raw_runtime_secrets_exposed !== false) {
-    throw new OperationError("domain_expert_error", "Domain expert response did not include the bounded policy contract.");
-  }
-}
-async function safeText5(response) {
-  const reader = response.body?.getReader();
-  if (!reader)
-    return "";
-  const chunks = [];
-  let byteLength = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      byteLength += value.byteLength;
-      if (byteLength > MAX_WORKER_ERROR_BODY_BYTES) {
-        await reader.cancel();
-        return "";
-      }
-      chunks.push(value);
-    }
-    const body = new Uint8Array(byteLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      body.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(body);
-  } catch {
-    return "";
-  } finally {
-    reader.releaseLock();
-  }
-}
-function parseWorkerError(body) {
-  try {
-    const parsed = JSON.parse(body);
-    const error = optionalRecord(optionalRecord(parsed)?.error);
-    const code = boundedWorkerErrorString(error?.code, MAX_WORKER_ERROR_CODE_LENGTH);
-    const message = boundedWorkerErrorString(error?.message, MAX_WORKER_ERROR_MESSAGE_LENGTH);
-    if (!code || !message)
-      return;
-    const typedCode = PASSTHROUGH_WORKER_ERROR_CODES[code];
-    if (!typedCode)
-      return;
-    const suggestionValue = error?.suggestion;
-    const suggestion = suggestionValue === undefined ? undefined : boundedWorkerErrorString(suggestionValue, MAX_WORKER_ERROR_SUGGESTION_LENGTH);
-    if (suggestionValue !== undefined && !suggestion)
-      return;
-    return {
-      code: typedCode,
-      message,
-      ...suggestion ? { suggestion } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function optionalRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function boundedWorkerErrorString(value, maxLength) {
-  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u001f\u007f-\u009f]/u.test(value))
-    return;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-function asRecord8(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("domain_expert_error", "Domain expert response was not an object.");
-  }
-  return value;
-}
-
 // src/core/operation-exposure.ts
 init_config();
 init_public_surface();
@@ -12840,7 +12618,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord13(await response.json());
+  const health = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -12893,7 +12671,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -12901,7 +12679,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord13(entry);
+    const corpus = asRecord12(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -12915,8 +12693,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord13(corpus.counts);
-    const embeddingParity = asRecord13(corpus.embedding_parity);
+    const counts = asRecord12(corpus.counts);
+    const embeddingParity = asRecord12(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -12976,7 +12754,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -13021,7 +12799,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord12(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -13033,8 +12811,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord13(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord13(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord12(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord12(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -13091,7 +12869,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord13(value);
+  const record = asRecord12(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -13104,7 +12882,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord13(entry);
+    const credential = asRecord12(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -13156,7 +12934,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord12(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -13184,7 +12962,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord13(entry);
+    const source = asRecord12(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -13194,7 +12972,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord13(taskEntry);
+      const task = asRecord12(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -13330,7 +13108,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord13(await response.json());
+    return asRecord12(await response.json());
   } catch {
     return;
   }
@@ -13340,7 +13118,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord13(await response.json());
+    const status = asRecord12(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -13349,7 +13127,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord13(status.ingestion_ledger);
+  const ledger = asRecord12(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -13381,12 +13159,12 @@ function readIngestionHealthState(path) {
     if (!existsSync9(path))
       return;
     const parsed = JSON.parse(readFileSync9(path, "utf8"));
-    const record = asRecord13(parsed);
-    const sources = asRecord13(record.sources);
+    const record = asRecord12(parsed);
+    const sources = asRecord12(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord13(sourceValue);
-      const terminal = asRecord13(source.failed_terminal_by_class);
+      const source = asRecord12(sourceValue);
+      const terminal = asRecord12(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -13414,9 +13192,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord13(await response.json());
+    const status = asRecord12(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord13(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord12(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -13557,7 +13335,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord12(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -13572,25 +13350,17 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord12(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord13(corpus.last_sync);
+  const lastSync = asRecord12(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord13(corpus.counts);
+  const counts = asRecord12(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
-  return corpora.filter((entry) => {
-    const corpus = asRecord13(entry);
-    const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "";
-    return !isDomainCorpus(corpusId) || deps.config.domainExpert.enabled === true;
-  });
   return corpora;
-}
-function isDomainCorpus(corpusId) {
-  return corpusId.startsWith("internal.solon.") || corpusId.startsWith("secure_local.solon.");
 }
 function staleTaskAttempt(task, deps) {
   const attemptedAt = typeof task.last_attempt_at === "string" ? task.last_attempt_at : undefined;
@@ -13620,7 +13390,7 @@ function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord13(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -13632,35 +13402,6 @@ function errorDetail(error) {
 
 // src/core/operations.ts
 init_config();
-
-// src/core/domain-expert.ts
-init_operation_error();
-var DOMAIN_AGENT_ACTIONS = ["bootstrap", "status"];
-var DOMAIN_SOURCE_ACTIONS = ["add", "list", "status", "remove"];
-var RAG_CORPUS_ACTIONS = ["create", "import", "stage_import", "web_import", "notion_import", "list_files", "delete_file", "status", "refresh"];
-var DOMAIN_DOC_ACTIONS = [
-  "read",
-  "comment",
-  "visual_insert",
-  "visual_replace",
-  "accept_visual_edits",
-  "reject_visual_edits"
-];
-var DOMAIN_SOURCE_KINDS = [
-  "book",
-  "pdf",
-  "epub",
-  "google_doc",
-  "blog_post",
-  "transcript",
-  "note",
-  "dataset",
-  "web_page",
-  "unknown"
-];
-var ANNAS_ARCHIVE_FORMATS = ["pdf", "epub", "mobi", "azw3", "djvu", "unknown"];
-
-// src/core/operations.ts
 init_config();
 init_operation_error();
 
@@ -14599,178 +14340,6 @@ var operations = [
       }
     },
     {
-      name: "domain_agent",
-      description: [
-        "Create or inspect a reusable domain expert agent workspace, persona, library, and corpus setup through the configured domain-expert backend.",
-        "Use this when the owner asks to create a governance, dating, trading, or other domain-specific researcher.",
-        "dry_run=true asks the runtime worker for a non-mutating scaffold."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_AGENT_ACTIONS], description: "Domain-agent lifecycle action." },
-        domain_id: { type: "string", description: "Stable domain id. Defaults to governance." },
-        display_name: { type: "string", description: "Optional human name for the domain researcher." },
-        dry_run: { type: "boolean", description: "Defaults true. Live execution is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain agent" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_agent", params)
-    },
-    {
-      name: "domain_ask",
-      description: [
-        "Return a grounded domain-expert answer over a domain library using Gemini Enterprise RAG Engine Cross-Corpus Retrieval.",
-        "This is the public/internal domain-expert lane, separate from the frozen secure-local source_answer pipeline.",
-        "This tool is available only while its live retrieval backend is enabled."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        question: { type: "string", required: true, description: "Question for the domain expert to answer from its curated library." },
-        corpus_id: { type: "string", description: "Optional single Vertex RAG corpus id or manifest display name. Defaults to all corpora in the domain manifest." },
-        corpora: { type: "array", description: "Optional corpus ids or manifest display names. Defaults to all corpora in the domain manifest." },
-        max_results: { type: "number", description: "Optional retrieval result target. Defaults to 12." }
-      },
-      mutating: false,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain ask", positional: ["question"], stdin: "question" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_ask", params)
-    },
-    {
-      name: "domain_source",
-      description: [
-        "Manage source intake for a domain expert library from files, Google Docs, PDFs, books, blog posts, or web links.",
-        "Worker-backed list/status are read-only registry reads; remove appends an audit tombstone; add keeps the existing intake record path.",
-        "The source record is domain-agnostic and flows into classification, dedupe, staging, Gemini Enterprise import, and source-registry updates.",
-        "dry_run=true asks the configured runtime worker for a non-mutating intake plan."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_SOURCE_ACTIONS], description: "Source lifecycle action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        source_id: { type: "string", description: "Required for status/remove; optional stable id for add." },
-        kind: { type: "string", enum: [...DOMAIN_SOURCE_KINDS], description: "Source kind." },
-        title: { type: "string", description: "Optional source title." },
-        author: { type: "string", description: "Optional source author." },
-        url: { type: "string", description: "Canonical URL or provider locator for link intake." },
-        relative_path: { type: "string", description: "Path inside the domain workspace or delegated alias for folder intake." },
-        corpus_id: { type: "string", description: "Optional target corpus id." },
-        trust_posture: { type: "string", description: "Optional trust/source-review posture." },
-        copyright_posture: { type: "string", description: "Explicit source copyright/import posture when known." },
-        include_history: { type: "boolean", description: "For list, include every registry record per source instead of only current records." },
-        include_removed: { type: "boolean", description: "For list, include sources whose latest record is a removed tombstone." },
-        dry_run: { type: "boolean", description: "Defaults true. Live intake is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain source" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_source", params)
-    },
-    {
-      name: "rag_corpus",
-      description: [
-        "Plan Gemini Enterprise RAG Engine corpus create, import, stage_import, web_import, notion_import, status, or refresh actions for a domain expert.",
-        "The operation enforces the domain manifest GCS allowlist and keeps Olympus as the control plane.",
-        "Live corpus mutations run in the OpenClaw runtime with credentials resolved through SecretRef; dry_run=true returns an operator-reviewable plan."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...RAG_CORPUS_ACTIONS], description: "Corpus lifecycle action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        corpus_id: { type: "string", description: "Target corpus id. Defaults to a domain manifest corpus." },
-        rag_file_name: { type: "string", description: "For delete_file, full Vertex ragFiles resource name under the resolved corpus." },
-        page_token: { type: "string", description: "For list_files, Vertex pageToken passthrough." },
-        source_id: { type: "string", description: "Optional source registry id to import or inspect." },
-        gcs_uri: { type: "string", description: "Optional staged gs:// URI. Must be under the domain allowlist." },
-        drive_file_id: { type: "string", description: "Optional Google Drive file id for future direct import paths." },
-        workspace_relative_path: { type: "string", description: "For stage_import, path inside the domain workspace root to recursively stage." },
-        batch_id: { type: "string", description: "Optional deterministic staging batch id. Generated by the worker when omitted." },
-        urls: { type: "array", description: "For web_import, HTTPS URLs to fetch and derive into importable documents; for notion_import, Notion URLs to import through the official API. 1 to 200 entries." },
-        page_ids: { type: "array", description: "For notion_import, raw Notion page ids to import." },
-        database_ids: { type: "array", description: "For notion_import, raw Notion database ids to query and import." },
-        include_media: { type: "boolean", description: "For stage_import or web_import, include media files. Audio/video media is staged raw and transcribed to markdown when live. Defaults false." },
-        transcript_mode: { type: "string", enum: ["auto", "captions", "asr"], description: "For web_import YouTube URLs: auto uses captions then ASR, captions never falls through to ASR, asr skips caption tiers. Defaults auto." },
-        dry_run: { type: "boolean", description: "Defaults true. Live corpus mutation is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "rag corpus" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "rag_corpus", params)
-    },
-    {
-      name: "domain_doc",
-      description: [
-        "Plan Google Docs collaboration for a domain expert service account: read, comment, visually marked insert/replace, accept, or reject.",
-        "Google Docs API suggestion-mode creation is not treated as available; the supported review path is comments plus approved direct edits in a visible domain-agent style.",
-        "Phase 0 is dry-run only and records the service-account, approval, and visual review contract."
-      ].join(" "),
-      params: {
-        action: { type: "string", required: true, enum: [...DOMAIN_DOC_ACTIONS], description: "Google Docs collaboration action." },
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        document_id: { type: "string", required: true, description: "Google Docs document id." },
-        text: { type: "string", description: "Text for visual_insert or visual_replace." },
-        comment: { type: "string", description: "Comment text or edit rationale." },
-        range_start: { type: "number", description: "Optional Docs structural index/range start for edit actions." },
-        range_end: { type: "number", description: "Optional Docs structural index/range end for visual_replace." },
-        approval_id: { type: "string", description: "Explicit approval reference required for live direct edits." },
-        edit_batch_id: { type: "string", description: "Stable id for later accept/reject cleanup." },
-        dry_run: { type: "boolean", description: "Defaults true. Live Docs mutation is blocked until the runtime backend is configured." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "domain doc" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "domain_doc", params)
-    },
-    {
-      name: "annas_archive_search",
-      description: [
-        "Search Anna Archive through the Castor runtime secret and return ranked candidate book/file metadata for approval.",
-        "The API key is never exposed to the agent; this tool is available only while the runtime worker is enabled."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        query: { type: "string", description: "Search query." },
-        topic: { type: "string", description: "Optional topic for top-N book discovery, such as evolutionary biology." },
-        title: { type: "string", description: "Optional title search." },
-        author: { type: "string", description: "Optional author search." },
-        language: { type: "string", description: "Optional preferred language filter or ranking hint." },
-        max_results: { type: "number", description: "Maximum candidate metadata results. Defaults to 10." },
-        top_n: { type: "number", description: "Number of top candidates to rank and present for approval. Defaults to max_results." },
-        format_preference: { type: "string", enum: ["auto", "text_rag", "layout"], description: "Prefer EPUB/text for text-first RAG, PDF for layout-heavy books, or auto." }
-      },
-      mutating: false,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "annas archive search" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_search", params)
-    },
-    {
-      name: "annas_archive_import",
-      description: [
-        "Plan or run an approved Anna Archive PDF/EPUB/etc. download into the owner's Xanthos books folder.",
-        "Requires explicit copyright posture and approval for live execution; RAG ingest is optional and requires an explicit corpus_id."
-      ].join(" "),
-      params: {
-        domain_id: { type: "string", description: "Domain id. Defaults to governance." },
-        annas_archive_id: { type: "string", description: "Anna Archive item id or md5-like locator." },
-        url: { type: "string", description: "Optional Anna Archive URL locator." },
-        format: { type: "string", enum: [...ANNAS_ARCHIVE_FORMATS], description: "Desired or observed file format." },
-        corpus_id: { type: "string", description: "Optional explicit target domain corpus id for RAG ingest." },
-        title: { type: "string", description: "Candidate title, used for deterministic folder naming and audit." },
-        author: { type: "string", description: "Candidate author, used for deterministic folder naming and audit." },
-        year: { type: "string", description: "Candidate publication year, used for deterministic folder naming and audit." },
-        topic: { type: "string", description: "Topic folder under the Xanthos books root." },
-        language: { type: "string", description: "Candidate language metadata." },
-        file_name: { type: "string", description: "Optional original filename from the candidate metadata." },
-        md5: { type: "string", description: "Optional stable Anna/hash locator for duplicate detection." },
-        file_size_bytes: { type: "number", description: "Optional expected file size from candidate metadata." },
-        ingest: { type: "boolean", description: "Also attempt RAG ingest after saving. Requires explicit corpus_id or returns needs_corpus_decision." },
-        copyright_posture: { type: "string", required: true, description: "Explicit copyright/import posture for this item." },
-        approval_id: { type: "string", description: "Explicit approval reference required for live download/import." },
-        dry_run: { type: "boolean", description: "Defaults true. Live download is blocked until approval_id is provided." }
-      },
-      mutating: true,
-      availability: domainExpertToolsAvailable,
-      cliHints: { name: "annas archive import" },
-      handler: async (ctx, params) => runDomainExpert(ctx, "annas_archive_import", params)
-    },
-    {
       name: "email_search",
       description: [
         "Search private email and return a sanitized local-only source packet for approved local/private sessions.",
@@ -15200,15 +14769,6 @@ function renderIdentityTemplate(value, config) {
   const identity = config?.identity ?? { ownerName: "the owner", assistantName: "the calling assistant" };
   return value.replace(/\{\{ownerName\}\}/g, identity.ownerName).replace(/\{\{assistantName\}\}/g, identity.assistantName);
 }
-async function runDomainExpert(ctx, tool, rawParams) {
-  if (ctx.domainExpert && ctx.config.domainExpert.enabled && ctx.config.domainExpert.liveToolsEnabled) {
-    return ctx.domainExpert.run(tool, rawParams);
-  }
-  throw new OperationError("domain_expert_not_configured", `${tool} is unavailable because the live domain-expert backend is not enabled in this Olympus runtime.`, "Enable both domainExpert.enabled and domainExpert.liveToolsEnabled after configuring the runtime worker.");
-}
-function domainExpertToolsAvailable(config) {
-  return config.domainExpert.enabled && config.domainExpert.liveToolsEnabled;
-}
 function asString(value, name) {
   if (typeof value !== "string" || value.length === 0) {
     throw new OperationError("invalid_params", `${name} must be a non-empty string.`);
@@ -15468,11 +15028,11 @@ var PRIVATE_EXTENSION_MODULE_BASENAMES = [
 class OlympusPrivateExtensionError extends Error {
 }
 function assertPrivateExtensionContract(moduleNamespace, source) {
-  const namespace = asRecord14(moduleNamespace);
+  const namespace = asRecord13(moduleNamespace);
   if (!namespace) {
     throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} did not export a module namespace.`);
   }
-  const candidate = asRecord14(namespace.default) ?? namespace;
+  const candidate = asRecord13(namespace.default) ?? namespace;
   const contractVersion = candidate.contractVersion;
   if (typeof contractVersion !== "number" || !Number.isInteger(contractVersion)) {
     throw new OlympusPrivateExtensionError(`Olympus private extension module at ${source} must export an integer contractVersion. ` + `This build implements contract version ${OLYMPUS_PRIVATE_EXTENSION_CONTRACT_VERSION}.`);
@@ -15512,19 +15072,19 @@ function readPrivateExtensionRequirement(manifestPath, readFile3 = (path) => rea
   const refuse = (detail) => {
     throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} declares ` + `${PRIVATE_EXTENSION_MANIFEST_NAMESPACE}.${PRIVATE_EXTENSION_MANIFEST_KEY}, but ${detail}. ` + "A malformed requirement is refused rather than read as requiring nothing. Regenerate the " + "manifest from the private extension module.");
   };
-  const root = asRecord14(parsed);
+  const root = asRecord13(parsed);
   if (!root) {
     throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} is not a JSON object.`);
   }
   if (!Object.hasOwn(root, PRIVATE_EXTENSION_MANIFEST_NAMESPACE))
     return;
-  const namespace = asRecord14(root[PRIVATE_EXTENSION_MANIFEST_NAMESPACE]);
+  const namespace = asRecord13(root[PRIVATE_EXTENSION_MANIFEST_NAMESPACE]);
   if (!namespace) {
     throw new OlympusPrivateExtensionError(`The plugin manifest at ${manifestPath} has a ${PRIVATE_EXTENSION_MANIFEST_NAMESPACE} key that ` + "is not an object. Regenerate the manifest from the private extension module.");
   }
   if (!Object.hasOwn(namespace, PRIVATE_EXTENSION_MANIFEST_KEY))
     return;
-  const marker = asRecord14(namespace[PRIVATE_EXTENSION_MANIFEST_KEY]);
+  const marker = asRecord13(namespace[PRIVATE_EXTENSION_MANIFEST_KEY]);
   if (!marker)
     return refuse("it is not an object");
   const unknownFields = Object.keys(marker).filter((field) => !PRIVATE_EXTENSION_MARKER_FIELDS.includes(field));
@@ -15603,7 +15163,7 @@ function loadPrivateExtensions(options = {}) {
   }
   return evaluateOverlay();
 }
-function asRecord14(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -15629,13 +15189,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord15(payload);
+  const result = asRecord14(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord15(result.audit);
-  const policy = asRecord15(result.policy);
-  const synthesis = asRecord15(audit?.answer_synthesis);
-  const timings = asRecord15(audit?.phase_timings);
+  const audit = asRecord14(result.audit);
+  const policy = asRecord14(result.policy);
+  const synthesis = asRecord14(audit?.answer_synthesis);
+  const timings = asRecord14(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -15645,7 +15205,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord15(item);
+    const record = asRecord14(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -15656,7 +15216,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord15(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord14(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -15708,7 +15268,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord15(value) {
+function asRecord14(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -15727,8 +15287,7 @@ var plugin = {
       email: new EmailClient(config, createEmailTransport(config)),
       ...PUBLIC_RUNTIME_BUILD ? {} : {
         fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
-        castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-        domainExpert: new DomainExpertClient(config, createDomainExpertTransport(config))
+        castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config))
       },
       ...privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}
     };
@@ -15968,7 +15527,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord15(value);
+  const record = asRecord14(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

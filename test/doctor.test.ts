@@ -1193,7 +1193,6 @@ describe('runDoctor', () => {
           corpusReport('secure_local.whatsapp.messages', { family: 'chat', trust_domain: 'secure_local' }),
           corpusReport('internal.readwise.library', { family: 'readwise', trust_domain: 'internal' }),
           dropboxCorpusReport(),
-          corpusReport('internal.solon.governance-library', { family: 'file' }),
         ],
       },
     });
@@ -1210,10 +1209,6 @@ describe('runDoctor', () => {
 
     expect(result.ok).toBe(true);
     expect(result.checks.filter((check) => !check.ok)).toEqual([]);
-    const output = result.checks.map((check) => `${check.name} ${check.detail}`).join('\n');
-    expect(output).not.toContain('Solon');
-    expect(output).not.toContain('solon');
-    expect(output).not.toContain('governance');
     const sourceIndex = checkByName(result.checks, 'source_index_status');
     expect(sourceIndex.detail).toContain('internal.email not connected');
     expect(sourceIndex.detail).toContain('internal.drive.docs not connected');
@@ -1251,32 +1246,6 @@ describe('runDoctor', () => {
     expect(sourceIndex.ok).toBe(true);
     expect(sourceIndex.detail).toContain('secure_local.dropbox.files: connector store, 12 chunks, 12 embedded');
     expect(sourceIndex.detail).not.toContain('extraction jobs failed');
-  });
-
-  test('hides Solon domain corpus checks when no domain is configured', async () => {
-    const { fetchImpl } = fakeWorkerFetch({
-      '/v1/health': { status: 'ok', configured: true },
-      '/v1/source/index/status': {
-        kind: 'source_index_status',
-        corpora: [{
-          corpus_id: 'internal.solon.governance-library',
-          family: 'file',
-          trust_domain: 'internal',
-          configured: true,
-          counts: {},
-        }],
-      },
-    });
-
-    const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), fetchImpl }));
-
-    expect(result.ok).toBe(true);
-    const output = result.checks.map((check) => `${check.name} ${check.detail}`).join('\n');
-    expect(output).not.toContain('Solon');
-    expect(output).not.toContain('solon');
-    expect(output).not.toContain('governance');
-    expect(checkByName(result.checks, 'source_index_status').detail)
-      .toContain('healthy across 0 corpus reports');
   });
 
   test('flags scheduler stalls from the worker scheduler feed', async () => {

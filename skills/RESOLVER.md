@@ -42,14 +42,6 @@ medical, tax, or similar private topics to Dropbox by assumption.
 | User asks to save, write, create, or deliver a file on Xanthos | `skills/deliver-files/SKILL.md` |
 | User asks to save a file in Fleur or another approved Olympus delivery root | `skills/deliver-files/SKILL.md` |
 
-## Agent Workshop Usage
-
-| Trigger | Skill |
-| --- | --- |
-| User asks Castor to create, bootstrap, spin up, register, bind, or clone a new domain-specific agent | `skills/agent-workshop/SKILL.md` |
-| User asks for a new expert/researcher/assistant with its own workspace, personality, memory, library, RAG corpus, or Telegram topic | `skills/agent-workshop/SKILL.md` |
-| User asks to reuse the Solon pattern for another domain agent or library | `skills/agent-workshop/SKILL.md` |
-
 ## External Consultant Hiring
 
 | Trigger | Skill |
@@ -60,22 +52,6 @@ medical, tax, or similar private topics to Dropbox by assumption.
 Do not load or use the Hire Broker for ordinary sessions. New or drifted
 counterparty approval must match the exact confirmation prompt in the current
 owner conversation; an assistant-generated confirmation flag is never enough.
-
-## Anna Archive Acquisition Usage
-
-| Trigger | Skill |
-| --- | --- |
-| User asks Castor to find top books, candidate books, EPUBs, PDFs, or reading-list material through Anna Archive | `skills/annas-archive-acquisition/SKILL.md` |
-| User asks to download approved Anna Archive items into the owner's books folder | `skills/annas-archive-acquisition/SKILL.md` |
-| User asks to ingest an approved downloaded book into a named RAG corpus or domain library | `skills/annas-archive-acquisition/SKILL.md` |
-
-## Governance Research Usage
-
-| Trigger | Skill |
-| --- | --- |
-| User asks to use Solon or the governance researcher for governance work | `skills/governance-research/SKILL.md` |
-| User asks Solon to answer from the governance library, add governance sources, manage governance RAG corpora, or collaborate in Google Docs | `skills/governance-research/SKILL.md` |
-| User asks to search or import Anna Archive material for the governance library | `skills/governance-research/SKILL.md` plus `skills/annas-archive-acquisition/SKILL.md` for the approval/download mechanics |
 
 ## Delegated Workfiles Usage
 
@@ -207,28 +183,6 @@ doctor repair. Test one real item before any batch.
   and run a natural OpenClaw agent smoke before declaring the live issue fixed.
 - If file delivery is unavailable, do not fall back to broad `exec`, shell,
   redirection, `cat`, or raw absolute-path writes.
-- Agent Workshop is the reusable factory for new domain-specific agents. Use
-  `skills/agent-workshop/SKILL.md` and `domain_agent` when the owner asks to create
-  or bootstrap an agent. Do not put generic agent-creation behavior inside
-  `governance-research`.
 - External consultant hiring is a separate outbound containment path. Use
   `skills/hire-expert/SKILL.md`, `expert_hire`, and `expert_report`; never
   contact, pay, poll, or recover raw reports through shell/network fallbacks.
-- Domain-agent libraries live in owner-visible `Castor Workfiles/<Agent>/`
-  folders. The OpenClaw workspace holds scaffold, doctrine, memory, registry,
-  evals, and scratch, not the library of record.
-- Domain expert tools are the reusable cloud-eligible library/RAG lane. Use
-  `domain_ask`, `domain_source`, `rag_corpus`, `domain_doc`,
-  `annas_archive_search`, and `annas_archive_import` for existing domain
-  experts. Do not route secure-local/private source questions through
-  `domain_ask`; keep those on `source_answer`. These tool names are absent when
-  the live domain-expert backend is disabled; do not substitute shell, public
-  web, or a locally invented plan under the same job.
-- Two domain-agent regimes compose: Olympus source corpora serve gated
-  consumers with per-item classification, while Gemini Enterprise RAG serves
-  the domain agent's own cloud-eligible answers. Do not use either lane as a
-  side door around the other lane's trust gates.
-- Google Docs collaboration for domain experts uses service-account comments
-  and approved visually marked direct edits by default. Do not claim native
-  Docs API suggestion-mode edits are available through `domain_doc`.
-- Anna Archive acquisition uses `annas_archive_search` for ranked candidate metadata, then `annas_archive_import` only after approval. Live import saves to the owner's Xanthos books folder first; RAG ingest is optional and requires an explicit target corpus or returns `needs_corpus_decision`.

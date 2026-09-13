@@ -32,7 +32,6 @@ export const REPOSITORY_ONLY_PLUGIN_CONFIG_KEYS = [
   'argus_fast_base_url',
   'argus_fast_model',
   'castorWorkspace',
-  'domainExpert',
   'fileDelivery',
 ] as const;
 
@@ -134,21 +133,6 @@ export interface OlympusConfig {
     enabled: boolean;
     baseUrl: string;
     requestTimeoutSeconds: number;
-  };
-  domainExpert: {
-    enabled: boolean;
-    liveToolsEnabled: boolean;
-    baseUrl: string;
-    requestTimeoutSeconds: number;
-    authToken?: string;
-    /**
-     * Domain id injected into domain-expert requests that omit one. The legacy
-     * worker defaulted omissions to `governance` inside normalizeDomainId; the
-     * Expert-Agents worker is tenant-neutral and refuses its own default
-     * domain, so after the 3A cutover the tenant default belongs here — the
-     * layer this deployment owns.
-     */
-    defaultDomainId?: string;
   };
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 }
@@ -278,12 +262,6 @@ const DEFAULT_CONFIG: OlympusConfig = {
     enabled: false,
     baseUrl: 'http://127.0.0.1:8030/v1',
     requestTimeoutSeconds: 300,
-  },
-  domainExpert: {
-    enabled: false,
-    liveToolsEnabled: false,
-    baseUrl: 'http://127.0.0.1:8040/v1',
-    requestTimeoutSeconds: 600,
   },
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 };
@@ -512,33 +490,6 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
       'OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS',
     );
   }
-  if (env.OLYMPUS_DOMAIN_EXPERT_ENABLED) {
-    config.domainExpert.enabled = parseBoolean(
-      env.OLYMPUS_DOMAIN_EXPERT_ENABLED,
-      'OLYMPUS_DOMAIN_EXPERT_ENABLED',
-    );
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED) {
-    config.domainExpert.liveToolsEnabled = parseBoolean(
-      env.OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED,
-      'OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED',
-    );
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_BASE_URL) {
-    config.domainExpert.baseUrl = trimTrailingSlash(env.OLYMPUS_DOMAIN_EXPERT_BASE_URL);
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS) {
-    config.domainExpert.requestTimeoutSeconds = parsePositiveNumber(
-      env.OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS,
-      'OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS',
-    );
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN) {
-    config.domainExpert.authToken = env.OLYMPUS_DOMAIN_EXPERT_AUTH_TOKEN.trim();
-  }
-  if (env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID) {
-    config.domainExpert.defaultDomainId = env.OLYMPUS_DOMAIN_EXPERT_DEFAULT_DOMAIN_ID.trim();
-  }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 }
 
@@ -554,7 +505,6 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
   const fileDelivery = asRecord(root?.fileDelivery);
   const castorWorkspace = asRecord(root?.castorWorkspace);
-  const domainExpert = asRecord(root?.domainExpert);
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
   if (sovereignty) {
@@ -737,24 +687,6 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
   if (typeof castorWorkspace?.requestTimeoutSeconds === 'number') {
     config.castorWorkspace.requestTimeoutSeconds = castorWorkspace.requestTimeoutSeconds;
   }
-  if (typeof domainExpert?.enabled === 'boolean') {
-    config.domainExpert.enabled = domainExpert.enabled;
-  }
-  if (typeof domainExpert?.liveToolsEnabled === 'boolean') {
-    config.domainExpert.liveToolsEnabled = domainExpert.liveToolsEnabled;
-  }
-  if (typeof domainExpert?.baseUrl === 'string' && domainExpert.baseUrl.trim()) {
-    config.domainExpert.baseUrl = trimTrailingSlash(domainExpert.baseUrl.trim());
-  }
-  if (typeof domainExpert?.requestTimeoutSeconds === 'number') {
-    config.domainExpert.requestTimeoutSeconds = domainExpert.requestTimeoutSeconds;
-  }
-  if (typeof domainExpert?.authToken === 'string' && domainExpert.authToken.trim()) {
-    config.domainExpert.authToken = domainExpert.authToken.trim();
-  }
-  if (typeof domainExpert?.defaultDomainId === 'string' && domainExpert.defaultDomainId.trim()) {
-    config.domainExpert.defaultDomainId = domainExpert.defaultDomainId.trim();
-  }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
   validateConfig(config);
@@ -895,9 +827,6 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
   }
   if (source.castorWorkspace) {
     target.castorWorkspace = { ...target.castorWorkspace, ...source.castorWorkspace };
-  }
-  if (source.domainExpert) {
-    target.domainExpert = { ...target.domainExpert, ...source.domainExpert };
   }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 }
@@ -1067,30 +996,6 @@ function validateConfig(config: OlympusConfig): void {
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
   assertBoolean(config.fileDelivery.enabled, 'fileDelivery.enabled');
   assertBoolean(config.castorWorkspace.enabled, 'castorWorkspace.enabled');
-  if (config.domainExpert.defaultDomainId !== undefined) {
-    if (typeof config.domainExpert.defaultDomainId !== 'string') {
-      throw new OperationError('config_error', 'domainExpert.defaultDomainId must be a string.');
-    }
-    const trimmed = config.domainExpert.defaultDomainId.trim();
-    if (trimmed) {
-      config.domainExpert.defaultDomainId = trimmed;
-    } else {
-      delete config.domainExpert.defaultDomainId;
-    }
-  }
-  if (config.domainExpert.authToken !== undefined) {
-    if (typeof config.domainExpert.authToken !== 'string') {
-      throw new OperationError('config_error', 'domainExpert.authToken must be a string.');
-    }
-    const trimmed = config.domainExpert.authToken.trim();
-    if (trimmed) {
-      config.domainExpert.authToken = trimmed;
-    } else {
-      delete config.domainExpert.authToken;
-    }
-  }
-  assertBoolean(config.domainExpert.enabled, 'domainExpert.enabled');
-  assertBoolean(config.domainExpert.liveToolsEnabled, 'domainExpert.liveToolsEnabled');
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   if (
     typeof config.email.baseUrl !== 'string'
@@ -1114,13 +1019,6 @@ function validateConfig(config: OlympusConfig): void {
     throw new OperationError('config_error', 'castorWorkspace.baseUrl must be an HTTP(S) URL.');
   }
   config.castorWorkspace.baseUrl = trimTrailingSlash(config.castorWorkspace.baseUrl);
-  if (
-    typeof config.domainExpert.baseUrl !== 'string'
-    || (!config.domainExpert.baseUrl.startsWith('http://') && !config.domainExpert.baseUrl.startsWith('https://'))
-  ) {
-    throw new OperationError('config_error', 'domainExpert.baseUrl must be an HTTP(S) URL.');
-  }
-  config.domainExpert.baseUrl = trimTrailingSlash(config.domainExpert.baseUrl);
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   if (
     typeof config.email.requestTimeoutSeconds !== 'number'
@@ -1143,13 +1041,6 @@ function validateConfig(config: OlympusConfig): void {
     || config.castorWorkspace.requestTimeoutSeconds <= 0
   ) {
     throw new OperationError('config_error', 'castorWorkspace.requestTimeoutSeconds must be greater than zero.');
-  }
-  if (
-    typeof config.domainExpert.requestTimeoutSeconds !== 'number'
-    || !Number.isFinite(config.domainExpert.requestTimeoutSeconds)
-    || config.domainExpert.requestTimeoutSeconds <= 0
-  ) {
-    throw new OperationError('config_error', 'domainExpert.requestTimeoutSeconds must be greater than zero.');
   }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 }

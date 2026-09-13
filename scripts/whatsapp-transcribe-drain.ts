@@ -3,8 +3,8 @@
 // This lane is LOCAL ONLY. It reuses WhisperCommandTranscriber and
 // OLYMPUS_TRANSCRIBE_COMMAND to turn files captured by tools/whatsapp-bridge
 // into <media_path>.transcript.txt sidecars consumed by the live connector.
-// It must never route WhatsApp personal audio through domain-expert, Gemini,
-// GCS, or any cloud ASR lane. The one remote the command may use is the
+// It must never route WhatsApp personal audio through Gemini, GCS, or any
+// cloud ASR lane. The one remote the command may use is the
 // owner's Delphi appliance over the loopback SSH tunnel (OLYMPUS_TRANSCRIBE_URL
 // on 127.0.0.1/localhost, the same trust class as local); the drain refuses to
 // start with any other host, so `local_only` / `cloud_asr_allowed: false` in

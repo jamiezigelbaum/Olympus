@@ -19,7 +19,6 @@
 export const PUBLIC_RUNTIME_STRIPPED_MODULES = [
   'src/core/config.ts',
   'src/core/connect.ts',
-  'src/core/doctor.ts',
   'src/data-lifecycle.ts',
   'src/mcp/server.ts',
   'src/native-plugin.ts',
@@ -36,7 +35,7 @@ export const PUBLIC_RUNTIME_STRIPPED_MODULES = [
  * rather than letting a module join the list without joining the build.
  */
 export const PUBLIC_RUNTIME_STRIPPED_MODULE_FILTER =
-  /(?:email-source\/(?:index|server|gogcli)|credential-broker\/index|credential-health|core\/(?:config|connect|doctor)|data-lifecycle|native-plugin|mcp\/server)\.ts$/;
+  /(?:email-source\/(?:index|server|gogcli)|credential-broker\/index|credential-health|core\/(?:config|connect)|data-lifecycle|native-plugin|mcp\/server)\.ts$/;
 
 /** The one stripped module that also has its service-account handle set replaced. */
 export const PUBLIC_RUNTIME_CREDENTIAL_BROKER_MODULE = 'src/workers/credential-broker/index.ts';

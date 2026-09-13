@@ -2,7 +2,7 @@
 // build` never type-checks the result. That is how the v0.4 package shipped a
 // broker whose OAuth mint methods were stripped while their caller survived,
 // and how src/core/config.ts shipped a DEFAULT_CONFIG missing the
-// fileDelivery, castorWorkspace, and domainExpert sections its own interface
+// fileDelivery and castorWorkspace sections its own interface
 // declared required — any packaged-build reader of those sections crashes
 // invisibly to `tsc` over the repo. The resolved design keeps the sections out
 // of the shipped bundle (the release's assertNoOwnerIdentifiers gate bans the
@@ -96,7 +96,7 @@ describe('public runtime config stripping', () => {
 
     // Everything the public build DOES ship must be untouched by the strip,
     // and a defaults-only load (no config file, no env) must still validate.
-    const { fileDelivery, castorWorkspace, domainExpert, ...sharedDefaults } = defaultConfig();
+    const { fileDelivery, castorWorkspace, ...sharedDefaults } = defaultConfig();
     expect(publicDefaults).toEqual(sharedDefaults);
     const publicLoaded = stripped.loadConfig({ OLYMPUS_CONFIG: join(mirror, 'absent-config.json') }) as
       Partial<ReturnType<typeof defaultConfig>>;

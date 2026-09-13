@@ -995,7 +995,6 @@ describe('olympus connect OAuth authorization-code flow', () => {
 
       expect(result.handles).toEqual(['notion.solon']);
       expect(result.secretRefs).toEqual(['store:notion.solon.integration_token']);
-      expect(result.next).toContain('OLYMPUS_DOMAIN_EXPERT_NOTION_TOKEN');
       expect(result.next).toContain('Share each target page or database');
       expect(await store.get('notion.solon.integration_token')).toBe('good-notion-token-fixture');
       expect(registry.handles[0]).toMatchObject({

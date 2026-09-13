@@ -3,16 +3,7 @@ import { runDoctor } from './doctor.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption, type SourceExportItemOption } from './email.ts';
 import type { FileDeliveryClient } from './file-delivery.ts';
 import type { CastorWorkspaceClient } from './castor-workspace.ts';
-import type { DomainExpertClient, DomainExpertTool } from './domain-expert-client.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
-import {
-  ANNAS_ARCHIVE_FORMATS,
-  DOMAIN_AGENT_ACTIONS,
-  DOMAIN_DOC_ACTIONS,
-  DOMAIN_SOURCE_ACTIONS,
-  DOMAIN_SOURCE_KINDS,
-  RAG_CORPUS_ACTIONS,
-} from './domain-expert.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError } from './operation-error.ts';
 import { selectedItemContentFieldPath } from './source-index/selected-item-safety.ts';
@@ -60,7 +51,6 @@ export interface OperationContext {
   email: EmailClient;
   fileDelivery?: FileDeliveryClient;
   castorWorkspace?: CastorWorkspaceClient;
-  domainExpert?: DomainExpertClient;
   /** Trusted OpenClaw tool-factory context; never sourced from tool params. */
   sourceWatchRoute?: SourceWatchAuthenticatedRoute;
   hireBroker?: HireBrokerClient;
@@ -1000,178 +990,6 @@ export const operations: Operation[] = [
     },
   },
   {
-    name: 'domain_agent',
-    description: [
-      'Create or inspect a reusable domain expert agent workspace, persona, library, and corpus setup through the configured domain-expert backend.',
-      'Use this when the owner asks to create a governance, dating, trading, or other domain-specific researcher.',
-      'dry_run=true asks the runtime worker for a non-mutating scaffold.',
-    ].join(' '),
-    params: {
-      action: { type: 'string', required: true, enum: [...DOMAIN_AGENT_ACTIONS], description: 'Domain-agent lifecycle action.' },
-      domain_id: { type: 'string', description: 'Stable domain id. Defaults to governance.' },
-      display_name: { type: 'string', description: 'Optional human name for the domain researcher.' },
-      dry_run: { type: 'boolean', description: 'Defaults true. Live execution is blocked until the runtime backend is configured.' },
-    },
-    mutating: true,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'domain agent' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'domain_agent', params),
-  },
-  {
-    name: 'domain_ask',
-    description: [
-      'Return a grounded domain-expert answer over a domain library using Gemini Enterprise RAG Engine Cross-Corpus Retrieval.',
-      'This is the public/internal domain-expert lane, separate from the frozen secure-local source_answer pipeline.',
-      'This tool is available only while its live retrieval backend is enabled.',
-    ].join(' '),
-    params: {
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      question: { type: 'string', required: true, description: 'Question for the domain expert to answer from its curated library.' },
-      corpus_id: { type: 'string', description: 'Optional single Vertex RAG corpus id or manifest display name. Defaults to all corpora in the domain manifest.' },
-      corpora: { type: 'array', description: 'Optional corpus ids or manifest display names. Defaults to all corpora in the domain manifest.' },
-      max_results: { type: 'number', description: 'Optional retrieval result target. Defaults to 12.' },
-    },
-    mutating: false,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'domain ask', positional: ['question'], stdin: 'question' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'domain_ask', params),
-  },
-  {
-    name: 'domain_source',
-    description: [
-      'Manage source intake for a domain expert library from files, Google Docs, PDFs, books, blog posts, or web links.',
-      'Worker-backed list/status are read-only registry reads; remove appends an audit tombstone; add keeps the existing intake record path.',
-      'The source record is domain-agnostic and flows into classification, dedupe, staging, Gemini Enterprise import, and source-registry updates.',
-      'dry_run=true asks the configured runtime worker for a non-mutating intake plan.',
-    ].join(' '),
-    params: {
-      action: { type: 'string', required: true, enum: [...DOMAIN_SOURCE_ACTIONS], description: 'Source lifecycle action.' },
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      source_id: { type: 'string', description: 'Required for status/remove; optional stable id for add.' },
-      kind: { type: 'string', enum: [...DOMAIN_SOURCE_KINDS], description: 'Source kind.' },
-      title: { type: 'string', description: 'Optional source title.' },
-      author: { type: 'string', description: 'Optional source author.' },
-      url: { type: 'string', description: 'Canonical URL or provider locator for link intake.' },
-      relative_path: { type: 'string', description: 'Path inside the domain workspace or delegated alias for folder intake.' },
-      corpus_id: { type: 'string', description: 'Optional target corpus id.' },
-      trust_posture: { type: 'string', description: 'Optional trust/source-review posture.' },
-      copyright_posture: { type: 'string', description: 'Explicit source copyright/import posture when known.' },
-      include_history: { type: 'boolean', description: 'For list, include every registry record per source instead of only current records.' },
-      include_removed: { type: 'boolean', description: 'For list, include sources whose latest record is a removed tombstone.' },
-      dry_run: { type: 'boolean', description: 'Defaults true. Live intake is blocked until the runtime backend is configured.' },
-    },
-    mutating: true,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'domain source' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'domain_source', params),
-  },
-  {
-    name: 'rag_corpus',
-    description: [
-      'Plan Gemini Enterprise RAG Engine corpus create, import, stage_import, web_import, notion_import, status, or refresh actions for a domain expert.',
-      'The operation enforces the domain manifest GCS allowlist and keeps Olympus as the control plane.',
-      'Live corpus mutations run in the OpenClaw runtime with credentials resolved through SecretRef; dry_run=true returns an operator-reviewable plan.',
-    ].join(' '),
-    params: {
-      action: { type: 'string', required: true, enum: [...RAG_CORPUS_ACTIONS], description: 'Corpus lifecycle action.' },
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      corpus_id: { type: 'string', description: 'Target corpus id. Defaults to a domain manifest corpus.' },
-      rag_file_name: { type: 'string', description: 'For delete_file, full Vertex ragFiles resource name under the resolved corpus.' },
-      page_token: { type: 'string', description: 'For list_files, Vertex pageToken passthrough.' },
-      source_id: { type: 'string', description: 'Optional source registry id to import or inspect.' },
-      gcs_uri: { type: 'string', description: 'Optional staged gs:// URI. Must be under the domain allowlist.' },
-      drive_file_id: { type: 'string', description: 'Optional Google Drive file id for future direct import paths.' },
-      workspace_relative_path: { type: 'string', description: 'For stage_import, path inside the domain workspace root to recursively stage.' },
-      batch_id: { type: 'string', description: 'Optional deterministic staging batch id. Generated by the worker when omitted.' },
-      urls: { type: 'array', description: 'For web_import, HTTPS URLs to fetch and derive into importable documents; for notion_import, Notion URLs to import through the official API. 1 to 200 entries.' },
-      page_ids: { type: 'array', description: 'For notion_import, raw Notion page ids to import.' },
-      database_ids: { type: 'array', description: 'For notion_import, raw Notion database ids to query and import.' },
-      include_media: { type: 'boolean', description: 'For stage_import or web_import, include media files. Audio/video media is staged raw and transcribed to markdown when live. Defaults false.' },
-      transcript_mode: { type: 'string', enum: ['auto', 'captions', 'asr'], description: 'For web_import YouTube URLs: auto uses captions then ASR, captions never falls through to ASR, asr skips caption tiers. Defaults auto.' },
-      dry_run: { type: 'boolean', description: 'Defaults true. Live corpus mutation is blocked until the runtime backend is configured.' },
-    },
-    mutating: true,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'rag corpus' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'rag_corpus', params),
-  },
-  {
-    name: 'domain_doc',
-    description: [
-      'Plan Google Docs collaboration for a domain expert service account: read, comment, visually marked insert/replace, accept, or reject.',
-      'Google Docs API suggestion-mode creation is not treated as available; the supported review path is comments plus approved direct edits in a visible domain-agent style.',
-      'Phase 0 is dry-run only and records the service-account, approval, and visual review contract.',
-    ].join(' '),
-    params: {
-      action: { type: 'string', required: true, enum: [...DOMAIN_DOC_ACTIONS], description: 'Google Docs collaboration action.' },
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      document_id: { type: 'string', required: true, description: 'Google Docs document id.' },
-      text: { type: 'string', description: 'Text for visual_insert or visual_replace.' },
-      comment: { type: 'string', description: 'Comment text or edit rationale.' },
-      range_start: { type: 'number', description: 'Optional Docs structural index/range start for edit actions.' },
-      range_end: { type: 'number', description: 'Optional Docs structural index/range end for visual_replace.' },
-      approval_id: { type: 'string', description: 'Explicit approval reference required for live direct edits.' },
-      edit_batch_id: { type: 'string', description: 'Stable id for later accept/reject cleanup.' },
-      dry_run: { type: 'boolean', description: 'Defaults true. Live Docs mutation is blocked until the runtime backend is configured.' },
-    },
-    mutating: true,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'domain doc' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'domain_doc', params),
-  },
-  {
-    name: 'annas_archive_search',
-    description: [
-      'Search Anna Archive through the Castor runtime secret and return ranked candidate book/file metadata for approval.',
-      'The API key is never exposed to the agent; this tool is available only while the runtime worker is enabled.',
-    ].join(' '),
-    params: {
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      query: { type: 'string', description: 'Search query.' },
-      topic: { type: 'string', description: 'Optional topic for top-N book discovery, such as evolutionary biology.' },
-      title: { type: 'string', description: 'Optional title search.' },
-      author: { type: 'string', description: 'Optional author search.' },
-      language: { type: 'string', description: 'Optional preferred language filter or ranking hint.' },
-      max_results: { type: 'number', description: 'Maximum candidate metadata results. Defaults to 10.' },
-      top_n: { type: 'number', description: 'Number of top candidates to rank and present for approval. Defaults to max_results.' },
-      format_preference: { type: 'string', enum: ['auto', 'text_rag', 'layout'], description: 'Prefer EPUB/text for text-first RAG, PDF for layout-heavy books, or auto.' },
-    },
-    mutating: false,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'annas archive search' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'annas_archive_search', params),
-  },
-  {
-    name: 'annas_archive_import',
-    description: [
-      "Plan or run an approved Anna Archive PDF/EPUB/etc. download into the owner\'s Xanthos books folder.",
-      'Requires explicit copyright posture and approval for live execution; RAG ingest is optional and requires an explicit corpus_id.',
-    ].join(' '),
-    params: {
-      domain_id: { type: 'string', description: 'Domain id. Defaults to governance.' },
-      annas_archive_id: { type: 'string', description: 'Anna Archive item id or md5-like locator.' },
-      url: { type: 'string', description: 'Optional Anna Archive URL locator.' },
-      format: { type: 'string', enum: [...ANNAS_ARCHIVE_FORMATS], description: 'Desired or observed file format.' },
-      corpus_id: { type: 'string', description: 'Optional explicit target domain corpus id for RAG ingest.' },
-      title: { type: 'string', description: 'Candidate title, used for deterministic folder naming and audit.' },
-      author: { type: 'string', description: 'Candidate author, used for deterministic folder naming and audit.' },
-      year: { type: 'string', description: 'Candidate publication year, used for deterministic folder naming and audit.' },
-      topic: { type: 'string', description: 'Topic folder under the Xanthos books root.' },
-      language: { type: 'string', description: 'Candidate language metadata.' },
-      file_name: { type: 'string', description: 'Optional original filename from the candidate metadata.' },
-      md5: { type: 'string', description: 'Optional stable Anna/hash locator for duplicate detection.' },
-      file_size_bytes: { type: 'number', description: 'Optional expected file size from candidate metadata.' },
-      ingest: { type: 'boolean', description: 'Also attempt RAG ingest after saving. Requires explicit corpus_id or returns needs_corpus_decision.' },
-      copyright_posture: { type: 'string', required: true, description: 'Explicit copyright/import posture for this item.' },
-      approval_id: { type: 'string', description: 'Explicit approval reference required for live download/import.' },
-      dry_run: { type: 'boolean', description: 'Defaults true. Live download is blocked until approval_id is provided.' },
-    },
-    mutating: true,
-    availability: domainExpertToolsAvailable,
-    cliHints: { name: 'annas archive import' },
-    handler: async (ctx, params) => runDomainExpert(ctx, 'annas_archive_import', params),
-  },
-  {
     name: 'email_search',
     description: [
       'Search private email and return a sanitized local-only source packet for approved local/private sessions.',
@@ -1650,26 +1468,6 @@ function renderIdentityTemplate(value: string, config?: OlympusConfig): string {
   return value
     .replace(/\{\{ownerName\}\}/g, identity.ownerName)
     .replace(/\{\{assistantName\}\}/g, identity.assistantName);
-}
-
-async function runDomainExpert(
-  ctx: OperationContext,
-  tool: DomainExpertTool,
-  rawParams: Record<string, unknown>,
-): Promise<unknown> {
-  if (ctx.domainExpert && ctx.config.domainExpert.enabled && ctx.config.domainExpert.liveToolsEnabled) {
-    return ctx.domainExpert.run(tool, rawParams);
-  }
-  throw new OperationError(
-    'domain_expert_not_configured',
-    `${tool} is unavailable because the live domain-expert backend is not enabled in this Olympus runtime.`,
-    'Enable both domainExpert.enabled and domainExpert.liveToolsEnabled after configuring the runtime worker.',
-  );
-}
-
-function domainExpertToolsAvailable(config: OlympusConfig): boolean {
-  return config.domainExpert.enabled
-    && config.domainExpert.liveToolsEnabled;
 }
 
 function asString(value: unknown, name: string): string {

@@ -52,29 +52,6 @@ describe('operation exposure policy', () => {
     }
   });
 
-  test('keeps domain expert tools outside the v0.4 public surface even when internal gates are active', () => {
-    const config = defaultConfig();
-    const domainTools = [
-      'domain_agent',
-      'domain_ask',
-      'domain_source',
-      'rag_corpus',
-      'domain_doc',
-      'annas_archive_search',
-      'annas_archive_import',
-    ];
-
-    config.domainExpert.liveToolsEnabled = true;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-
-    config.domainExpert.enabled = true;
-    config.domainExpert.liveToolsEnabled = false;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-
-    config.domainExpert.liveToolsEnabled = true;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-  });
-
   test('can disable the product source-index read surface without exposing operator tools', () => {
     const config = defaultConfig();
     config.sourceIndex.enabled = false;

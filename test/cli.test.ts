@@ -998,33 +998,15 @@ describe('CLI tool surface', () => {
     expect(tools.map((tool) => tool.name)).not.toContain('castor_workspace');
   }, 30_000);
 
-  test('--tools-json never exposes repository-only Domain Expert tools', async () => {
-    const tools = await runToolsJson({});
-
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_agent');
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_ask');
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_doc');
-
-    const enabledTools = await runToolsJson({
-      domainExpert: {
-        enabled: true,
-        liveToolsEnabled: true,
-      },
-    });
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_agent');
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_ask');
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_doc');
-  }, 30_000);
-
   test('parseArgs accepts explicit false values for boolean flags', () => {
-    const domainAgent = operations.find((operation) => operation.name === 'domain_agent')!;
+    const castorWorkspace = operations.find((operation) => operation.name === 'castor_workspace')!;
 
-    expect(parseArgs(domainAgent, ['--action', 'bootstrap', '--dry-run=false'])).toEqual({
-      action: 'bootstrap',
+    expect(parseArgs(castorWorkspace, ['--action', 'export_gcs', '--dry-run=false'])).toEqual({
+      action: 'export_gcs',
       dry_run: false,
     });
-    expect(parseArgs(domainAgent, ['--action', 'bootstrap', '--dry-run', 'false'])).toEqual({
-      action: 'bootstrap',
+    expect(parseArgs(castorWorkspace, ['--action', 'export_gcs', '--dry-run', 'false'])).toEqual({
+      action: 'export_gcs',
       dry_run: false,
     });
   });
