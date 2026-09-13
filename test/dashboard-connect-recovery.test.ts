@@ -15,6 +15,7 @@ import {
 } from '../src/core/sovereignty.ts';
 import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
+import { DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
@@ -160,8 +161,8 @@ describe('a Google reconnect keeps the client secret its own registration was is
         sovereigntyEngine: fixtureSovereigntyEngine(),
         registryPath,
         // A secret left over from a registration whose client id is gone. The
-        // pilot client is a public client; pairing it with a stranger's secret
-        // is the one thing Google refuses outright.
+        // publisher Web client uses the server-held secret, never this
+        // unrelated local credential.
         secretStore: memorySecretStore({ 'gmail.personal.oauth.client_secret': 'stale-secret' }),
         startExternalOAuthConnection: async (options) => {
           starts.push({
@@ -174,19 +175,15 @@ describe('a Google reconnect keeps the client secret its own registration was is
     });
 
     try {
-      // Loopback, not `jsonRequest`'s `http://worker.test`: with the Google
-      // publisher Web client filled in (docs/ops/OAUTH_RELAY.md), a
-      // NON-loopback dashboard with nothing registered now takes the
-      // publisher relay flow instead of this fallback, exactly as intended —
-      // the packaged Desktop pilot client is reachable at all only on a
-      // loopback origin, because it cannot register an https redirect URI.
+      // HTTP loopback uses the publisher Web flow too, even when a legacy
+      // Desktop client is configured. No local secret accompanies the request.
       const response = await worker.fetch(new Request('http://127.0.0.1:8010/dashboard/connect/oauth/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'gmail' }),
       }));
       expect(response.status).toBe(200);
-      expect(starts).toEqual([{ clientId: 'pilot-client-id' }]);
+      expect(starts).toEqual([{ clientId: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID }]);
     } finally {
       if (previous === undefined) delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
       else process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;
