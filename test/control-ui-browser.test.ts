@@ -698,7 +698,7 @@ describe('folder scope before ingestion', () => {
   test('opens Dropbox directly, switches providers without ingestion, and routes native exit links', async () => {
     const view = buildDispositionsPreviewView(); view.sources = [];
     view.folder_scopes = [
-      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: false, status: 'scope_pending' },
+      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending' },
       { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: 'account-one', scope_revision: 'revision-one' },
     ];
     const root = document.createElement('div'); root.innerHTML = renderSourceDispositionsControlUi(view, true, 'dropbox.files').body; document.body.append(root);
@@ -717,7 +717,7 @@ describe('folder scope before ingestion', () => {
     click(dropbox, '[data-scope-select]'); click(dropbox, '[data-scope-state="metadata_only"]');
     click(dropbox, '[data-scope-switch="google_drive.docs"]');
     expect(drive.hidden).toBe(false); expect(dropbox.hidden).toBe(true);
-    const connect = Array.from(drive.querySelectorAll<HTMLAnchorElement>('a')).find((node) => node.textContent?.startsWith('Connect Google'))!;
+    const connect = drive.querySelector<HTMLAnchorElement>('.scope-back a')!;
     connect.dataset.olympusNav = connect.getAttribute('href')!; connect.href = 'https://gateway.test/native-page';
     connect.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
@@ -730,6 +730,43 @@ describe('folder scope before ingestion', () => {
     expect(dropbox.hidden).toBe(false);
     expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
     expect(reads).toHaveLength(1); expect(writes).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test('Locations lists connected providers only while a direct disconnected page still offers Connect', () => {
+    const view = buildDispositionsPreviewView(); view.sources = [];
+    view.folder_scopes = [
+      { source_id: 'google_drive.docs', disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: false, status: 'scope_pending' },
+      { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending' },
+    ];
+    const root = document.createElement('div');
+    root.innerHTML = renderSourceDispositionsControlUi(view, true, 'dropbox.files').body;
+    const dropbox = root.querySelector('[data-scope-panel="dropbox.files"]')!;
+    expect(Array.from(dropbox.querySelectorAll('.location'), node => node.textContent)).toEqual(['◆Dropbox']);
+    expect(root.querySelector('[data-scope-switch="google_drive.docs"]')).toBeNull();
+    root.innerHTML = renderSourceDispositionsControlUi(view, true, 'google_drive.docs').body;
+    const drive = root.querySelector<HTMLElement>('[data-scope-panel="google_drive.docs"]')!;
+    expect(drive.hidden).toBe(false);
+    expect(drive.textContent).toContain('Connect Google Drive');
+  });
+
+  test('folder siblings sort alphabetically with natural numbers at every depth', async () => {
+    const { root } = scopeRoot();
+    const controller = mountDispositionsController({
+      root, transport: { async read(params) {
+        const response = page();
+        const parent = 'parent_key' in params ? params.parent_key : undefined;
+        response.scope_browser!.nodes = (parent ? ['Child 10', 'child 2', 'Apple'] : ['Zebra', 'alpha 10', 'Alpha 2', 'alpha'])
+          .map(name => ({ key: `${parent || 'root'}/${name}`, name, kind: 'folder' as const, selectable: true, has_children: !parent }));
+        return response;
+      }, async control() { throw new Error('Browsing must not change scope'); } },
+      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
+    expect(Array.from(root.querySelectorAll('[data-scope-select]'), n => n.textContent)).toEqual(['alpha', 'Alpha 2', 'alpha 10', 'Zebra']);
+    click(root, '[data-scope-open]'); await happyWindow.happyDOM.waitUntilComplete();
+    expect(Array.from(root.querySelectorAll('[data-scope-select]'), n => n.textContent)).toEqual(['alpha', 'Apple', 'child 2', 'Child 10', 'Alpha 2', 'alpha 10', 'Zebra']);
     controller.dispose();
   });
 

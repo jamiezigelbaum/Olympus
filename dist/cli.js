@@ -11406,6 +11406,7 @@ var init_local_index = __esm(() => {
       const limit = normalizeExtractionCandidateLimit(options.limit);
       const matchesMimeType = buildMimeTypeMatcher(options.mimeTypes);
       const accountScope = normalizeOptionalAccountScope(options.accountScope);
+      const selectedFilters = connectorStoreFilterSql(options.filters);
       let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
       const query = this.db.query(`
@@ -11417,9 +11418,11 @@ var init_local_index = __esm(() => {
         (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS stored_chunks
       FROM items i
       WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
     `);
@@ -11427,7 +11430,7 @@ var init_local_index = __esm(() => {
       let skippedByDisposition = 0;
       let exhausted = false;
       while (candidates.length < limit) {
-        const rows = query.all(lastExaminedPk, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, scanBatch);
+        const rows = query.all(lastExaminedPk, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, ...selectedFilters.params, scanBatch);
         if (rows.length === 0) {
           exhausted = true;
           break;
@@ -11436,7 +11439,11 @@ var init_local_index = __esm(() => {
           lastExaminedPk = row.item_pk;
           if (matchesMimeType && !matchesMimeType(row.mime_type))
             continue;
-          const decision = this.exclusions.evaluatePath(row.locator_uri);
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          });
           if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
             skippedByDisposition += 1;
             continue;
@@ -13971,17 +13978,34 @@ var init_local_index = __esm(() => {
       const row = this.db.query("SELECT reactions_json FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId);
       return parseStoredSourceReactions(row?.reactions_json);
     }
-    status() {
+    status(scope) {
+      const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
+      const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
+      const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+      const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${itemFilters.sql}`;
+      const contentWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}`;
+      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params];
+      const contentParams = [...accountScope ? [accountScope] : [], ...contentFilters.params];
       const counts = this.db.query(`
       SELECT
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items,
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 1) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks) AS chunks,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
+        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+          WHERE i.tombstoned = 0 ${contentWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
           WHERE connector_id <> 'connector_store_embedding_write_authority'
@@ -13991,8 +14015,34 @@ var init_local_index = __esm(() => {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        ) AS items_with_text
-    `).get();
+            ${contentWhere}
+        ) AS items_with_text,
+        (SELECT COUNT(*) FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${contentWhere}
+        ) AS full_ingestion_files
+    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...contentParams, ...contentParams, ...contentParams, ...contentParams);
+      let policyDeferredItems = 0;
+      if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+        const rows = this.db.query(`
+        SELECT i.locator_uri, i.title, i.mime_type
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory'
+          ${contentWhere}
+      `).all(...contentParams);
+        for (const row of rows) {
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          });
+          if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
+            policyDeferredItems += 1;
+          }
+        }
+      }
       const byModel = this.db.query(`
       SELECT
         m.model_id AS model_id,
@@ -14001,10 +14051,12 @@ var init_local_index = __esm(() => {
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+            ${contentWhere}
             AND NOT EXISTS (
               SELECT 1 FROM chunks c
               WHERE c.item_pk = i.item_pk
@@ -14016,9 +14068,14 @@ var init_local_index = __esm(() => {
                 )
             )
         ) AS items_embedded
-      FROM (SELECT DISTINCT model_id FROM chunk_embeddings) m
+      FROM (
+        SELECT DISTINCT emb.model_id
+        FROM chunk_embeddings emb
+        JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0 ${contentWhere}
+      ) m
       ORDER BY m.model_id
-    `).all();
+    `).all(...contentParams, ...contentParams, ...contentParams);
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id <> 'connector_store_embedding_write_authority'
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
@@ -14026,13 +14083,22 @@ var init_local_index = __esm(() => {
         corpusId: this.corpusId,
         family: this.family,
         trustDomain: this.trustDomain,
+        ...scope?.scopeRevision ? { scopeRevision: scope.scopeRevision } : {},
         counts: {
           items: counts.items,
           tombstonedItems: counts.tombstoned_items,
           chunks: counts.chunks,
           embeddedChunks: counts.embedded_chunks,
           syncRuns: counts.sync_runs,
-          itemsWithText: counts.items_with_text
+          itemsWithText: counts.items_with_text,
+          ...scope ? {
+            files: counts.files,
+            folders: counts.folders,
+            fullIngestionFiles: counts.full_ingestion_files,
+            scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+            policyDeferredItems
+          } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -35161,6 +35227,10 @@ function withState(phase, index, phases, source, now, embeddingRuntime) {
     return { ...phase, state: "waiting", state_words: "Not measured by this store" };
   }
   if (dashboardPhaseComplete(phase)) {
+    const due2 = nextSyncDue(source, phase.id, now);
+    if (phase.id === "metadata_sync" && due2 !== undefined) {
+      return { ...phase, state: "done", state_words: `Complete · next check in ${due2}` };
+    }
     return { ...phase, state: "done", state_words: "Done" };
   }
   const previous = index > 0 ? phases[index - 1] : undefined;
@@ -35459,6 +35529,7 @@ function createSourceIndexStatusHandler(options = {}) {
       const corpora = registry.list().filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
       const statuses = corpora.map((corpus) => {
         const store = storesByCorpusId.get(corpus.corpusId);
+        const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
         const availability = resolveStatusRetrievalAvailability(options.retrievalAvailability?.[corpus.corpusId], request);
         const cacheKey = JSON.stringify([
@@ -35470,13 +35541,14 @@ function createSourceIndexStatusHandler(options = {}) {
             availability.embeddingEpoch ?? null,
             availability.reason ?? null,
             availability.backend ?? null
-          ]
+          ],
+          statusScope ?? null
         ]);
         const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
         if (cached && nowMs() - cached.recordedAtMs <= maxAgeMs)
           return cached.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
-        const status = store ? connectorStoreStatus(corpus, store.status(), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId) : configuredCorpusStatus(corpus);
+        const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId) : configuredCorpusStatus(corpus);
         const resolved = withRetrievalEnforcementStatus(corpus, status, availability);
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
@@ -35579,14 +35651,23 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
   return {
     ...baseStatus(corpus),
     configured: true,
+    ...status.scopeRevision ? { scope_revision: status.scopeRevision } : {},
     counts: {
       ...readinessCounts,
-      indexed_items: status.counts.items,
+      indexed_items: status.counts.files ?? status.counts.items,
+      ...status.counts.folders === undefined ? {} : { folders: status.counts.folders },
       tombstoned_items: status.counts.tombstonedItems,
       chunks: status.counts.chunks,
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
       sync_runs: status.counts.syncRuns,
       [ITEMS_WITH_TEXT_COUNT_KEY]: status.counts.itemsWithText,
+      ...status.counts.fullIngestionFiles === undefined ? {} : { scope_full_ingestion_files: status.counts.fullIngestionFiles },
+      ...status.counts.scopeMetadataOnlyFiles === undefined ? {} : { scope_metadata_only_files: status.counts.scopeMetadataOnlyFiles },
+      ...status.counts.policyDeferredItems === undefined ? {} : { scope_policy_deferred_files: status.counts.policyDeferredItems },
+      ...status.counts.contentEligibleItems === undefined ? {} : { qa_eligible_items: status.counts.contentEligibleItems },
+      ...status.counts.scopeMetadataOnlyFiles === undefined || status.counts.policyDeferredItems === undefined ? {} : {
+        [METADATA_ONLY_EXPECTED_COUNT_KEY]: status.counts.scopeMetadataOnlyFiles + status.counts.policyDeferredItems
+      },
       ...forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded }
     },
     ...status.lastSyncRun ? { last_refresh: lastRefreshFromConnectorStoreSync(status.lastSyncRun) } : {},
@@ -36084,6 +36165,11 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
   const embeddingRequired = embeddingRequiredFromCorpora(corpora);
   const vlmQueued = vlmExtractionQueued(ingestionLedgerRow);
+  const exactScopeSelection = scopeSelectionFromCorpora(corpora);
+  const ingestionSelection = exactScopeSelection ?? (ingestionLedgerRow && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined ? {
+    metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
+    full_ingestion_files: Math.max(0, ingestionLedgerRow.items - ingestionLedgerRow.ingestion_health.not_read_by_policy_items)
+  } : undefined);
   const card = {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -36103,12 +36189,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     configured,
     freshness,
     coverage,
-    ...ingestionLedgerRow && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined ? {
-      ingestion_selection: {
-        metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
-        full_ingestion_files: Math.max(0, ingestionLedgerRow.items - ingestionLedgerRow.ingestion_health.not_read_by_policy_items)
-      }
-    } : {},
+    ...ingestionSelection ? { ingestion_selection: ingestionSelection } : {},
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
     ingestion_health: ingestionHealth,
     tier_composition: aggregateTierComposition(corpusCards, trustDomain, coverage),
@@ -36140,14 +36221,17 @@ function googlePilotStatus(configured) {
 function dashboardSourceSetupStatus(card) {
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
-  const dependenciesReady = synced;
   const embeddingLaneApplies = card.embedding_lane_state !== "embedding_lane_disabled" && card.embedding_required !== false;
-  const dependencies = (card.capabilities?.dependencies ?? []).filter((dependency) => dependency.id !== "local_embedding_lane" || embeddingLaneApplies).map((dependency) => ({
-    id: dependency.id,
-    label: dependency.label,
-    status: dependenciesReady ? "ready" : "check_required",
-    next_action: dependenciesReady ? "No action needed; a completed source read proves this dependency path." : "Checked after the first sync."
-  }));
+  const dependencies = (card.capabilities?.dependencies ?? []).filter((dependency) => dependency.id !== "local_embedding_lane" || embeddingLaneApplies).map((dependency) => {
+    const ready = dependency.id === "local_document_extractors" ? card.coverage.content_ready_items > 0 : dependency.id === "local_embedding_lane" ? (card.coverage.embedded_files ?? 0) > 0 : synced;
+    return {
+      id: dependency.id,
+      label: dependency.label,
+      status: ready ? "ready" : "check_required",
+      next_action: ready ? dependency.id === "local_document_extractors" ? "No action needed; extracted document text proves this dependency path." : dependency.id === "local_embedding_lane" ? "No action needed; the current embedding lane reports file-level parity." : "No action needed; a completed source read proves this dependency path." : dependency.id === "local_document_extractors" ? "Checked when the first selected document produces text." : dependency.id === "local_embedding_lane" ? "Checked when the current embedding lane reports an embedded file." : "Checked after the first sync."
+    };
+  });
+  const dependenciesReady = dependencies.every((dependency) => dependency.status === "ready");
   if (connection.state === "not_connected" || connection.state === "needs_setup") {
     const action = connection.action;
     const pairing = action.kind === "guided_session";
@@ -37022,6 +37106,16 @@ function numericCounts(corpus) {
       output[key] = Math.max(0, Math.trunc(value));
   }
   return output;
+}
+function scopeSelectionFromCorpora(corpora) {
+  const selected = corpora.map(numericCounts).filter((counts) => counts.scope_full_ingestion_files !== undefined && counts.scope_metadata_only_files !== undefined);
+  if (selected.length === 0)
+    return;
+  return {
+    full_ingestion_files: selected.reduce((total, counts) => total + counts.scope_full_ingestion_files, 0),
+    metadata_only_files: selected.reduce((total, counts) => total + counts.scope_metadata_only_files, 0),
+    policy_deferred_files: selected.reduce((total, counts) => total + (counts.scope_policy_deferred_files ?? 0), 0)
+  };
 }
 function coverageFromCounts(counts) {
   const indexedItems = firstCount(counts, ["indexed_items", "files", "reader_documents"]) + firstCount(counts, ["folders"], 0);
@@ -56425,6 +56519,14 @@ function normalizeMimeType2(input) {
   const value = input?.split(";", 1)[0]?.trim().toLowerCase();
   return value || undefined;
 }
+function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
+  const enqueued = normalizeMimeType2(refMimeType);
+  const fetched = normalizeMimeType2(fetchedMimeType);
+  if (!fetched || fetched === "application/octet-stream" || fetched === "binary/octet-stream") {
+    return enqueued;
+  }
+  return fetched;
+}
 function sanitizeErrorDetail(body, maxChars = 120) {
   return body.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxChars);
 }
@@ -59273,7 +59375,7 @@ async function settleOneJob(input) {
       }
     }
   }
-  const resolvedMimeType = fetched?.mimeType ?? job.ref.mimeType;
+  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType);
   const resolvedSizeBytes = fetched?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput = {
     ref: job.ref,
@@ -59560,6 +59662,7 @@ var init_runner = __esm(() => {
   init_types();
   init_file_extraction_source();
   init_command_runner();
+  init_bounded_text();
   init_store_sink();
   SINK_SKIP_SETTLEMENTS = Object.freeze({
     [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
@@ -59686,13 +59789,14 @@ function fileExtractionCorporaRoster(input) {
   const configuredDropbox = input.configured.find((corpus) => corpus.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
   const canonicalIds = new Set;
   const canonical = [];
-  if (input.dropbox && input.dropbox.extractionScopes.length > 0) {
+  if (input.dropbox && (input.dropbox.extractionScopes.length > 0 || input.dropbox.resolveExtractionScopes !== undefined)) {
     canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       provider: "dropbox",
       scopes: input.dropbox.extractionScopes,
       ...input.dropbox.resolveExtractionScopes ? { resolveScopes: input.dropbox.resolveExtractionScopes } : {},
+      ...input.dropbox.resolveCandidateFilters ? { resolveCandidateFilters: input.dropbox.resolveCandidateFilters } : {},
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
       ownerConnectorId: "dropbox",
       ...configuredDropbox?.maxTrustTierForRemote ? {
@@ -59765,7 +59869,7 @@ function defaultSourceFactories(env, deps = {}) {
         id: `${input.config.corpusId}:extraction`,
         corpusId: input.config.corpusId,
         provider: input.config.provider,
-        candidates: connectorStoreExtractionCandidateReader(input.store),
+        candidates: connectorStoreExtractionCandidateReader(input.store, input.config.resolveCandidateFilters?.()),
         locators: input.store,
         scopes: (input.config.resolveScopes?.() ?? input.config.scopes).map((approvedScopeKey) => ({ approvedScopeKey })),
         token,
@@ -59813,10 +59917,10 @@ function defaultSourceFactories(env, deps = {}) {
   ]);
   return factories;
 }
-function connectorStoreExtractionCandidateReader(store) {
+function connectorStoreExtractionCandidateReader(store, filters) {
   return {
     extractionCandidates(options) {
-      const page = store.extractionCandidates(options);
+      const page = store.extractionCandidates({ ...options, ...filters ? { filters } : {} });
       return {
         candidates: page.candidates.map((candidate) => ({
           localItemId: candidate.identity.localItemId,
@@ -59889,9 +59993,13 @@ var init_file_extraction_runtime = __esm(() => {
 });
 
 // src/workers/file-extraction/readiness-ledger.ts
-function createExtractionReadinessLedger(jobs) {
+function createExtractionReadinessLedger(jobs, options = {}) {
   return {
     snapshotForCorpus(corpusId) {
+      const lanes = options.lanesForCorpus?.(corpusId);
+      if (lanes !== undefined) {
+        return jobs.counts ? scopedReadinessSnapshot({ counts: jobs.counts.bind(jobs) }, lanes) : undefined;
+      }
       let readiness;
       try {
         readiness = jobs.corpusReadiness(corpusId);
@@ -59916,6 +60024,34 @@ function createExtractionReadinessLedger(jobs) {
           ...readiness.newestTerminalProgressAt ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt } : {}
         }
       };
+    }
+  };
+}
+function scopedReadinessSnapshot(jobs, lanes) {
+  let rows;
+  try {
+    const unique = new Map(lanes.map((lane) => [JSON.stringify(lane), lane]));
+    rows = [...unique.values()].flatMap((lane) => jobs.counts(lane));
+  } catch {
+    return;
+  }
+  const count = (status) => rows.filter((row) => row.status === status).reduce((total, row) => total + row.jobs, 0);
+  const queued = count("queued");
+  const leased = count("leased");
+  const failedRetryable = count("failed_retryable");
+  const failedTerminal = count("failed_terminal");
+  return {
+    counts: {
+      extraction_jobs_queued: queued,
+      extraction_jobs_queued_actionable: queued,
+      extraction_jobs_leased: leased,
+      extraction_jobs_failed: failedRetryable + failedTerminal,
+      extraction_jobs_failed_actionable: failedRetryable + failedTerminal,
+      extraction_jobs_retryable_due_actionable: failedRetryable
+    },
+    contentExtractionThroughput: {
+      actionable_queued: queued,
+      actionable_retryable_due: failedRetryable
     }
   };
 }
@@ -62718,7 +62854,8 @@ function mountDispositionsController(options) {
       return;
     list.replaceChildren();
     const appendNodes = (host, nodes, seen = new Set) => {
-      for (const node of nodes) {
+      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
+      for (const node of sorted) {
         if (seen.has(node.key))
           continue;
         const wrapper = root.ownerDocument.createElement("div");
@@ -65597,12 +65734,13 @@ function renderIngestionSelection(source) {
   const selection = source.ingestion_selection;
   if (!selection)
     return "";
+  const deferred = Math.max(0, selection.policy_deferred_files ?? 0);
   return `
         <div class="dsect">Added to Olympus</div>
         <div class="selectioncounts">
           <div><span>Metadata only</span><b>${escapeHtml(`${dashboardCount(selection.metadata_only_files)} files`)}</b></div>
           <div><span>Full ingestion</span><b>${escapeHtml(`${dashboardCount(selection.full_ingestion_files)} files`)}</b></div>
-        </div>`;
+        </div>${deferred > 0 ? `<p class="hint">${dashboardCount(deferred)} ${deferred === 1 ? "file selected for full ingestion is" : "files selected for full ingestion are"} not being processed because of a separate ingestion policy.</p>` : ""}`;
 }
 function renderTotals(source) {
   const noun = dashboardItemNoun(source);
@@ -68303,8 +68441,9 @@ ${DISPOSITIONS_CSS}</style>
 </html>`;
 }
 function renderSourceDispositionsFragment(view, selectedSourceId) {
-  const locations = view.folder_scopes ?? [];
-  const selected = locations.find((source) => source.source_id === selectedSourceId) ?? locations.find((source) => source.connected) ?? locations[0];
+  const scopes = view.folder_scopes ?? [];
+  const locations = scopes.filter((source) => source.connected);
+  const selected = scopes.find((source) => source.source_id === selectedSourceId) ?? locations[0] ?? scopes[0];
   const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
   const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join("") + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join("");
   return `<main class="picker-page">
@@ -76165,6 +76304,14 @@ async function main() {
             return [];
           return dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref)));
         },
+        resolveCandidateFilters: () => {
+          const approval = fileSourceScopeAuthority?.snapshot("dropbox.files");
+          const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false };
+          if (!scope.allowed || !scope.filters) {
+            throw new OperationError("source_index_policy_violation", "Current Dropbox full-ingestion scope is required before candidate enumeration.");
+          }
+          return scope.filters;
+        },
         resolveCredentialHandle: () => selectedSourceCredentialHandle({
           env: process.env,
           pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
@@ -76303,6 +76450,20 @@ async function main() {
       filters: metadataScope.filters,
       contentAllowed: contentScope.allowed,
       ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
+    };
+  };
+  const connectorStoreStatusScope = (store) => {
+    const readScope = connectorStoreReadScope(store);
+    if (!readScope.allowed)
+      return { itemsAllowed: false, contentAllowed: false };
+    if (!readScope.filters && !readScope.contentFilters)
+      return;
+    return {
+      ...readScope.filters?.sourceScopeRevision ? { scopeRevision: readScope.filters.sourceScopeRevision } : {},
+      ...readScope.accountScope ? { accountScope: readScope.accountScope } : {},
+      ...readScope.filters ? { itemFilters: readScope.filters } : {},
+      contentAllowed: readScope.contentAllowed,
+      ...readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}
     };
   };
   const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
@@ -76536,8 +76697,35 @@ async function main() {
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
     corpusDefinitions: sourceCorpusRegistry.definitions("status", fullCorpusDefinitions),
     connectorStores,
+    connectorStoreStatusScope,
     retrievalAvailability,
-    ...fileExtractionRuntime ? { readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs) } : {}
+    ...fileExtractionRuntime ? {
+      readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+        lanesForCorpus(corpusId) {
+          if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+            return;
+          const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
+          if (!ref || !fileSourceScopeAuthority)
+            return [];
+          const approval = fileSourceScopeAuthority.assertCurrent(ref);
+          const scopes = dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval));
+          const handle = selectedSourceCredentialHandle({
+            env: process.env,
+            pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+            provider: "dropbox",
+            capability: "dropbox.files.sync",
+            handles: readActiveConnectedHandles(process.env)
+          });
+          const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || "personal";
+          return scopes.map((approvedScopeKey) => ({
+            corpusId,
+            provider: "dropbox",
+            accountScope,
+            approvedScopeKey
+          }));
+        }
+      })
+    } : {}
   }) : undefined;
   const sourceDashboardHistory = sourceIndexReadEnabled ? new SqliteSourceDashboardHistory : undefined;
   const sourceIngestionLedger = sourceIndexReadEnabled ? new SqliteSourceIngestionLedgerStore : undefined;
@@ -76862,27 +77050,7 @@ async function main() {
           if (request.source !== "dropbox") {
             throw dashboardSourceSyncNotSupportedError(request.source);
           }
-          const latestDropboxHandle = selectedSourceCredentialHandle({
-            env: process.env,
-            pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
-            provider: "dropbox",
-            capability: "dropbox.files.sync",
-            handles: readActiveConnectedHandles(process.env)
-          });
-          const latestDropboxProviderStoreSync = latestDropboxHandle && dropboxConnectorStore ? createDropboxProviderStoreSyncHandler({
-            store: dropboxConnectorStore,
-            account: latestDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
-            credentialHandle: latestDropboxHandle.handle,
-            ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
-          }) : undefined;
-          const source = createCanonicalDropboxSchedulerSource({
-            policy: dropboxIngestionPolicy,
-            config: olympusConfig,
-            ...latestDropboxProviderStoreSync ? { providerSync: latestDropboxProviderStoreSync } : {},
-            ...dropboxConnectorStore ? { store: dropboxConnectorStore } : {},
-            ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
-            ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
-          });
+          const source = schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources.find((candidate) => candidate.sourceId === SCHEDULER_SOURCE_IDS.dropbox);
           if (!source)
             throw new Error("Dropbox sync is not configured.");
           const tasks = [];

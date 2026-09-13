@@ -776,6 +776,8 @@ export interface ConnectorStoreStatus {
   corpusId: string;
   family: SourceFamily;
   trustDomain: SourceTrustDomain;
+  /** Opaque current approval revision when counts were scope-filtered. */
+  scopeRevision?: string;
   counts: {
     items: number;
     tombstonedItems: number;
@@ -792,6 +794,18 @@ export interface ConnectorStoreStatus {
      * 20k of them extracted reported itself fully answer-ready.
      */
     itemsWithText: number;
+    /** Active non-directory rows in the current approved metadata scope. */
+    files?: number;
+    /** Active directory rows in the current approved metadata scope. */
+    folders?: number;
+    /** Files selected for full ingestion before standing item policy is applied. */
+    fullIngestionFiles?: number;
+    /** Files explicitly selected as metadata-only. */
+    scopeMetadataOnlyFiles?: number;
+    /** Full-ingestion files the standing item policy still permits extraction for. */
+    contentEligibleItems?: number;
+    /** Full-ingestion files separately deferred by standing item policy. */
+    policyDeferredItems?: number;
   };
   /**
    * Embedding parity PER MODEL: for each model that holds any vector here,
@@ -805,6 +819,15 @@ export interface ConnectorStoreStatus {
    */
   embeddingByModel: Array<{ modelId: string; embeddedChunks: number; itemsEmbedded: number }>;
   lastSyncRun?: ConnectorStoreSyncRun;
+}
+
+export interface ConnectorStoreStatusScope {
+  scopeRevision?: string;
+  accountScope?: string;
+  itemsAllowed?: boolean;
+  itemFilters?: ConnectorStoreSearchFilters;
+  contentAllowed?: boolean;
+  contentFilters?: ConnectorStoreSearchFilters;
 }
 
 export interface ConnectorStoreQualificationFingerprint {
@@ -1242,6 +1265,8 @@ export interface ConnectorStoreExtractionCandidateOptions {
   mimeTypes?: readonly string[];
   accountScope?: string;
   withoutChunksOnly?: boolean;
+  /** Trusted current-account/scope boundary, applied before pagination. */
+  filters?: ConnectorStoreSearchFilters;
 }
 
 export interface ConnectorStoreExtractionCandidatePage {
@@ -2369,6 +2394,7 @@ export class LocalConnectorStore {
     const limit = normalizeExtractionCandidateLimit(options.limit);
     const matchesMimeType = buildMimeTypeMatcher(options.mimeTypes);
     const accountScope = normalizeOptionalAccountScope(options.accountScope);
+    const selectedFilters = connectorStoreFilterSql(options.filters);
     let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
 
     // With no media-type filter every scanned row is a match, so one query of
@@ -2384,9 +2410,11 @@ export class LocalConnectorStore {
         (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS stored_chunks
       FROM items i
       WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
     `);
@@ -2400,6 +2428,7 @@ export class LocalConnectorStore {
         accountScope ?? null,
         accountScope ?? null,
         options.withoutChunksOnly === true ? 1 : 0,
+        ...selectedFilters.params,
         scanBatch,
       ) as ConnectorStoreExtractionCandidateRow[];
       if (rows.length === 0) {
@@ -2418,7 +2447,11 @@ export class LocalConnectorStore {
         // purpose: at this seam the conservative direction would be a new,
         // silent skip of items no rule actually names, and the store already
         // reports unevaluable rows as debt for the owner to settle deliberately.
-        const decision = this.exclusions.evaluatePath(row.locator_uri);
+        const decision = this.exclusions.evaluateItem({
+          path: row.locator_uri,
+          name: row.title,
+          mimeType: row.mime_type,
+        });
         if (decision.disposition !== 'admit' && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
           skippedByDisposition += 1;
           continue;
@@ -6756,17 +6789,34 @@ export class LocalConnectorStore {
     return parseStoredSourceReactions(row?.reactions_json);
   }
 
-  status(): ConnectorStoreStatus {
+  status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
+    const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
+    const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
+    const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+    const itemWhere = `${scope?.itemsAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${itemFilters.sql}`;
+    const contentWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}`;
+    const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params];
+    const contentParams = [...(accountScope ? [accountScope] : []), ...contentFilters.params];
     const counts = this.db.query(`
       SELECT
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items,
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 1) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks) AS chunks,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
+        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+          WHERE i.tombstoned = 0 ${contentWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
           WHERE connector_id <> 'connector_store_embedding_write_authority'
@@ -6776,15 +6826,57 @@ export class LocalConnectorStore {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        ) AS items_with_text
-    `).get() as {
+            ${contentWhere}
+        ) AS items_with_text,
+        (SELECT COUNT(*) FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${contentWhere}
+        ) AS full_ingestion_files
+    `).get(
+      ...itemParams,
+      ...itemParams,
+      ...itemParams,
+      ...itemParams,
+      ...contentParams,
+      ...contentParams,
+      ...contentParams,
+      ...contentParams,
+    ) as {
       items: number;
+      files: number;
+      folders: number;
       tombstoned_items: number;
       chunks: number;
       embedded_chunks: number;
       sync_runs: number;
       items_with_text: number;
+      full_ingestion_files: number;
     };
+    let policyDeferredItems = 0;
+    if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+      const rows = this.db.query(`
+        SELECT i.locator_uri, i.title, i.mime_type
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory'
+          ${contentWhere}
+      `).all(...contentParams) as Array<{
+        locator_uri: string | null;
+        title: string | null;
+        mime_type: string | null;
+      }>;
+      for (const row of rows) {
+        const decision = this.exclusions.evaluateItem({
+          path: row.locator_uri,
+          name: row.title,
+          mimeType: row.mime_type,
+        });
+        if (decision.disposition !== 'admit' && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
+          policyDeferredItems += 1;
+        }
+      }
+    }
     // Parity per model. The inner probe is a primary-key lookup on
     // (chunk_pk, model_id), so it stays an indexed point read per chunk.
     const byModel = this.db.query(`
@@ -6795,10 +6887,12 @@ export class LocalConnectorStore {
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+            ${contentWhere}
             AND NOT EXISTS (
               SELECT 1 FROM chunks c
               WHERE c.item_pk = i.item_pk
@@ -6810,9 +6904,18 @@ export class LocalConnectorStore {
                 )
             )
         ) AS items_embedded
-      FROM (SELECT DISTINCT model_id FROM chunk_embeddings) m
+      FROM (
+        SELECT DISTINCT emb.model_id
+        FROM chunk_embeddings emb
+        JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0 ${contentWhere}
+      ) m
       ORDER BY m.model_id
-    `).all() as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+    `).all(
+      ...contentParams,
+      ...contentParams,
+      ...contentParams,
+    ) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
     // "Last" means most-recently-inserted. started_at has only millisecond
     // resolution, so two runs in the same tick tie on it; sync_run_id is a
     // random UUID, so tie-breaking on it picks a run at random (an
@@ -6827,6 +6930,7 @@ export class LocalConnectorStore {
       corpusId: this.corpusId,
       family: this.family,
       trustDomain: this.trustDomain,
+      ...(scope?.scopeRevision ? { scopeRevision: scope.scopeRevision } : {}),
       counts: {
         items: counts.items,
         tombstonedItems: counts.tombstoned_items,
@@ -6834,6 +6938,16 @@ export class LocalConnectorStore {
         embeddedChunks: counts.embedded_chunks,
         syncRuns: counts.sync_runs,
         itemsWithText: counts.items_with_text,
+        ...(scope
+          ? {
+              files: counts.files,
+              folders: counts.folders,
+              fullIngestionFiles: counts.full_ingestion_files,
+              scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+              contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+              policyDeferredItems,
+            }
+          : {}),
       },
       embeddingByModel: byModel.map((row) => ({
         modelId: row.model_id,

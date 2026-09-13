@@ -981,6 +981,24 @@ describe('extraction job store: corpus readiness', () => {
     });
   });
 
+  test('scopes queue readiness to the currently approved extraction lanes', () => {
+    const { store } = newStore();
+    enqueueOne(store, 'current');
+    store.enqueue({
+      refs: [ref('old', { approvedScopeKey: 'example_provider.personal:/Old Scope' })],
+      extractorKind: KIND,
+      extractorVersion: VERSION,
+      policyDecision: 'index_allowed',
+    });
+
+    expect(createExtractionReadinessLedger(store, {
+      lanesForCorpus: () => [LANE],
+    }).snapshotForCorpus(LANE.corpusId)?.counts).toMatchObject({
+      extraction_jobs_queued: 1,
+      extraction_jobs_queued_actionable: 1,
+    });
+  });
+
   test('keeps the actionable stall clock anchored to job arrival across retries', () => {
     const { store, dbPath } = newStore();
     const jobId = enqueueOne(store, 'retrying');

@@ -328,6 +328,15 @@ together at one exact commit and against one exact package artifact.
   names the next supported action.
 - Use a short-lived local control session with CSRF and origin protection;
   never place the worker bearer token in browser local storage.
+- Derive file-source selection, extraction and embedding populations from the
+  current approved scope. Count files separately from folders and show policy
+  deferrals separately from the user's full-ingestion choice. Completed metadata
+  remains complete while waiting for its next refresh. Folder pickers sort
+  siblings alphabetically and list only connected providers in Locations.
+- Missing extraction dependencies must remain visible prerequisites. Source
+  connection alone does not prove extraction or embedding readiness and does
+  not authorize installing OCR tools. Vision-model image ingestion remains
+  outside this repair; existing image policy and explicit exclusions stay intact.
 - Ship the bounded Disconnect behavior recorded in Decisions. Keep local data
   deletion CLI-only with dry-run and explicit worker/store custody. Web scope
   edits author and preview rules; destructive purge/strip remains a separate

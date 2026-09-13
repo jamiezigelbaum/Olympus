@@ -695,7 +695,8 @@ function mountDispositionsController(options) {
       return;
     list.replaceChildren();
     const appendNodes = (host, nodes, seen = new Set) => {
-      for (const node of nodes) {
+      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.key.localeCompare(b.key));
+      for (const node of sorted) {
         if (seen.has(node.key))
           continue;
         const wrapper = root.ownerDocument.createElement("div");

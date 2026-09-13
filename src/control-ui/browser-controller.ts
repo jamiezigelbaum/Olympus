@@ -770,7 +770,9 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (!list) return;
     list.replaceChildren();
     const appendNodes = (host: Element, nodes: OlympusFolderScopeNode[], seen = new Set<string>()): void => {
-      for (const node of nodes) {
+      const sorted = [...nodes].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+        || a.key.localeCompare(b.key));
+      for (const node of sorted) {
         if (seen.has(node.key)) continue;
         const wrapper = root.ownerDocument.createElement('div'); wrapper.className = 'node';
         const row = root.ownerDocument.createElement('div');

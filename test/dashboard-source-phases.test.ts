@@ -389,6 +389,15 @@ describe('phase state words', () => {
     expect(extraction?.state_words).toBe('Stalled · nothing moved for 1d 6h · lane reports running');
   });
 
+  test('a completed metadata traversal stays complete while the next check is scheduled', () => {
+    const progress = dashboardSourceProgress(settledPassCard({
+      last_run: { status: 'completed', traversal_complete: true, items_seen: 4806, items_indexed: 4806 },
+      schedule: { running: false, consecutive_failures: 0, next_run_at: new Date(NOW.getTime() + 29 * 60_000).toISOString() },
+    }), { now: NOW });
+    expect(progress.phases[0]?.state).toBe('done');
+    expect(progress.phases[0]?.state_words).toBe('Complete · next check in 29m');
+  });
+
   test('a sync scheduled inside the hour is waiting, not stalled', () => {
     const progress = dashboardSourceProgress(settledPassCard({
       ...partlyRead,

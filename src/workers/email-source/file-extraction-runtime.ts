@@ -97,6 +97,8 @@ export interface FileExtractionCorpusConfig {
   scopes: readonly string[];
   /** Live scope list for a connected account whose approval may change without restart. */
   resolveScopes?: () => readonly string[];
+  /** Live trusted store filters applied before candidate pagination. */
+  resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
   credentialHandle?: string;
   /**
    * Resolves the credential handle at RUN time, from whatever the connected
@@ -337,6 +339,7 @@ export function fileExtractionCorporaRoster(input: {
   dropbox?: {
     extractionScopes: readonly string[];
     resolveExtractionScopes?: () => readonly string[];
+    resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
     resolveCredentialHandle: () => string | undefined;
   };
   /** True when the WhatsApp connector store exists. */
@@ -347,7 +350,10 @@ export function fileExtractionCorporaRoster(input: {
   );
   const canonicalIds = new Set<string>();
   const canonical: FileExtractionCorpusConfig[] = [];
-  if (input.dropbox && input.dropbox.extractionScopes.length > 0) {
+  if (input.dropbox && (
+    input.dropbox.extractionScopes.length > 0
+    || input.dropbox.resolveExtractionScopes !== undefined
+  )) {
     canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
@@ -355,6 +361,9 @@ export function fileExtractionCorporaRoster(input: {
       scopes: input.dropbox.extractionScopes,
       ...(input.dropbox.resolveExtractionScopes
         ? { resolveScopes: input.dropbox.resolveExtractionScopes }
+        : {}),
+      ...(input.dropbox.resolveCandidateFilters
+        ? { resolveCandidateFilters: input.dropbox.resolveCandidateFilters }
         : {}),
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
       ownerConnectorId: 'dropbox',
@@ -462,7 +471,10 @@ function defaultSourceFactories(
         id: `${input.config.corpusId}:extraction`,
         corpusId: input.config.corpusId,
         provider: input.config.provider,
-        candidates: connectorStoreExtractionCandidateReader(input.store),
+        candidates: connectorStoreExtractionCandidateReader(
+          input.store,
+          input.config.resolveCandidateFilters?.(),
+        ),
         locators: input.store,
         scopes: (input.config.resolveScopes?.() ?? input.config.scopes)
           .map((approvedScopeKey) => ({ approvedScopeKey })),
@@ -525,10 +537,11 @@ function defaultSourceFactories(
  */
 export function connectorStoreExtractionCandidateReader(
   store: LocalConnectorStore,
+  filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters,
 ): ExtractionCandidateReader {
   return {
     extractionCandidates(options) {
-      const page = store.extractionCandidates(options);
+      const page = store.extractionCandidates({ ...options, ...(filters ? { filters } : {}) });
       return {
         candidates: page.candidates.map((candidate) => ({
           localItemId: candidate.identity.localItemId,

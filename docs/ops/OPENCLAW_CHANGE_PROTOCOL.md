@@ -247,6 +247,14 @@ systemd proof behavior remains unchanged.
 
 ## Known sharp edges (dated)
 
+- **Native-only Linux credentials need an explicit restart mode** (2026-09-13):
+  installations backed only by OpenClaw native env/file/store SecretRefs and
+  native OAuth use `openclaw-safe-restart.sh --native-credentials`. This mode
+  runs the strict audit before lint, omits `--allow-exec`, and refuses any
+  skipped exec ref, incomplete resolution, credential finding other than the
+  supported OAuth information, malformed report, or audit command failure. It
+  does not contact the 1Password broker. Broker-backed private-host restarts
+  retain the existing default path; native mode is explicit, not auto-detected.
 - **`openclaw config get` REDACTS secrets** (2026-07-06 zigelbot-Air
   lockout): never capture values through it — read `openclaw.json` or its
   `.bak.*` rotation directly. Claude-side this is hook-enforced.

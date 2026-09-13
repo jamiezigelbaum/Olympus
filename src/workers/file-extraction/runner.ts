@@ -52,6 +52,7 @@ import { isFileExtractionSourceError } from '../../core/file-extraction-source.t
 import {
   ExtractionCommandTimeoutError,
 } from './extractors/command-runner.ts';
+import { resolveExtractionMimeType } from './extractors/bounded-text.ts';
 import type {
   ExtractionLaneKey,
   ExtractionStatusCount,
@@ -787,7 +788,7 @@ async function settleOneJob(input: {
     }
   }
 
-  const resolvedMimeType = fetched?.mimeType ?? job.ref.mimeType;
+  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType);
   const resolvedSizeBytes = fetched?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,

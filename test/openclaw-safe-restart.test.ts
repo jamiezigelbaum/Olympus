@@ -88,6 +88,94 @@ describe('OpenClaw safe restart', () => {
     expect(script).not.toContain('systemctl --user restart');
   }, 30_000);
 
+  test('native credentials audit before lint without contacting the broker or enabling exec', () => {
+    const result = runScenario({ args: ['--native-credentials'] });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Secrets audit passed: clean.');
+    expect(result.stdout).toContain('Gateway boot proved: MainPID=4242');
+    expect(result.captured).not.toContain('broker_args=');
+    expect(result.captured).toContain('openclaw_args=secrets audit --check --json\n');
+    expect(result.captured).not.toContain('--allow-exec');
+    const audit = result.captured.indexOf('openclaw_args=secrets audit --check --json');
+    const validate = result.captured.indexOf('openclaw_args=config validate');
+    const lint = result.captured.indexOf('openclaw_args=doctor --lint --severity-min error --non-interactive');
+    const restart = result.captured.indexOf('openclaw_args=gateway restart');
+    expect(audit).toBeGreaterThanOrEqual(0);
+    expect(audit).toBeLessThan(validate);
+    expect(validate).toBeLessThan(lint);
+    expect(lint).toBeLessThan(restart);
+    expect(result.captured.match(/openclaw_args=gateway restart/g)).toHaveLength(1);
+  }, 30_000);
+
+  test('native credentials permit only the supported OAuth information even when secrets were touched', () => {
+    const result = runScenario({
+      args: ['--native-credentials', '--secrets-touched'],
+      auditOutput: JSON.stringify(extendedAuditReport([sharedOauthFinding])),
+      auditExit: 1,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('only native OAuth informational records');
+    expect(result.captured.match(/openclaw_args=secrets audit --check --json/g)).toHaveLength(1);
+    expect(result.captured).not.toContain('--allow-exec');
+    expect(result.captured).not.toContain('broker_args=');
+    expect(result.captured.match(/openclaw_args=gateway restart/g)).toHaveLength(1);
+  }, 30_000);
+
+  test.each([
+    {
+      label: 'skipped exec refs',
+      auditOutput: JSON.stringify({
+        ...auditReport(),
+        resolution: { refsChecked: 3, skippedExecRefs: 1, resolvabilityComplete: true },
+      }),
+      auditExit: 0,
+      failStep: undefined,
+    },
+    {
+      label: 'plaintext credentials',
+      auditOutput: JSON.stringify(auditReport([{ ...oauthFinding, code: 'PLAINTEXT_FOUND', severity: 'error' }])),
+      auditExit: 1,
+      failStep: undefined,
+    },
+    {
+      label: 'unresolved refs',
+      auditOutput: JSON.stringify(auditReport([{ ...oauthFinding, code: 'REF_UNRESOLVED', severity: 'error' }])),
+      auditExit: 1,
+      failStep: undefined,
+    },
+    {
+      label: 'unsupported findings',
+      auditOutput: JSON.stringify(auditReport([{ ...oauthFinding, code: 'UNSUPPORTED_NATIVE_STORE', severity: 'error' }])),
+      auditExit: 1,
+      failStep: undefined,
+    },
+    {
+      label: 'audit command failure',
+      auditOutput: JSON.stringify(auditReport()),
+      auditExit: 0,
+      failStep: 'secrets' as const,
+    },
+  ])('native credentials refuse $label before config, lint, or restart', ({ auditOutput, auditExit, failStep }) => {
+    const result = runScenario({
+      args: ['--native-credentials'],
+      auditOutput,
+      auditStderr: 'native-audit-private-sentinel',
+      auditExit,
+      ...(failStep === undefined ? {} : { failStep }),
+    });
+
+    expect(result.exitCode).toBe(78);
+    expect(result.stderr).toContain('openclaw secrets audit --check --json refused:');
+    expect(result.stdout + result.stderr).not.toContain('native-audit-private-sentinel');
+    expect(result.captured).not.toContain('broker_args=');
+    expect(result.captured).not.toContain('--allow-exec');
+    expect(result.captured).not.toContain('openclaw_args=config validate');
+    expect(result.captured).not.toContain('openclaw_args=doctor');
+    expect(result.captured).not.toContain('openclaw_args=gateway restart');
+  }, 30_000);
+
   test('refuses below-threshold 1Password quota before validation or restart', () => {
     const result = runScenario({ quotaRemaining: 24 });
 
@@ -718,6 +806,16 @@ describe('OpenClaw safe restart', () => {
     expect(result.captured).toBe('');
   }, 30_000);
 
+  test('native credentials dry-run advertises the non-exec audit and no broker step', () => {
+    const result = runScenario({ args: ['--native-credentials', '--dry-run'] });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('secrets audit --check --json');
+    expect(result.stdout).not.toContain('--allow-exec');
+    expect(result.stdout).not.toContain('1Password');
+    expect(result.captured).toBe('');
+  }, 30_000);
+
   test('dry-run stops advertising the cache-covered path this installation cannot run', () => {
     const configured = runScenario({ args: ['--dry-run'] });
     const unconfigured = runScenario({ args: ['--dry-run'], cacheSeamUnconfigured: true });
@@ -820,17 +918,17 @@ function runScenario(options: ScenarioOptions = {}): {
     '#!/usr/bin/env bash',
     'set -euo pipefail',
     `printf 'openclaw_args=%s\\n' "$*" >> ${shellQuote(capture)}`,
-    'if [[ "$*" == "secrets audit --check --allow-exec --json" ]]; then',
+    'if [[ "$*" == "secrets audit --check --allow-exec --json" || "$*" == "secrets audit --check --json" ]]; then',
     `  printf 'audit_env_caller=%s\\n' "\${OLYMPUS_OP_BROKER_CALLER:-unset}" >> ${shellQuote(capture)}`,
     `  printf 'audit_env_inherited=%s\\n' "\${OLYMPUS_OP_INHERITED:-unset}" >> ${shellQuote(capture)}`,
     'fi',
     'case "${TEST_FAIL_STEP:-}" in',
     '  config) [[ "$*" == "config validate" ]] && exit 7 ;;',
     '  doctor) [[ "$*" == "doctor --lint --severity-min error --non-interactive" ]] && exit 8 ;;',
-    '  secrets) [[ "$*" == "secrets audit --check --allow-exec --json" ]] && exit 9 ;;',
+    '  secrets) [[ "$*" == "secrets audit --check --allow-exec --json" || "$*" == "secrets audit --check --json" ]] && exit 9 ;;',
     '  restart) [[ "$*" == "gateway restart" ]] && exit 10 ;;',
     'esac',
-    'if [[ "$*" == "secrets audit --check --allow-exec --json" ]]; then',
+    'if [[ "$*" == "secrets audit --check --allow-exec --json" || "$*" == "secrets audit --check --json" ]]; then',
     '  printf "%s" "$TEST_AUDIT_OUTPUT"',
     '  printf "%s" "$TEST_AUDIT_STDERR" >&2',
     '  case "$TEST_AUDIT_CORRUPTION" in',

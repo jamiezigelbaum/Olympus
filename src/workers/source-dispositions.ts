@@ -515,9 +515,10 @@ export function renderSourceDispositionsHtml(
 }
 
 export function renderSourceDispositionsFragment(view: SourceDispositionsView, selectedSourceId?: string): string {
-  const locations = view.folder_scopes ?? [];
-  const selected = locations.find((source) => source.source_id === selectedSourceId)
-    ?? locations.find((source) => source.connected) ?? locations[0];
+  const scopes = view.folder_scopes ?? [];
+  const locations = scopes.filter((source) => source.connected);
+  const selected = scopes.find((source) => source.source_id === selectedSourceId)
+    ?? locations[0] ?? scopes[0];
   const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
   const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join('')
     + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join('');

@@ -512,6 +512,10 @@ function withState(
     return { ...phase, state: 'waiting', state_words: 'Not measured by this store' };
   }
   if (dashboardPhaseComplete(phase)) {
+    const due = nextSyncDue(source, phase.id, now);
+    if (phase.id === 'metadata_sync' && due !== undefined) {
+      return { ...phase, state: 'done', state_words: `Complete · next check in ${due}` };
+    }
     return { ...phase, state: 'done', state_words: 'Done' };
   }
   const previous = index > 0 ? phases[index - 1] : undefined;

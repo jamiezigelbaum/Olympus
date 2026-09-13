@@ -168,6 +168,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
+import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
 import {
@@ -1730,6 +1731,17 @@ export async function main(): Promise<void> {
                 fileSourceScopeAuthority.assertCurrent(ref),
               ));
             },
+            resolveCandidateFilters: () => {
+              const approval = fileSourceScopeAuthority?.snapshot('dropbox.files');
+              const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false as const };
+              if (!scope.allowed || !scope.filters) {
+                throw new OperationError(
+                  'source_index_policy_violation',
+                  'Current Dropbox full-ingestion scope is required before candidate enumeration.',
+                );
+              }
+              return scope.filters;
+            },
             resolveCredentialHandle: () => selectedSourceCredentialHandle({
               env: process.env,
               pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
@@ -1938,6 +1950,21 @@ export async function main(): Promise<void> {
       filters: metadataScope.filters,
       contentAllowed: contentScope.allowed,
       ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+    };
+  };
+  const connectorStoreStatusScope = (store: LocalConnectorStore):
+    ConnectorStoreStatusScope | undefined => {
+    const readScope = connectorStoreReadScope(store);
+    if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
+    if (!readScope.filters && !readScope.contentFilters) return undefined;
+    return {
+      ...(readScope.filters?.sourceScopeRevision
+        ? { scopeRevision: readScope.filters.sourceScopeRevision }
+        : {}),
+      ...(readScope.accountScope ? { accountScope: readScope.accountScope } : {}),
+      ...(readScope.filters ? { itemFilters: readScope.filters } : {}),
+      contentAllowed: readScope.contentAllowed,
+      ...(readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}),
     };
   };
   // Policy truth is independent of credential readiness: a selected Venice
@@ -2345,13 +2372,40 @@ export async function main(): Promise<void> {
     ? createSourceIndexStatusHandler({
       corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions),
       connectorStores,
+      connectorStoreStatusScope,
       retrievalAvailability,
       // The policy and queue half of the readiness counts, from the shared
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
       // store's own per-item count alone.
       ...(fileExtractionRuntime
-        ? { readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs) }
+        ? {
+            readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+              lanesForCorpus(corpusId) {
+                if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
+                const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+                if (!ref || !fileSourceScopeAuthority) return [];
+                const approval = fileSourceScopeAuthority.assertCurrent(ref);
+                const scopes = dropboxPolicyFullExtractionScopeKeys(
+                  fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
+                );
+                const handle = selectedSourceCredentialHandle({
+                  env: process.env,
+                  pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
+                  provider: 'dropbox',
+                  capability: 'dropbox.files.sync',
+                  handles: readActiveConnectedHandles(process.env),
+                });
+                const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
+                return scopes.map((approvedScopeKey) => ({
+                  corpusId,
+                  provider: 'dropbox',
+                  accountScope,
+                  approvedScopeKey,
+                }));
+              },
+            }),
+          }
         : {}),
     })
     : undefined;
@@ -2839,35 +2893,10 @@ export async function main(): Promise<void> {
               if (request.source !== 'dropbox') {
                 throw dashboardSourceSyncNotSupportedError(request.source);
               }
-              const latestDropboxHandle = selectedSourceCredentialHandle({
-                env: process.env,
-                pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
-                provider: 'dropbox',
-                capability: 'dropbox.files.sync',
-                handles: readActiveConnectedHandles(process.env),
-              });
-              const latestDropboxProviderStoreSync = latestDropboxHandle && dropboxConnectorStore
-                ? createDropboxProviderStoreSyncHandler({
-                    store: dropboxConnectorStore,
-                    account: latestDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
-                    credentialHandle: latestDropboxHandle.handle,
-                    ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
-                      ? { embeddingProvider: dropboxFilesEmbeddingProvider }
-                      : {}),
-                  })
-                : undefined;
-              const source = createCanonicalDropboxSchedulerSource({
-                policy: dropboxIngestionPolicy,
-                config: olympusConfig,
-                ...(latestDropboxProviderStoreSync
-                  ? { providerSync: latestDropboxProviderStoreSync }
-                  : {}),
-                ...(dropboxConnectorStore ? { store: dropboxConnectorStore } : {}),
-                ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
-                ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
-                  ? { embeddingProvider: dropboxFilesEmbeddingProvider }
-                  : {}),
-              });
+              const source = schedulerSourcesForHandles(activeLaneHandles(
+                readActiveConnectedHandles(process.env),
+                process.env,
+              )).sources.find((candidate) => candidate.sourceId === SCHEDULER_SOURCE_IDS.dropbox);
               if (!source) throw new Error('Dropbox sync is not configured.');
               const tasks = [];
               for (const task of source.tasks) {

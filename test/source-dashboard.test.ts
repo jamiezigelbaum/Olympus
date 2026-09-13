@@ -141,7 +141,8 @@ describe('multi-source source dashboard', () => {
       .filter((dependency) => dependency.status === 'check_required');
     expect(unchecked.length).toBeGreaterThan(0);
     for (const dependency of unchecked) {
-      expect(dependency.next_action).toBe('Checked after the first sync.');
+      expect(dependency.next_action).toStartWith('Checked ');
+      expect(dependency.next_action.toLowerCase()).not.toContain('repair');
     }
   });
 
@@ -1837,8 +1838,10 @@ describe('multi-source source dashboard', () => {
     );
     const hookStart = server.indexOf('triggerSourceSync: async (request) => {');
     expect(hookStart).toBeGreaterThanOrEqual(0);
-    const hook = server.slice(hookStart, server.indexOf('createCanonicalDropboxSchedulerSource({', hookStart));
+    const hook = server.slice(hookStart, server.indexOf("if (!source) throw new Error('Dropbox sync is not configured.');", hookStart));
     expect(hook).toContain('throw dashboardSourceSyncNotSupportedError(request.source);');
+    expect(hook).toContain('schedulerSourcesForHandles(activeLaneHandles(');
+    expect(hook).not.toContain('createDropboxProviderStoreSyncHandler({');
     expect(hook).not.toMatch(/throw new Error\(`Source \$\{request\.source\}/);
   });
 

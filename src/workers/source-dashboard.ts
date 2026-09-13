@@ -658,6 +658,8 @@ export interface DashboardSourceCard {
   ingestion_selection?: {
     metadata_only_files: number;
     full_ingestion_files: number;
+    /** Full-selected files still deferred by a separate standing item policy. */
+    policy_deferred_files?: number;
   };
   /** The only ingestion phase currently proven to be doing work. */
   active_ingestion_phase?: 'metadata_sync' | 'extraction' | 'embedding';
@@ -2166,6 +2168,20 @@ function sourceCardFromDefinition(
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
   const embeddingRequired = embeddingRequiredFromCorpora(corpora);
   const vlmQueued = vlmExtractionQueued(ingestionLedgerRow);
+  const exactScopeSelection = scopeSelectionFromCorpora(corpora);
+  const ingestionSelection = exactScopeSelection ?? (
+    ingestionLedgerRow
+      && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined
+      && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined
+      ? {
+          metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
+          full_ingestion_files: Math.max(
+            0,
+            ingestionLedgerRow.items - ingestionLedgerRow.ingestion_health.not_read_by_policy_items,
+          ),
+        }
+      : undefined
+  );
   const card: DashboardSourceCard = {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -2187,20 +2203,7 @@ function sourceCardFromDefinition(
     configured,
     freshness,
     coverage,
-    ...(ingestionLedgerRow
-      && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined
-      && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined
-      ? {
-          ingestion_selection: {
-            metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
-            full_ingestion_files: Math.max(
-              0,
-              ingestionLedgerRow.items
-                - ingestionLedgerRow.ingestion_health.not_read_by_policy_items,
-            ),
-          },
-        }
-      : {}),
+    ...(ingestionSelection ? { ingestion_selection: ingestionSelection } : {}),
     // Summed from the same corpus cards `coverage` was, so the total here is
     // that field and not a second reading of it.
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
@@ -2238,7 +2241,6 @@ function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardView
 function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceSetupStatus {
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
-  const dependenciesReady = synced;
   // A source whose embedding lane is switched off, or which is served without
   // embeddings at all, does not depend on an embedding lane. Listing it anyway
   // put "Approved local embedding lane" on a Dropbox card under a posture with
@@ -2247,17 +2249,30 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
     && card.embedding_required !== false;
   const dependencies = (card.capabilities?.dependencies ?? [])
     .filter((dependency) => dependency.id !== 'local_embedding_lane' || embeddingLaneApplies)
-    .map((dependency) => ({
-      id: dependency.id,
-      label: dependency.label,
-      // Unchecked is not broken. "Run Olympus doctor and repair X" named a
-      // repair for a dependency nothing had yet had reason to exercise, on a
-      // card that had never synced; the first sync is what checks it.
-      status: dependenciesReady ? 'ready' as const : 'check_required' as const,
-      next_action: dependenciesReady
-        ? 'No action needed; a completed source read proves this dependency path.'
-        : 'Checked after the first sync.',
-    }));
+    .map((dependency) => {
+      const ready = dependency.id === 'local_document_extractors'
+        ? card.coverage.content_ready_items > 0
+        : dependency.id === 'local_embedding_lane'
+          ? (card.coverage.embedded_files ?? 0) > 0
+          : synced;
+      return {
+        id: dependency.id,
+        label: dependency.label,
+        status: ready ? 'ready' as const : 'check_required' as const,
+        next_action: ready
+          ? dependency.id === 'local_document_extractors'
+            ? 'No action needed; extracted document text proves this dependency path.'
+            : dependency.id === 'local_embedding_lane'
+              ? 'No action needed; the current embedding lane reports file-level parity.'
+              : 'No action needed; a completed source read proves this dependency path.'
+          : dependency.id === 'local_document_extractors'
+            ? 'Checked when the first selected document produces text.'
+            : dependency.id === 'local_embedding_lane'
+              ? 'Checked when the current embedding lane reports an embedded file.'
+              : 'Checked after the first sync.',
+      };
+    });
+  const dependenciesReady = dependencies.every((dependency) => dependency.status === 'ready');
   if (connection.state === 'not_connected' || connection.state === 'needs_setup') {
     const action = connection.action;
     const pairing = action.kind === 'guided_session';
@@ -3776,6 +3791,30 @@ function numericCounts(corpus: SourceIndexStatusCorpus): Record<string, number> 
     if (typeof value === 'number' && Number.isFinite(value)) output[key] = Math.max(0, Math.trunc(value));
   }
   return output;
+}
+
+function scopeSelectionFromCorpora(
+  corpora: readonly SourceIndexStatusCorpus[],
+): DashboardSourceCard['ingestion_selection'] | undefined {
+  const selected = corpora.map(numericCounts).filter((counts) => (
+    counts.scope_full_ingestion_files !== undefined
+    && counts.scope_metadata_only_files !== undefined
+  ));
+  if (selected.length === 0) return undefined;
+  return {
+    full_ingestion_files: selected.reduce(
+      (total, counts) => total + counts.scope_full_ingestion_files!,
+      0,
+    ),
+    metadata_only_files: selected.reduce(
+      (total, counts) => total + counts.scope_metadata_only_files!,
+      0,
+    ),
+    policy_deferred_files: selected.reduce(
+      (total, counts) => total + (counts.scope_policy_deferred_files ?? 0),
+      0,
+    ),
+  };
 }
 
 function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard['coverage'] {

@@ -20,7 +20,12 @@ import {
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
-import type { ExtractionCorpusReadiness, LocalFileExtractionJobStore } from './job-store.ts';
+import type {
+  ExtractionCorpusReadiness,
+  ExtractionLaneKey,
+  ExtractionStatusCount,
+  LocalFileExtractionJobStore,
+} from './job-store.ts';
 
 /**
  * The readiness ledger backed by the shared extraction queue.
@@ -34,10 +39,21 @@ import type { ExtractionCorpusReadiness, LocalFileExtractionJobStore } from './j
  * is published through the same shared path.
  */
 export function createExtractionReadinessLedger(
-  jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>,
+  jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
+    & Partial<Pick<LocalFileExtractionJobStore, 'counts'>>,
+  options: {
+    /** Current approved lanes; undefined preserves the ordinary corpus-wide ledger. */
+    lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
+  } = {},
 ): SourceIndexReadinessLedger {
   return {
     snapshotForCorpus(corpusId: string) {
+      const lanes = options.lanesForCorpus?.(corpusId);
+      if (lanes !== undefined) {
+        return jobs.counts
+          ? scopedReadinessSnapshot({ counts: jobs.counts.bind(jobs) }, lanes)
+          : undefined;
+      }
       let readiness: ExtractionCorpusReadiness;
       try {
         readiness = jobs.corpusReadiness(corpusId);
@@ -67,6 +83,43 @@ export function createExtractionReadinessLedger(
             : {}),
         } satisfies ContentExtractionThroughputSignal,
       };
+    },
+  };
+}
+
+function scopedReadinessSnapshot(
+  jobs: Pick<LocalFileExtractionJobStore, 'counts'>,
+  lanes: readonly ExtractionLaneKey[],
+): ReturnType<SourceIndexReadinessLedger['snapshotForCorpus']> {
+  let rows: ExtractionStatusCount[];
+  try {
+    const unique = new Map(lanes.map((lane) => [JSON.stringify(lane), lane]));
+    rows = [...unique.values()].flatMap((lane) => jobs.counts(lane));
+  } catch {
+    return undefined;
+  }
+  const count = (status: ExtractionStatusCount['status']): number => rows
+    .filter((row) => row.status === status)
+    .reduce((total, row) => total + row.jobs, 0);
+  const queued = count('queued');
+  const leased = count('leased');
+  const failedRetryable = count('failed_retryable');
+  const failedTerminal = count('failed_terminal');
+  return {
+    counts: {
+      extraction_jobs_queued: queued,
+      extraction_jobs_queued_actionable: queued,
+      extraction_jobs_leased: leased,
+      extraction_jobs_failed: failedRetryable + failedTerminal,
+      extraction_jobs_failed_actionable: failedRetryable + failedTerminal,
+      // Lane counts carry no retry timestamp. Counting retryable jobs as due
+      // overstates attention rather than readiness until the queue grows a
+      // scoped corpusReadiness query.
+      extraction_jobs_retryable_due_actionable: failedRetryable,
+    },
+    contentExtractionThroughput: {
+      actionable_queued: queued,
+      actionable_retryable_due: failedRetryable,
     },
   };
 }

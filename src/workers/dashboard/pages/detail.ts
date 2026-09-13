@@ -215,12 +215,15 @@ export function renderDashboardDetailBody(
 function renderIngestionSelection(source: DashboardSourceCard): string {
   const selection = source.ingestion_selection;
   if (!selection) return '';
+  const deferred = Math.max(0, selection.policy_deferred_files ?? 0);
   return `
         <div class="dsect">Added to Olympus</div>
         <div class="selectioncounts">
           <div><span>Metadata only</span><b>${escapeHtml(`${dashboardCount(selection.metadata_only_files)} files`)}</b></div>
           <div><span>Full ingestion</span><b>${escapeHtml(`${dashboardCount(selection.full_ingestion_files)} files`)}</b></div>
-        </div>`;
+        </div>${deferred > 0
+          ? `<p class="hint">${dashboardCount(deferred)} ${deferred === 1 ? 'file selected for full ingestion is' : 'files selected for full ingestion are'} not being processed because of a separate ingestion policy.</p>`
+          : ''}`;
 }
 
 /**
