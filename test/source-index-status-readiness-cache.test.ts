@@ -193,6 +193,15 @@ describe('connector-store status readiness', () => {
       expect(candidates.candidates.map((candidate) => candidate.identity.providerItemId).sort())
         .toEqual(['one.pdf', 'two.pdf']);
       expect(candidates.skippedByDisposition).toBe(1);
+      const current = candidates.candidates[0]!;
+      expect(store.itemMatchesExtractionRef({
+        ...current.identity,
+        ...(current.contentHash ? { contentHash: current.contentHash } : {}),
+      }, contentScope.filters)).toBe(true);
+      expect(store.itemMatchesExtractionRef({
+        ...current.identity,
+        sourceVersion: 'superseded-version',
+      }, contentScope.filters)).toBe(false);
     } finally {
       store.close();
     }
