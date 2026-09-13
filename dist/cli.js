@@ -21055,6 +21055,23 @@ var init_drive_live_sync = __esm(() => {
   init_drive_live_control();
 });
 
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+  PRIVACY_PRESET_LABELS = {
+    "local-first": "Local models with Venice fallback",
+    "local-only": "Local models",
+    "private-cloud-only": "Venice",
+    "no-sensitive": "Don't ingest Private data"
+  };
+});
+
 // src/workers/google-connectors/corpora.ts
 function defineGmailSecureLocalCorpus() {
   return defineSourceIndexCorpus({
@@ -21062,7 +21079,7 @@ function defineGmailSecureLocalCorpus() {
     family: "email",
     trustDomain: "secure_local",
     activationMode: "hybrid_shadow",
-    description: "Personal Gmail evidence stored and retrieved through the shared connector store."
+    description: `${SENSITIVITY_TIER_LABELS.secure} Gmail evidence stored and retrieved through the shared connector store.`
   });
 }
 function defineInternalEmailCorpus() {
@@ -21076,7 +21093,7 @@ function defineInternalEmailCorpus() {
       embeddingBackend: "local",
       cloudQueryApproved: false
     },
-    description: "Internal Gmail evidence stored and retrieved through the shared connector store."
+    description: `${SENSITIVITY_TIER_LABELS.private} Gmail evidence stored and retrieved through the shared connector store.`
   });
 }
 function defineGoogleDriveDocsCorpus() {
@@ -21094,6 +21111,7 @@ function defineGoogleDriveDocsCorpus() {
 }
 var GMAIL_SECURE_LOCAL_CORPUS_ID, INTERNAL_EMAIL_CORPUS_ID, GOOGLE_DRIVE_DOCS_CORPUS_ID;
 var init_corpora = __esm(() => {
+  init_privacy_language();
   init_corpus();
   init_gmail();
   init_drive();
@@ -34746,23 +34764,6 @@ var init_connect = __esm(() => {
     "expired_token",
     "redirect_uri_mismatch"
   ]);
-});
-
-// src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS;
-var init_privacy_language = __esm(() => {
-  SENSITIVITY_TIER_LABELS = {
-    public: "Public",
-    private: "Personal",
-    secure: "Private",
-    secrets: "Secrets"
-  };
-  PRIVACY_PRESET_LABELS = {
-    "local-first": "Local models with Venice fallback",
-    "local-only": "Local models",
-    "private-cloud-only": "Venice",
-    "no-sensitive": "Don't ingest Private data"
-  };
 });
 
 // src/core/ingestion-throughput.ts

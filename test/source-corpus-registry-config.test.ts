@@ -32,9 +32,17 @@ import {
   createSourceIndexStatusHandler,
   type SourceIndexStatusRetrievalAvailability,
 } from '../src/workers/source-index/status.ts';
-import { defineGoogleDriveDocsCorpus } from '../src/workers/google-connectors/corpora.ts';
+import { defineGmailSecureLocalCorpus, defineInternalEmailCorpus, defineGoogleDriveDocsCorpus } from '../src/workers/google-connectors/corpora.ts';
 
 describe('config-driven source corpus registry', () => {
+  test('Gmail tier descriptions match their unchanged routing domains', () => {
+    expect(defineGmailSecureLocalCorpus()).toMatchObject({
+      trustDomain: 'secure_local', description: 'Private Gmail evidence stored and retrieved through the shared connector store.',
+    });
+    expect(defineInternalEmailCorpus()).toMatchObject({
+      trustDomain: 'internal', description: 'Personal Gmail evidence stored and retrieved through the shared connector store.',
+    });
+  });
   test('declares the R3 roster plus Telegram v5 in hybrid shadow while no-lane corpora stay lexical', () => {
     const registry = createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig());
     const modes = Object.fromEntries(

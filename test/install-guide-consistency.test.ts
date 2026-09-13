@@ -54,7 +54,7 @@ describe('pilot installation entry points', () => {
     const section = document.slice(receipt, handoff);
     expect(section).toContain('Gemini — every posture');
     expect(section).toContain('Venice — only when the posture uses it');
-    expect(section).toContain('secure embeddings');
+    expect(section).toContain('Private embeddings');
     expect(section).toContain('approved cost');
     expect(section).toContain('Preserve existing vectors');
     expect(section).toContain('worker_credential_lanes');

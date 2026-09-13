@@ -1,3 +1,4 @@
+import { SENSITIVITY_TIER_LABELS } from '../../core/privacy-language.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -19,7 +20,7 @@ export function defineGmailSecureLocalCorpus(): SourceIndexCorpusDefinition {
     family: 'email',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    description: 'Personal Gmail evidence stored and retrieved through the shared connector store.',
+    description: `${SENSITIVITY_TIER_LABELS.secure} Gmail evidence stored and retrieved through the shared connector store.`,
   });
 }
 
@@ -34,7 +35,7 @@ export function defineInternalEmailCorpus(): SourceIndexCorpusDefinition {
       embeddingBackend: 'local',
       cloudQueryApproved: false,
     },
-    description: 'Internal Gmail evidence stored and retrieved through the shared connector store.',
+    description: `${SENSITIVITY_TIER_LABELS.private} Gmail evidence stored and retrieved through the shared connector store.`,
   });
 }
 

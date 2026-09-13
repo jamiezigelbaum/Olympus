@@ -7360,6 +7360,7 @@ var init_drive = __esm(() => {
 
 // src/workers/google-connectors/corpora.ts
 var init_corpora = __esm(() => {
+  init_privacy_language();
   init_corpus();
   init_gmail();
   init_drive();
