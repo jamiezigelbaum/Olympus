@@ -10922,7 +10922,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return `printf '%s' "$KEY" | olympus connect gemini --api-key-stdin`;
+    return "olympus connect gemini --api-key-prompt";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -10950,7 +10950,7 @@ function localServerPrerequisite(profileId, profile) {
 }
 function storeSecretRemedy(key) {
   if (key === "venice.api_key") {
-    return `printf '%s' "$KEY" | olympus connect venice --api-key-stdin`;
+    return "olympus connect venice --api-key-prompt";
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
