@@ -308,12 +308,29 @@ openclaw gateway restart
 exits 1 on pre-existing warnings that have nothing to do with Olympus; read
 those, but they do not block the restart.
 
-This loads the Olympus tools into your agent: `source_answer`,
-`source_index_status`, and `source_index_search`. They register when the plugin
-initializes, so `openclaw plugins inspect olympus --json` reports an empty
-`toolNames` by design — that is not a failed load. Verify instead that the
-gateway boot line lists olympus, that inspect reports `"status": "loaded"`,
-and that `olympus source index status` returns.
+Olympus registers `source_answer`, `source_index_status`, and
+`source_index_search` when the plugin initializes. OpenClaw's tool profile must
+also permit them. A working dashboard or CLI does not prove agent access;
+`plugins inspect` can report an empty static `toolNames` list on a healthy install.
+
+For a fresh `coding` profile with no existing `tools.allow` or `tools.alsoAllow`:
+
+```bash
+openclaw config get tools
+openclaw config set tools.alsoAllow '["olympus"]'
+openclaw config validate
+```
+
+If a list already exists, preserve its entries and add `olympus` to that list;
+do not combine `allow` and `alsoAllow` in the same scope. Keep the current
+profile and intentional denies. Agent/provider/sandbox restrictions may also
+apply. Follow the [native tool-access check](../INSTALL_FOR_AGENTS.md#native-agent-tool-access)
+for the installed host's schema and policy diagnostics.
+
+Before declaring setup complete, ask your intended OpenClaw assistant to call
+`source_index_status` and verify a successful tool result. No connected source
+is needed for this check. A model's assurance or a CLI fallback is insufficient.
+The current host can hot-apply the tool-policy change without another restart.
 
 The boot line is not where you would guess. `openclaw logs` printed nothing
 on `2026.9.1`, and `~/.openclaw/logs/gateway.log` can be months stale. On

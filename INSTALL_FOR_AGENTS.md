@@ -1073,6 +1073,46 @@ plugin initializes, not in the static manifest inspect reads. An empty
 `toolNames` on a healthy install proves nothing is wrong, and chasing it
 sends you re-installing a plugin that already works.
 
+### Native agent tool access
+
+**Required before setup completion.** A loaded
+plugin, a working dashboard, and a successful CLI status command prove the
+backend; they do not prove the assistant can call Olympus. OpenClaw's `coding`
+profile can filter all Olympus tools while those checks remain green.
+
+Inspect the installed host's schema and the target agent's current tool policy.
+For a fresh configuration with `tools.profile: "coding"` and no existing
+`tools.allow` or `tools.alsoAllow`, enable only the approved Olympus plugin:
+
+```bash
+openclaw gateway call config.schema.lookup --params '{"path":"tools.alsoAllow"}' --json
+openclaw config get tools
+openclaw config set tools.alsoAllow '["olympus"]'
+openclaw config validate
+```
+
+Preserve the selected profile and all existing entries. When `alsoAllow` already
+exists, append `olympus` only if absent; when `allow` exists, extend that list
+instead, because OpenClaw rejects `allow` and `alsoAllow` in the same scope.
+Inspect applicable agent, provider, channel, and sandbox restrictions as well.
+Do not remove explicit denies, switch to `full`, grant `group:plugins`, or enable
+unrelated plugins to make Olympus work. An intentional policy restriction is a
+boundary to explain to the operator, not a reason to bypass it. Use the host's
+supported config path and reload procedure; a hot-applied tool-policy change
+does not require another Gateway restart.
+
+Use `tools.catalog` for registration diagnostics and `tools.effective` with the
+actual target `sessionKey` for its projected inventory. Finish with a real
+`source_index_status` call from the operator's intended assistant session and
+check the successful tool result. If the inventory and actual run disagree,
+inspect the run's tool-call evidence; do not repeatedly reinstall or restart to
+make a diagnostic listing change. A CLI fallback, the model saying a tool is
+available, and an empty or truncated diagnostic export do not satisfy this
+check. No source must be connected for the status call. If the call fails,
+report agent integration as incomplete and repair the named failure before the
+source handoff. After a chosen source is ready, Step 7 also requires a native
+`source_answer` call through this same assistant.
+
 For a Hermes Agent install, use the package's narrower MCP-only lane:
 
 ```bash
@@ -1121,6 +1161,9 @@ Step 3, then prove the worker consumes that wiring with the existing
   `no-sensitive` do not require Venice, so do not ask for or block on a Venice
   key for those postures. Preserve existing vectors and obtain activation or
   backfill approval before changing a saved embedding profile.
+- **Native assistant proof (OpenClaw).** The Step 5 `source_index_status` call
+  must succeed from the intended assistant session through the native tool.
+  Worker or dashboard success alone cannot satisfy this check.
 - **Worker consumer proof.** The existing Doctor output must show the relevant
   `sovereignty_prerequisites`, `worker_credential_lanes`, `source_index_status`,
   and `email_worker` checks green, and `olympus worker status` must show the
@@ -1448,7 +1491,9 @@ Rules:
 ## Step 7 — Verify the chosen source with a cited answer
 
 Run this only after the chosen source has completed a bounded initial sync and
-reports answer readiness. Ask a normal question whose answer the operator
+reports answer readiness. In OpenClaw, have the intended assistant call the
+native `source_answer` tool; a successful CLI command alone does not prove
+agent integration. Ask a normal question whose answer the operator
 expects in that source, then check the returned citations against that scope.
 If they deferred sources, report "base installation verified; cited-answer
 proof pending a chosen source" and stop here. An empty-source answer is not

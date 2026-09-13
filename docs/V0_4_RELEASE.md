@@ -333,6 +333,10 @@ together at one exact commit and against one exact package artifact.
   deferrals separately from the user's full-ingestion choice. Completed metadata
   remains complete while waiting for its next refresh. Folder pickers sort
   siblings alphabetically and list only connected providers in Locations.
+- Native OpenClaw setup must preserve the selected tool profile, enable only
+  the approved Olympus tools where needed, and prove a real status-tool call
+  from the intended assistant before the source handoff. Backend health and
+  dashboard activation cannot substitute for agent tool access.
 - Missing extraction dependencies must remain visible prerequisites. Source
   connection alone does not prove extraction or embedding readiness and does
   not authorize installing OCR tools. Vision-model image ingestion remains
