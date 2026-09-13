@@ -3,21 +3,17 @@ import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
 
-function exposedNames(config = defaultConfig(), activeModel?: unknown, hireBrokerEnabled?: boolean): string[] {
-  return surfaceNames('native', config, activeModel, hireBrokerEnabled);
+function exposedNames(config = defaultConfig()): string[] {
+  return surfaceNames('native', config);
 }
 
 function surfaceNames(
   surface: OperationSurface,
   config = defaultConfig(),
-  activeModel?: unknown,
-  hireBrokerEnabled?: boolean,
 ): string[] {
   return exposedOperations(operations, {
     config,
     surface,
-    activeModel,
-    ...(hireBrokerEnabled !== undefined ? { hireBrokerEnabled } : {}),
   }).map((operation) => operation.name);
 }
 
@@ -52,30 +48,7 @@ describe('operation exposure policy', () => {
     }
   });
 
-  test('keeps domain expert tools outside the v0.4 public surface even when internal gates are active', () => {
-    const config = defaultConfig();
-    const domainTools = [
-      'domain_agent',
-      'domain_ask',
-      'domain_source',
-      'rag_corpus',
-      'domain_doc',
-      'annas_archive_search',
-      'annas_archive_import',
-    ];
-
-    config.domainExpert.liveToolsEnabled = true;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-
-    config.domainExpert.enabled = true;
-    config.domainExpert.liveToolsEnabled = false;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-
-    config.domainExpert.liveToolsEnabled = true;
-    for (const tool of domainTools) expect(exposedNames(config)).not.toContain(tool);
-  });
-
-  test('can disable the product source-index read surface without exposing operator tools', () => {
+  test('can disable the product source-index surface', () => {
     const config = defaultConfig();
     config.sourceIndex.enabled = false;
 
@@ -85,9 +58,6 @@ describe('operation exposure policy', () => {
     expect(exposedNames(config)).not.toContain('source_watch_create');
     expect(exposedNames(config)).not.toContain('source_watches');
     expect(exposedNames(config)).not.toContain('source_watch_cancel');
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
-    expect(exposedNames(config)).not.toContain('source_index_sync');
-    expect(exposedNames(config)).not.toContain('email_index_search');
   });
 
   test('legacy source-index answer dev gate still enables the promoted read surface', () => {
@@ -100,67 +70,4 @@ describe('operation exposure policy', () => {
     expect(exposedNames(config)).toContain('source_index_search');
   });
 
-  test('operator-gated source-index tools stay hidden on fresh product defaults', () => {
-    const names = exposedNames();
-
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('source_export');
-    expect(names).not.toContain('source_transcribe');
-    expect(names).not.toContain('source_media_ingest');
-    expect(names).not.toContain('source_index_promotion_candidates');
-    expect(names).not.toContain('source_index_promotion_propose');
-    expect(names).not.toContain('source_index_promotion_proposals');
-    expect(names).not.toContain('source_index_promotion_proposal');
-    expect(names).not.toContain('source_index_promotion_decide');
-  });
-
-  test('keeps Hire Broker tools outside the v0.4 public surface', () => {
-    expect(exposedNames()).not.toContain('expert_hire');
-    expect(exposedNames()).not.toContain('expert_report');
-    expect(exposedNames(defaultConfig(), undefined, true)).not.toContain('expert_hire');
-    expect(exposedNames(defaultConfig(), undefined, true)).not.toContain('expert_report');
-  });
-
-  test('keeps Xanthos file delivery outside the v0.4 public surface', () => {
-    const config = defaultConfig();
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
-
-    config.fileDelivery.enabled = true;
-
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
-  });
-
-  test('hides private email tools when active-model guard is enabled without approved local metadata', () => {
-    const config = defaultConfig();
-    config.email.localPacketsDevEnabled = true;
-    config.email.indexAdminDevEnabled = true;
-    config.email.requireLocalActiveModelForPrivateTools = true;
-
-    expect(exposedNames(config)).not.toContain('email_search');
-    expect(exposedNames(config)).not.toContain('email_index_search');
-    expect(exposedNames(config)).not.toContain('email_index_sync');
-    expect(exposedNames(config)).not.toContain('source_index_sync');
-    expect(exposedNames(config, { provider: 'openai-codex', modelId: 'gpt-5.5' }))
-      .not.toContain('email_index_search');
-  });
-
-  test('keeps private email packet/admin tools outside the v0.4 public surface', () => {
-    const config = defaultConfig();
-    config.argus.lanes.fast.model = 'local-qwen-fast';
-    config.email.localPacketsDevEnabled = true;
-    config.email.indexAdminDevEnabled = true;
-    config.email.requireLocalActiveModelForPrivateTools = true;
-
-    const names = exposedNames(config, {
-      provider: 'olympus-local',
-      modelId: 'local-qwen-fast',
-    });
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-  });
 });

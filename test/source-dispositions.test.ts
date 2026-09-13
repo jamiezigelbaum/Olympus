@@ -761,7 +761,7 @@ describe('rendered picker page', () => {
     expect(html).toContain('class="stored-controls"');
     expect(html).toContain('value="metadata_only"');
     expect(html).not.toContain('role="radiogroup"');
-    expect(html).toContain('const csrfToken = "csrf-fixture-token"');
+    expect(html).toContain('var csrfToken = "csrf-fixture-token"');
     expect(html).toContain("'X-Olympus-CSRF': csrfToken");
     expect(html).toContain("credentials: 'same-origin'");
     expect(html).not.toContain('sessionStorage');
@@ -773,13 +773,13 @@ describe('rendered picker page', () => {
     // Choosing folders in a large tree is minutes of pure client-side work, so
     // the page renews its own session while the owner is still working.
     expect(html).toContain("fetch('/dashboard/control/session'");
-    expect(html).toContain('renewControlSession');
-    expect(html).toContain('KEEPALIVE_INTERVAL_MS');
+    expect(html).toContain('async function renew()');
+    expect(html).toContain('240000');
     // Renewal is cookie plus CSRF: the picker page never sees the bearer.
     expect(html).not.toContain("'Authorization': 'Bearer '");
     expect(html).not.toContain('window.prompt');
     // An expired session must leave every selection on the page.
-    expect(html).toContain('response.status === 401');
+    expect(html).toContain('result.status === 401');
     expect(html).toContain('Your folder choices are still here');
   });
 
@@ -1217,7 +1217,7 @@ describe('worker routes', () => {
     }));
     expect(page.status).toBe(200);
     const html = await page.text();
-    expect(html).toContain(`const csrfToken = "${control.csrf_token}"`);
+    expect(html).toContain(`var csrfToken = "${control.csrf_token}"`);
     expect(html).not.toContain('worker-secret');
     expect(html).not.toContain('sessionStorage');
 

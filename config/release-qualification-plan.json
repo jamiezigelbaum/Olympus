@@ -2,13 +2,44 @@
   "schema_version": 1,
   "artifact_input": "release-artifacts/olympus-0.4.0.tgz",
   "candidate_artifact": {
-    "artifact_sha256": "847702f2f4eb4961fb03c9ccdabeddb8f4254981cd8de9874fbde893b8fde0d5",
-    "artifact_bytes": 606093
+    "artifact_sha256": "97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267",
+    "artifact_bytes": 703157
   },
   "rollback_baseline": {
-    "source_commit": "9d9fc02fa30e9dc6d1ceee6c3742da7b9b0c1ead",
-    "artifact_sha256": "e70351832431110d7786ac77486bd1d4c3e06af1fae3b22770b18ef370b3aa81",
-    "artifact_bytes": 603128
+    "source_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+    "artifact_sha256": "65eab956e30c60dad513cb504c64709a0d64490a8b50911700b04b122d054f0c",
+    "artifact_bytes": 670223,
+    "package_files": [
+      "CHANGELOG.md",
+      "CONTRIBUTING.md",
+      "INSTALL_FOR_AGENTS.md",
+      "LICENSE",
+      "README.md",
+      "bin/olympus",
+      "config/hermes/olympus.mcp.yaml",
+      "config/olympus.example.json",
+      "config/source-ingestion/dropbox.personal.ingestion.json",
+      "config/sovereignty/presets/local-first.json",
+      "config/sovereignty/presets/local-only.json",
+      "config/sovereignty/presets/no-sensitive.json",
+      "config/sovereignty/presets/private-cloud-only.json",
+      "dist/cli.js",
+      "dist/index.js",
+      "docs/CONTRACTS.md",
+      "docs/QUICKSTART.md",
+      "docs/SOURCE_CAPABILITIES.md",
+      "docs/SOVEREIGNTY_CONFIG.md",
+      "docs/TRUST_MODEL.md",
+      "docs/UNINSTALL.md",
+      "docs/V0_4_RELEASE.md",
+      "index.js",
+      "integrations/hermes/ask-sources/SKILL.md",
+      "openclaw.plugin.json",
+      "package.json",
+      "skills/ask-argus/SKILL.md",
+      "skills/ask-sources/SKILL.md",
+      "skills/manifest.json"
+    ]
   },
   "normal_install_rule": "A user or their AI completes setup through documented Olympus onboarding, settings, and recovery actions without code, database, config-file, service-manager, or undocumented repair work.",
   "assistance": {

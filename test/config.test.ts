@@ -117,11 +117,6 @@ describe('config', () => {
       freshnessThresholdHours: 26,
     });
     expect(config.sourceIndex.answerDevEnabled).toBe(false);
-    expect(config.fileDelivery.enabled).toBe(false);
-    expect(config.fileDelivery.baseUrl).toBe('http://127.0.0.1:8020/v1');
-    expect(config.domainExpert.enabled).toBe(false);
-    expect(config.domainExpert.liveToolsEnabled).toBe(false);
-    expect(config.domainExpert.baseUrl).toBe('http://127.0.0.1:8040/v1');
   });
 
   test('environment overrides lane config', () => {
@@ -139,13 +134,6 @@ describe('config', () => {
       OLYMPUS_EMAIL_ENABLED: 'true',
       OLYMPUS_EMAIL_BASE_URL: 'http://email.test/v1/',
       OLYMPUS_SOURCE_INDEX_ENABLED: 'false',
-      OLYMPUS_FILE_DELIVERY_ENABLED: 'true',
-      OLYMPUS_FILE_DELIVERY_BASE_URL: 'http://xanthos-delivery.test/v1/',
-      OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS: '45',
-      OLYMPUS_DOMAIN_EXPERT_ENABLED: 'true',
-      OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED: 'true',
-      OLYMPUS_DOMAIN_EXPERT_BASE_URL: 'http://domain-expert.test/v1/',
-      OLYMPUS_DOMAIN_EXPERT_REQUEST_TIMEOUT_SECONDS: '90',
       OLYMPUS_WORKER_AUTH_TOKEN: ' shared-worker-secret ',
       OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
       OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS: 'x.bookmarks',
@@ -170,13 +158,6 @@ describe('config', () => {
     expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://email.test/v1');
     expect(config.sourceIndex.enabled).toBe(false);
-    expect(config.fileDelivery.enabled).toBe(true);
-    expect(config.fileDelivery.baseUrl).toBe('http://xanthos-delivery.test/v1');
-    expect(config.fileDelivery.requestTimeoutSeconds).toBe(45);
-    expect(config.domainExpert.enabled).toBe(true);
-    expect(config.domainExpert.liveToolsEnabled).toBe(true);
-    expect(config.domainExpert.baseUrl).toBe('http://domain-expert.test/v1');
-    expect(config.domainExpert.requestTimeoutSeconds).toBe(90);
   });
 
   test('normalizes source-worker base URLs at file and env ingest', () => {
@@ -244,17 +225,6 @@ describe('config', () => {
         enabled: false,
         answerDevEnabled: true,
       },
-      fileDelivery: {
-        enabled: true,
-        baseUrl: 'http://xanthos-delivery.test/v1/',
-        requestTimeoutSeconds: 45,
-      },
-      domainExpert: {
-        enabled: true,
-        liveToolsEnabled: true,
-        baseUrl: 'http://domain-expert.test/v1/',
-        requestTimeoutSeconds: 90,
-      },
       worker: {
         authToken: 'plugin-worker-secret',
         scheduler: {
@@ -300,17 +270,6 @@ describe('config', () => {
     });
     expect(config.sourceIndex.enabled).toBe(false);
     expect(config.sourceIndex.answerDevEnabled).toBe(true);
-    expect(config.fileDelivery).toEqual({
-      enabled: true,
-      baseUrl: 'http://xanthos-delivery.test/v1',
-      requestTimeoutSeconds: 45,
-    });
-    expect(config.domainExpert).toEqual({
-      enabled: true,
-      liveToolsEnabled: true,
-      baseUrl: 'http://domain-expert.test/v1',
-      requestTimeoutSeconds: 90,
-    });
   });
 
   test('normalizes source-worker base URLs from plugin config', () => {
@@ -325,16 +284,6 @@ describe('config', () => {
     expect(configFromPluginConfig({
       email: { baseUrl: 'http://source-worker.test/custom/' },
     }).email.baseUrl).toBe('http://source-worker.test/custom');
-  });
-
-  test('treats the live domain-expert tool gate as inert when the worker is disabled', () => {
-    const config = loadConfig({
-      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_DOMAIN_EXPERT_LIVE_TOOLS_ENABLED: 'true',
-    });
-
-    expect(config.domainExpert.enabled).toBe(false);
-    expect(config.domainExpert.liveToolsEnabled).toBe(true);
   });
 
   test('keeps local email source packets disabled unless explicitly gated', () => {

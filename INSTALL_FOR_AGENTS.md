@@ -192,69 +192,19 @@ prior Olympus setup — including an already-installed olympus plugin the
 command below would update — and you have not already cleared the residue
 gate in this flow, STOP and run Rule zero before the commands below.
 
-### Pilot download
-
-**Obtain the package yourself.** The operator needs only the installation
-prompt. Do not ask them to supply a tarball, a checksum receipt, or GitHub
-credentials. Download the designated pilot through GitHub's public release
-API without authentication:
-
-`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.2`
-
-The repository guide pins the designated candidate below. These are agent-only
-verification inputs, not a receipt to request from the operator:
-
-- SHA-256: `baf11e4a040360fab3c04731f6ea2935d70c95bf0fe53f3a3d98efda42f08ef5`
-- Byte count: `705776`
-
-1. Fetch that exact release as JSON over HTTPS. Require a successful HTTP
-   response, `tag_name` equal to `v0.4.0-pilot.2`, `prerelease` equal to `true`,
-   and `draft` equal to `false`.
-   Do not use `/releases/latest`: GitHub excludes prereleases there, and a
-   later release is not automatically this pilot's candidate.
-2. Select exactly one uploaded asset named `olympus-0.4.0.tgz` from `assets`.
-   Require `state: "uploaded"`, a positive integer `id` and `size`, and a
-   `digest` of the form `sha256:` followed by 64 hexadecimal characters.
-   Its `browser_download_url` must be exactly
-   `https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.2/olympus-0.4.0.tgz`.
-   Require the metadata's digest and size to match the pinned values above;
-   a replacement upload under the same tag/name is not a qualified candidate.
-   GitHub's generated source-code archives are not the plugin package.
-3. Download that asset into a new temporary directory, following HTTPS
-   redirects to GitHub's asset storage. Compute its SHA-256 and byte count
-   locally and compare both with the metadata from step 2. Do not extract,
-   execute, or install an archive unless both match. Keep this verified local
-   file for the entire install; do not download another copy between steps.
-4. Record the release tag, asset ID, SHA-256, and byte count in the install
-   report. This is automatic bookkeeping, not another operator question.
-   These values satisfy any reference to a "supplied candidate and receipt"
-   in an older packaged guide. Read `package/INSTALL_FOR_AGENTS.md` from this
-   verified archive. From here, the packaged guide alone governs installation
-   and setup, retaining the existing-install and consent checks. Execute its
-   plugin install command exactly once; the command below is a reference,
-   not an additional install. The repository guide on `main` owns candidate
-   selection: skip any candidate-selection/download section in the packaged
-   guide and use this already-verified local archive throughout. Do not switch
-   to a stale tag or repeat the download because the packaged guide names one.
-
-If the release or asset is missing, say **"The Olympus pilot download is not
-available yet; the maintainer needs to publish it."** A failed request,
-missing digest, ambiguous asset, or checksum/size mismatch stops installation.
-Explain the download failure; do not ask the operator to fetch a receipt or
-log into GitHub, build a replacement, use a Git checkout, or select another
-version as a fallback. A network or rate-limit failure can be retried as a
-read-only download after reporting it.
-
-For the local comparison in step 3, use the downloaded file's absolute path:
+**Pilot install — this is the path you use.** Install the exact qualified
+`olympus-0.4.0.tgz` supplied by the maintainer, with its SHA-256 and byte count.
+**ASK THE OPERATOR** for the candidate and receipt if either is missing; do
+not build a replacement or substitute a Git checkout. Compare both values
+before installing and stop on any mismatch:
 
 ```bash
 shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
 wc -c < /absolute/path/to/olympus-0.4.0.tgz
 ```
 
-The expected digest and size come from the repository pin and fetched release
-metadata, never from the same local file you are checking. Reference command
-for the packaged guide's single install of those verified bytes:
+Record the matching artifact identity in the install report. Read this guide
+from that same archive; npm archives place it at `package/INSTALL_FOR_AGENTS.md`.
 
 ```bash
 openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
@@ -303,8 +253,7 @@ The `npm-pack:` prefix creates OpenClaw's per-plugin npm project and verifies
 the installed dependency shape. A raw archive/path install or Git checkout
 does not qualify these package bytes. Pilot testers and internal release
 qualification use the same candidate; a product fix needs a newly qualified
-candidate before an affected tester retries; the agent retrieves its identity
-automatically through the designated release metadata.
+candidate and receipt before an affected tester retries.
 
 `clawhub:olympus` becomes the one-line public install **after the pilot**,
 using the byte-identical qualified package. Until publication,
@@ -635,14 +584,15 @@ before the options name it:
 >
 > 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
 >    not run local models. Secure content goes only to Venice, on its
->    Private model path — currently `kimi-k3`. Requires: a
+>    Private model path — `kimi-k3` for answers and a separately approved
+>    private embedding model for secure search. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
 >    available) for public and ordinary-private search indexing. Secure search
->    stays on this machine as keyword search; secure content never goes to
->    Gemini. “Only” describes secure-data handling, not all Olympus traffic.
+>    uses Venice Private embeddings when no local provider is configured;
+>    secure content never goes to Gemini. “Only” describes secure-data handling, not all Olympus traffic.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
->    for secure answers, on that provider's word rather than on
+>    for secure answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
 > 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
@@ -723,9 +673,11 @@ report "your keys are set up" after the fact.
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
 before this step. It separates Gemini non-secure embeddings, local secure
-embeddings, Venice secure reasoning, and private-cloud-only's keyword search.
+embeddings, Venice secure reasoning, and the approved Venice secure embedding
+fallback when no local provider is configured.
 The worker uses registered dimensions for shipped models when there is no
-override (Gemini Embedding 2: 3072; registered local embedding model: 2560).
+override (Gemini Embedding 2: 3072; registered local embedding model: 2560;
+Venice Qwen3 Embedding 8B: 4096).
 Do not add a dimension flag or edit `worker.env` for those defaults. An unknown
 model still needs a verified explicit dimension; report unsupported custom
 configuration rather than inventing flags or declaring readiness from key
@@ -926,8 +878,8 @@ it. Setup's own output says so, under `worker`: `worker.state` is the state
 the service manager reported when setup returned, `worker.next` is the step
 that state calls for, and `worker.activation_detail` appears only when the
 start did not take. On the healthy path `worker.state` is `active` and
-`worker.next` reads `The managed worker is running; open the dashboard with
-olympus dashboard.` Read those three fields before you run anything here —
+`worker.next` reads `The managed worker is running; open Olympus in OpenClaw.
+Use olympus dashboard for standalone access.` Read those three fields before you run anything here —
 they usually make this step a confirmation.
 
 Also check setup's `ok` and `worker.activation`: a failed start or policy
@@ -1148,6 +1100,52 @@ does not define that handler, and no external catalog submission is authorized.
 
 ## Step 6 — Optional source setup
 
+**Pre-source completion receipt — mandatory before inviting Connect.** Do not
+say "Setup is complete" or invite the operator to click a source's Connect
+button until this receipt is green. It proves that the selected posture's
+model/provider wiring is usable by the worker; it does not choose a source,
+and it does not require any source to be connected yet.
+
+Use the provider-specific connect and readiness checks already documented in
+Step 3, then prove the worker consumes that wiring with the existing
+`olympus doctor` and `olympus worker status` checks. The receipt must name:
+
+- **Gemini — every posture.** Its wiring is for public and ordinary-private
+  embeddings. Gemini is not the secure-answer provider and is never a secure
+  embedding requirement.
+- **Venice — only when the posture uses it.** `local-first` uses Venice as
+  the approved secure-answer escalation; `private-cloud-only` uses Venice for
+  secure answers and, without a local provider, secure embeddings. Verify the
+  embedding model separately: Private catalog classification, endpoint
+  readiness, matching dimensions, and approved cost. `local-only` and
+  `no-sensitive` do not require Venice, so do not ask for or block on a Venice
+  key for those postures. Preserve existing vectors and obtain activation or
+  backfill approval before changing a saved embedding profile.
+- **Worker consumer proof.** The existing Doctor output must show the relevant
+  `sovereignty_prerequisites`, `worker_credential_lanes`, `source_index_status`,
+  and `email_worker` checks green, and `olympus worker status` must show the
+  worker reachable without degraded credentials. Use the posture's existing
+  remedies when one is red, then rerun the same checks.
+
+A provider key being present, a configured model profile, or a check reported
+as **Skipped** is not readiness. A Venice key also does not prove usable API
+balance. Do not add a new CLI/API/billing probe or a source connection to make
+the receipt look complete. If a required check is not green, say which provider
+wiring remains open and keep source Connect unopened.
+
+Give the operator this honest summary before the source handoff, adapting only
+the observed facts:
+
+> Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
+> for public and ordinary-private embeddings: `<verified or still open>`.
+> Venice secure-answer and secure-embedding wiring, reported separately:
+> `<verified, not required for this posture, or
+> still open>`. Worker consumer checks: `<green or name the open check>`. No
+> source is connected yet, and I will wait to invite Connect until every
+> required provider check is green.
+
+Only after the receipt is green deliver the required handoff below.
+
 **Base installation is complete before source choice.** Report the selected
 posture, model prerequisites, worker health, and successful plugin/tool and
 selected-dashboard activation from Steps 1–5. No connected source is required.
@@ -1164,9 +1162,26 @@ for the source the operator selects and only its approved scope. If the
 operator explicitly needs the documented headless fallback, ask which source
 that fallback should connect.
 
-On OpenClaw **2026.9.2**, prefer **Olympus** in the Control UI sidebar **when
-the installed Olympus artifact includes native Control UI support**. Host
-version alone does not prove that integration exists. Native plugin pages need
+**Drive and Dropbox require scope approval before ingestion.** Connecting an
+account grants access for the folder browser; it does not approve indexing the
+account. Open **Choose folders** on the source card. Use the existing
+Finder-style tree and inspector to choose **Full ingestion**, **Metadata only**,
+or **No ingestion**, then have the operator press **Save scope and start**.
+Browsing lists folder names without indexing or reading file contents.
+Unselected folders stay out; using the entire account requires an explicit
+selection and confirmation. Never select the whole account, confirm scope, or
+press Start for the operator without their instruction.
+
+An empty rule set, a built-in root, a connected credential, or previously cached
+items are not scope approval. Unapproved cached file content remains unavailable
+to search and answers. Reconnection requires review of the current account's
+scope. Preserve retained data; changing scope is not permission to purge it.
+Do not reconnect a source the operator disconnected while resolving a problem.
+Provider/model readiness and any required cost approval remain separate from
+permission to use selected folders.
+
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, use **Olympus** in the Control UI sidebar. Native plugin pages need
 **Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
 managed procedure, and a browser reload. Explain this opt-in and obtain any
 uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
@@ -1484,8 +1499,9 @@ the worker only if it reports `resolved_restart_required`);
 `degraded_credentials`; and the first answer's audit block must not
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
-should be absent. Then return to the selected Olympus dashboard — a protected view of source
-freshness and where public, private, secure, and secrets are allowed to go.
+should be absent. Then show the operator Olympus in OpenClaw: source freshness
+and where public, private, secure, and secrets are allowed to go. Use
+`olympus dashboard` when standalone access is needed.
 
 Report to the operator: what was installed, the chosen posture, which
 sources are connected, which prerequisites remain open, and the doctor

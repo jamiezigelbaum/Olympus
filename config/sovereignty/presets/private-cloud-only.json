@@ -22,6 +22,14 @@
       "model": "gemini-embedding-2",
       "secretRef": "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
       "purpose": "embedding"
+    },
+    "venice-source-embedding": {
+      "provider": "venice",
+      "trust": "encrypted_cloud",
+      "baseUrl": "https://api.venice.ai/api/v1",
+      "model": "text-embedding-qwen3-8b",
+      "secretRef": "store:venice.api_key",
+      "purpose": "embedding"
     }
   },
   "routes": {
@@ -42,9 +50,9 @@
       "secure_local": {
         "minimumExecutionTrust": "encrypted_cloud",
         "allowedEmbeddingTrust": [
-          "local"
+          "encrypted_cloud"
         ],
-        "embeddingProfile": null,
+        "embeddingProfile": "venice-source-embedding",
         "allowCloudQuery": false,
         "activationMode": "lexical_only",
         "secureHandling": "answerable"

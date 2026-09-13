@@ -38,7 +38,6 @@ const SLICE_2_ACTIVE_SURFACE_GLOBS = [
   'package.json',
 ];
 const SLICE_2_RECEIPT_ONLY_LEDGERS = new Set([
-  'config/private-ops-disposition.json',
   'config/slice2-deleted-paths.json',
 ]);
 

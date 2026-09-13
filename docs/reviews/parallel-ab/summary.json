@@ -1,0 +1,75 @@
+{
+  "kind": "olympus_parallel_ab_interpretation",
+  "tested_baseline": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+  "tested_alternative": "7aac1040d7235574925ddf94002dd1b42f8591ed",
+  "latest_main_observed": "6a78f5bd7c67a9117884a78323a50d6bcab1bf5a",
+  "latest_main_difference": "Restart script, matching tests and protocol/governance text; src, eval, package.json, bun.lock and build scripts unchanged from tested baseline. No merge or rebase performed.",
+  "host_ab": "PASS within isolated no-provider foreground scope",
+  "store_ab": "PARITY_PASS; shared metadata-only change-counter defect remains",
+  "question_count": 16,
+  "model": "gemini-2.5-flash",
+  "retrieval_and_hydration_exactly_equal_pairs": 16,
+  "model_prompt_exactly_equal_pairs": 16,
+  "model_body_exactly_equal_pairs": 16,
+  "answer_text_exactly_equal_pairs": 13,
+  "grade_equal_pairs": 15,
+  "evidence_identity_equal_pairs": 15,
+  "coverage_equal_pairs": 16,
+  "scores": {
+    "main": {
+      "strict_passes": 5,
+      "answer_value_grades_passed": 6,
+      "citation_grades_passed": 13,
+      "gap_grades_passed": 14,
+      "privacy_grades_passed": 16,
+      "median_wall_ms": 1190.83,
+      "timing_is_benchmark": false
+    },
+    "parallel": {
+      "strict_passes": 4,
+      "answer_value_grades_passed": 6,
+      "citation_grades_passed": 12,
+      "gap_grades_passed": 14,
+      "privacy_grades_passed": 16,
+      "median_wall_ms": 1131.28,
+      "timing_is_benchmark": false
+    }
+  },
+  "repeat": {
+    "question_ordinal": 11,
+    "additional_samples_per_arm": 3,
+    "main_passes": 2,
+    "alternative_passes": 2,
+    "all_six_request_bodies_match_original": true,
+    "pass_direction_reversed_in_sample_2": true,
+    "conclusion": "Variation recurs within both revisions under identical requests; original one-point difference is not evidence of a code-caused regression."
+  },
+  "recorded_request_attempts_including_one_unobserved_early_smoke": 42,
+  "maximum_total_requests": 64,
+  "raw_scores_replaced": false,
+  "shared_fixture_misses": [
+    {
+      "question": 7,
+      "observation": "Exact path omitted; exact URL returned. Fixture used metadata.path and URL locatorUri, while real Dropbox emits pathDisplay/pathLower. Live-provider defect not established."
+    },
+    {
+      "question": 8,
+      "observation": "Exact channel name omitted; date returned. Fixture stored metadata.channel but used a record-specific metadata.title; real Telegram places chatTitle in metadata.title. Live-provider defect not established."
+    }
+  ],
+  "interpretation": "The alternative is simpler to maintain and exhibits equivalent tested retrieval/model-input behavior. This small synthetic experiment does not establish full product parity, superior answer quality, real-provider qualification, or a speedup.",
+  "not_tested": [
+    "private-corpus held-out eval",
+    "real-provider authentication/sync/extraction",
+    "real service-manager lifecycle",
+    "embeddings and default privacy-preset routing",
+    "second real host platform",
+    "owner dashboard acceptance"
+  ],
+  "local_raw_evidence_archive": {
+    "path": "release-artifacts/parallel/ab-evidence/synthetic-evidence.tgz",
+    "sha256": "747c6160f4d4fe690d7257ac97c7a612a0c66157ecc6cc5aa6e6b0d768cbdd84",
+    "bytes": 302268
+  },
+  "model_comparison_dependencies": "Both source arms deliberately shared the candidate-locked dependency tree via a symlink. Directory equality and inventory digest are recorded in shared-dependencies.json. Separate packaged-host tests used their independently built artifacts."
+}

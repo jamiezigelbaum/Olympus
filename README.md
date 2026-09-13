@@ -98,7 +98,8 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **secure-data handling**: Venice answers secure
-questions and secure search uses local keywords. Gemini still supplies
+questions and its approved Private embedding model provides secure semantic
+search when no local provider is configured. Gemini still supplies
 embeddings for public and ordinary-private content. Secure content never goes
 to Gemini.
 
@@ -112,14 +113,15 @@ exhausted policy chain refuses rather than silently downgrading.
 (`>=22.22.3 <23`, `>=24.15.0 <25`, or `>=25.9.0` — its installer refuses any
 other), plus [Bun](https://bun.sh) `1.2+`. macOS or Linux.
 
-Paste this into OpenClaw, or another agent with a terminal:
+The pilot uses the exact qualified `olympus-0.4.0.tgz` supplied by the
+maintainer, together with its SHA-256 and byte count. Let your agent do the
+install. Give it those files and paste this into any agent with a terminal
+(OpenClaw, Claude Code, Codex):
 
-> Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
-
-Your agent downloads the designated pilot package, checks it automatically,
-and guides you through setup. You do not need to download files, find a
-checksum receipt, or have a GitHub account. The agent checks the SHA-256 and
-byte count against the designated candidate and GitHub's release metadata.
+> Verify the supplied Olympus tarball against its SHA-256 and byte count.
+> Read `package/INSTALL_FOR_AGENTS.md` from that archive and follow it step by
+> step, including the existing-install check before installing. Use those exact
+> package bytes and record their identity in the install report.
 
 `openclaw plugins install clawhub:olympus` becomes the one-line public path
 once Olympus is published to ClawHub, which happens **after** the pilot. The
@@ -140,7 +142,7 @@ Olympus ready for later; no source is selected for you. Once your chosen source
 is ready, the agent checks a first answer and its citations.
 
 Prefer to drive it yourself? Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)**,
-starting with the automatic download and existing-install checks. Its install
+starting with the archive identity and existing-install checks. Its install
 command for a clean machine is:
 
 ```bash
@@ -158,21 +160,27 @@ connect model credentials, and verify base activation before optional source
 setup and the first cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, use **Olympus** in the Control UI sidebar to connect
+sources, choose scope, and follow ingestion. Enable **Settings → Labs → Custom
+plugin UI**, then restart the Gateway through your normal managed procedure
+and reload the browser. OpenClaw currently makes this integration experimental
+and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
+your signed-in OpenClaw permissions; its worker token stays on the server.
+The standalone `olympus dashboard` command remains available for older hosts,
+when custom plugin UI is off, and for direct access when needed. See the
+[dashboard guide](docs/QUICKSTART.md#5-optionally-connect-a-source).
+
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It explains the separate secure/non-secure routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
+
 Choose how to supply each key: paste it yourself from your password manager's
 website into a supported local field or silent terminal input, or authorize an
 exact named-item read through an already authenticated manager CLI. The manual
 route needs no password-manager desktop app or CLI; a 1Password `op://`
 reference needs authenticated `op` access for an agent fetch.
-
-On OpenClaw `2026.9.2`, use Olympus in the Control UI sidebar when the installed
-Olympus artifact includes native Control UI support and Custom plugin UI is
-enabled. Host version alone is not proof of support. Otherwise the quickstart
-uses the retained standalone dashboard; it explains the different authentication
-requirements for each route.
 
 ## Supported sources
 
@@ -248,8 +256,8 @@ flowchart LR
 | `olympus setup --preset <preset> --yes` | writes sovereignty policy and worker auth for the chosen posture |
 | `olympus connect <source> ...` | records OAuth, session, or API-key credentials with source-specific flags |
 | `olympus worker foreground\|install\|start\|stop\|restart\|status\|upgrade\|uninstall` | one versioned lifecycle for the local engine, foreground or supervised |
-| `olympus dashboard` | opens the local ingestion dashboard |
-| `olympus dashboard token` | prints the worker token the dashboard's Unlock field asks for |
+| `olympus dashboard` | opens the standalone dashboard when direct access is needed |
+| `olympus dashboard token` | prints the token for the standalone dashboard's Unlock field |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |

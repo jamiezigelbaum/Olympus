@@ -26,7 +26,10 @@ import {
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
 import {
   DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES,
@@ -181,9 +184,9 @@ export function createGoogleDriveConnectorStoreSyncHandler(
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
   if (
     options.secureEmbeddingProvider
-    && options.secureEmbeddingProvider.backend !== 'local'
+    && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)
   ) {
-    throw new Error('Google Drive secure_local embeddings require a local/private embedding provider.');
+    throw new Error('Google Drive secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
   const classification = googleDriveConnectorStoreClassification(
     options.sensitivityMap ?? loadGoogleSensitivityMap(env),
@@ -220,6 +223,17 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     const sync = {
       fetchContent: true,
       classification,
+      ...(options.scope
+        ? {
+            sourceScopeObservation: (item: import('../../core/contracts.ts').RawItem) => ({
+              accountGeneration: options.scope!.generation,
+              scopeRevision: options.scope!.revision,
+              folderKeys: Array.isArray(item.metadata['folderAncestorIds'])
+                ? item.metadata['folderAncestorIds'].filter((key): key is string => typeof key === 'string')
+                : [],
+            }),
+          }
+        : {}),
       ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
       ...(input.cursor ? { cursor: input.cursor } : {}),
       ...(input.reconcile

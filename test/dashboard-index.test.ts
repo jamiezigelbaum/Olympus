@@ -1,3 +1,4 @@
+import { htmlHasSelector } from './helpers/html-selector.ts';
 import { describe, expect, test } from 'bun:test';
 import {
   DASHBOARD_DETAIL_QUERY_PARAM,
@@ -180,7 +181,7 @@ describe('dashboard html route token propagation', () => {
     // The gate lives on the setup page only (owner ruling, 2026-09-01), so
     // home carries no token form; the locked row links to that gate.
     expect(page.html).not.toContain('data-control-session-kind="unlock"');
-    expect(page.html).not.toContain('data-connect-kind="oauth"');
+    expect(htmlHasSelector(page.html, 'form[data-connect-kind="oauth"]')).toBe(false);
     expect(page.html).toContain('href="/dashboard?token=dash_fixture123&amp;setup#dashboard-controls"');
     expect(page.html).toContain('unlock controls in Setup');
   });
@@ -195,7 +196,7 @@ describe('dashboard html route token propagation', () => {
     });
 
     expect(page.html).toContain('<form class="rowform"');
-    expect(page.html).toContain('data-connect-kind="oauth"');
+    expect(htmlHasSelector(page.html, 'form[data-connect-kind="oauth"]')).toBe(true);
     expect(page.html).not.toContain('data-control-session-kind="unlock"');
   });
 
@@ -207,8 +208,9 @@ describe('dashboard html route token propagation', () => {
       options: { now: NOW, controlSessionCsrfToken: 'csrf-fixture' },
     });
 
-    expect(page.html).toContain('data-connect-kind="oauth"');
-    expect(page.html).toContain('var csrfToken = "csrf-fixture"');
+    expect(htmlHasSelector(page.html, 'form[data-connect-kind="oauth"]')).toBe(true);
+    expect(page.html).toContain('"csrfToken":"csrf-fixture"');
+    expect(page.html).toContain('function mountDashboardController');
   });
 
   test('still reads a dash_ token as read-only under a caller-set base path', () => {
@@ -220,7 +222,7 @@ describe('dashboard html route token propagation', () => {
       options: { now: NOW, basePath: '/dashboard?view=all' },
     });
 
-    expect(page.html).not.toContain('data-connect-kind="oauth"');
+    expect(htmlHasSelector(page.html, 'form[data-connect-kind="oauth"]')).toBe(false);
     // Locked, and pointing at the setup gate under the caller's base path.
     expect(page.html).toContain('href="/dashboard?view=all&amp;setup#dashboard-controls"');
   });

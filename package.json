@@ -33,8 +33,8 @@
   },
   "scripts": {
     "prepack": "bun scripts/standard-pack-guard.ts",
-    "build": "bun build ./src/native-plugin.ts --target=node --format=esm --outfile=dist/index.js && bun build ./src/cli.ts --target=node --format=esm --outfile=dist/cli.js && bun scripts/strip-generated-trailing-whitespace.ts dist/index.js dist/cli.js",
-    "dist:check": "bun run build && git diff --exit-code -- dist/index.js dist/cli.js",
+    "build": "bun build ./src/native-plugin.ts --target=node --format=esm --outfile=dist/index.js && bun build ./src/cli.ts --target=node --format=esm --outfile=dist/cli.js && bun build ./src/control-ui.ts --target=browser --format=esm --outfile=dist/control-ui/index.js && bun scripts/strip-generated-trailing-whitespace.ts dist/index.js dist/cli.js dist/control-ui/index.js",
+    "dist:check": "bun run build && git diff --exit-code -- dist/index.js dist/cli.js dist/control-ui/index.js",
     "release:artifact": "bun scripts/release-artifact.ts",
     "release:managed-proof": "bun scripts/managed-package-proof.ts",
     "release:qualification": "bun scripts/release-qualification-harness.ts",
@@ -42,8 +42,6 @@
     "release:qualification:inputs": "bun scripts/qualification/release-input-evidence.ts",
     "artifact:receipt": "bun scripts/ci-artifact-receipt.ts --output release-artifacts/ci-provenance.json",
     "openshell-posture:proof": "bun scripts/openshell-posture-proof.ts",
-    "resource-wiki:compile-proof": "bun scripts/resource-wiki-compile-proof.ts",
-    "resource-wiki:compile-real": "bun scripts/resource-wiki-compile-real.ts",
     "source-readiness:proof": "bun scripts/source-readiness-proof.ts",
     "source-ingestion:dashboard": "bun scripts/source-ingestion-dashboard.ts",
     "source-ingestion:live-dashboard": "bun scripts/source-ingestion-live-dashboard.ts",
@@ -60,7 +58,6 @@
     "dropbox-venice:extraction-proof:qwen3vl235b": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_qwen3vl235b_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-qwen3vl235b-proof bun scripts/dropbox-venice-extraction-proof.ts",
     "dropbox-venice:extraction-proof:grok43": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_grok43_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-grok43-proof bun scripts/dropbox-venice-extraction-proof.ts",
     "x-oauth2:seed-state": "bun scripts/x-oauth2-seed-state.ts",
-    "domain-library:sync": "bun scripts/domain-library-sync.ts",
     "whatsapp:live-sync": "bun scripts/whatsapp-live-sync.ts",
     "whatsapp:identity-backfill": "bun scripts/whatsapp-identity-backfill.ts",
     "connector-store:embed": "bun scripts/connector-store-embed.ts",
@@ -69,9 +66,6 @@
     "worktree:audit": "bun scripts/worktree-integration-audit.ts",
     "local-vlm:promotion-gate": "bun scripts/local-vlm-promotion-gate.ts",
     "email-source:serve": "bun src/workers/email-source/server.ts",
-    "file-delivery:serve": "bun src/workers/file-delivery/server.ts",
-    "castor-workspace:serve": "bun src/workers/castor-workspace/server.ts",
-    "domain-expert:serve": "bun src/workers/domain-expert/server.ts",
     "test": "bun run build && bun test",
     "test:focus": "bun test",
     "test:fast": "bun run build && bun scripts/test-lane.ts fast && bun run test:exchange",
@@ -102,7 +96,7 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.20.0",
     "@types/bun": "^1.3.0",
-    "terser": "^5.51.2",
+    "happy-dom": "20.14.0",
     "typescript": "^5.9.3"
   }
 }

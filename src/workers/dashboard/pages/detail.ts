@@ -45,9 +45,7 @@ import {
   actionButton,
   advancedPanel,
   attentionBanner,
-  clipboardScript,
   connectorSheet,
-  controlScript,
   countChip,
   escapeHtml,
   pageShell,
@@ -134,7 +132,9 @@ export function renderDashboardDetailPage(
   const scope = dashboardScopeForCard(view, source);
   // The picker route refuses the read-only query token, so the link is offered
   // only where the route exists at all; `available` is the worker saying so.
-  const folderPickerPath = view.folder_picker?.available === true ? view.folder_picker.path : undefined;
+  const folderPickerPath = view.folder_picker?.available === true && (scope !== undefined || source.scope_selection !== undefined)
+    ? `${view.folder_picker.path}${view.folder_picker.path.includes('?') ? '&' : '?'}source_id=${encodeURIComponent(source.source_id)}`
+    : undefined;
   return pageShell({
     title: 'Olympus',
     crumb: source.label,
@@ -162,14 +162,12 @@ export function renderDashboardDetailPage(
     // along because this page now carries the connect control for a source
     // that needs one — the row a warning on home leads to has to be able to
     // finish what the warning is about.
-    scripts: [
-      clipboardScript(),
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-    ],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 
@@ -870,13 +868,13 @@ function renderScope(
   editPath: string | undefined,
   options: DashboardDetailBodyOptions | undefined,
 ): string {
-  if (!scope) return '';
-  const unenforceable = new Set(scope.unenforceable_rule_ids ?? []);
-  const rows = scope.entries.map((rule) =>
+  if (!scope && editPath === undefined) return '';
+  const unenforceable = new Set(scope?.unenforceable_rule_ids ?? []);
+  const rows = (scope?.entries ?? []).map((rule) =>
     scopeRow({ ruleId: rule.rule_id, facts: scopeRuleFacts(rule, unenforceable.has(rule.rule_id)) })
   );
-  const debt = scopeDebtLines(scope);
-  if (rows.length === 0 && debt.length === 0) return '';
+  const debt = scope ? scopeDebtLines(scope) : [];
+  if (rows.length === 0 && debt.length === 0 && editPath === undefined) return '';
   // "Rules" and not "folders": a media criterion is not a folder, and the row
   // above may be describing one.
   const legend = rows.length === 0
@@ -893,16 +891,16 @@ function renderScope(
     ? ''
     : `\n        <div class="tiernote">${actionButton(options?.readOnly === true
       ? {
-        label: 'Edit what gets ingested →',
+        label: 'Choose folders and ingestion scope →',
         kind: 'link',
         href: `${setupHref(options?.basePath)}#dashboard-controls`,
         hint: 'unlock controls in Setup',
       }
       : {
-        label: 'Edit what gets ingested →',
+        label: 'Choose folders and ingestion scope →',
         kind: 'control_link',
         href: editPath,
-        hint: 'needs the worker token',
+        hint: 'review scope before starting ingestion',
       })}</div>`;
   return `
         <div class="dsect">Scope</div>${legend}

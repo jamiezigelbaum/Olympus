@@ -9,7 +9,11 @@ export interface VerifiedQualificationArtifact {
   bytes: number;
 }
 
-export function verifyQualificationArtifact(pathValue: string, expected: { artifact_sha256: string; artifact_bytes: number }): VerifiedQualificationArtifact {
+export function verifyQualificationArtifact(
+  pathValue: string,
+  expected: { artifact_sha256: string; artifact_bytes: number },
+  expectedFiles: readonly string[] = V0_4_PUBLIC_PACKAGE_FILES,
+): VerifiedQualificationArtifact {
   const path = resolve(pathValue);
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Qualification artifact must be a regular file.');
@@ -17,7 +21,7 @@ export function verifyQualificationArtifact(pathValue: string, expected: { artif
   const bytes = statSync(path).size;
   if (sha256 !== expected.artifact_sha256 || bytes !== expected.artifact_bytes) throw new Error('Qualification artifact does not match the exact plan identity.');
   const inventory = capture(['tar', '-tzf', path]).trim().split('\n').filter((line) => line && !line.endsWith('/')).map((line) => line.replace(/^package\//, '')).sort();
-  if (JSON.stringify(inventory) !== JSON.stringify([...V0_4_PUBLIC_PACKAGE_FILES].sort())) throw new Error('Qualification artifact inventory is not the exact public allowlist.');
+  if (JSON.stringify(inventory) !== JSON.stringify([...expectedFiles].sort())) throw new Error('Qualification artifact inventory is not the exact pinned allowlist.');
   const packageJson = JSON.parse(capture(['tar', '-xOf', path, 'package/package.json'])) as { name?: string; version?: string; private?: boolean };
   if (packageJson.name !== 'olympus' || packageJson.version !== '0.4.0' || packageJson.private === true) throw new Error('Qualification artifact package identity is invalid.');
   return { path, sha256, bytes };

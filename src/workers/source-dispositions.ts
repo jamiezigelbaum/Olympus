@@ -1,3 +1,6 @@
+import { renderDashboardNav, DASHBOARD_NAV_CSS } from './dashboard/nav.ts';
+import { DISPOSITIONS_CSS } from './dashboard/static-styles.ts';
+export { DISPOSITIONS_CSS };
 // The ingestion-dispositions picker: the page the owner chooses folders on, and
 // the only writer of their ingestion-dispositions file.
 //
@@ -44,6 +47,9 @@ import {
 } from '../core/source-disposition-tree.ts';
 import { OperationError } from '../core/operation-error.ts';
 import { DASHBOARD_THEME_CSS } from './dashboard/theme.ts';
+import { dashboardPageSignature } from './dashboard/components.ts';
+import type { OlympusDashboardReadResult, OlympusFolderScopeSourceId, OlympusSourceScopeStatus, OlympusSourceScopeSelection } from '../control-ui-contract.ts';
+import { mountDispositionsController } from '../control-ui/browser-controller.ts';
 import {
   defaultSourceIngestionExclusionsPath,
   parseSourceIngestionExclusions,
@@ -109,6 +115,19 @@ export interface SourceDispositionsSourceView {
   error?: string;
 }
 
+export interface SourceFolderScopeSummary {
+  source_id: OlympusFolderScopeSourceId;
+  disposition_source_id: string;
+  label: string;
+  connected: boolean;
+  status: OlympusSourceScopeStatus;
+  account_generation?: string;
+  scope_revision?: string;
+  selections?: OlympusSourceScopeSelection[];
+  whole_account_selected?: boolean;
+  error?: string;
+}
+
 export interface SourceDispositionsView {
   kind: 'source_dispositions';
   generated_at: string;
@@ -117,6 +136,8 @@ export interface SourceDispositionsView {
   schema_version: typeof SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION;
   rule_count: number;
   sources: SourceDispositionsSourceView[];
+  /** Private, status-only scope setup. Rendering never contacts a provider. */
+  folder_scopes?: SourceFolderScopeSummary[];
   /**
    * What the owner has to run at a terminal to settle what is already stored.
    * Printed, never executed: this page changes configuration and nothing else.
@@ -134,7 +155,7 @@ export interface SourceDispositionsView {
   };
   policy: {
     folder_paths_returned: true;
-    writes_config_only: true;
+    writes_config_only: boolean;
     deletes_store_content: false;
     runs_purge_or_strip: false;
   };
@@ -146,6 +167,7 @@ export const SOURCE_DISPOSITIONS_STRIP_COMMAND = 'bun run source-exclusions:purg
 
 export interface SourceDispositionsBuildOptions {
   sources: readonly SourceDispositionsSource[];
+  folderScopes?: readonly SourceFolderScopeSummary[];
   document: SourceIngestionExclusions;
   rulesPath?: string;
   rulesPresent?: boolean;
@@ -158,7 +180,8 @@ export function buildSourceDispositionsView(
   options: SourceDispositionsBuildOptions,
 ): SourceDispositionsView {
   const now = options.now ?? new Date();
-  const sources = options.sources.map((source): SourceDispositionsSourceView => {
+  const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
+  const sources = options.sources.filter((source) => !scopeSourceIds.has(source.source_id)).map((source): SourceDispositionsSourceView => {
     const tree = buildSourceDispositionTree({
       matcher: source.matcher,
       items: source.items?.() ?? [],
@@ -193,6 +216,7 @@ export function buildSourceDispositionsView(
     schema_version: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION,
     rule_count: options.document.rules.length,
     sources,
+    ...(options.folderScopes ? { folder_scopes: [...options.folderScopes] } : {}),
     cleanup: {
       dry_run_command: SOURCE_DISPOSITIONS_DRY_RUN_COMMAND,
       purge_command: SOURCE_DISPOSITIONS_PURGE_COMMAND,
@@ -203,7 +227,7 @@ export function buildSourceDispositionsView(
     },
     policy: {
       folder_paths_returned: true,
-      writes_config_only: true,
+      writes_config_only: !options.folderScopes?.length,
       deletes_store_content: false,
       runs_purge_or_strip: false,
     },
@@ -471,9 +495,9 @@ export function selectableDispositionStates(
 
 export function renderSourceDispositionsHtml(
   view: SourceDispositionsView,
-  options?: { csrfToken?: string | undefined },
+  options?: { csrfToken?: string | undefined; selectedSourceId?: string | undefined },
 ): string {
-  const sources = view.sources.map((source) => renderDispositionSource(source)).join('');
+  const body = renderSourceDispositionsFragment(view, options?.selectedSourceId);
   const csrfToken = escapeScriptJson(JSON.stringify(options?.csrfToken ?? ''));
   return `<!doctype html>
 <html lang="en">
@@ -481,173 +505,156 @@ export function renderSourceDispositionsHtml(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Olympus — Choose folders</title>
-    <style>${DASHBOARD_THEME_CSS}\n${DISPOSITIONS_CSS}</style>
+    <style>${DASHBOARD_THEME_CSS}\n${DASHBOARD_NAV_CSS}\n${DISPOSITIONS_CSS}</style>
   </head>
   <body>
-    <main class="picker-page">
+    <div data-olympus-dispositions-root>${body}</div>
+    ${standaloneSourceDispositionsControllerScript(csrfToken)}
+  </body>
+</html>`;
+}
+
+export function renderSourceDispositionsFragment(view: SourceDispositionsView, selectedSourceId?: string): string {
+  const locations = view.folder_scopes ?? [];
+  const selected = locations.find((source) => source.source_id === selectedSourceId)
+    ?? locations.find((source) => source.connected) ?? locations[0];
+  const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
+  const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join('')
+    + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join('');
+  return `<main class="picker-page">
+      ${renderDashboardNav('home')}
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
-        <p>New connections start with <strong>Full ingestion</strong>. Choose <strong>Metadata only</strong>
+        <p>Connecting an account does not start indexing. Browse folders, choose what Olympus may use,
+        then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
         processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
         entirely. New files inherit the nearest folder choice.</p>
       </header>
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
-    </main>
-    <script>
-      const csrfToken = ${csrfToken};
-      const labels = { ingest: 'Full ingestion', metadata_only: 'Metadata only', exclude: 'No ingestion' };
-      // Choosing folders in a large tree is minutes of purely local work: no
-      // request leaves this page between opening it and pressing Save, so a
-      // control session that only expired would die under the owner mid-edit
-      // and take every unsaved choice with it. The renewal carries exactly what
-      // a save carries -- the HttpOnly cookie and the CSRF token, never the
-      // worker bearer -- and only fires when the owner has actually done
-      // something since the last one, so an abandoned tab still lets the
-      // session lapse.
-      const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
-      let lastActivityMs = 0;
-      let lastRenewalMs = Date.now();
-      const noteActivity = () => { lastActivityMs = Date.now(); };
-      document.addEventListener('pointerdown', noteActivity, { passive: true });
-      document.addEventListener('keydown', noteActivity, { passive: true });
-      async function renewControlSession() {
-        if (!csrfToken || lastActivityMs <= lastRenewalMs) return;
-        lastRenewalMs = Date.now();
-        try {
-          await fetch('/dashboard/control/session', {
-            method: 'POST',
-            cache: 'no-store',
-            credentials: 'same-origin',
-            headers: { 'X-Olympus-CSRF': csrfToken },
-          });
-        } catch (error) {
-          // A renewal that cannot reach the worker changes nothing on the page;
-          // the save path is what reports an unusable session.
-        }
+    </main>`;
+}
+
+function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: readonly SourceFolderScopeSummary[], selected: boolean): string {
+  const unavailable = !source.connected || Boolean(source.error);
+  return `<section class="source-dispositions" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
+    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← Back to ${escapeHtml(source.label)}</a></p>
+    <form data-folder-scope-source="${escapeHtml(source.source_id)}"
+      data-connected="${source.connected}" data-account-generation="${escapeHtml(source.account_generation ?? '')}"
+      data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
+      data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}">
+      <div class="finder-window">
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${locations.map((location) => `<a class="location${location.source_id === source.source_id ? ' selected' : ''}" href="/dashboard/dispositions?source_id=${encodeURIComponent(location.source_id)}" data-scope-switch="${escapeHtml(location.source_id)}"${location.source_id === source.source_id ? ' aria-current="page"' : ''}><span class="folder-icon">◆</span><span>${escapeHtml(location.label)}</span></a>`).join('')}
+          <p class="scope-connection">${source.connected ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection' : 'Disconnected'}</p>
+        </aside>
+        <section class="finder-main">
+          <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
+          <div class="scope-browser-toolbar"><button type="button" data-scope-browse-root${unavailable ? ' disabled' : ''}>Browse folders</button>
+            <span data-scope-location>Folders</span></div>
+          <p class="scope-browser-note">${source.error ? escapeHtml(source.error) : source.connected
+            ? 'Browsing lists folder names only. No file contents are read or indexed until you confirm your scope.'
+            : 'Connect this account first, then return here to choose folders. Connecting will not start ingestion.'}</p>
+          ${source.connected ? '' : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
+          <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
+          <button type="button" data-scope-more hidden>Show more folders</button>
+          <label class="scope-whole-account"><input type="checkbox" data-scope-whole-account${source.whole_account_selected ? ' checked' : ''}${unavailable ? ' disabled' : ''}> Use the entire account, including future folders, except choices below</label>
+          <label class="scope-whole-confirm"${source.whole_account_selected ? '' : ' hidden'}><input type="checkbox" data-scope-whole-confirm${unavailable ? ' disabled' : ''}> I explicitly approve using the entire account</label>
+          <details class="scope-review"><summary>Review your folder choices</summary><ul data-scope-selections></ul></details>
+        </section>
+        <aside class="finder-inspector" aria-label="Folder choice">
+          <div data-scope-inspector-empty><div class="inspector-folder">▱</div><p>Select a folder</p></div>
+          <div data-scope-inspector-content hidden><div class="inspector-folder">▰</div>
+          <h3 data-scope-selected-name></h3><p class="inspector-path" data-scope-selected-path></p>
+          <div class="choice-stack" aria-label="Ingestion choice">
+            <button type="button" data-scope-state="ingest" disabled>Full ingestion<span>Read and index contents</span></button>
+            <button type="button" data-scope-state="metadata_only" disabled>Metadata only<span>Index names and dates; never contents</span></button>
+            <button type="button" data-scope-state="exclude" disabled>No ingestion<span>Keep this folder out</span></button>
+          </div><p class="inspector-note" data-scope-selected-note></p></div>
+        </aside>
+        <footer class="finder-footer"><span data-scope-summary>No folders selected.</span>
+          <span class="footer-actions"><button type="button" class="secondary" data-scope-cancel>Cancel changes</button>
+            <button type="submit" data-scope-start disabled>Save scope and start</button></span></footer>
+      </div>
+      <p class="action-message" data-scope-message role="status" aria-live="polite">Nothing starts until you confirm.</p>
+    </form>
+  </section>`;
+}
+
+export function renderSourceDispositionsControlUi(
+  view: SourceDispositionsView,
+  canWrite: boolean,
+  selectedSourceId?: string,
+): OlympusDashboardReadResult {
+  const body = renderSourceDispositionsFragment(view, selectedSourceId);
+  return {
+    status: 200,
+    title: 'Olympus / Choose folders',
+    body,
+    controller: 'dispositions',
+    can_write: canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15_000,
+  };
+}
+
+function standaloneSourceDispositionsControllerScript(csrfTokenJson: string): string {
+  const mountSource = mountDispositionsController.toString().replaceAll('</script', '<\\/script');
+  return `<script>
+    (function () {
+      var csrfToken = ${csrfTokenJson};
+      var root = document.querySelector('[data-olympus-dispositions-root]');
+      if (!root) return;
+      var abort = new AbortController();
+      var mount = ${mountSource};
+      async function json(response) {
+        try { return await response.json(); } catch (error) { return {}; }
       }
-      if (csrfToken) setInterval(renewControlSession, KEEPALIVE_INTERVAL_MS);
-      function selectFolder(row) {
-        const form = row.closest('form[data-dispositions-source]');
-        if (!form) return;
-        form.querySelectorAll('.folder-row.selected').forEach((item) => item.classList.remove('selected'));
-        row.classList.add('selected');
-        form.dataset.selectedPath = row.dataset.path || '';
-        const inspector = form.querySelector('.finder-inspector');
-        if (!inspector) return;
-        inspector.querySelector('[data-inspector-empty]').hidden = true;
-        inspector.querySelector('[data-inspector-content]').hidden = false;
-        inspector.querySelector('[data-inspector-name]').textContent = row.dataset.name || '';
-        inspector.querySelector('[data-inspector-path]').textContent = row.dataset.path || '';
-        inspector.querySelector('[data-inspector-count]').textContent = row.dataset.counts || '';
-        // A locked row explains itself first: why the three buttons below it
-        // will not move matters more than where its current choice came from.
-        // The form's reason covers a whole source that cannot be edited here.
-        inspector.querySelector('[data-inspector-note]').textContent = row.dataset.locked
-          || form.dataset.locked
-          || (row.dataset.origin === 'default'
-            ? 'Uses the Full ingestion default until you choose otherwise.'
-            : row.dataset.origin === 'inherited'
-              ? 'Inherited from the nearest folder choice above.'
-              : 'This folder has its own choice.');
-        const selectable = new Set((row.dataset.selectable || '').split(',').filter(Boolean));
-        inspector.querySelectorAll('button[data-picker-state]').forEach((button) => {
-          const state = button.dataset.pickerState;
-          button.disabled = !selectable.has(state);
-          button.classList.toggle('on', row.dataset.state === state);
-        });
-      }
-      document.querySelectorAll('.folder-row').forEach((row) => {
-        row.addEventListener('click', () => selectFolder(row));
-        row.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFolder(row); }
-        });
-      });
-      document.querySelectorAll('button[data-picker-state]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const form = button.closest('form[data-dispositions-source]');
-          const path = form?.dataset.selectedPath;
-          const state = button.dataset.pickerState;
-          if (!form || !path || !state || button.disabled) return;
-          const row = Array.from(form.querySelectorAll('.folder-row')).find((item) => item.dataset.path === path);
-          const radio = Array.from(form.querySelectorAll('input[type="radio"]')).find((input) => input.dataset.path === path && input.value === state);
-          if (!(row instanceof HTMLElement) || !(radio instanceof HTMLInputElement)) return;
-          radio.checked = true;
-          row.dataset.state = state;
-          const status = row.querySelector('[data-folder-status]');
-          if (status) status.textContent = labels[state] || state;
-          selectFolder(row);
-        });
-      });
-      document.querySelectorAll('[data-folder-search]').forEach((input) => {
-        input.addEventListener('input', () => {
-          const query = input.value.trim().toLowerCase();
-          const form = input.closest('form[data-dispositions-source]');
-          form?.querySelectorAll('.folder-row').forEach((row) => {
-            row.hidden = query !== '' && !(row.dataset.search || '').includes(query);
-          });
-        });
-      });
-      document.querySelectorAll('button[data-cancel-picker]').forEach((button) => {
-        button.addEventListener('click', () => window.location.reload());
-      });
-      document.querySelectorAll('form[data-dispositions-source]').forEach((form) => {
-        form.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          const message = document.getElementById('save-message');
-          if (!csrfToken) {
-            if (message) message.textContent = 'Open this picker from the dashboard before saving.';
-            return;
-          }
-          // Only radios the owner actually moved are sent. Posting every folder
-          // on the page would rewrite rules nobody touched and re-slug their
-          // ids, which is the one thing a save here must never do.
-          const edits = [];
-          form.querySelectorAll('input[type="radio"]:checked').forEach((input) => {
-            if (input.value === input.getAttribute('data-initial')) return;
-            edits.push({ path: input.getAttribute('data-path'), state: input.value });
-          });
-          if (edits.length === 0) {
-            if (message) message.textContent = 'Nothing changed.';
-            return;
-          }
-          if (message) message.textContent = 'Saving ' + edits.length + ' change(s)...';
-          try {
-            const response = await fetch('/dashboard/dispositions', {
-              method: 'POST',
-              credentials: 'same-origin',
+      var controller = mount({
+        root: root,
+        transport: {
+          async read(params) {
+            var response = await fetch('/dashboard/dispositions', {
+              method: 'POST', cache: 'no-store', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ source: form.getAttribute('data-dispositions-source'), edits }),
+              body: JSON.stringify({ action: 'browse_folder_scope', source_id: params.source_id,
+                parent_key: params.parent_key, cursor: params.cursor }),
             });
-            if (response.status === 401) {
-              // Never reload here: the choices on this page are the only copy.
-              if (message) {
-                message.textContent = 'The control session expired. Your folder choices are still here — '
-                  + 'unlock controls on the dashboard, then reopen this picker to save them.';
-              }
-              return;
+            var body = await json(response);
+            return Object.assign({}, body, { status: response.status });
+          },
+          async control(params) {
+            if (params.action !== 'save_dispositions' && params.action !== 'approve_source_scope_and_start') {
+              return { status: 400, body: { error: { message: 'Unsupported picker action.' } } };
             }
-            const payload = await response.json();
-            if (!response.ok || payload.ok !== true) {
-              throw new Error(payload?.error?.message || 'Save failed.');
-            }
-            const refused = (payload.result?.refused || []);
-            if (refused.length > 0) {
-              if (message) message.textContent = refused.map((entry) => entry.path + ': ' + entry.message).join(' ');
-              return;
-            }
-            if (message) message.textContent = 'Saved. Reloading...';
-            window.location.reload();
-          } catch (error) {
-            if (message) message.textContent = error instanceof Error ? error.message : 'Save failed.';
-          }
-        });
+            var response = await fetch('/dashboard/dispositions', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(params.action === 'save_dispositions'
+                ? { source: params.source, edits: params.edits }
+                : params),
+            });
+            return { status: response.status, body: await json(response) };
+          },
+          async renew() {
+            await fetch('/dashboard/control/session', {
+              method: 'POST', cache: 'no-store', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken },
+            });
+          },
+        },
+        navigate: function (href) { window.location.assign(href); },
+        refresh: async function () { window.location.reload(); return undefined; },
+        returnUrl: window.location.href,
+        canWrite: Boolean(csrfToken),
+        authority: 'worker-session',
+        signal: abort.signal,
+        pollIntervalMs: 0,
       });
-    </script>
-  </body>
-</html>`;
+      window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
+    })();
+  </script>`;
 }
 
 function renderDispositionSource(source: SourceDispositionsSourceView): string {
@@ -920,178 +927,3 @@ function escapeScriptJson(value: string): string {
 // literal rather than imported: source-dashboard.ts inlines its stylesheet in
 // its own template, and exporting a shared string would couple two page
 // templates that are free to diverge.
-const DISPOSITIONS_CSS = `
-      :root {
-        color-scheme: light;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: #1c2523;
-        background: #f6f7f5;
-        --accent: #2f7d67;
-        --accent-strong: #276a57;
-        --accent-soft: #e7f0ec;
-        --warn: #9a6b1f;
-        --warn-soft: #f7efdd;
-        --danger: #b04a38;
-        --border: #e0e5e1;
-        --muted: #4d5955;
-        --faint: #616e69;
-        --card: #ffffff;
-        --radius-card: 10px;
-        --radius-control: 8px;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; font-size: 14px; line-height: 1.55; }
-      main { max-width: 880px; margin: 0 auto; padding: 40px 24px 72px; }
-      header { margin-bottom: 24px; display: grid; gap: 8px; }
-      h1 { font-size: 24px; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
-      h2 { font-size: 16px; font-weight: 600; margin: 0; }
-      h3 { font-size: 14px; font-weight: 600; margin: 0; }
-      p { margin: 0; color: var(--muted); max-width: 72ch; }
-      .eyebrow { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
-      .subtle { color: var(--muted); font-size: 13px; }
-      code { background: #f0f3f1; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
-
-      .warn-note { background: var(--warn-soft); border: 1px solid #e2c888; border-radius: var(--radius-card); padding: 11px 14px; color: #6f551f; font-size: 13px; }
-      .warn-note strong { color: #59410f; }
-
-      .auth { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; margin-bottom: 16px; }
-      .auth-status { font-size: 13px; }
-      .auth-status.authorized { color: var(--accent); font-weight: 500; }
-
-      .source-dispositions { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 12px; margin-bottom: 16px; }
-      .source-head { display: grid; gap: 3px; }
-
-      .tree { display: grid; gap: 2px; }
-      .node { border-top: 1px solid var(--border); padding: 8px 0 8px 0; }
-      .node > .children { margin-left: 18px; border-left: 1px solid var(--border); padding-left: 12px; }
-      .node-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; cursor: default; }
-      /* A flex summary drops the native disclosure triangle in every engine, so
-         the affordance is drawn here. Without it a folder with children looks
-         exactly like one without, and the whole tree reads as flat. */
-      details.node > summary.node-head { cursor: pointer; list-style: none; }
-      details.node > summary.node-head::-webkit-details-marker { display: none; }
-      details.node > summary.node-head::before { content: "\\25B8"; color: var(--faint); font-size: 11px; width: 10px; }
-      details.node[open] > summary.node-head::before { content: "\\25BE"; }
-      .node.leaf > .node-head::before { content: ""; width: 10px; }
-      .node-name { font-weight: 500; }
-      .node-counts { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-
-      /* Explicit and inherited are the distinction this page exists to draw, so
-         they are separated by fill, weight and a note — never by colour alone,
-         which a reader with low colour vision would not see at all. */
-      .chip { display: inline-flex; align-items: baseline; gap: 5px; border-radius: 999px; font-size: 12px; padding: 1px 9px; border: 1px solid var(--border); }
-      .chip-note { font-size: 11px; opacity: 0.85; }
-      .chip.explicit { font-weight: 600; }
-      .chip.explicit.exclude { background: #f6e2de; border-color: #dcb0a6; color: #7d2f20; }
-      .chip.explicit.metadata_only { background: var(--warn-soft); border-color: #d9c9a3; color: #6f551f; }
-      .chip.explicit.ingest { background: var(--accent-soft); border-color: #b6d3c8; color: var(--accent-strong); }
-      .chip.inherited { background: transparent; border-style: dashed; color: var(--faint); font-weight: 400; }
-      .chip.default { background: transparent; color: var(--faint); }
-      .mixed { font-size: 11.5px; color: var(--warn); border: 1px dotted #d9c9a3; border-radius: 999px; padding: 0 8px; }
-
-      .control { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0 0; font-size: 13px; }
-      .control label { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
-      .control label.locked { opacity: 0.5; }
-      .control-locked { font-size: 12.5px; color: var(--faint); margin: 6px 0 0; max-width: 70ch; }
-
-      .media-rules { background: #fbfcfb; border: 1px solid var(--border); border-radius: var(--radius-card); padding: 14px 16px; display: grid; gap: 6px; }
-      .media-rules ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-      .media-rules li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
-      .rule-criterion { font-size: 12.5px; color: #2a3733; }
-
-      .cleanup { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px 20px; display: grid; gap: 10px; margin-bottom: 16px; }
-      .copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
-      label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
-      input[readonly] { background: #f6f8f6; color: #2a3733; }
-      input { border: 1px solid #ccd5d1; border-radius: var(--radius-control); padding: 7px 10px; font: inherit; font-size: 13.5px; min-width: 0; }
-      button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius-control); padding: 7px 14px; font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; justify-self: start; }
-      button.secondary { background: transparent; color: var(--accent); }
-      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-      form { display: grid; gap: 10px; }
-      .action-message { color: var(--muted); font-size: 13px; min-height: 18px; }
-
-      @media (max-width: 720px) {
-        main { padding: 28px 16px 48px; }
-        .node > .children { margin-left: 8px; padding-left: 8px; }
-      }
-
-      /* Finder-style Olympus picker. These rules intentionally override the
-         retired light form above while the underlying save contract remains
-         unchanged. */
-      :root {
-        color-scheme: dark;
-        color: var(--t1);
-        background: #0B0B0E;
-        --accent: var(--link);
-        --accent-strong: var(--link);
-        --accent-soft: var(--panel2);
-        --border: var(--line);
-        --muted: var(--t3);
-        --faint: var(--t4);
-        --card: var(--bg);
-      }
-      body { background: #0B0B0E; color: var(--t1); }
-      .picker-page { max-width: 1180px; margin: 0 auto; padding: 28px 24px 72px; }
-      .picker-header { margin: 0 0 18px; display: grid; gap: 5px; }
-      .picker-header h1 { color: var(--t1); font-size: 22px; }
-      .picker-header p { color: var(--t3); }
-      .picker-header strong { color: var(--t2); }
-      .source-dispositions { padding: 0; margin: 0 0 14px; border: 0; background: transparent; display: block; }
-      .finder-window { min-height: 590px; display: grid; grid-template-columns: 180px minmax(420px, 1fr) 270px; grid-template-rows: 1fr auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); box-shadow: 0 12px 38px rgba(0,0,0,.34); }
-      .finder-sidebar { grid-column: 1; grid-row: 1; padding: 15px 10px; background: rgba(255,255,255,.025); border-right: 1px solid var(--line2); }
-      .sidebar-label { padding: 0 9px 8px; color: var(--t4); font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
-      .location { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 6px; color: var(--t2); font-size: 12.5px; }
-      .location.selected { background: var(--panel2); color: var(--t1); }
-      .location .folder-icon { color: var(--link); font-size: 10px; }
-      .finder-browser { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); }
-      .finder-toolbar { min-height: 68px; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
-      .finder-toolbar h2 { color: var(--t1); font-size: 15px; }
-      .finder-toolbar p { color: var(--t4); font-size: 11.5px; margin-top: 2px; }
-      .finder-toolbar input { width: 180px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font-size: 12px; }
-      .finder-columns { display: grid; grid-template-columns: minmax(180px, 1fr) 64px 128px; gap: 10px; padding: 6px 14px 6px 36px; border-bottom: 1px solid var(--line2); color: var(--t4); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
-      .tree { height: 468px; overflow: auto; display: block; padding: 6px; }
-      /* Under the tree, not inside it: these count folders and items the tree
-         does not list, so a reader who scrolls to the bottom of the tree has
-         not seen them. */
-      .tree-notes { padding: 8px 14px 10px; border-top: 1px solid var(--line2); display: grid; gap: 4px; }
-      .tree-notes .subtle { color: var(--t4); font-size: 11.5px; }
-      .node { border: 0; padding: 0; }
-      .node > .children { margin-left: 18px; padding-left: 0; border-left: 1px solid var(--line2); }
-      details.node > summary.folder-row { list-style: none; }
-      details.node > summary.folder-row::-webkit-details-marker { display: none; }
-      details.node > summary.folder-row::before { content: "\\25B8"; width: 12px; color: var(--t4); font-size: 10px; }
-      details.node[open] > summary.folder-row::before { content: "\\25BE"; }
-      .folder-row { min-height: 31px; display: grid; grid-template-columns: 12px 15px minmax(150px, 1fr) 64px 128px; gap: 7px; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: default; color: var(--t2); }
-      .folder-row:hover { background: rgba(255,255,255,.035); }
-      .folder-row.selected { background: var(--link-line); color: var(--t1); }
-      .folder-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
-      .node.leaf .folder-row .disclosure { width: 12px; }
-      .folder-icon { color: var(--link); font-size: 11px; }
-      .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-      .node-counts, .node-state { color: var(--t3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-      .folder-row.selected .node-counts, .folder-row.selected .node-state { color: var(--t1); }
-      .stored-controls { display: none; }
-      .finder-inspector { grid-column: 3; grid-row: 1; padding: 22px 18px; background: rgba(255,255,255,.015); }
-      .finder-inspector [data-inspector-empty] { padding-top: 120px; text-align: center; color: var(--t4); }
-      .inspector-folder { color: var(--link); font-size: 30px; margin-bottom: 10px; }
-      .finder-inspector h3 { color: var(--t1); font-size: 15px; margin-bottom: 4px; }
-      .inspector-path { color: var(--t4); font-size: 11px; overflow-wrap: anywhere; }
-      .inspector-count { color: var(--t3); font-size: 12px; margin: 9px 0 18px; }
-      .choice-stack { display: grid; gap: 7px; }
-      .choice-stack button { width: 100%; display: grid; gap: 2px; justify-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); text-align: left; font-size: 12.5px; }
-      .choice-stack button span { color: var(--t4); font-size: 10.5px; font-weight: 400; }
-      .choice-stack button.on { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
-      .choice-stack button:disabled { opacity: .38; cursor: not-allowed; }
-      .inspector-note { color: var(--t4); font-size: 11px; margin-top: 12px; }
-      .finder-footer { grid-column: 1 / -1; grid-row: 2; min-height: 54px; display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 11.5px; }
-      .footer-actions { display: flex; gap: 8px; }
-      .finder-footer button { padding: 6px 16px; border: 1px solid var(--link-line); border-radius: 6px; background: var(--link-line); color: #E8EDF8; font-size: 12.5px; }
-      .finder-footer button.secondary { background: transparent; color: var(--t2); border-color: var(--line); }
-      .action-message { color: var(--t3); min-height: 18px; margin-top: 8px; }
-      .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
-      @media (max-width: 860px) {
-        .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
-        .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
-        .finder-footer { grid-row: 3; }
-      }
-`;

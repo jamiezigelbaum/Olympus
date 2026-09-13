@@ -46,6 +46,7 @@ import {
   V0_4_PUBLIC_SOURCE_CAPABILITIES,
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
+import { createPublicSourceCorpusRegistry } from './source-corpus-registry.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -1312,21 +1313,12 @@ function hasSyncRecord(corpus: Record<string, unknown>): boolean {
 }
 
 function doctorVisibleCorpora(deps: DoctorDeps, corpora: unknown[]): unknown[] {
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
+  const registry = createPublicSourceCorpusRegistry(deps.config.sourceIndex.corpusRegistry);
   return corpora.filter((entry) => {
-    const corpus = asRecord(entry);
-    const corpusId = typeof corpus.corpus_id === 'string' ? corpus.corpus_id : '';
-    return !isDomainCorpus(corpusId) || deps.config.domainExpert.enabled === true;
+    const corpusId = asRecord(entry).corpus_id;
+    return typeof corpusId === 'string' && registry.has(corpusId, 'status');
   });
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-  return corpora;
 }
-
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-function isDomainCorpus(corpusId: string): boolean {
-  return corpusId.startsWith('internal.solon.') || corpusId.startsWith('secure_local.solon.');
-}
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
 function staleTaskAttempt(task: Record<string, unknown>, deps: DoctorDeps): boolean {
   const attemptedAt = typeof task.last_attempt_at === 'string' ? task.last_attempt_at : undefined;

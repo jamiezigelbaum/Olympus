@@ -1,3 +1,5 @@
+import { SETUP_JOURNEY_CSS } from '../static-styles.ts';
+export { SETUP_JOURNEY_CSS };
 /**
  * First run: what is connecting, what is available to connect, and the way to
  * build a connector for anything else.
@@ -22,11 +24,9 @@ import type { WorkerCredentialDegradation } from '../../credential-degradation.t
 import { dashboardAttentionLine, dashboardIsConnectedSource, dashboardSetupMeta, dashboardStatus } from '../vocabulary.ts';
 import {
   attentionRow,
-  clipboardScript,
   dashboardNeedsSetupSheet,
   dashboardOAuthConnectSheet,
   connectorSheet,
-  controlScript,
   dashboardControlGate,
   escapeHtml,
   pageShell,
@@ -64,13 +64,7 @@ const CONNECTOR_PROMPT = [
   + 'everything downstream is shared. Keep the required CI check green.',
 ].join('\n');
 
-const SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 18px; }
-.setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
-.setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
-.pilotnote b { color: var(--warn); }
-@media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`;
+
 
 type SetupGroupId = 'needs_you' | 'working' | 'connecting' | 'fresh' | 'not_connected';
 
@@ -108,7 +102,11 @@ export function renderDashboardSetupPage(
     renderDashboardNav('setup', {
       ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
     }),
-    dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
+    options?.controlMode === 'native'
+      ? (options.canWrite === false
+        ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>'
+        : '')
+      : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
     renderSetupSummary(view),
     // Above every Google row, because Google raises its unverified-app screen
     // only after the reader has already pressed Connect.
@@ -135,15 +133,13 @@ export function renderDashboardSetupPage(
     crumb: 'Setup',
     ...(options?.basePath === undefined ? {} : { basePath: options.basePath }),
     body,
-    scripts: [
-      clipboardScript(),
-      controlScript({ csrfToken: options?.controlSessionCsrfToken }),
-    ],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
     styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS],
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 
@@ -235,7 +231,7 @@ function renderGroup(
   if (sources.length === 0) return '';
   const rows = sources
     .map((source) => (
-      group.id === 'not_connected' ? renderSetupRow(source) : renderStateRow(group, source, degraded, basePath)))
+      group.id === 'not_connected' ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)))
     .join('\n');
   return `${sectionHeading(group.heading, sources.length, group.attention)}\n${rows}`;
 }
@@ -317,12 +313,13 @@ function renderStateRow(
   });
 }
 
-function renderSetupRow(source: DashboardSourceCard): string {
+function renderSetupRow(source: DashboardSourceCard, basePath?: string): string {
   const action = source.connection.action;
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
     const row = setupRow({
       label: source.label,
+      href: detailHref(source, basePath),
       blurb: setupBlurb(source),
       action: { label: 'Ask your agent', kind: 'none', sheet: sheetId },
     });
@@ -344,6 +341,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
     const link = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
+      href: detailHref(source, basePath),
       blurb: action.instructions.plain_intro,
       action: { label: action.label, kind: 'none', sheet: sheetId },
       ...(link === undefined ? {} : { blurbLink: link }),
@@ -361,6 +359,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
     if (connect) {
       const row = setupRow({
         label: source.label,
+      href: detailHref(source, basePath),
         blurb: setupBlurb(source),
         action: { label: action.label, kind: 'none', sheet: connect.sheetId },
       });
@@ -373,6 +372,7 @@ function renderSetupRow(source: DashboardSourceCard): string {
   const link = action.kind === 'api_key' ? keyLocationLink(action.instructions) : undefined;
   return setupRow({
     label: source.label,
+      href: detailHref(source, basePath),
     blurb: setupBlurb(source),
     action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' },
     ...(link === undefined ? {} : { blurbLink: link }),

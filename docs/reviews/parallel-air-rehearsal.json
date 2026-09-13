@@ -1,0 +1,139 @@
+{
+  "kind": "olympus_parallel_air_rehearsal",
+  "schema_version": 1,
+  "recorded_at": "2026-09-08T12:02:18Z",
+  "candidate": {
+    "source_commit": "4c314e959936ab5580d52a959ae129fb94191352",
+    "artifact_sha256": "97e836437b2b5edf074e42789d30a0749148031d722f72f0f77a78e0612f8267",
+    "artifact_bytes": 703157,
+    "pull_request": 21,
+    "required_ci_run": 34221954940,
+    "required_contexts": 7,
+    "required_contexts_green": true,
+    "independent_critical_review": "pass",
+    "merged": false
+  },
+  "host": {
+    "class": "darwin_arm64_air_rehearsal",
+    "openclaw_version": "2026.9.2",
+    "real_host": true,
+    "disposable_profile": false
+  },
+  "worker": {
+    "upgrade": "passed",
+    "immutable_version_root": true,
+    "artifact_digest_matched": true,
+    "managed_environment_changed": false,
+    "state": "active",
+    "loopback_health": "passed",
+    "lifecycle_transaction": "none"
+  },
+  "gateway": {
+    "plugin_install": "passed",
+    "reload_mode_during_install": "off",
+    "controlled_restarts": 2,
+    "native_preflight": {
+      "config_validate": "passed",
+      "doctor_lint": "passed",
+      "local_credential_refs": 6,
+      "native_oauth_information_records": 1,
+      "skipped_exec_refs": 0
+    },
+    "boot_proof": {
+      "new_stable_launchd_identity": true,
+      "owned_loopback_listener": true,
+      "http_2xx": true,
+      "fresh_process_bound_ready_line": true,
+      "olympus_loaded": true
+    }
+  },
+  "native_control_ui": {
+    "custom_plugin_ui_enabled": true,
+    "enabled_user_installed_native_ui_plugins": [
+      "olympus"
+    ],
+    "navigation_visible": true,
+    "browser_rendered": true,
+    "views": [
+      {
+        "view": "home",
+        "status": 200,
+        "controller": "dashboard",
+        "can_write": true,
+        "body_bytes": 18269
+      },
+      {
+        "view": "setup",
+        "status": 200,
+        "controller": "dashboard",
+        "can_write": true,
+        "body_bytes": 18269
+      },
+      {
+        "view": "background",
+        "status": 200,
+        "controller": "dashboard",
+        "can_write": true,
+        "body_bytes": 2408
+      }
+    ],
+    "mutating_controls_invoked": 0
+  },
+  "real_agent_turns": [
+    {
+      "model": "openai/gpt-5.6-luna",
+      "tool": "source_index_status",
+      "scope": "internal.email",
+      "target_tool_calls": 1,
+      "total_tool_calls": 1,
+      "tool_failures": 0,
+      "assertions": {
+        "configured": true,
+        "indexed_items": 0,
+        "retrieval_state": "degraded",
+        "castor_visible": true
+      },
+      "result": "passed"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "tool": "source_answer",
+      "scope": "unavailable_email_question",
+      "target_tool_calls": 1,
+      "total_tool_calls": 2,
+      "additional_read_only_tools": [
+        "bash"
+      ],
+      "tool_failures": 0,
+      "evidence_returned": false,
+      "explicit_no_matching_evidence_gap": true,
+      "result": "passed"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "tool": "source_index_status",
+      "scope": "all_corpora",
+      "target_tool_calls": 1,
+      "total_tool_calls": 1,
+      "tool_failures": 0,
+      "tool_result_chars_before_host_truncation": 10245,
+      "host_visible_chars": 10000,
+      "model_summary_correct": false,
+      "result": "failed_interpretation"
+    }
+  ],
+  "authoritative_source_summary": {
+    "connected_sources": 0,
+    "answer_ready_sources": 0
+  },
+  "limits": {
+    "source_credentials_or_pairings_changed": false,
+    "sources_connected": 0,
+    "real_provider_ingestion_qualified": false,
+    "personal_corpus_answer_parity_qualified": false,
+    "answer_quality_superiority_proven": false,
+    "dashboard_owner_acceptance_recorded": false,
+    "candidate_adopted": false
+  },
+  "content_free": true
+}

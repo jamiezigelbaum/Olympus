@@ -50,15 +50,13 @@ export type ConnectSource =
   | 'google'
   | 'gmail'
   | 'google-drive'
-  | 'gcp'
   | 'dropbox'
   | 'x'
   | 'telegram'
   | 'whatsapp'
   | 'venice'
   | 'readwise'
-  | 'gemini'
-  | 'notion';
+  | 'gemini';
 
 export interface ConnectOAuthOptions {
   source: 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x';
@@ -782,8 +780,7 @@ function formatDurationMs(value: number): string {
   return `${seconds} second${seconds === 1 ? '' : 's'}`;
 }
 
-/** Public v0.4 API-key path. Kept separate from repository-only providers so
- * the release bundler cannot retain their validation or credential code. */
+/** Validate and store credentials for the supported API-key providers. */
 export async function connectPublicApiKeySource(options: {
   source: 'venice' | 'readwise';
   apiKey: string;
@@ -971,192 +968,6 @@ async function validatePublicApiKeySource(options: {
     throw new Error('Venice rejected the API key. Paste a current Venice API key and try again.');
   }
 }
-
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-export async function connectApiKeySource(options: {
-  source: 'venice' | 'readwise' | 'notion';
-  apiKey: string;
-  accountRole?: string;
-  registryPath?: string;
-  secretStore?: SecretStore;
-  now?: () => Date;
-  fetch?: OAuthFetch;
-  readwiseAuthUrl?: string;
-  veniceModelsUrl?: string;
-  notionBaseUrl?: string;
-  notionVersion?: string;
-  validationTimeoutMs?: number;
-}): Promise<ConnectResult> {
-  const accountRole = safeAccountRole(options.accountRole ?? 'personal');
-  const key = options.apiKey.trim();
-  if (!key) throw new Error('API key is required.');
-  const secretStore = options.secretStore ?? createDefaultSecretStore();
-  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
-  const grantEpoch = options.source === 'venice'
-    ? undefined
-    : readConnectedHandleGrantEpoch(registryPath);
-  const now = options.now ?? (() => new Date());
-  const secretKey = options.source === 'venice'
-    ? 'venice.api_key'
-    : options.source === 'readwise'
-      ? `readwise.${accountRole}.token`
-      : `notion.${accountRole}.integration_token`;
-  await validateApiKeySource({
-    source: options.source,
-    apiKey: key,
-    fetchImpl: options.fetch ?? fetch,
-    ...(options.readwiseAuthUrl ? { readwiseAuthUrl: options.readwiseAuthUrl } : {}),
-    ...(options.veniceModelsUrl ? { veniceModelsUrl: options.veniceModelsUrl } : {}),
-    ...(options.notionBaseUrl ? { notionBaseUrl: options.notionBaseUrl } : {}),
-    ...(options.notionVersion ? { notionVersion: options.notionVersion } : {}),
-    timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS,
-  });
-  if (options.source === 'venice') {
-    await secretStore.set(secretKey, key);
-    return {
-      ok: true,
-      source: options.source,
-      handles: [],
-      registryPath,
-      secretRefs: [`store:${secretKey}`],
-      next: 'Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Secure answers use that configured pool; E2EE model ids remain gated pending local key handling.',
-    };
-  }
-
-  const source: 'readwise' | 'notion' = options.source;
-  return withConnectedHandleGrantCustody(registryPath, { expectedEpoch: grantEpoch! }, async () => {
-    const handle = `${source}.${accountRole}`;
-    const provider = source;
-    assertOneConnectedAccountForProposedProviders(registryPath, [{ handle, provider }]);
-    await secretStore.set(secretKey, key);
-    if (source === 'readwise') {
-      upsertConnectedHandle({
-        handle,
-        provider: 'readwise',
-        accountRole,
-        trustDomain: 'internal',
-        allowedCapabilities: ['readwise.sync'],
-        scopes: ['readwise.export:read', 'readwise.reader:read'],
-        tokenSecretRefs: [`store:${secretKey}`],
-        connectedAt: now().toISOString(),
-      }, registryPath);
-      return { ok: true, source, handles: [handle], registryPath, secretRefs: [`store:${secretKey}`] };
-    }
-    upsertConnectedHandle({
-      handle,
-      provider: 'notion',
-      accountRole,
-      trustDomain: 'internal',
-      allowedCapabilities: ['domain_expert.notion_import'],
-      scopes: ['notion.pages:read', 'notion.databases:read', 'notion.blocks:read'],
-      tokenSecretRefs: [`store:${secretKey}`],
-      connectedAt: now().toISOString(),
-    }, registryPath);
-    return {
-      ok: true,
-      source,
-      handles: [handle],
-      registryPath,
-      secretRefs: [`store:${secretKey}`],
-      next: 'Wire the domain-expert worker with OLYMPUS_DOMAIN_EXPERT_NOTION_TOKEN from store:notion.<account-role>.integration_token before running notion_import. Share each target page or database with the Notion integration first.',
-    };
-  });
-}
-
-async function validateApiKeySource(options: {
-  source: 'venice' | 'readwise' | 'notion';
-  apiKey: string;
-  fetchImpl: OAuthFetch;
-  readwiseAuthUrl?: string;
-  veniceModelsUrl?: string;
-  notionBaseUrl?: string;
-  notionVersion?: string;
-  timeoutMs: number;
-}): Promise<void> {
-  if (options.source === 'readwise') {
-    const url = options.readwiseAuthUrl
-      ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL
-      ?? 'https://readwise.io/api/v2/auth/';
-    let response: Response;
-    try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Token ${options.apiKey}`,
-          Accept: 'application/json',
-        },
-      }, options.timeoutMs);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error('Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.');
-      }
-      throw new Error('Could not validate the Readwise token. No credentials were stored; try again when Readwise is reachable.');
-    }
-    if (response.status !== 204) {
-      throw new Error('Readwise rejected the API token. Paste a current Readwise access token and try again.');
-    }
-    return;
-  }
-
-  if (options.source === 'notion') {
-    const baseUrl = options.notionBaseUrl
-      ?? process.env.OLYMPUS_CONNECT_NOTION_BASE_URL
-      ?? 'https://api.notion.com/v1';
-    const version = options.notionVersion
-      ?? process.env.OLYMPUS_CONNECT_NOTION_VERSION
-      ?? '2022-06-28';
-    const url = new URL('/v1/users/me', normalizeNotionBaseUrl(baseUrl)).toString();
-    let response: Response;
-    try {
-      response = await fetchWithTimeout(options.fetchImpl, url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${options.apiKey}`,
-          'Notion-Version': version,
-          Accept: 'application/json',
-        },
-      }, options.timeoutMs);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error('Notion integration token validation timed out. No credentials were stored; try again when Notion is reachable.');
-      }
-      throw new Error('Could not validate the Notion integration token. No credentials were stored; try again when Notion is reachable.');
-    }
-    if (!response.ok) {
-      throw new Error('Notion rejected the integration token. Paste a current Notion internal integration token and try again.');
-    }
-    return;
-  }
-
-  const url = options.veniceModelsUrl
-    ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL
-    ?? 'https://api.venice.ai/api/v1/models';
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        Accept: 'application/json',
-      },
-    }, options.timeoutMs);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
-    }
-    throw new Error('Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.');
-  }
-  if (!response.ok) {
-    throw new Error('Venice rejected the API key. Paste a current Venice API key and try again.');
-  }
-}
-
-function normalizeNotionBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, '');
-  if (!trimmed) return 'https://api.notion.com';
-  return trimmed.endsWith('/v1') ? trimmed.slice(0, -3) : trimmed;
-}
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
 async function fetchXUserId(options: {
   tokenUrl: string;

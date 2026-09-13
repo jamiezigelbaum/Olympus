@@ -3,11 +3,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { configFromPluginConfig } from './core/config.ts';
 import { createDelphiTransport, DelphiClient } from './core/delphi.ts';
 import { createEmailTransport, EmailClient } from './core/email.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { createFileDeliveryTransport, FileDeliveryClient } from './core/file-delivery.ts';
-import { createCastorWorkspaceTransport, CastorWorkspaceClient } from './core/castor-workspace.ts';
-import { createDomainExpertTransport, DomainExpertClient } from './core/domain-expert-client.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import { shouldExposeOperation } from './core/operation-exposure.ts';
 import { workerAuthTokenFromConfig } from './core/worker-auth.ts';
 import {
@@ -26,40 +21,32 @@ import {
   type Operation,
   type OperationContext,
 } from './core/operations.ts';
-import { PUBLIC_RUNTIME_BUILD } from './core/build-flavor.ts';
-import { isV04PublicOperation } from './core/public-surface.ts';
-import {
-  loadPrivateExtensions,
-  type OlympusPrivateOperationToolRegistrar,
-} from './private-extension-contract.ts';
-
-/**
- * The private overlay is resolved once, at module scope, SYNCHRONOUSLY.
- *
- * OpenClaw's plugin loader is synchronous end to end — it `require()`s this
- * entry and falls back to a jiti source transform — so a top-level `await`
- * anywhere in this graph makes the built bundle unloadable on both legs and
- * every install fails before `register` is reached. Nothing in this file may
- * introduce one.
- *
- * A refusal here (version mismatch, malformed module) fails the plugin load,
- * which is the intended fail-closed behaviour: a private deployment must not
- * come up public.
- */
-const privateExtensions = loadPrivateExtensions();
+import { registerOlympusDashboardGateway } from './core/control-ui-gateway.ts';
 
 interface OpenClawPluginApi {
   pluginConfig?: unknown;
   config?: unknown;
-  activeModel?: unknown;
-  context?: { activeModel?: unknown };
-  toolContext?: { activeModel?: unknown };
   registerTool(tool: NativeTool): void;
+  registerGatewayMethod?(method: string, handler: (input: {
+    params: Record<string, unknown>;
+    client: { invalidated?: boolean; connect?: { scopes?: unknown } } | null;
+    respond(
+      ok: boolean,
+      payload?: unknown,
+      error?: { code: 'INVALID_REQUEST' | 'UNAVAILABLE'; message: string },
+      meta?: Record<string, unknown>,
+    ): void;
+    context?: { getRuntimeConfig?: () => unknown };
+    signal?: AbortSignal;
+  }) => Promise<void> | void, options?: {
+    scope?: 'operator.read' | 'operator.write';
+    profileAccess?: 'independent' | 'required';
+  }): void;
   registerHttpRoute?(route: {
     path: string;
     auth: 'plugin';
     match: 'exact';
-    handler(request: IncomingMessage, response: ServerResponse): Promise<void>;
+    handler(request: IncomingMessage, response: ServerResponse): Promise<boolean | void> | boolean | void;
   }): void;
 }
 
@@ -75,10 +62,6 @@ interface OpenClawPluginToolContext {
     to?: string;
     accountId?: string;
   };
-}
-
-interface NativeRegistrationContext {
-  activeModel?: unknown;
 }
 
 interface NativeTool {
@@ -229,33 +212,22 @@ const plugin = {
   id: 'olympus',
   name: 'Olympus',
   description: 'Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.',
-  register(api: OpenClawPluginApi, registrationContext?: NativeRegistrationContext) {
+  register(api: OpenClawPluginApi) {
     const config = configFromPluginConfig(api.pluginConfig);
-    const activeModel = activeModelFromNativeContext(api, registrationContext);
     const ctx: OperationContext = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
       email: new EmailClient(config, createEmailTransport(config)),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-      ...(PUBLIC_RUNTIME_BUILD ? {} : {
-        fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
-        castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-        domainExpert: new DomainExpertClient(config, createDomainExpertTransport(config)),
-      }),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-      ...(privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}),
     };
 
     registerSourceWatchDeliveryRoute(api, config);
+    registerOlympusDashboardGateway(api, config);
 
-    const registeredToolNames: string[] = [];
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, {
         config,
         surface: 'native',
-        activeModel,
       })) continue;
-      registeredToolNames.push(operation.name);
       if (isSourceWatchOperation(operation)) {
         api.registerTool(((toolContext: OpenClawPluginToolContext) => {
           const sourceWatchRoute = sourceWatchRouteFromToolContext(toolContext);
@@ -268,43 +240,6 @@ const plugin = {
         api.registerTool(nativeToolFromOperation(operation, ctx));
       }
     }
-
-    if (!privateExtensions?.register) return;
-    // The overlay decides its own exposure, so the public positive lists in
-    // `shouldExposeOperation` stay exactly as the public artifact evaluates
-    // them. What it may not do is shadow or re-register a public tool.
-    const registerOperationTool: OlympusPrivateOperationToolRegistrar = (operation, options) => {
-      if (!operations.includes(operation)) {
-        throw new Error(`Private extension ${privateExtensions.id} registered an unknown operation.`);
-      }
-      if (isV04PublicOperation('native', operation.name) || registeredToolNames.includes(operation.name)) {
-        throw new Error(
-          `Private extension ${privateExtensions.id} may not register the already-registered or public `
-          + `tool ${operation.name}.`,
-        );
-      }
-      registeredToolNames.push(operation.name);
-      const extendToolContext = options?.toolContextExtension;
-      if (!extendToolContext) {
-        api.registerTool(nativeToolFromOperation(operation, ctx));
-        return;
-      }
-      api.registerTool(((toolContext: OpenClawPluginToolContext) => nativeToolFromOperation(operation, {
-        ...ctx,
-        ...extendToolContext(toolContext as Readonly<Record<string, unknown>>),
-      })) as unknown as NativeTool);
-    };
-    privateExtensions.register({
-      api,
-      pluginConfig: api.pluginConfig,
-      config,
-      activeModel,
-      operations,
-      context: ctx,
-      registeredToolNames,
-      isPublicNativeOperation: (operationName) => isV04PublicOperation('native', operationName),
-      registerOperationTool,
-    });
   },
 };
 
@@ -600,18 +535,6 @@ export function sourceWatchRouteFromToolContext(
     };
   }
   return undefined;
-}
-
-function activeModelFromNativeContext(
-  api: OpenClawPluginApi,
-  registrationContext?: NativeRegistrationContext,
-): unknown {
-  return (
-    api.activeModel
-    ?? api.context?.activeModel
-    ?? api.toolContext?.activeModel
-    ?? registrationContext?.activeModel
-  );
 }
 
 export default plugin;

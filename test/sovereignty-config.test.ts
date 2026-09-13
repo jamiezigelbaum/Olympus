@@ -97,7 +97,7 @@ describe('sovereignty config engine', () => {
     })).not.toThrow();
   });
 
-  test('invariant: config cannot cloud-embed secure_local, including encrypted_cloud embedding', () => {
+  test('invariant: secure_local permits only local or approved Venice embedding trust', () => {
     const standardCloud = baseConfig({
       retrieval: {
         trustDomains: {
@@ -112,7 +112,7 @@ describe('sovereignty config engine', () => {
         },
       },
     });
-    expect(() => createSovereigntyEngine(standardCloud)).toThrow('secure_local embeddings may only use local trust');
+    expect(() => createSovereigntyEngine(standardCloud)).toThrow('secure_local embeddings may use local or approved encrypted_cloud trust');
 
     const encryptedCloud = baseConfig({
       modelProfiles: {
@@ -137,7 +137,7 @@ describe('sovereignty config engine', () => {
         },
       },
     });
-    expect(() => createSovereigntyEngine(encryptedCloud)).toThrow('secure_local embeddings may only use local trust');
+    expect(() => createSovereigntyEngine(encryptedCloud)).not.toThrow();
   });
 
   test('invariant: S5 remains hard-denied regardless of config', () => {
@@ -399,7 +399,10 @@ describe('sovereignty config engine', () => {
     expect(engine.resolveAnalystRoute({ trustDomain: 'internal' }).map((entry) => entry.id)).toEqual([
       'cloud-openclaw-infer',
     ]);
-    expect(engine.resolveEmbeddingProfile('secure_local')).toBeUndefined();
+    expect(engine.resolveEmbeddingProfile('secure_local')).toMatchObject({
+      id: 'venice-source-embedding',
+      profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
+    });
   });
 
   test('preset preflight: private-cloud-only produces no local model server prerequisite', async () => {

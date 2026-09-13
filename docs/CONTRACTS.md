@@ -180,13 +180,33 @@ normalized `e2ee-*` ids are refused with a typed policy error until Olympus has
 local key handling. E2EE still satisfies the Venice category floor; it is set
 aside operationally, not reclassified. While this gate stands, Olympus runs
 Venice in Private mode. The Venice defaults are the Private models `kimi-k3`
-(the strong default for every Venice task except embeddings, which never leave
-local) and `inkling` (the normal tier); cheaper Private models may serve
+(the strong reasoning default) and `inkling` (the normal tier); cheaper Private models may serve
 low-intelligence work, though the local Qwen normally covers that tier.
 
 `standard_cloud` is banned for every pack containing `secure_local` candidates.
 S5 and `blocked_sensitive` content never leaves local and never enters any
 cloud analyst, including Venice.
+
+### Secure embeddings
+
+Owner decision, 2026-09-10: when an installation has no local embedding
+provider, an explicitly configured Venice embedding profile may embed S4
+content and retrieval queries. It must resolve an embedding model from
+Venice's `models?type=embedding` catalog at the same Private-or-above floor;
+unknown, anonymized, or unsupported E2EE models refuse before content dispatch.
+An approved answer model or a Venice API key alone does not authorize an
+embedding model. Ordinary cloud embedding providers, including Gemini,
+remain forbidden for S4; S5 remains forbidden for every remote provider.
+
+The default Venice embedding model is `text-embedding-qwen3-8b`, with 4096
+dimensions. Local secure embedding profiles remain preferred when configured.
+An unavailable local endpoint must not silently switch a populated corpus to
+another model. Document and query vectors must share the exact provider,
+model, dimension, configuration, and epoch identity. Existing installations
+retain their selected profiles and vectors until an approved configuration
+change; activation and any backfill require advance cost approval and an
+embedding-ledger entry. The secure-data `local-only` and `no-sensitive`
+boundaries remain unchanged.
 
 The two approved flows are deliberately distinct:
 
@@ -256,6 +276,12 @@ section consolidates and supersedes all other policy wording.
   receipts. The change and reason are also recorded below.
 
 ### Change log
+
+- 2026-09-10 — Owner approved a Venice Private embedding fallback when no
+  local provider is configured. The embedding catalog owns privacy eligibility;
+  explicit routing, exact vector identity, cost approval, and ledger receipts
+  govern activation. Existing vectors and the SourceConnector, EvidencePack,
+  and Analyst interface shapes are unchanged.
 
 - 2026-07-30 — `egress_destination` semantics stated precisely: lifecycle
   receipts declare the static approved floor (`venice_private`); only the

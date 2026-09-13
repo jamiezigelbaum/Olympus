@@ -311,6 +311,8 @@ export interface DashboardSourceRun {
   duration_seconds?: number;
   items_seen: number;
   items_indexed: number;
+  /** Provider traversal truth; false means this bounded pass did not finish the walk. */
+  traversal_complete?: boolean;
 }
 
 /**
@@ -598,6 +600,13 @@ export interface DashboardSourceCard {
   trust_domain: string;
   /** Shared seven-source capability metadata; always emitted by the builder. */
   capabilities?: PublicSourceDashboardCapability;
+  /** Counts-only declaration that this connected source requires an explicit folder scope. */
+  scope_selection?: {
+    required: true;
+    status: 'scope_pending' | 'approved';
+    connected: boolean;
+    ingestion_enabled?: boolean;
+  };
   setup?: DashboardSourceSetupStatus;
   configured: boolean;
   freshness: {
@@ -1048,6 +1057,9 @@ export interface SourceDashboardBuildOptions {
    * unknown, and unknown keeps today's behaviour of offering the control.
    */
   syncNowAvailable?: (source: DashboardConnectSource) => boolean;
+  /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
+  fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
+  fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
   /**
    * The owner's sensitivity map, already loaded and parsed by the caller.
    *
@@ -1856,6 +1868,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.contentExtractionStallThresholdHours,
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
+      options.fileSourceScopeStatus?.[definition.source_id],
+      options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
     );
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
@@ -2020,6 +2034,8 @@ function sourceCardFromDefinition(
   contentExtractionStallThresholdHours: number | undefined,
   registryUnreadable: boolean,
   unpaired: DashboardUnpairedSourceState | undefined,
+  fileSourceScopeStatus: 'scope_pending' | 'approved' | undefined,
+  fileSourceScopeIngestionEnabled: boolean,
 ): DashboardSourceCard {
   const corpusCards = withoutCustodialDoubleCount(
     corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)),
@@ -2093,8 +2109,14 @@ function sourceCardFromDefinition(
   const pairedSession = definition.connect_action.kind === 'guided_session';
   const unpairable = pairedSession && unpaired === undefined
     && (baseConnection.handles.length > 0 || baseConnection.state !== 'not_connected');
+  const connectedFolderSource = fileSourceScopeStatus !== undefined
+    && baseConnection.handles.length > 0
+    && baseConnection.state !== 'reauth_required';
   const connection = {
     ...baseConnection,
+    ...(connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
+      ? { state: 'connected' as const, label: 'connected · choose folders to start', action: { kind: 'none' as const } }
+      : {}),
     ...(!pairedSession && baseConnection.handles.length > 0
       ? { disconnect: dashboardDisconnectAction(definition.source_id as V04PublicSourceId, definition.label) }
       : {}),
@@ -2119,6 +2141,10 @@ function sourceCardFromDefinition(
     ? { state: 'disconnected' as const, label: 'Connect this source' }
     : connection.state === 'reauth_required'
       ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
+      : connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
+        ? { state: 'empty' as const, label: 'Choose folders to start' }
+      : connectedFolderSource && fileSourceScopeStatus === 'approved' && !fileSourceScopeIngestionEnabled
+        ? { state: 'empty' as const, label: 'Ingestion is off for this source' }
       : embeddingLaneDisabled
         ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
         : throughput?.state === 'stalled'
@@ -2129,7 +2155,14 @@ function sourceCardFromDefinition(
             // header, the control and the detail sentence read one pause.
             : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
-  const lastRun = lastRunFromCorpora(corpora);
+  const lastRunBase = lastRunFromCorpora(corpora);
+  const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
+  const lastRun = lastRunBase
+    ? {
+        ...lastRunBase,
+        ...(traversalComplete === undefined ? {} : { traversal_complete: traversalComplete }),
+      }
+    : undefined;
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
   const embeddingRequired = embeddingRequiredFromCorpora(corpora);
   const vlmQueued = vlmExtractionQueued(ingestionLedgerRow);
@@ -2141,6 +2174,16 @@ function sourceCardFromDefinition(
     family: definition.family,
     trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
+    ...(fileSourceScopeStatus !== undefined
+      ? {
+          scope_selection: {
+            required: true as const,
+            status: fileSourceScopeStatus,
+            connected: connectedFolderSource,
+            ingestion_enabled: fileSourceScopeIngestionEnabled,
+          },
+        }
+      : {}),
     configured,
     freshness,
     coverage,
@@ -2242,6 +2285,14 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       stage: 'credential_or_pairing',
       condition: 'blocked',
       next_action: `Reauthenticate ${card.label} from this page, then run the initial sync again.`,
+      dependencies,
+    };
+  }
+  if (card.scope_selection?.connected && card.scope_selection.status === 'scope_pending') {
+    return {
+      stage: 'scope',
+      condition: 'blocked',
+      next_action: `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
       dependencies,
     };
   }
@@ -3902,6 +3953,16 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
     }
   }
   return output;
+}
+
+function metadataTraversalCompleteFromSchedulers(
+  schedulers: readonly SourceSchedulerSourceStatus[],
+): boolean | undefined {
+  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
+  if (tasks.length === 0) return undefined;
+  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
+  if (signals.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return false;
+  return signals.every((value) => value === 1);
 }
 
 function freshnessFrom(

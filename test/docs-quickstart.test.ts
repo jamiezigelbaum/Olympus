@@ -13,8 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Secure search remains lexical-only in `private-cloud-only`');
-    expect(docs).toContain('local presets configure local secure embeddings');
+    expect(docs).toContain('secure search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Existing lexical-only installations require an approved');
+    expect(docs).toContain('Local presets configure local secure embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -132,7 +133,7 @@ describe('first-run docs', () => {
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(posture).toContain('Secure content goes only to Venice');
     expect(posture).toContain('public and ordinary-private search indexing');
-    expect(posture).toContain('keyword search');
+    expect(posture).toContain('Venice Private embeddings when no local provider is configured');
     expect(posture).toContain('secure content never goes to Gemini');
     expect(posture).toContain('“Only” describes secure-data handling');
   });
@@ -149,6 +150,24 @@ describe('first-run docs', () => {
     expect(install).toContain('gateway.publicOrigin');
     expect(install).toContain('never paste it into chat');
     expect(install).toContain('`dash_` token is not the worker token');
+  });
+
+  test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    const dashboardStep = quickstart.indexOf('## 5. Optionally connect a source');
+
+    expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
+    expect(dashboardStep).toBeGreaterThan(0);
+    for (const check of ['olympus worker status', 'openclaw config validate', 'openclaw doctor --lint']) {
+      expect(quickstart.indexOf(check)).toBeGreaterThan(0);
+      expect(quickstart.indexOf(check)).toBeLessThan(dashboardStep);
+    }
+    expect(quickstart.indexOf('openclaw config validate')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw doctor --lint')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw gateway restart')).toBeLessThan(dashboardStep);
+    expect(readme).toContain('treat plugin install/enable, gateway');
+    expect(readme).toMatch(/repo docs and commands should never require raw edits to\s+OpenClaw runtime config/);
   });
 
   test('active top-level docs use resolvable relative links', () => {

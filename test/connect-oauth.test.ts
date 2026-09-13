@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
-  connectApiKeySource,
+  connectPublicApiKeySource,
   connectOAuthSourceDetached,
   connectOAuthSource,
   listDetachedOAuthStates,
@@ -53,7 +53,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       },
     } satisfies SecretStore;
 
-    const error = await connectApiKeySource({
+    const error = await connectPublicApiKeySource({
       source: 'venice',
       apiKey: 'venice-key-fixture',
       secretStore: store,
@@ -529,13 +529,13 @@ describe('olympus connect OAuth authorization-code flow', () => {
       keyFilePath: join(dir, 'secrets.key'),
     });
     // A registry that already violates the rule for an unrelated provider —
-    // two GCP account roles, which connect-gcp upserts without the assert.
+    // two Readwise account roles, seeded directly as a pre-existing registry.
     for (const accountRole of ['personal', 'work']) {
       upsertConnectedHandle({
-        handle: `gcp.${accountRole}`,
-        provider: 'gcp',
+        handle: `readwise.${accountRole}`,
+        provider: 'readwise',
         accountRole,
-        allowedCapabilities: ['gcp.projects.read'],
+        allowedCapabilities: ['readwise.sync'],
         scopes: [],
         connectedAt: '2026-08-20T12:00:00.000Z',
       }, registryPath);
@@ -562,7 +562,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
 
       expect(result.handles).toEqual(['dropbox.personal']);
       expect(readConnectedHandleRegistry(registryPath).handles.map((handle) => handle.handle).sort())
-        .toEqual(['dropbox.personal', 'gcp.personal', 'gcp.work']);
+        .toEqual(['dropbox.personal', 'readwise.personal', 'readwise.work']);
     } finally {
       server.close();
       rmSync(dir, { recursive: true, force: true });
@@ -890,7 +890,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       return new Response('', { status: 401 });
     };
     try {
-      await expect(connectApiKeySource({
+      await expect(connectPublicApiKeySource({
         source: 'readwise',
         apiKey: 'bad-readwise-token-fixture',
         registryPath,
@@ -907,7 +907,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       }]);
 
       const validFetch: OAuthFetch = async () => new Response('', { status: 204 });
-      const result = await connectApiKeySource({
+      const result = await connectPublicApiKeySource({
         source: 'readwise',
         apiKey: 'good-readwise-token-fixture',
         registryPath,
@@ -930,92 +930,6 @@ describe('olympus connect OAuth authorization-code flow', () => {
     }
   });
 
-  test('Notion integration token connect validates before storing credentials', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-connect-notion-validate-'));
-    const registryPath = join(dir, 'handles.json');
-    const store = new EncryptedFileSecretStore({
-      encryptedFilePath: join(dir, 'secrets.enc'),
-      keyFilePath: join(dir, 'secrets.key'),
-    });
-    const calls: Array<{
-      url: string;
-      authorization: string | null;
-      notionVersion: string | null;
-    }> = [];
-    const invalidFetch: OAuthFetch = async (input, init) => {
-      const headers = new Headers(init?.headers);
-      calls.push({
-        url: String(input),
-        authorization: headers.get('authorization'),
-        notionVersion: headers.get('notion-version'),
-      });
-      return new Response(JSON.stringify({ code: 'unauthorized' }), { status: 401 });
-    };
-    try {
-      await expect(connectApiKeySource({
-        source: 'notion',
-        apiKey: 'bad-notion-token-fixture',
-        registryPath,
-        secretStore: store,
-        fetch: invalidFetch,
-        notionBaseUrl: 'https://api.notion.test/v1',
-        notionVersion: '2026-01-01',
-      })).rejects.toThrow('Notion rejected the integration token');
-
-      expect(await store.get('notion.personal.integration_token')).toBeUndefined();
-      expect(existsSync(registryPath)).toBe(false);
-      expect(calls).toEqual([{
-        url: 'https://api.notion.test/v1/users/me',
-        authorization: 'Bearer bad-notion-token-fixture',
-        notionVersion: '2026-01-01',
-      }]);
-
-      const validFetch: OAuthFetch = async (input, init) => {
-        const headers = new Headers(init?.headers);
-        calls.push({
-          url: String(input),
-          authorization: headers.get('authorization'),
-          notionVersion: headers.get('notion-version'),
-        });
-        return new Response(JSON.stringify({ object: 'user', id: 'notion-user-fixture' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      };
-      const result = await connectApiKeySource({
-        source: 'notion',
-        apiKey: 'good-notion-token-fixture',
-        accountRole: 'solon',
-        registryPath,
-        secretStore: store,
-        fetch: validFetch,
-        notionBaseUrl: 'https://api.notion.test/v1',
-      });
-      const registry = readConnectedHandleRegistry(registryPath);
-
-      expect(result.handles).toEqual(['notion.solon']);
-      expect(result.secretRefs).toEqual(['store:notion.solon.integration_token']);
-      expect(result.next).toContain('OLYMPUS_DOMAIN_EXPERT_NOTION_TOKEN');
-      expect(result.next).toContain('Share each target page or database');
-      expect(await store.get('notion.solon.integration_token')).toBe('good-notion-token-fixture');
-      expect(registry.handles[0]).toMatchObject({
-        handle: 'notion.solon',
-        provider: 'notion',
-        accountRole: 'solon',
-        trustDomain: 'internal',
-        allowedCapabilities: ['domain_expert.notion_import'],
-        tokenSecretRefs: ['store:notion.solon.integration_token'],
-      });
-      expect(calls[1]).toEqual({
-        url: 'https://api.notion.test/v1/users/me',
-        authorization: 'Bearer good-notion-token-fixture',
-        notionVersion: '2022-06-28',
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   test('Venice API key connect probes models before storing credentials', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-connect-venice-validate-'));
     const store = new EncryptedFileSecretStore({
@@ -1031,7 +945,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       });
     };
     try {
-      const result = await connectApiKeySource({
+      const result = await connectPublicApiKeySource({
         source: 'venice',
         apiKey: 'venice-api-key-fixture',
         secretStore: store,
@@ -1452,7 +1366,7 @@ async function runChildScript(script: string, options: {
 
 function productionDefaultRegistryBrokerScript(): string {
   return `
-import { connectApiKeySource, connectGuidedSession, connectOAuthSource } from './src/core/connect.ts';
+import { connectPublicApiKeySource, connectGuidedSession, connectOAuthSource } from './src/core/connect.ts';
 import { createEnvCredentialBroker } from './src/workers/credential-broker/index.ts';
 
 const baseUrl = process.env.OLYMPUS_TEST_CONNECT_BASE_URL;
@@ -1477,7 +1391,7 @@ for (const source of ['dropbox', 'x']) {
     onAuthorizationUrl: completeBrowserRedirect,
   });
 }
-await connectApiKeySource({
+await connectPublicApiKeySource({
   source: 'readwise',
   apiKey: 'readwise-api-token-fixture',
 });

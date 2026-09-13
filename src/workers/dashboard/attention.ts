@@ -13,14 +13,15 @@
  * That silence is the feature; the module is written so that arming is the
  * exception it has to earn.
  *
- * Exactly three classes can surface, in this precedence:
+ * Four classes can surface, in this precedence:
  *
  *   1. CREDENTIAL — the connection needs an act before anything else can
  *      matter. Wired to the same connect controls the rest of the dashboard
  *      already uses, so a reader never gets a button that only fails.
- *   2. TERMINAL_EXTRACTION — files no lane will ever retry. One real action:
+ *   2. SCOPE — a connected file source needs explicit folder approval.
+ *   3. TERMINAL_EXTRACTION — files no lane will ever retry. One real action:
  *      exclude the folders they sit in, or leave them.
- *   3. LANE_STUCK — machine-detected. A lane with open work that has not moved
+ *   4. LANE_STUCK — machine-detected. A lane with open work that has not moved
  *      beyond its own grace window, named in plain words with the last
  *      condition that governed it.
  *
@@ -41,7 +42,7 @@ import {
 } from './phases.ts';
 import { dashboardCount, dashboardDuration } from './vocabulary.ts';
 
-export type DashboardAttentionKind = 'credential' | 'terminal_extraction' | 'lane_stuck';
+export type DashboardAttentionKind = 'credential' | 'scope' | 'terminal_extraction' | 'lane_stuck';
 
 export interface DashboardAttentionBanner {
   kind: DashboardAttentionKind;
@@ -155,8 +156,23 @@ export function dashboardAttentionBanner(
   options: DashboardAttentionOptions,
 ): DashboardAttentionBanner | undefined {
   return credentialBanner(source, options)
+    ?? scopeApprovalBanner(source, options)
     ?? terminalExtractionBanner(source, options)
     ?? laneStuckBanner(source, options.now ?? new Date(), options);
+}
+
+function scopeApprovalBanner(source: DashboardSourceCard, options: DashboardAttentionOptions): DashboardAttentionBanner | undefined {
+  if (!source.scope_selection?.connected || source.scope_selection.status !== 'scope_pending') return undefined;
+  const path = options.folderPickerPath;
+  const picker = path && !path.includes('source_id=')
+    ? `${path}${path.includes('?') ? '&' : '?'}source_id=${encodeURIComponent(source.source_id)}` : path;
+  return {
+    kind: 'scope',
+    sentence: `${source.label} is connected. Choose the folders Olympus may use before any indexing starts.`,
+    action: options.readOnly || !picker
+      ? { kind: 'link', label: 'Choose folders →', href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
+      : { kind: 'control_link', label: 'Choose folders →', href: picker, hint: 'nothing starts before you confirm' },
+  };
 }
 
 /**
@@ -187,6 +203,7 @@ function credentialBanner(
     };
   }
   const action = source.connection.action;
+  if (source.scope_selection?.status === 'scope_pending' && source.scope_selection.connected && source.connection.state !== 'reauth_required') return undefined;
   const healthy = HEALTHY_CONNECTION_STATES.has(source.connection.state);
   if (!healthy) {
     if (action.kind === 'needs_setup') {

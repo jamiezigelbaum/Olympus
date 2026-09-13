@@ -1,12 +1,15 @@
+import { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS } from './static-styles.ts';
+export { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS };
 /**
  * The page's shared HTML pieces: status glyphs, cards, rows, the connector
- * sheet, and the two inline scripts.
+ * sheet, and the standalone bootstrap for the shared browser controller.
  *
  * Every dynamic value that reaches a page goes through escapeHtml here, and
  * every serialized view model through escapeScriptJson. Both are implemented
  * rather than stubbed so the three pages cannot each grow their own copy.
  */
 import { createHash } from 'node:crypto';
+import { mountDashboardController } from '../../control-ui/browser-controller.ts';
 import type { DashboardCallbackRegistration, DashboardConnectField, DashboardConnectFieldName, DashboardSourceAction, DashboardSourceCard } from '../source-dashboard.ts';
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
@@ -135,6 +138,10 @@ export interface DashboardPageShellInput {
    * its scripts and the control handler would keep a stale CSRF token.
    */
   poll?: { intervalMs?: number; unlocked?: boolean; controlSessionCsrfToken?: string };
+  /** Inert body-only output for the native Control UI host. */
+  format?: 'document' | 'fragment';
+  /** Use the shared browser controller for the standalone worker page. */
+  controller?: { csrfToken?: string };
 }
 
 /**
@@ -165,21 +172,32 @@ export function pageShell(input: DashboardPageShellInput): string {
     : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
   // The poll's signature is taken from the very body being shipped, so the
   // page and its signature can never disagree about the clock or the facts.
-  const poll = input.poll === undefined
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined
+    ? ''
+    : createHash('sha256').update('olympus-dashboard-session-marker\0').update(input.poll.controlSessionCsrfToken).digest('hex').slice(0, 24);
+  const useController = input.controller !== undefined || input.poll !== undefined;
+  const controller = !useController
     ? []
-    : [pollScript({
+    : [standaloneDashboardControllerScript({
+      csrfToken: input.controller?.csrfToken ?? '',
       signature: dashboardPageSignature(input.body),
-      unlocked: input.poll.unlocked === true,
-      // A non-secret fingerprint of the session this render's control
-      // handler holds: a re-mint elsewhere (new nonce, new CSRF) changes it
-      // and forces a reload, where a bare unlocked flag would not.
-      session: input.poll.controlSessionCsrfToken === undefined
-        ? ''
-        : createHash('sha256').update('olympus-dashboard-session-marker\0').update(input.poll.controlSessionCsrfToken).digest('hex').slice(0, 24),
-      ...(input.poll.intervalMs === undefined ? {} : { intervalMs: input.poll.intervalMs }),
+      session: sessionMarker,
+      intervalMs: input.poll?.intervalMs ?? 15_000,
     })];
-  const scripts = [...(input.scripts ?? []), ...poll].join('\n    ');
+  const scripts = !useController
+    ? [...(input.scripts ?? [])].join('\n    ')
+    : controller.join('\n    ');
   const styles = [DASHBOARD_THEME_CSS, ...(input.styles ?? [])].join('\n');
+  const content = `<div class="frame">
+      <div class="page">
+      <div class="top">
+        <span class="brand">${brand}</span>${input.meta ? `
+        <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
+      </div>
+      ${input.body}
+      </div>
+    </div>`;
+  if (input.format === 'fragment') return content;
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -189,15 +207,7 @@ export function pageShell(input: DashboardPageShellInput): string {
     <style>${styles}</style>
   </head>
   <body>
-    <div class="frame">
-      <div class="page">
-      <div class="top">
-        <span class="brand">${brand}</span>${input.meta ? `
-        <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
-      </div>
-      ${input.body}
-      </div>
-    </div>
+    <div data-olympus-dashboard-root data-signature="${escapeHtml(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? 'true' : 'false'}" data-session="${escapeHtml(sessionMarker)}">${content}</div>
     ${scripts}
   </body>
 </html>`;
@@ -501,7 +511,7 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
   const go = href === undefined
     ? ''
     : `<a class="go" href="${escapeHtml(href)}" aria-label="${escapeHtml(`${input.label} details`)}">→</a>`;
-  return `<div class="${klass}">`
+  return `<div class="${klass}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
     + `<div class="grow">${name}${reason}${bar}</div>`
     + `${control}${go}`
     + `</div>`;
@@ -509,6 +519,7 @@ export function attentionRow(input: DashboardAttentionRowInput): string {
 
 export interface DashboardSetupRowInput {
   label: string;
+  href?: string;
   /** One plain sentence about what connecting this source does. */
   blurb: string;
   action: DashboardActionInput;
@@ -520,6 +531,7 @@ export interface DashboardSetupRowInput {
 }
 
 export function setupRow(input: DashboardSetupRowInput): string {
+  const href = safeHref(input.href);
   // No blurb means no empty span and no empty grid column: the row closes up
   // (.setrow.noblurb) rather than holding a visible gap for absent copy.
   const blurb = input.blurb.trim();
@@ -532,9 +544,9 @@ export function setupRow(input: DashboardSetupRowInput): string {
   const blurbSpan = blurbBody === '' ? '' : `<span class="blurb">${blurbBody}</span>`;
   // The column closes up only when NOTHING is in it: a row whose whole blurb is
   // the key-location link still needs its column.
-  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}">`
+  return `<div class="${blurbBody === '' ? 'setrow noblurb' : 'setrow'}"${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ''}>`
     + `${dotGlyph(DASHBOARD_STATUS_COLORS.Off)}`
-    + `<span class="name">${escapeHtml(input.label)}</span>`
+    + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`)
     + `${blurbSpan}`
     + `${actionButton(input.action)}`
     + `</div>`;
@@ -560,32 +572,7 @@ export function progressBar(input: DashboardProgressBarInput): string {
  * theme: it is layout for one page and one home section, and the theme file is
  * the token ground truth the whole dashboard shares.
  */
-export const DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; color: inherit; text-decoration: none; }
-.bgrow .bgl { display: grid; grid-template-columns: 110px 1fr 64px; gap: 12px; align-items: center; padding: 3px 0; }
-.bgrow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.bgrow .fx { color: var(--t3); font-size: 12px; }
-.bgrow .go { position: absolute; right: 14px; top: 10px; color: var(--t4); font-size: 13px; }
-.bgrow:hover .go, .bgrow:focus-visible .go { color: var(--link); }
-.bgrow:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-.minibar { display: block; width: 64px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; justify-self: end; }
-.minibar i { display: block; height: 100%; background: var(--t3); }
-.lanerow { display: grid; grid-template-columns: 110px 64px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.lanerow .nm { font-weight: 500; font-size: 13px; color: var(--t2); }
-.lanerow .st { color: var(--t3); font-size: 12px; }
-.lanerow .minibar { justify-self: start; }
-.lanestrip { display: flex; gap: 2px; }
-.lanestrip i { display: block; width: 7px; height: 20px; border-radius: 2px; }
-.disp { font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .04em; }
-.disp.heal { color: var(--good); }
-.disp.attn { color: var(--warn); }
-@media (max-width: 700px) {
-  .lanerow { grid-template-columns: 110px 1fr; }
-  .lanerow .minibar, .lanerow .lanestrip { display: none; }
-  /* The go arrow is absolutely positioned at the right edge, so the facts
-     column keeps clear of it rather than running underneath. */
-  .bgrow .bgl { grid-template-columns: 1fr auto; padding-right: 18px; }
-}
-`;
+
 
 /**
  * Layout for the three phase bars, the attention banner and the Advanced fold.
@@ -595,33 +582,7 @@ export const DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; 
  * has already said it does not have. The animation is disabled under
  * prefers-reduced-motion, where it becomes a flat neutral band.
  */
-export const DASHBOARD_PROGRESS_CSS = `.phase { margin: 0 0 14px; max-width: 520px; }
-.phase .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.phase .pn { font-size: 12.5px; font-weight: 600; color: var(--t2); }
-.phase .pv { font-size: 12px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
-.phase .bar { max-width: none; margin-top: 6px; height: 5px; border-radius: 3px; }
-.phase .pv .st { display: inline-block; margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); font-weight: 600; color: var(--t2); }
-.phase.done .pv .st { color: var(--good); }
-.phase.working .pv .st { color: var(--run); }
-.phase.stalled .pv .st { color: var(--warn); }
-.phase.waiting .pv .st { color: var(--t4); }
-.phase.waiting .bar { background: var(--line2); }
-.phase.waiting .bar i { display: none; }
-.bar.indet.working { position: relative; }
-.bar.indet.working i { width: 34%; background: var(--run); animation: dashsweep 1.6s ease-in-out infinite; }
-@keyframes dashsweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(294%); } }
-.settled { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; color: var(--t2); font-size: 13px; max-width: 520px; }
-.banner { margin-bottom: 6px; }
-.advanced { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 4px; }
-.advanced > summary { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--t4); cursor: pointer; padding: 12px 0; list-style: none; }
-.advanced > summary::-webkit-details-marker { display: none; }
-.advanced > summary::before { content: '\\25B8 '; display: inline-block; transition: transform .12s ease; }
-.advanced[open] > summary::before { transform: rotate(90deg); }
-.advanced > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
-@media (prefers-reduced-motion: reduce) {
-  .bar.indet.working i { animation: none; width: 100%; background: var(--line2); }
-}
-`;
+
 
 export interface DashboardPhaseBarInput {
   /** The phase's own name, e.g. "Extraction". */
@@ -826,29 +787,7 @@ export function backgroundRow(input: DashboardBackgroundRowInput): string {
  * the same tabular treatment, and a page carrying a few unused rules costs less
  * than the same rule written twice.
  */
-export const DASHBOARD_POLICY_CSS = `.catrow { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
-.catrow .name { font-weight: 600; color: var(--t2); }
-.catrow .what { color: var(--t4); font-size: 12px; }
-.catrow .tier { color: var(--t3); font-size: 12px; font-variant-numeric: tabular-nums; }
-.scoperow { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 14px; margin-bottom: 6px; }
-.scoperow .rid { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--t2); }
-.scoperow .what { color: var(--t3); font-size: 12.5px; }
-.sect.gap { margin-top: 44px; }
-.quiet { color: var(--t4); font-size: 12px; margin: -2px 0 10px; max-width: 66ch; }
-.quiet.after { margin: 8px 0 0; }
-.tiersnote { color: var(--t3); font-size: 12.5px; margin: 0 0 12px; max-width: 66ch; }
-.tiernote { font-size: 12.5px; margin-top: 10px; }
-.pm { color: var(--t4); }
-.pm.yes { color: var(--good); }
-.tname { color: var(--t1); font-weight: 600; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 11px; color: var(--t3); font-size: 12px; }
-.chip b { color: var(--t2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-@media (max-width: 700px) {
-  .catrow { grid-template-columns: 1fr; gap: 4px; }
-}
-`;
+
 
 export interface DashboardCategoryRowInput {
   /** The owner's category name, e.g. Financial. */
@@ -1054,7 +993,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // The one-click form carries the source and NOTHING else: no client id
     // field to fill, no redirect URI to register, no console to visit. The
     // start route reads the absence of a client id as "use the publisher app".
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? '' : ' data-oauth-autostart'} style="margin-top:12px">`
       + sourceField
       + `<button class="btn primary" type="submit">${submitLabel}</button>`
       + `<span class="actmsg" data-action-message role="status"></span>`
@@ -1225,481 +1164,110 @@ function redirectUriInput(
   };
 }
 
+interface StandaloneDashboardControllerScriptInput {
+  csrfToken: string;
+  signature: string;
+  session: string;
+  intervalMs: number;
+}
+
 /**
- * Control wiring for every connect, sync, embedding, or Disconnect form on
- * the page. Delegated from document, like the
- * clipboard script, because the poll replaces the whole body.
- *
- * The endpoint is chosen from a closed set of attributes rather than read off
- * the form: a page that could name its own POST target would turn any future
- * markup bug into a request at an arbitrary path.
- *
- * The worker bearer token is used once to mint a short-lived HttpOnly control
- * session, then discarded. The session is origin-bound and every control POST
- * carries its CSRF token. Neither the worker bearer nor the session id is ever
- * placed in localStorage/sessionStorage or a URL. The read-only dash_ token is
- * refused by name.
+ * Trusted standalone bootstrap for the same controller the native module
+ * imports. The fetched HTML contributes only the known root's inert contents;
+ * its scripts are never copied or evaluated.
  */
-export function controlScript(input: { csrfToken?: string | undefined } = {}): string {
-  const initialCsrfToken = escapeScriptJson(JSON.stringify(input.csrfToken ?? ''));
+export function standaloneDashboardControllerScript(
+  input: StandaloneDashboardControllerScriptInput,
+): string {
+  const mountSource = mountDashboardController.toString().replaceAll('</script', '<\\/script');
+  const config = escapeScriptJson(JSON.stringify(input));
   return `<script>
-      (function () {
-        var csrfToken = ${initialCsrfToken};
-        function say(form, text) {
-          var message = form.querySelector('[data-action-message]');
-          if (message) message.textContent = text;
-        }
-        async function mintSession(form) {
-          var field = form.querySelector('[data-dashboard-control-token]');
-          var pasted = field instanceof HTMLInputElement ? field.value.trim() : '';
-          if (!pasted) { say(form, 'Paste the worker bearer token.'); if (field) field.focus(); return false; }
-          if (pasted.indexOf('dash_') === 0) {
-            say(form, 'That is the read-only view token; use the worker bearer token from setup.');
-            field.value = '';
-            field.focus();
-            return false;
-          }
-          try {
+    (function () {
+      var config = ${config};
+      var csrfToken = config.csrfToken;
+      var sessionMarker = config.session;
+      var root = document.querySelector('[data-olympus-dashboard-root]');
+      if (!root) return;
+      var abort = new AbortController();
+      var mount = ${mountSource};
+      function route(params) {
+        var action = params.action;
+        if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
+        if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
+        if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
+        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
+        if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
+        if (action === 'disconnect') return ['/dashboard/disconnect', withoutAction(params)];
+        if (action === 'unpair') return ['/dashboard/unpair', withoutAction(params)];
+        return null;
+      }
+      function withoutAction(params) {
+        var body = {};
+        Object.keys(params).forEach(function (key) { if (key !== 'action') body[key] = params[key]; });
+        return body;
+      }
+      async function json(response) {
+        try { return await response.json(); } catch (error) { return {}; }
+      }
+      var controller = mount({
+        root: root,
+        transport: {
+          async control(params) {
+            var target = route(params);
+            if (!target) return { status: 400, body: { error: { message: 'Unsupported dashboard action.' } } };
+            var response = await fetch(target[0], {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(target[1]),
+            });
+            return { status: response.status, body: await json(response) };
+          },
+          async unlock(workerToken) {
             var response = await fetch('/dashboard/control/session', {
               method: 'POST', cache: 'no-store', credentials: 'same-origin',
-              headers: { 'Authorization': 'Bearer ' + pasted },
+              headers: { 'Authorization': 'Bearer ' + workerToken },
             });
-            pasted = '';
-            field.value = '';
-            var payload = {};
-            try { payload = await response.json(); } catch (error) {}
-            if (!response.ok || !payload.csrf_token) { say(form, 'That token was not accepted.'); return false; }
-            csrfToken = payload.csrf_token;
-            window.location.reload();
-            return true;
-          } catch (error) {
-            pasted = '';
-            field.value = '';
-            say(form, 'Could not reach the worker.');
-            return false;
-          }
-        }
-        async function ensureSession(form) {
-          if (csrfToken) return true;
-          var field = document.querySelector('[data-dashboard-control-token]');
-          say(form, 'Unlock dashboard controls above first.');
-          if (field instanceof HTMLInputElement) { field.focus(); field.scrollIntoView({ block: 'center' }); }
-          return false;
-        }
-        async function lockSession(form) {
-          say(form, 'Locking\u2026');
-          try {
+            var body = await json(response);
+            if (response.ok && typeof body.csrf_token === 'string') csrfToken = body.csrf_token;
+            return { ok: response.ok, csrf_token: body.csrf_token };
+          },
+          async lock() {
             var response = await fetch('/dashboard/control/session/lock', {
               method: 'POST', cache: 'no-store', credentials: 'same-origin',
               headers: { 'X-Olympus-CSRF': csrfToken },
             });
-            if (!response.ok) { say(form, 'Could not lock.'); return; }
-            csrfToken = '';
-            window.location.reload();
-          } catch (error) { say(form, 'Could not reach the worker.'); }
-        }
-        function clearFallback(form) {
-          var slot = form.querySelector('[data-authorization-fallback]');
-          if (slot) slot.textContent = '';
-        }
-        // The tab the authorization will land in, opened SYNCHRONOUSLY inside
-        // the submit event so the browser counts it as user-initiated. It
-        // cannot be opened later: /dashboard/connect/oauth/start has to be
-        // awaited first, and a window.open after that await is a popup.
-        //
-        // 'noopener' is deliberately NOT passed here. Per the HTML spec a
-        // window.open with noopener returns null even when it succeeds, so the
-        // old call could never tell a blocked tab from an opened one and every
-        // connect claimed the browser had blocked it. The opener reference is
-        // severed by hand instead, which is what noopener was there for.
-        function openAuthorizationTab() {
-          var tab = null;
-          try { tab = window.open('', '_blank'); } catch (error) { tab = null; }
-          if (tab) { try { tab.opener = null; } catch (error) {} }
-          return tab;
-        }
-        function closeAuthorizationTab(tab) {
-          if (!tab) return;
-          try { tab.close(); } catch (error) {}
-        }
-        // Where the reader goes when no tab could be pre-opened. It says only
-        // what is true — no tab opened — without asserting a cause the page
-        // cannot know. Built as a node with a checked https href, never as
-        // markup: the URL is the worker's own origin-checked authorization
-        // URL, and it is still never interpolated into HTML.
-        function showFallback(form, url) {
-          var slot = form.querySelector('[data-authorization-fallback]');
-          if (!slot || String(url).indexOf('https://') !== 0) return;
-          slot.textContent = '';
-          var link = document.createElement('a');
-          link.href = url;
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-          link.className = 'hint';
-          link.textContent = "If a new tab didn't open, open it here";
-          slot.appendChild(link);
-        }
-        async function submitControl(form, authorizationTab) {
-          if (!await ensureSession(form)) { closeAuthorizationTab(authorizationTab); return; }
-          var body = Object.fromEntries(new FormData(form).entries());
-          var connectKind = form.getAttribute('data-connect-kind');
-          var disconnectKind = form.getAttribute('data-disconnect-kind');
-          var unpairKind = form.getAttribute('data-unpair-kind');
-          if (disconnectKind || unpairKind) {
-            var fallbackConfirmation = unpairKind ? 'Unpair this source?' : 'Disconnect this source?';
-            var confirmation = form.getAttribute('data-confirmation') || fallbackConfirmation;
-            if (!window.confirm(confirmation)) return;
-            body.acknowledge = true;
-          }
-          var endpoint = unpairKind
-            ? '/dashboard/unpair'
-            : disconnectKind
-            ? '/dashboard/disconnect'
-            : connectKind
-            ? (connectKind === 'oauth'
-              ? '/dashboard/connect/oauth/start'
-              : connectKind === 'oauth_cancel'
-                ? '/dashboard/connect/oauth/cancel'
-                : '/dashboard/connect/api-key')
-            : form.hasAttribute('data-embedding-kind')
-              ? '/dashboard/embedding-priority'
-              : '/dashboard/sync-now';
-          if (connectKind === 'oauth') { body.return_to = window.location.href; clearFallback(form); }
-          say(form, 'Starting\\u2026');
-          try {
-            var response = await fetch(endpoint, {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            });
-            var payload = {};
-            try { payload = await response.json(); } catch (error) {}
-            if (response.status === 401) {
-              csrfToken = '';
-              closeAuthorizationTab(authorizationTab);
-              say(form, 'The control session expired \\u2014 submit again to unlock controls.');
-              return;
-            }
-            if (!response.ok || payload.ok !== true) {
-              closeAuthorizationTab(authorizationTab);
-              say(form, (payload && payload.error && payload.error.message) || 'Request failed.');
-              return;
-            }
-            if (payload.authorization_url) {
-              // A NEW TAB, never this one. Navigating the dashboard away lost
-              // the page the owner has to come back to, and a provider that
-              // refuses the request leaves them on the provider's error page
-              // with no way back (owner, 2026-09-03). The dashboard keeps
-              // polling here and updates when the callback lands.
-              if (authorizationTab) {
-                authorizationTab.location = payload.authorization_url;
-                say(form, 'Authorization opened in a new tab. Approve it there, then come back to this page.');
-              } else {
-                say(form, 'Open the authorization page to continue.');
-                showFallback(form, payload.authorization_url);
-              }
-              return;
-            }
-            closeAuthorizationTab(authorizationTab);
-            form.reset();
-            // The route's own words when it has any. A partial Unpair reports
-            // what is still on disk, and showing the generic "Done" over that
-            // was a completion claim the response did not make.
-            say(form, payload.status_message || 'Done. Waiting for the next refresh.');
-          } catch (error) {
-            closeAuthorizationTab(authorizationTab);
-            say(form, 'Could not reach the worker.');
-          }
-        }
-        document.addEventListener('submit', function (event) {
-          var form = event.target;
-          if (!(form instanceof HTMLFormElement)) return;
-          if (form.hasAttribute('data-control-session-kind')) {
-            event.preventDefault();
-            if (form.getAttribute('data-control-session-kind') === 'lock') void lockSession(form);
-            else void mintSession(form);
-            return;
-          }
-          if (!form.hasAttribute('data-connect-kind')
-            && !form.hasAttribute('data-sync-kind')
-            && !form.hasAttribute('data-embedding-kind')
-            && !form.hasAttribute('data-disconnect-kind')
-            && !form.hasAttribute('data-unpair-kind')) return;
-          event.preventDefault();
-          // Still inside the user gesture: the only moment a new tab may be
-          // opened without the browser treating it as a popup.
-          var authorizationTab = form.getAttribute('data-connect-kind') === 'oauth'
-            ? openAuthorizationTab()
-            : null;
-          void submitControl(form, authorizationTab);
-        });
-        document.addEventListener('click', function (event) {
-          var target = event.target instanceof Element ? event.target : null;
-          var control = target && target.closest('[data-control-link]');
-          if (!control) return;
-          event.preventDefault();
-          var host = control.closest('.rowlink') || control;
-          void ensureSession(host).then(function (ready) {
-            if (!ready) return;
-            window.location.assign(control.getAttribute('data-control-link'));
-          });
-        });
-      })();
-    </script>`;
-}
-
-/**
- * Clipboard copy wiring for every [data-copy-target] on the page.
- *
- * Delegated from document, never bound per element: the poll below replaces
- * the whole body, and a listener on a replaced node dies with it.
- */
-export function clipboardScript(): string {
-  return `<script>
-      (function () {
-        function copyText(node) {
-          if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) return node.value;
-          return node.innerText || node.textContent || '';
-        }
-        function announce(button, message) {
-          var status = button.parentElement && button.parentElement.querySelector('[data-copy-status]');
-          if (status) status.textContent = message;
-        }
-        document.addEventListener('click', function (event) {
-          var target = event.target instanceof Element ? event.target : null;
-          if (!target) return;
-          var toggle = target.closest('[data-sheet-toggle]');
-          if (toggle) {
-            var sheet = document.querySelector(toggle.getAttribute('data-sheet-toggle'));
-            if (!sheet) return;
-            var open = sheet.classList.toggle('on');
-            sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
-            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-            return;
-          }
-          var copy = target.closest('[data-copy-target]');
-          if (!copy) return;
-          var source = document.querySelector(copy.getAttribute('data-copy-target'));
-          if (!source) return;
-          var text = copyText(source);
-          var label = copy.textContent;
-          if (!navigator.clipboard) {
-            announce(copy, 'Clipboard unavailable — select the text and copy it with your keyboard.');
-            return;
-          }
-          navigator.clipboard.writeText(text).then(function () {
-            copy.textContent = 'Copied';
-            announce(copy, 'Copied to the clipboard.');
-            setTimeout(function () { copy.textContent = label; }, 1600);
-          }).catch(function () {
-            announce(copy, 'Clipboard unavailable — select the text and copy it with your keyboard.');
-          });
-        });
-      })();
-    </script>`;
-}
-
-export interface DashboardPollScriptInput {
-  /** Poll cadence. Every page today takes the 15000ms default. */
-  intervalMs?: number;
-  /** Signature of the currently rendered view, compared to each poll. */
-  signature: string;
-  /** The custody state this render was made under. */
-  unlocked?: boolean;
-  /** Non-secret fingerprint of the control session this render holds; '' when locked. */
-  session?: string;
-}
-
-/**
- * The /dashboard.json poll loop. Carries the dash_ query token through from
- * window.location, never from a server-side interpolation, and refuses to
- * reload over unsaved input.
- *
- * It refetches this page's own URL — the token already in the address bar
- * rides along — and swaps the body only when the served signature differs, so
- * a quiet dashboard never flickers. The header meta is copied over on every
- * poll regardless, so "checked Ns ago" never freezes on a quiet page, and an
- * open sheet blocks the swap so a prompt is never yanked mid-read. The
- * signature travels in the marker span below, which the fetched document
- * carries too.
- *
- * One poll at a time. A render costs what the server's slowest source costs,
- * and a bare interval starts another the moment the clock says so whether or
- * not the last one came back — so a page that renders slower than its cadence
- * builds a queue of overlapping renders, each of them making the next one
- * slower. Skipping a tick while one is still in flight bounds the page to one
- * outstanding render however slow the server gets.
- */
-export function pollScript(input: DashboardPollScriptInput): string {
-  const interval = Number.isFinite(input.intervalMs) && (input.intervalMs ?? 0) > 0
-    ? Math.round(input.intervalMs as number)
-    : 15000;
-  const signature = escapeScriptJson(JSON.stringify(input.signature));
-  const unlocked = input.unlocked === true ? 'true' : 'false';
-  const session = escapeScriptJson(JSON.stringify(input.session ?? ''));
-  return `<span id="dashboard-poll-signature" data-signature="${escapeHtml(input.signature)}" data-unlocked="${unlocked}" data-session="${escapeHtml(input.session ?? '')}" style="display:none"></span>
-    <script>
-      (function () {
-        var current = ${signature};
-        var unlocked = ${unlocked};
-        var session = ${session};
-        var deferredSince = 0;
-        function signatureOf(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-signature') || '' : '';
-        }
-        function unlockedIn(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-unlocked') === 'true' : false;
-        }
-        function sessionIn(doc) {
-          var marker = doc.getElementById('dashboard-poll-signature');
-          return marker ? marker.getAttribute('data-session') || '' : '';
-        }
-        function focusKey(node) {
-          if (!node || node === document.body || node === document.documentElement) return '';
-          return node.id ? '#' + node.id
-            : node.getAttribute && node.getAttribute('href') ? 'href:' + node.getAttribute('href')
-            : node.tagName + ':' + (node.textContent || '').trim().slice(0, 60);
-        }
-        function findByFocusKey(key) {
-          if (!key) return null;
-          if (key.charAt(0) === '#') return document.getElementById(key.slice(1));
-          var candidates = document.querySelectorAll('a, button, summary, [tabindex]');
-          for (var index = 0; index < candidates.length; index += 1) {
-            if (focusKey(candidates[index]) === key) return candidates[index];
-          }
-          return null;
-        }
-        function typing() {
-          var active = document.activeElement;
-          if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return true;
-          // A focused button or link defers a swap, but not forever: after two
-          // minutes the page refreshes and puts focus back by key, so a reader
-          // who tabbed onto a link and walked away is not left stale.
-          if (active && active !== document.body && active !== document.documentElement) {
-            if (!deferredSince) deferredSince = Date.now();
-            if (Date.now() - deferredSince < 120000) return true;
-          } else {
-            deferredSince = 0;
-          }
-          var fields = document.querySelectorAll('input:not([type=hidden]), textarea');
-          for (var index = 0; index < fields.length; index += 1) {
-            if ((fields[index].value || '').trim() !== '') return true;
-          }
-          return false;
-        }
-        var inFlight = false;
-        async function refresh() {
-          if (document.hidden) return;
-          if (typing()) return;
-          if (document.querySelector('.sheet.on')) return;
-          if (inFlight) return;
-          inFlight = true;
-          try {
-            var response = await fetch(window.location.href, { cache: 'no-store' });
-            if (!response.ok) return;
-            var next = new DOMParser().parseFromString(await response.text(), 'text/html');
-            var meta = document.querySelector('.top .meta');
-            var nextMeta = next.querySelector('.top .meta');
-            if (meta && nextMeta) meta.textContent = nextMeta.textContent;
-            // Custody changed under this tab (unlocked elsewhere, expired,
-            // rotated): swapped-in markup does not run its scripts, so the
-            // control handler would keep a stale CSRF token. Reload instead.
-            if (unlockedIn(next) !== unlocked || sessionIn(next) !== session) { window.location.reload(); return; }
-            var signature = signatureOf(next);
-            if (signature !== '' && signature === current) return;
-            current = signature;
-            // Keep the reader's open disclosures open across the swap, keyed
-            // by their summary text so a disclosure that came or went does
-            // not shift the others.
-            var open = {};
-            function disclosureKey(node) {
-              var summary = node.querySelector('summary');
-              return node.getAttribute('data-poll-key') || (summary ? summary.textContent.trim() : '');
-            }
-            Array.prototype.forEach.call(document.querySelectorAll('details'), function (node) {
-              if (node.open) open[disclosureKey(node)] = true;
-            });
-            var focused = focusKey(document.activeElement);
-            document.body.innerHTML = next.body.innerHTML;
-            Array.prototype.forEach.call(document.querySelectorAll('details'), function (node) {
-              if (open[disclosureKey(node)]) node.open = true;
-            });
-            var restore = findByFocusKey(focused);
-            if (restore && typeof restore.focus === 'function') restore.focus();
-            deferredSince = 0;
-          } catch (error) {
-          } finally {
-            inFlight = false;
-          }
-        }
-        setInterval(refresh, ${interval});
-      })();
-    </script>`;
-}
-
-/** The change signature a poll compares against; same shape for both sides. */
-export interface DashboardSignatureOptions {
-  /** True when the render was unlocked: custody is part of what the page shows. */
-  controlSession?: boolean;
-  embeddingRuntime?: EmbeddingRuntimeFacts;
-  now?: Date;
-}
-
-/**
- * Everything the rendered page can differ on, so the poll swaps the body when
- * — and only when — something visible changed.
- *
- * Beyond the counts: the custody state (an expired or rotated session must
- * not leave a page reading "unlocked" with dead controls), the embedding
- * lane's own run state, each row's phase state word, and — while a row is
- * Working — the age of its last rise in whole minutes, so "moved 40s ago"
- * cannot sit unchanged for an hour and a Working row flips to Stalled the
- * minute it should.
- */
-export function dashboardSignature(
-  sources: readonly DashboardSourceCard[],
-  options: DashboardSignatureOptions = {},
-): string {
-  const now = options.now ?? new Date();
-  return JSON.stringify([
-    options.controlSession === true,
-    options.embeddingRuntime?.state ?? null,
-    options.embeddingRuntime?.stateLine ?? null,
-    sources.map((source) => {
-      const progress = dashboardSourceProgress(source, {
-        now,
-        ...(options.embeddingRuntime === undefined ? {} : { embeddingRuntime: options.embeddingRuntime }),
+            if (response.ok) csrfToken = '';
+            return response.ok;
+          },
+        },
+        navigate: function (href) { window.location.assign(href); },
+        refresh: async function () {
+          var response = await fetch(window.location.href, { cache: 'no-store' });
+          if (!response.ok) return undefined;
+          var next = new DOMParser().parseFromString(await response.text(), 'text/html');
+          var nextRoot = next.querySelector('[data-olympus-dashboard-root]');
+          if (!nextRoot) return undefined;
+          var nextSession = nextRoot.getAttribute('data-session') || '';
+          if (nextSession !== sessionMarker) { window.location.reload(); return undefined; }
+          return {
+            status: response.status,
+            title: next.title,
+            body: nextRoot.innerHTML,
+            controller: 'dashboard',
+            can_write: nextRoot.getAttribute('data-unlocked') === 'true',
+            signature: nextRoot.getAttribute('data-signature') || '',
+            poll_interval_ms: config.intervalMs,
+          };
+        },
+        returnUrl: window.location.href,
+        canWrite: Boolean(csrfToken),
+        authority: 'worker-session',
+        signal: abort.signal,
+        signature: config.signature,
+        pollIntervalMs: config.intervalMs,
+        csrfToken: csrfToken,
       });
-      return [
-        source.source_id,
-        source.connection.state,
-        source.connection.label,
-        source.answer_readiness.state,
-        source.coverage.indexed_items,
-        source.coverage.content_ready_items,
-        source.coverage.embedded_items,
-        source.coverage.embedded_files ?? null,
-        source.queue_health.waiting,
-        source.queue_health.needs_attention,
-        progress.phases.map((phase) => [
-          phase.state,
-          phase.state === 'working' ? movementAgeMinutes(source, phase.id, now) : null,
-        ]),
-      ];
-    }),
-  ]);
-}
-
-function movementAgeMinutes(source: DashboardSourceCard, id: DashboardPhaseId, now: Date): number | null {
-  const movement = source.movement;
-  const at = id === 'metadata_sync'
-    ? movement?.metadata_sync_at
-    : id === 'extraction'
-      ? movement?.extraction_at
-      : movement?.embedding_at;
-  const movedAt = Date.parse(at ?? '');
-  return Number.isFinite(movedAt) ? Math.max(0, Math.floor((now.getTime() - movedAt) / 60_000)) : null;
+      window.addEventListener('pagehide', function () { controller.dispose(); abort.abort(); }, { once: true });
+    })();
+  </script>`;
 }

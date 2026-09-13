@@ -113,6 +113,8 @@ export interface SourceIndexStorageProfile {
 
 export type SourceIndexStorageProfileInput = {
   trustDomain: SourceTrustDomain;
+  /** Provider identity required when secure_local opts into cloud embedding. */
+  embeddingProvider?: string;
   placement?: SourceIndexStoragePlacement;
   storageEngine?: SourceIndexStorageEngine;
   lexicalBackend?: SourceIndexLexicalBackend;
@@ -223,6 +225,9 @@ export function isSecureTrustTier(trustTier: SourceTrustTier): boolean {
 
 export function buildSourceIndexStorageProfile(input: SourceIndexStorageProfileInput): SourceIndexStorageProfile {
   if (input.trustDomain === 'secure_local') {
+    if (input.embeddingBackend === 'cloud' && input.embeddingProvider !== 'venice') {
+      throw new Error('secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.');
+    }
     const profile: SourceIndexStorageProfile = {
       trustDomain: input.trustDomain,
       placement: input.placement ?? 'local_private',
@@ -302,9 +307,9 @@ function assertSecureLocalStorageProfile(profile: SourceIndexStorageProfile): vo
   if (!['none', 'exact_scan', 'sqlite_vec', 'sqlite_vec1'].includes(profile.vectorBackend)) {
     throw new Error('secure_local vector search must use a local SQLite-family vector lane.');
   }
-  if (profile.embeddingBackend === 'cloud') {
-    throw new Error('secure_local corpora cannot use cloud embeddings.');
-  }
+  // Secure cloud embedding is provider-gated at the shared embedding seam
+  // (currently Venice Private/TEE only); this profile still keeps the corpus
+  // local_private with local lexical/vector storage.
   if (profile.cloudQueryEligible) {
     throw new Error('secure_local corpora cannot be directly cloud-query eligible.');
   }

@@ -85,6 +85,7 @@ import {
   cosineSimilarity,
   decodeEmbedding,
   encodeEmbedding,
+  isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingBackend,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -137,7 +138,7 @@ const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projec
 export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 11;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
 const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
@@ -251,7 +252,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 11,
       name: 'connector_store_locator_identity_index',
       up(db: Database) {
         // Deliberately does NOT backfill existing items. The live Dropbox
@@ -260,6 +261,15 @@ export function connectorStoreMigrations() {
         // outage. New/changed rows are maintained by triggers immediately;
         // existing rows move through the bounded, resumable method below.
         createConnectorStoreLocatorIdentityIndex(db);
+      },
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_trusted_source_scope_observation',
+      up(db: Database) {
+        addColumnIfMissing(db, 'items', 'source_scope_generation', 'TEXT');
+        addColumnIfMissing(db, 'items', 'source_scope_revision', 'TEXT');
+        addColumnIfMissing(db, 'items', 'source_scope_folder_keys_json', 'TEXT');
       },
     },
   ];
@@ -592,6 +602,12 @@ export interface ConnectorStoreSyncOptions {
    * its re-stamp as fresh provider evidence.
    */
   ownerObservation?: ConnectorStoreOwnerObservation;
+  /** Trusted account/scope observation supplied by approved connector wiring. */
+  sourceScopeObservation?: (item: RawItem) => {
+    accountGeneration: string;
+    scopeRevision: string;
+    folderKeys?: readonly string[];
+  };
 }
 
 export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
@@ -1480,6 +1496,10 @@ export interface ConnectorStoreSearchFilters {
    * Exact path and descendants match; string-prefix siblings do not.
    */
   locatorPathScope?: string;
+  /** Any one rooted locator path may match; used by an approved multi-folder scope. */
+  locatorPathScopes?: readonly string[];
+  /** None of these rooted locator paths may match. */
+  locatorPathExcludedScopes?: readonly string[];
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
@@ -1494,6 +1514,17 @@ export interface ConnectorStoreSearchFilters {
    * every retrieval lane without adding a source-specific table or branch.
    */
   searchTextExactLines?: readonly string[];
+  /** Exact trusted connected-account generation, never derived from searchable text. */
+  sourceScopeGeneration?: string;
+  sourceScopeRevision?: string;
+  /** At least one trusted provider folder identity must match. */
+  sourceScopeFolderAnyKeys?: readonly string[];
+  /** No trusted provider folder identity in this set may match. */
+  sourceScopeFolderNoneKeys?: readonly string[];
+  /** These approved paths are searchable by metadata rows, never chunk rows. */
+  metadataOnlyLocatorPathScopes?: readonly string[];
+  /** These approved folder identities are searchable by metadata rows only. */
+  metadataOnlySourceScopeFolderKeys?: readonly string[];
 }
 
 export interface ConnectorStoreSenderAggregationOptions {
@@ -1744,6 +1775,25 @@ export class LocalConnectorStore {
 
   close(): void {
     closeSqliteStore(this.db);
+  }
+
+  /** Current-row scope check used immediately before a queued content read. */
+  itemMatchesSearchFilters(
+    localItemId: string,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean {
+    const predicate = connectorStoreFilterSql(filters);
+    const row = this.db.query(`
+      SELECT 1 AS matched
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        ${accountScope ? 'AND i.account_scope = ?' : ''}
+        ${predicate.sql}
+      LIMIT 1
+    `).get(localItemId, ...(accountScope ? [accountScope] : []), ...predicate.params) as { matched?: number } | null;
+    return row?.matched === 1;
   }
 
   [READ_RESULT_PROJECTION_LOCATOR_URI](
@@ -2483,7 +2533,7 @@ export class LocalConnectorStore {
     const chunksEmbeddingCurrent = exactChunks.filter(
       (chunk) => chunk.embedding_current === 1,
     ).length;
-    const expectedFtsRows = Math.max(1, chunks.length);
+    const expectedFtsRows = chunks.length + 1;
     const ftsRows = (this.db.query(`
       SELECT COUNT(*) AS count
       FROM connector_store_fts_rows
@@ -2591,7 +2641,8 @@ export class LocalConnectorStore {
 
   /**
    * Set-wise corpus integrity audit: active chunks must hash to their stored
-   * content hashes, each active item must own exactly max(1, chunk count) FTS
+   * content hashes, each active item must own one metadata FTS row plus one
+   * row per chunk
    * mappings that resolve to real virtual-table rows, each live chunk must be
    * the target of one of those mappings, and the selected model must carry an
    * embedding whose currency hash matches each chunk input.
@@ -2683,7 +2734,7 @@ export class LocalConnectorStore {
       // six-figure corpus scale. Dangling mappings share the item, so the
       // narrowed probe still detects the crash window — and additionally
       // flags a mapping that points at another item's chunk.
-      if (currentChunkUnmapped || currentFtsRows !== Math.max(1, currentChunkCount)) {
+      if (currentChunkUnmapped || currentFtsRows !== currentChunkCount + 1) {
         counts.itemsWithFtsDeficiency += 1;
         if (samples.ftsDeficientLocalItemIds.length < sampleLimit) {
           samples.ftsDeficientLocalItemIds.push(currentLocalItemId);
@@ -4363,6 +4414,9 @@ export class LocalConnectorStore {
           // fact. Committing them separately leaves a crash window where a
           // rewritten item is visible without the owner that observed it.
           // Existing owners belong to other connectors and remain untouched.
+          const sourceScopeObservation = options?.sourceScopeObservation
+            ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage))
+            : undefined;
           const upsert = this.upsertItemWithOwner(
             itemForStorage,
             sensitivity,
@@ -4373,6 +4427,7 @@ export class LocalConnectorStore {
             deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
             false,
             deferMetadataOnlyContent && itemForStorage.content.kind === 'metadata_only',
+            sourceScopeObservation,
           );
           itemsIndexed += 1;
           let itemChanged = upsert.contentChanged;
@@ -4592,6 +4647,7 @@ export class LocalConnectorStore {
     preserveStoredSearchText = false,
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
+    sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
     // The structural half of "exclusion beats inclusion". Every write into
     // this store reaches this line, and there is no option, scope, or
@@ -4660,16 +4716,22 @@ export class LocalConnectorStore {
           preserveStoredSearchTextOwnedFacets,
         )
       : emittedSearchText;
+    const sourceScopeGeneration = sourceScopeObservation?.accountGeneration;
+    const sourceScopeRevision = sourceScopeObservation?.scopeRevision;
+    const sourceScopeFolderKeysJson = sourceScopeObservation
+      ? JSON.stringify(sourceScopeObservation.folderKeys)
+      : undefined;
 
     const applied = this.db.query(`
       INSERT INTO items (
         provider, family, account_scope, provider_item_id, provider_thread_id, provider_conversation_id,
         provider_file_id, provider_event_id, local_item_id, source_version, title, search_text,
-        reactions_json, sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
+        reactions_json, source_scope_generation, source_scope_revision, source_scope_folder_keys_json,
+        sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
         authored_at, updated_at,
         fetched_at, indexed_at, content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
         provider_thread_id = excluded.provider_thread_id,
         provider_conversation_id = excluded.provider_conversation_id,
@@ -4680,6 +4742,9 @@ export class LocalConnectorStore {
         title = excluded.title,
         search_text = excluded.search_text,
         reactions_json = excluded.reactions_json,
+        source_scope_generation = COALESCE(excluded.source_scope_generation, items.source_scope_generation),
+        source_scope_revision = COALESCE(excluded.source_scope_revision, items.source_scope_revision),
+        source_scope_folder_keys_json = COALESCE(excluded.source_scope_folder_keys_json, items.source_scope_folder_keys_json),
         sender_id = excluded.sender_id,
         sender_label = excluded.sender_label,
         sender_is_owner = excluded.sender_is_owner,
@@ -4708,6 +4773,9 @@ export class LocalConnectorStore {
       title ?? null,
       searchText ?? null,
       reactionsJson,
+      sourceScopeGeneration ?? null,
+      sourceScopeRevision ?? null,
+      sourceScopeFolderKeysJson ?? null,
       sender.senderId ?? null,
       sender.senderLabel ?? null,
       sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner),
@@ -4751,6 +4819,7 @@ export class LocalConnectorStore {
     preserveStoredSearchText = false,
     preserveStoredSearchTextOwnedFacets = false,
     preserveStoredContentHash = false,
+    sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
     return this.db.transaction(() => {
       const upsert = this.upsertItem(
@@ -4760,6 +4829,7 @@ export class LocalConnectorStore {
         preserveStoredSearchText,
         preserveStoredSearchTextOwnedFacets,
         preserveStoredContentHash,
+        sourceScopeObservation,
       );
       // Ownership time is the actual application observation, not sync-run
       // start. A provider call can be slow; stamping the earlier start time
@@ -4779,7 +4849,12 @@ export class LocalConnectorStore {
       // is false, and unchanged chunks mean the content path refreshes nothing
       // either. A later chunk replacement rebuilds these rows again, which is
       // cheap next to a permanently stale keyword index.
-      if (upsert.ftsMetadataChanged) this.refreshFtsForItem(upsert.itemPk);
+      const missingScopeMetadataRow = sourceScopeObservation !== undefined
+        && !(this.db.query(`
+          SELECT 1 AS present FROM connector_store_fts_rows
+          WHERE item_pk = ? AND chunk_pk IS NULL LIMIT 1
+        `).get(upsert.itemPk) as { present?: number } | null)?.present;
+      if (upsert.ftsMetadataChanged || missingScopeMetadataRow) this.refreshFtsForItem(upsert.itemPk);
       return upsert;
     })();
   }
@@ -5355,10 +5430,10 @@ export class LocalConnectorStore {
       const chunks = this.db.query(
         'SELECT chunk_pk, bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
       ).all(itemPk) as Array<{ chunk_pk: number; bounded_text: string }>;
-      if (chunks.length === 0) {
-        this.insertFtsRow(title, connectorStoreFtsText(searchText, ''), itemPk, null);
-        return 1;
-      }
+      // One metadata-only row remains available even while retained content
+      // chunks exist. Scope-aware retrieval can search names/context without
+      // letting a body term reveal that a retained chunk matched.
+      this.insertFtsRow(title, connectorStoreFtsText(searchText, ''), itemPk, null);
       for (const chunk of chunks) {
         this.insertFtsRow(
           title,
@@ -5367,7 +5442,7 @@ export class LocalConnectorStore {
           chunk.chunk_pk,
         );
       }
-      return chunks.length;
+      return chunks.length + 1;
     })();
   }
 
@@ -6071,7 +6146,9 @@ export class LocalConnectorStore {
       model.dimension,
       model.backend,
       model.epochId,
-      Number(this.trustDomain !== 'secure_local' && model.backend === 'cloud'),
+      Number(model.backend === 'cloud' && (
+        this.trustDomain !== 'secure_local' || model.provider === 'venice'
+      )),
       recordedAt,
     );
   }
@@ -6173,6 +6250,7 @@ export class LocalConnectorStore {
     deadlineAtMs?: number,
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    const vectorFilters = connectorStoreVectorScopeFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
     const before = this.embeddingReadAuthority(provider);
@@ -6195,7 +6273,7 @@ export class LocalConnectorStore {
       beforeToken: before.token,
       maxResults,
       ...(accountScope !== undefined ? { accountScope } : {}),
-      ...(filters ? { filters } : {}),
+      ...(vectorFilters ? { filters: vectorFilters } : {}),
       ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
     });
   }
@@ -6462,6 +6540,7 @@ export class LocalConnectorStore {
     ftsOptions: { prefix?: boolean } = {},
   ): ConnectorStoreSearchRow[] {
     const selectedFilters = connectorStoreFilterSql(filters);
+    const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const terms = toFtsQuery(query, ftsOptions);
     if (!terms) return [];
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -6489,6 +6568,7 @@ export class LocalConnectorStore {
         AND i.tombstoned = 0
         ${selectedAccount ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
+        ${selectedFtsScope.sql}
       GROUP BY i.item_pk
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
@@ -6496,6 +6576,7 @@ export class LocalConnectorStore {
       terms,
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
+      ...selectedFtsScope.params,
       fetchLimit,
     ) as ItemRow[];
     // Minimum signal: for a multi-concept query, a candidate matching a
@@ -6510,9 +6591,13 @@ export class LocalConnectorStore {
       const matchedGroups = new Map<number, number>();
       for (const group of groups) {
         const hits = this.db.query(`
-          SELECT DISTINCT item_pk FROM connector_store_fts
-          WHERE connector_store_fts MATCH ? AND item_pk IN (${placeholders})
-        `).all(sourceIndexFtsGroupQuery(group), ...pks) as Array<{ item_pk: number }>;
+          SELECT DISTINCT connector_store_fts.item_pk
+          FROM connector_store_fts
+          JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ?
+            AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>;
         for (const hit of hits) {
           matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
         }
@@ -6940,6 +7025,7 @@ export interface ConnectorCorpusOptions {
   family: SourceFamily;
   trustDomain: SourceTrustDomain;
   activationMode?: SourceIndexActivationMode;
+  embeddingPolicy?: SourceIndexCorpusDefinition['embeddingPolicy'];
 }
 
 export function defineConnectorCorpus(options: ConnectorCorpusOptions): SourceIndexCorpusDefinition {
@@ -6948,6 +7034,7 @@ export function defineConnectorCorpus(options: ConnectorCorpusOptions): SourceIn
     family: options.family,
     trustDomain: options.trustDomain,
     activationMode: options.activationMode ?? 'lexical_only',
+    ...(options.embeddingPolicy ? { embeddingPolicy: options.embeddingPolicy } : {}),
     description: 'Shared connector-store corpus: generic local index over a Contract 1 SourceConnector.',
   });
 }
@@ -6994,7 +7081,7 @@ export function createConnectorStoreCorpusAdapter(
     let semanticSkippedReason: string | undefined;
     const useHybrid = options.retrievalMode ?? (embeddingProvider ? 'hybrid' : 'keyword');
     if (embeddingProvider && useHybrid === 'hybrid') {
-      if (store.trustDomain === 'secure_local' && embeddingProvider.backend !== 'local') {
+      if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
       } else if (!store.hasEmbeddings(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
@@ -7078,7 +7165,7 @@ export function createConnectorStoreCorpusAdapter(
     if (!embeddingProvider) {
       return { servable: false, reason: 'embedding_provider_unavailable' };
     }
-    if (store.trustDomain === 'secure_local' && embeddingProvider.backend !== 'local') {
+    if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
       return {
         servable: false,
         reason: 'embedding_provider_not_allowed',
@@ -7419,6 +7506,8 @@ function connectorStoreKeywordLaneAudit(
 
 export interface ConnectorStoreContentProviderOptions {
   store: LocalConnectorStore;
+  accountScope?: string;
+  filters?: ConnectorStoreSearchFilters;
 }
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
@@ -7438,6 +7527,7 @@ export function createConnectorStoreContentProvider(
       }
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
+      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return undefined;
       const content = store.localContent(localItemId, request.maxChars);
       if (!content) return undefined;
       // An item with no chunks has two very different explanations and the
@@ -8276,7 +8366,7 @@ function assertConnectorStoreEmbeddingProvider(
   trustDomain: SourceTrustDomain,
   provider: SourceEmbeddingProvider,
 ): void {
-  assertConnectorStoreEmbeddingBackend(trustDomain, provider.backend);
+  assertConnectorStoreEmbeddingBackend(trustDomain, provider);
   // A provider that has not been told its width cannot take part in an
   // authority-fenced lane at all: the fence compares the stored dimension
   // against this one BEFORE the first embed, so a provider that discovers its
@@ -8295,12 +8385,11 @@ function assertConnectorStoreEmbeddingProvider(
 // Backend half of the trust rule used by the normal computed-vector lane.
 function assertConnectorStoreEmbeddingBackend(
   trustDomain: SourceTrustDomain,
-  backend: SourceEmbeddingBackend,
+  provider: SourceEmbeddingProvider,
 ): void {
-  if (trustDomain === 'secure_local' && backend !== 'local') {
+  if (trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(provider)) {
     throw new Error(
-      'Connector store secure_local embeddings must use a local/private embedding provider '
-      + '(secure_local chunks are never cloud-embedding eligible).',
+      'Connector store secure_local embeddings must use a local/private provider or the approved Venice embedding lane.',
     );
   }
 }
@@ -8478,12 +8567,20 @@ function normalizeOptionalAccountScope(value: string | undefined): string | unde
 interface NormalizedConnectorStoreSearchFilters {
   provider?: string;
   locatorPathScope?: string;
+  locatorPathScopes?: readonly string[];
+  locatorPathExcludedScopes?: readonly string[];
   conversationId?: string;
   senderId?: string;
   senderLabel?: string;
   authoredAfter?: string;
   authoredBefore?: string;
   searchTextExactLines?: readonly string[];
+  sourceScopeGeneration?: string;
+  sourceScopeRevision?: string;
+  sourceScopeFolderAnyKeys?: readonly string[];
+  sourceScopeFolderNoneKeys?: readonly string[];
+  metadataOnlyLocatorPathScopes?: readonly string[];
+  metadataOnlySourceScopeFolderKeys?: readonly string[];
 }
 
 export function normalizeConnectorStoreSearchFilters(
@@ -8492,6 +8589,8 @@ export function normalizeConnectorStoreSearchFilters(
   if (value === undefined) return undefined;
   const provider = normalizeBoundedFilterString(value.provider, 'provider');
   const locatorPathScope = normalizeConnectorStoreLocatorPathScope(value.locatorPathScope);
+  const locatorPathScopes = normalizeScopePaths(value.locatorPathScopes);
+  const locatorPathExcludedScopes = normalizeScopePaths(value.locatorPathExcludedScopes);
   const conversationId = normalizeBoundedFilterString(value.conversationId, 'conversation id');
   const senderId = normalizeBoundedFilterString(value.senderId, 'sender id');
   const senderLabel = normalizeBoundedFilterString(value.senderLabel, 'sender label');
@@ -8507,15 +8606,29 @@ export function normalizeConnectorStoreSearchFilters(
     value.searchTextExactLines,
     'exact search-context line',
   );
+  const sourceScopeGeneration = normalizeScopeGeneration(value.sourceScopeGeneration);
+  const sourceScopeRevision = normalizeScopeRevision(value.sourceScopeRevision);
+  const sourceScopeFolderAnyKeys = normalizeScopeFolderKeys(value.sourceScopeFolderAnyKeys);
+  const sourceScopeFolderNoneKeys = normalizeScopeFolderKeys(value.sourceScopeFolderNoneKeys);
+  const metadataOnlyLocatorPathScopes = normalizeScopePaths(value.metadataOnlyLocatorPathScopes);
+  const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...(provider ? { provider } : {}),
     ...(locatorPathScope ? { locatorPathScope } : {}),
+    ...(locatorPathScopes.length > 0 ? { locatorPathScopes } : {}),
+    ...(locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {}),
     ...(conversationId ? { conversationId } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderLabel ? { senderLabel } : {}),
     ...(authoredAfter ? { authoredAfter } : {}),
     ...(authoredBefore ? { authoredBefore } : {}),
     ...(searchTextExactLines.length > 0 ? { searchTextExactLines } : {}),
+    ...(sourceScopeGeneration ? { sourceScopeGeneration } : {}),
+    ...(sourceScopeRevision ? { sourceScopeRevision } : {}),
+    ...(sourceScopeFolderAnyKeys.length > 0 ? { sourceScopeFolderAnyKeys } : {}),
+    ...(sourceScopeFolderNoneKeys.length > 0 ? { sourceScopeFolderNoneKeys } : {}),
+    ...(metadataOnlyLocatorPathScopes.length > 0 ? { metadataOnlyLocatorPathScopes } : {}),
+    ...(metadataOnlySourceScopeFolderKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys } : {}),
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -8532,6 +8645,28 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.provider = ?');
     params.push(normalized.provider);
   }
+  if (normalized.sourceScopeGeneration) {
+    clauses.push('AND i.source_scope_generation = ?');
+    params.push(normalized.sourceScopeGeneration);
+  }
+  if (normalized.sourceScopeRevision) {
+    clauses.push('AND i.source_scope_revision = ?');
+    params.push(normalized.sourceScopeRevision);
+  }
+  if (normalized.sourceScopeFolderAnyKeys?.length) {
+    clauses.push(`AND EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderAnyKeys.map(() => '?').join(', ')})
+    )`);
+    params.push(...normalized.sourceScopeFolderAnyKeys);
+  }
+  if (normalized.sourceScopeFolderNoneKeys?.length) {
+    clauses.push(`AND NOT EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderNoneKeys.map(() => '?').join(', ')})
+    )`);
+    params.push(...normalized.sourceScopeFolderNoneKeys);
+  }
   if (normalized.locatorPathScope) {
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
@@ -8540,6 +8675,29 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     } else {
       clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.locatorPathScopes?.length) {
+    const alternatives: string[] = [];
+    clauses.push('AND i.locator_uri IS NOT NULL');
+    for (const locatorPath of normalized.locatorPathScopes) {
+      if (locatorPath === '/') {
+        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      } else {
+        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
+    }
+    clauses.push(`AND (${alternatives.join(' OR ')})`);
+  }
+  if (normalized.locatorPathExcludedScopes?.length) {
+    for (const locatorPath of normalized.locatorPathExcludedScopes) {
+      if (locatorPath === '/') {
+        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+      } else {
+        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
     }
   }
   if (normalized.conversationId) {
@@ -8569,6 +8727,110 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     params.push(line);
   }
   return { sql: clauses.join('\n'), params };
+}
+
+function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined): {
+  sql: string;
+  params: string[];
+} {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  const contentRow = `(
+    connector_store_fts.chunk_pk IS NOT NULL
+    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
+  )`;
+  if (!normalized) return { sql: `AND ${contentRow}`, params: [] };
+  const metadataOnly: string[] = [];
+  const params: string[] = [];
+  for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
+    if (locatorPath === '/') {
+      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+    } else {
+      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.metadataOnlySourceScopeFolderKeys?.length) {
+    metadataOnly.push(`EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) metadata_folder
+      WHERE metadata_folder.value IN (${normalized.metadataOnlySourceScopeFolderKeys.map(() => '?').join(', ')})
+    )`);
+    params.push(...normalized.metadataOnlySourceScopeFolderKeys);
+  }
+  if (metadataOnly.length === 0) return { sql: `AND ${contentRow}`, params: [] };
+  const metadataExpression = `(${metadataOnly.join(' OR ')})`;
+  return {
+    sql: `AND (
+      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      OR (NOT ${metadataExpression} AND ${contentRow})
+    )`,
+    params: [...params, ...params],
+  };
+}
+
+function connectorStoreVectorScopeFilters(
+  filters: ConnectorStoreSearchFilters | undefined,
+): ConnectorStoreSearchFilters | undefined {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  if (!normalized) return undefined;
+  return normalizeConnectorStoreSearchFilters({
+    ...normalized,
+    locatorPathExcludedScopes: [
+      ...(normalized.locatorPathExcludedScopes ?? []),
+      ...(normalized.metadataOnlyLocatorPathScopes ?? []),
+    ],
+    sourceScopeFolderNoneKeys: [
+      ...(normalized.sourceScopeFolderNoneKeys ?? []),
+      ...(normalized.metadataOnlySourceScopeFolderKeys ?? []),
+    ],
+  });
+}
+
+function normalizeScopePaths(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error('Connector store locator path scopes must be an array of at most 100 strings.');
+  }
+  return [...new Set(values.map((value) => normalizeConnectorStoreLocatorPathScope(value)!))];
+}
+
+function normalizeScopeGeneration(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error('Connector store source scope generation must be a 64-character lowercase digest.');
+  }
+  return value;
+}
+
+function normalizeScopeRevision(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new Error('Connector store source scope revision must be a lowercase UUID v4.');
+  }
+  return value;
+}
+
+function normalizeSourceScopeObservation(value: ReturnType<NonNullable<ConnectorStoreSyncOptions['sourceScopeObservation']>>): {
+  accountGeneration: string;
+  scopeRevision: string;
+  folderKeys: readonly string[];
+} {
+  const accountGeneration = normalizeScopeGeneration(value.accountGeneration);
+  if (!accountGeneration) throw new Error('Connector store source scope observation requires an account generation.');
+  const scopeRevision = normalizeScopeRevision(value.scopeRevision);
+  if (!scopeRevision) throw new Error('Connector store source scope observation requires a scope revision.');
+  return {
+    accountGeneration,
+    scopeRevision,
+    folderKeys: normalizeScopeFolderKeys(value.folderKeys),
+  };
+}
+
+function normalizeScopeFolderKeys(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error('Connector store source scope folder keys must be an array of at most 100 strings.');
+  }
+  return [...new Set(values.map((value) => normalizeBoundedFilterString(value, 'source scope folder key')!))];
 }
 
 function normalizeBoundedFilterStrings(
@@ -9085,6 +9347,13 @@ const CONNECTOR_STORE_V9_ITEM_COLUMNS = [
   'reactions_json',
 ] as const;
 
+const CONNECTOR_STORE_V12_ITEM_COLUMNS = [
+  ...CONNECTOR_STORE_V9_ITEM_COLUMNS,
+  'source_scope_generation',
+  'source_scope_revision',
+  'source_scope_folder_keys_json',
+] as const;
+
 const CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
   'item_pk', 'claim_scope', 'claim_authority', 'claim_ordinal', 'claim_holder',
   'claim_generation', 'accepted_at',
@@ -9114,6 +9383,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 8) validateConnectorStoreV8Schema(db);
   if (version === 9) validateConnectorStoreV9Schema(db);
   if (version === 10) validateConnectorStoreV10Schema(db);
+  if (version === 11) validateConnectorStoreV11Schema(db);
   if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) validateConnectorStoreSchema(db);
 }
 
@@ -9123,33 +9393,56 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, 'v12');
+  assertExactTableColumns(
+    db,
+    'embedding_models',
+    CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS,
+    false,
+    'v12',
+  );
+  assertExactTableColumns(
+    db,
+    'item_write_claims',
+    CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS,
+    false,
+    'v12',
+  );
+  validateConnectorStoreLocatorIdentitySchema(db, 'v12');
+}
+
+function validateConnectorStoreV11Schema(db: Database): void {
   validateConnectorStoreV10Schema(db);
+  validateConnectorStoreLocatorIdentitySchema(db, 'v11');
+}
+
+function validateConnectorStoreLocatorIdentitySchema(db: Database, versionLabel: string): void {
   assertExactTableColumns(
     db,
     'item_locator_identities',
     ['item_pk', 'provider', 'account_scope', 'normalized_conversation', 'normalized_locator'],
     false,
-    'v11',
+    versionLabel,
   );
   assertExactTableColumns(
     db,
     'locator_identity_index_state',
     ['singleton', 'cursor_item_pk', 'completed'],
     false,
-    'v11',
+    versionLabel,
   );
   assertIndexColumns(
     db,
     'idx_connector_store_locator_identity',
     ['provider', 'account_scope', 'normalized_conversation', 'normalized_locator', 'item_pk'],
-    'v11',
+    versionLabel,
   );
-  assertTriggerExists(db, 'connector_store_locator_identity_insert', 'v11');
-  assertTriggerExists(db, 'connector_store_locator_identity_update', 'v11');
+  assertTriggerExists(db, 'connector_store_locator_identity_insert', versionLabel);
+  assertTriggerExists(db, 'connector_store_locator_identity_update', versionLabel);
   const stateRows = Number((db.query(`
     SELECT COUNT(*) AS count FROM locator_identity_index_state WHERE singleton = 1
   `).get() as { count: number }).count);
-  if (stateRows !== 1) throw new Error('Connector store locator identity index state is missing for v11.');
+  if (stateRows !== 1) throw new Error(`Connector store locator identity index state is missing for ${versionLabel}.`);
 }
 
 function validateConnectorStoreV10Schema(db: Database): void {

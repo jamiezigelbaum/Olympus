@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
+import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import {
   createCloudSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromEnv,
@@ -37,6 +38,54 @@ describe('canonical source-worker server configuration', () => {
       dimension: 2560,
       epochId: 'local:openai-compatible:secure-local-qwen3-embed:2560',
     });
+  });
+
+  test('builds the selectable Venice Private embedding provider with its canonical identity', () => {
+    const provider = createSourceIndexEmbeddingProviderFromEnv({
+      OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER: 'venice',
+      OLYMPUS_SOURCE_INDEX_VENICE_API_KEY: 'fixture-venice-key',
+    });
+
+    expect(provider).toMatchObject({
+      provider: 'venice',
+      modelId: 'text-embedding-qwen3-8b',
+      backend: 'cloud',
+      dimension: 4096,
+      epochId: 'cloud:venice:text-embedding-qwen3-8b:4096',
+    });
+  });
+
+  test('private-cloud-only selects Venice for secure embeddings while local-only stays local', () => {
+    const privateCloud = createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only'));
+    expect(privateCloud.resolveEmbeddingProfile('secure_local')).toMatchObject({
+      id: 'venice-source-embedding',
+      profile: { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding' },
+    });
+    const localOnly = createSovereigntyEngine(loadSovereigntyPreset('local-only'));
+    expect(localOnly.resolveEmbeddingProfile('secure_local')).toMatchObject({
+      id: 'local-source-embedding',
+      profile: { provider: 'local-openai-compatible', trust: 'local', purpose: 'embedding' },
+    });
+  });
+
+  test('missing private-cloud Venice embedding secret records a degraded embedding profile', () => {
+    const resolver = new WorkerBootSecretResolver({
+      schedule: () => undefined,
+      warn: () => undefined,
+    });
+    const provider = createSourceIndexEmbeddingProviderFromSovereignty(
+      createSovereigntyEngine(loadSovereigntyPreset('private-cloud-only')),
+      'secure_local',
+      {},
+      resolver,
+    );
+    expect(provider).toBeUndefined();
+    expect(resolver.status()).toEqual([
+      expect.objectContaining({
+        affected_profiles: ['venice-source-embedding'],
+        affected_capabilities: ['embedding'],
+      }),
+    ]);
   });
 
   test('registered local defaults give the env and preset factories the existing identity', () => {

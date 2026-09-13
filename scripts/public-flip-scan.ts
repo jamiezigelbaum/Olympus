@@ -82,30 +82,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
   // Renaming any of them orphans data or breaks a required CI context, so they
   // survive the flip by owner decision (PR #134, "Persisted identifiers").
   {
-    path: 'src/core/domain-expert.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs`: also the live Vertex RAG display name, so renaming means renaming the live corpus.',
-  },
-  {
-    path: 'skills/governance-research/SKILL.md',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` named in the skill that queries it.',
-  },
-  {
-    path: 'test/domain-expert-worker.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` in fixtures for the worker that resolves it.',
-  },
-  {
-    path: 'test/operations.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` in operations fixtures.',
-  },
-  {
     path: 'src/workers/embedding-ledger.ts',
     label: 'a tenant or host identity',
     match: /^jamie$/i,
@@ -118,28 +94,10 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     reason: "Comment naming the embedding-ledger approver enum value 'jamie'.",
   },
   {
-    path: 'src/workers/dashboard/pages/embedding-ledger.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: "Embedding-ledger approver enum value 'jamie' selecting a CSS class; the raw value is never displayed.",
-  },
-  {
-    path: 'scripts/dashboard-preview.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: "Embedding-ledger approver enum value 'jamie' in the dashboard preview fixture.",
-  },
-  {
     path: 'test/embedding-ledger.test.ts',
     label: 'a tenant or host identity',
     match: /^jamie$/i,
     reason: "Embedding-ledger approver enum value 'jamie' under test.",
-  },
-  {
-    path: 'dist/cli.js',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: "Embedding-ledger approver enum value 'jamie', compiled from src/workers/embedding-ledger.ts.",
   },
   {
     path: 'config/critical-review.json',
@@ -155,24 +113,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
   },
 
   // ---- 3. Real GitHub URLs and repository paths. ---------------------------
-  {
-    path: 'config/private-ops-disposition.json',
-    label: 'a tenant or host identity',
-    match: /^jamiezigelbaum$/i,
-    reason: 'Real private-ops CI receipt URL; the receipt has to be resolvable.',
-  },
-  {
-    path: 'config/private-ops-live-attestation.json',
-    label: 'a tenant or host identity',
-    match: /^jamiezigelbaum$/i,
-    reason: 'Real private-ops CI receipt URL; the receipt has to be resolvable.',
-  },
-  {
-    path: 'scripts/private-ops-disposition.ts',
-    label: 'a tenant or host identity',
-    match: /^jamiezigelbaum$/i,
-    reason: 'Real private-ops CI receipt URL pinned in the disposition checker.',
-  },
   {
     path: 'docs/V0_4_BASELINE.md',
     label: 'a tenant or host identity',
@@ -191,7 +131,7 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
   // This file carries a handful of the literals it sanctions, because an
   // allowlist that cannot name what it allows is not auditable. It is only
   // acceptable because the same strings already sit in the negative-guard tests
-  // (`pkm-doctrine`, `lifecycle`, `release-artifact`, `source-skill-runtime-context`)
+  // (`lifecycle` and `release-artifact`)
   // that assert the packaged output never contains them — this adds no new
   // disclosure. Rows whose literal ends up regex-escaped here never match and
   // are dead weight; `SANCTIONED_HITS` is asserted live against the real tree.
@@ -244,12 +184,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     reason: 'Invented service account on the invented project above; proves a non-fixture tenant still blocks.',
   },
   {
-    path: 'test/pkm-doctrine.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Forbidden-string list for the shipped PKM doctrine pack; neutralising it deletes the guard.',
-  },
-  {
     path: 'test/release-artifact.test.ts',
     label: 'a tenant or host identity',
     match: /^zigelbaum$/i,
@@ -288,18 +222,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     match: /^gs:\/\/castor-governance-rag$/i,
     reason: 'Forbidden-string assertion for the packaged artifact.',
   },
-  {
-    path: 'test/source-skill-runtime-context.test.ts',
-    label: 'a Google Cloud project id',
-    match: /^(?:olympus-491816|castor-493710)$/i,
-    reason: 'Forbidden-string assertion: the rendered governance skill context must not contain these project ids.',
-  },
-  {
-    path: 'test/source-skill-runtime-context.test.ts',
-    label: 'a named GCS bucket',
-    match: /^gs:\/\/castor-governance-rag$/i,
-    reason: 'Forbidden-string assertion for the rendered governance skill context.',
-  },
 
   // ---- 6. Obviously synthetic key material in redaction fixtures. ----------
   {
@@ -307,12 +229,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     label: 'private key material',
     match: /^BEGIN PRIVATE KEY$/i,
     reason: 'PEM header around the literal bodies `policy-private-key` / `config-private-key`; the fixture proves redaction, and no key is present.',
-  },
-  {
-    path: 'test/source-export-dropbox.test.ts',
-    label: 'private key material',
-    match: /^BEGIN PRIVATE KEY$/i,
-    reason: 'PEM header around the literal body `abc123`; the fixture proves export redaction, and no key is present.',
   },
 
   // ---- 7. Reserved-domain fixture kept deliberately in PR #120. ------------

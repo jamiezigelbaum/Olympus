@@ -49,17 +49,6 @@ export class GogcliEmailConnector implements EmailSourceConnector {
 
   async health(): Promise<EmailSourceHealth> {
     const args = this.healthArgs();
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    if (!args) {
-      return {
-        reachable: true,
-        configured: false,
-        connector: this.name,
-        raw_email_exposed: false,
-        detail: 'Set OLYMPUS_EMAIL_SOURCE_ACCOUNT when using service-account auth mode.',
-      };
-    }
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
     const result = await this.run(args);
     if (result.code !== 0) {
@@ -87,16 +76,9 @@ export class GogcliEmailConnector implements EmailSourceConnector {
   // union member strips out of the public runtime together with it — the
   // stripped method must type-check as always returning args.
   private healthArgs(): string[]
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    | undefined
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
   {
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    if (this.authMode === 'service-account') {
-      if (!this.account) return undefined;
-      return ['auth', 'service-account', 'status', this.account, '--json', '--no-input'];
-    }
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
     return ['auth', 'list', '--check', '--json', '--no-input'];
   }
 

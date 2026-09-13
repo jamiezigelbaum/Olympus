@@ -1,0 +1,978 @@
+{
+  "kind": "olympus_q11_repeated_real_model_ab_result",
+  "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+  "samples": 3,
+  "priorReportSha256": "e970180c09fa7efa2779ee7ec7031e1fa6f64b83e5235fe9e4fae27c09d55fd9",
+  "originalPromptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+  "originalBodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+  "specSha256": "1bca981b8b365e89603fc745ce13a84e47858fb197cf081f6cca515453345968",
+  "model": "gemini-2.5-flash",
+  "bindings": {
+    "main": {
+      "expectedRevision": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+      "gitSha": null,
+      "sourceTreeSha256": "d05389222dbdf3b467cd50bc59a0e78f2774cbbf344b54628c2b435e17163bee",
+      "sourceFiles": 250
+    },
+    "parallel": {
+      "expectedRevision": "7aac1040d7235574925ddf94002dd1b42f8591ed",
+      "gitSha": null,
+      "sourceTreeSha256": "4a685576d459f20ec303cdcaa7620c2ac9cd821f12a6b4b2ea85964a915c995b",
+      "sourceFiles": 214
+    }
+  },
+  "corpusSha256": "0ff72eb926c9556e8fafa7e334d2221c59dac1e79a968640dc372f6740aafcc8",
+  "questionsSha256": "db198b3cc853614648a0ddbdf1258a18bb8294a88b0befed177996300b53da36",
+  "snapshotHashes": {
+    "gmail": {
+      "corpusId": "public.gmail",
+      "family": "email",
+      "sha256": "248a68a2f4e10a513afd9f8f7294c369d256666a7b1efcf49b3f9e1633b250aa",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "google_drive": {
+      "corpusId": "public.google_drive",
+      "family": "file",
+      "sha256": "be7a100ff1268c7e2e9e718fd64a70d090ee6e97f421fcc740defd23dfe70987",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "dropbox": {
+      "corpusId": "public.dropbox",
+      "family": "file",
+      "sha256": "a15a339437f65608b36c78bfc81ae880537e2d04cd980ee867adbca48fbec423",
+      "items": 5,
+      "unreadableIds": [
+        "dropbox-atlas-addendum-unreadable",
+        "dropbox-beacon-invoice-unreadable"
+      ]
+    },
+    "telegram": {
+      "corpusId": "public.telegram",
+      "family": "chat",
+      "sha256": "d80de42d55e7e42846ce2240f1f6398e3e7f203d0f999eec86b7d400541d3954",
+      "items": 5,
+      "unreadableIds": []
+    },
+    "whatsapp_personal": {
+      "corpusId": "public.whatsapp_personal",
+      "family": "chat",
+      "sha256": "a70436bbed002e4f71bbe40f8319d7c6f9c098d486e9446e8367653fca17586f",
+      "items": 4,
+      "unreadableIds": []
+    },
+    "x": {
+      "corpusId": "public.x",
+      "family": "x",
+      "sha256": "98719112be4469ea1fad8790d2c4132b85cbfed5ebe78e500cc9cf71fbb41038",
+      "items": 4,
+      "unreadableIds": []
+    },
+    "readwise": {
+      "corpusId": "public.readwise",
+      "family": "readwise",
+      "sha256": "2c3a1198a05326cf743bd2f91bebd57b969ad1d00d5d4d095033e23818b3261f",
+      "items": 4,
+      "unreadableIds": []
+    }
+  },
+  "requestCount": 7,
+  "requestsAlreadyUsedOutsideHarness": 35,
+  "totalRequestsIncludingPriorSmoke": 42,
+  "usage": [
+    {
+      "ordinal": 1,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 31,
+        "total_tokens": 47
+      }
+    },
+    {
+      "ordinal": 2,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 1993,
+        "total_tokens": 2191
+      }
+    },
+    {
+      "ordinal": 3,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 141,
+        "prompt_tokens": 1993,
+        "total_tokens": 2134
+      }
+    },
+    {
+      "ordinal": 4,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 1993,
+        "total_tokens": 2191
+      }
+    },
+    {
+      "ordinal": 5,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 141,
+        "prompt_tokens": 1993,
+        "total_tokens": 2134
+      }
+    },
+    {
+      "ordinal": 6,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 1993,
+        "prompt_tokens_details": {
+          "cached_tokens": 1017
+        },
+        "total_tokens": 2191
+      }
+    },
+    {
+      "ordinal": 7,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 1993,
+        "total_tokens": 2191
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "sampleIndex": 1,
+      "mainPassed": true,
+      "parallelPassed": false,
+      "mainGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "parallelGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 1"
+        ]
+      },
+      "gradeEqual": false,
+      "evidenceIdentityEqual": false,
+      "coverageEqual": true,
+      "promptParity": true,
+      "allQuestionPromptsMatchOriginal": true
+    },
+    {
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "sampleIndex": 2,
+      "mainPassed": false,
+      "parallelPassed": true,
+      "mainGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 1"
+        ]
+      },
+      "parallelGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "gradeEqual": false,
+      "evidenceIdentityEqual": false,
+      "coverageEqual": true,
+      "promptParity": true,
+      "allQuestionPromptsMatchOriginal": true
+    },
+    {
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "sampleIndex": 3,
+      "mainPassed": true,
+      "parallelPassed": true,
+      "mainGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "parallelGrade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true,
+      "allQuestionPromptsMatchOriginal": true
+    }
+  ],
+  "observations": [
+    {
+      "arm": "main",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 1,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": true,
+      "wallMs": 1375.175708,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 10,
+        "analyst_ms": 1353,
+        "release_gate_ms": 5,
+        "total_ms": 1368
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 11,
+            "item_char_start": 0,
+            "item_char_end": 11,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          },
+          {
+            "fact_id": "citation-2",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 1,
+          "requestOrdinal": 2,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "3130e09e822bea870b0948ecaff49fd691990d14e0f1c1b044753e808cc41d93",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 198,
+            "prompt_tokens": 1993,
+            "total_tokens": 2191
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e13649f952ca7a3ce58161bfaeef1e37edd417555e4f7de7fe73c7ac9e235a9a",
+          "durationMs": 1347.854542
+        }
+      ]
+    },
+    {
+      "arm": "parallel",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 1,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 1"
+        ]
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": false,
+      "wallMs": 1003.631042,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 24,
+        "analyst_ms": 977,
+        "release_gate_ms": 1,
+        "total_ms": 1002
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 1,
+          "requestOrdinal": 3,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "c0a34dc831be78c13f90b09ee637e9b4d8b6d3596f8db438391fc9f8dcd607fd",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 141,
+            "prompt_tokens": 1993,
+            "total_tokens": 2134
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "b7f2d14278625fc22d39cccb9c2ada8ca071cb0bfb23c55c055f563b7ad03746",
+          "durationMs": 975.0261660000001
+        }
+      ]
+    },
+    {
+      "arm": "parallel",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 2,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": true,
+      "wallMs": 1267.179792,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 22,
+        "analyst_ms": 1244,
+        "release_gate_ms": 1,
+        "total_ms": 1267
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 11,
+            "item_char_start": 0,
+            "item_char_end": 11,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          },
+          {
+            "fact_id": "citation-2",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 2,
+          "requestOrdinal": 4,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "61b464fd6ce990463c0c1348c70128375994a5e38f812d472d4631da9c73a380",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 198,
+            "prompt_tokens": 1993,
+            "total_tokens": 2191
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e13649f952ca7a3ce58161bfaeef1e37edd417555e4f7de7fe73c7ac9e235a9a",
+          "durationMs": 1242.323292
+        }
+      ]
+    },
+    {
+      "arm": "main",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 2,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 1"
+        ]
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": false,
+      "wallMs": 1393.1891250000003,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 28,
+        "analyst_ms": 1364,
+        "release_gate_ms": 0,
+        "total_ms": 1392
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 2,
+          "requestOrdinal": 5,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "9fa81f3f20b2d5ceedbaa55ef1f7c8209a93779de9d6bd9811646516dfc06340",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 141,
+            "prompt_tokens": 1993,
+            "total_tokens": 2134
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "b7f2d14278625fc22d39cccb9c2ada8ca071cb0bfb23c55c055f563b7ad03746",
+          "durationMs": 1362.573292
+        }
+      ]
+    },
+    {
+      "arm": "main",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 3,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": true,
+      "wallMs": 1278.9664579999999,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 25,
+        "analyst_ms": 1253,
+        "release_gate_ms": 0,
+        "total_ms": 1278
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 11,
+            "item_char_start": 0,
+            "item_char_end": 11,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          },
+          {
+            "fact_id": "citation-2",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 3,
+          "requestOrdinal": 6,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "a59842a6bbd36c7e98a6103a2933c347125701a0e92b210bab89b999701e8af0",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 198,
+            "prompt_tokens": 1993,
+            "prompt_tokens_details": {
+              "cached_tokens": 1017
+            },
+            "total_tokens": 2191
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e13649f952ca7a3ce58161bfaeef1e37edd417555e4f7de7fe73c7ac9e235a9a",
+          "durationMs": 1251.3941249999998
+        }
+      ]
+    },
+    {
+      "arm": "parallel",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "ordinal": 11,
+      "sampleIndex": 3,
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "privacyProven": true,
+      "passedWithPrivacy": true,
+      "wallMs": 1183.4940419999994,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 25,
+        "analyst_ms": 1157,
+        "release_gate_ms": 0,
+        "total_ms": 1183
+      },
+      "backend": "cloud",
+      "identities": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 11,
+            "item_char_start": 0,
+            "item_char_end": 11,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "skippedCorpora": [],
+      "policy": {
+        "raw_source_exposed": false,
+        "source_packets_exposed": false,
+        "internal_content_exposed": false,
+        "secure_local_content_exposed": false,
+        "castor_safe_bridge": true
+      },
+      "opsec": {
+        "structured_evidence": [
+          {
+            "fact_id": "citation-1",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          },
+          {
+            "fact_id": "citation-2",
+            "trust_tier": "S0",
+            "trust_domain": "public_safe",
+            "confidence": "medium",
+            "extraction_kind": "paraphrase",
+            "source_instruction_flags": [],
+            "release_surface": "castor_answer",
+            "provenance_count": 1
+          }
+        ],
+        "release_decision": {
+          "decision": "allow",
+          "reasons": [
+            "release_gate_passed"
+          ]
+        },
+        "raw_source_exposed": false
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "sampleIndex": 3,
+          "requestOrdinal": 7,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "64ea101ef88c6e186bca92e0342de75e8e3071fe0bde9fbdacaad9792f3e2ffd",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 198,
+            "prompt_tokens": 1993,
+            "total_tokens": 2191
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e13649f952ca7a3ce58161bfaeef1e37edd417555e4f7de7fe73c7ac9e235a9a",
+          "durationMs": 1154.2678749999995
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "requests": 29,
+    "bodyUtf8Bytes": 40000,
+    "maxTokens": 1024,
+    "requestTimeoutMs": 45000,
+    "maxResults": 12,
+    "maxCharsPerCandidate": 800,
+    "maxOutputChars": 3072
+  },
+  "limitations": [
+    "Fictional S0/public_safe corpus only; no real-provider, private-corpus, embedding, default-preset or onboarding proof.",
+    "Three new samples per arm for one question only; interpreted alongside the preserved original sample. A small repeated sample does not establish broad branch equivalence or superiority.",
+    "Literal expected-value/citation/gap grades are reported unchanged; all failed questions remain visible.",
+    "No automatic retry or prompt tuning. No model is labelled local."
+  ]
+}

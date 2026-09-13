@@ -218,6 +218,25 @@ export function dashboardSourceProgress(
   const extraction = extractionPhase(source, settledPass, metadata);
   const embedding = embeddingPhase(source, settledPass, extraction, dashboardWorkingSummary(source));
   const bare = [metadata, extraction, embedding];
+  const scopeInactive = source.scope_selection?.required === true
+    && (source.scope_selection.status === 'scope_pending'
+      || source.scope_selection.ingestion_enabled === false);
+  if (scopeInactive) {
+    const stateWords = source.scope_selection!.status === 'scope_pending'
+      ? 'Waiting · choose folders to start'
+      : 'Waiting · ingestion is off';
+    return {
+      phases: bare.map((phase) => ({
+        ...phase,
+        measure: { kind: 'indeterminate' as const, done: 0 },
+        scope: 'corpus' as const,
+        state: 'waiting' as const,
+        state_words: stateWords,
+      })),
+      settled: false,
+      delta: false,
+    };
+  }
   const phases = bare.map((phase, index) => withState(phase, index, bare, source, now, options.embeddingRuntime));
   return {
     phases,
@@ -237,6 +256,7 @@ type BarePhase = Omit<DashboardPhase, 'state' | 'state_words'>;
  * sync is never settled however many items it has already recorded.
  */
 export function dashboardHasSettledPass(source: DashboardSourceCard): boolean {
+  if (source.last_run?.traversal_complete === false) return false;
   if (source.connection.state === 'waiting_for_first_sync') return false;
   if (source.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL) return false;
   // `synced` is the connection state the view model writes once this source has
@@ -555,9 +575,7 @@ function laneReportsLive(
     if (source.content_arrives_extracted === true) {
       return source.connection.state === 'syncing' || source.schedule?.running === true;
     }
-    const drainActive = source.ingestion_health.last_drain_activity_hours;
-    return source.queue_health.active > 0
-      || (drainActive !== undefined && drainActive * 60 <= 5);
+    return source.queue_health.active > 0;
   }
   const state = embeddingRuntime?.state;
   return state === 'running' || state === 'operator_priority';

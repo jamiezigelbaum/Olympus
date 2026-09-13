@@ -6,9 +6,8 @@
  *
  * Two ways it reaches a runtime, in this order:
  *
- * 1. The release builder replaces `PACKAGED_GOOGLE_PILOT_CLIENT_ID` in staged
- *    bundle bytes from `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which release builds
- *    still require.
+ * 1. The release builder defines a public client identity at compile time
+ *    from `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which release builds still require.
  * 2. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` below, which ships in source. A
  *    repository install has no release substitution, so without a real default
  *    every repo-installed pilot is forced onto the advanced BYO-OAuth path —
@@ -20,9 +19,12 @@
  */
 export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = '';
 
-export const PACKAGED_GOOGLE_PILOT_CLIENT_ID = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
+declare const OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID: string;
 
-const GOOGLE_PILOT_CLIENT_ID_SENTINEL = '__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__';
+export const PACKAGED_GOOGLE_PILOT_CLIENT_ID =
+  typeof OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID === 'undefined'
+    ? ''
+    : OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID;
 
 /**
  * Split out from the module constants so the resolution order itself is
@@ -32,10 +34,7 @@ export function resolveGooglePilotClientId(
   packaged: string,
   shipped: string,
 ): string | undefined {
-  const substituted = packaged.trim();
-  if (substituted !== '' && substituted !== GOOGLE_PILOT_CLIENT_ID_SENTINEL) return substituted;
-  const fallback = shipped.trim();
-  return fallback === '' ? undefined : fallback;
+  return packaged.trim() || shipped.trim() || undefined;
 }
 
 export function packagedGooglePilotClientId(): string | undefined {

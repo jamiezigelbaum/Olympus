@@ -54,6 +54,9 @@ describe('connector-store locator-index operator', () => {
     const rewind = new Database(dbPath);
     try {
       rewind.exec(`
+        ALTER TABLE items DROP COLUMN source_scope_folder_keys_json;
+        ALTER TABLE items DROP COLUMN source_scope_revision;
+        ALTER TABLE items DROP COLUMN source_scope_generation;
         DROP TRIGGER connector_store_locator_identity_insert;
         DROP TRIGGER connector_store_locator_identity_update;
         DROP TABLE item_locator_identities;
@@ -77,7 +80,7 @@ describe('connector-store locator-index operator', () => {
     expect(first).toMatchObject({
       execute: true,
       schemaVersionBefore: 10,
-      schemaVersionAfter: 11,
+      schemaVersionAfter: 12,
       before: { state: 'backfill_required', cursorItemPk: 0, indexedItems: 0 },
       after: { state: 'backfill_required', indexedItems: 1 },
       batch: { scannedItems: 1 },
@@ -86,14 +89,33 @@ describe('connector-store locator-index operator', () => {
     const second = runConnectorStoreLocatorIndex([...args, '--execute']);
     expect(second).toMatchObject({
       execute: true,
-      schemaVersionBefore: 11,
-      schemaVersionAfter: 11,
+      schemaVersionBefore: 12,
+      schemaVersionAfter: 12,
       before: { state: 'backfill_required', indexedItems: 1 },
       after: { state: 'ready', indexedItems: 2 },
       batch: { scannedItems: 1 },
     });
     expect(JSON.stringify(second)).not.toContain(dbPath);
     expect(JSON.stringify(second)).not.toContain('/Approved');
+
+    const upgraded = new LocalConnectorStore({
+      dbPath,
+      corpusId: 'secure_local.fixture.files',
+      family: 'file',
+      trustDomain: 'secure_local',
+    });
+    upgraded.close();
+    const proof = new Database(dbPath, { readonly: true });
+    try {
+      expect(proof.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get())
+        .toEqual({ version: 12 });
+      expect((proof.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((row) => row.name))
+        .toEqual(expect.arrayContaining([
+          'source_scope_generation', 'source_scope_revision', 'source_scope_folder_keys_json',
+        ]));
+    } finally {
+      proof.close();
+    }
   });
 });
 

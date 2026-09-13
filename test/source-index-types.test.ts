@@ -138,6 +138,11 @@ describe('source-index shared contracts', () => {
         embeddingBackend: 'cloud',
       }),
     ).toThrow('secure_local corpora cannot use cloud embeddings');
+    expect(buildSourceIndexStorageProfile({
+      trustDomain: 'secure_local',
+      embeddingBackend: 'cloud',
+      embeddingProvider: 'venice',
+    }).embeddingBackend).toBe('cloud');
   });
 
   test('defaults internal corpora to local-first SQLite storage with local embeddings', () => {

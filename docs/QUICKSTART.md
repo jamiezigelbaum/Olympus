@@ -4,9 +4,8 @@ Install Olympus, then optionally connect a source and verify a cited answer.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
-on macOS or Linux. An agent with terminal access can obtain the pilot package
-and guide you through setup automatically; no file or checksum-receipt handoff
-is needed. You can also follow the steps below manually.
+and the maintainer's qualified Olympus tarball, SHA-256, and byte count. macOS
+or Linux.
 
 OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
 `>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
@@ -19,14 +18,11 @@ up PATH from your shell rc, which non-interactive shells never read. Adding
 The `olympus` CLI is a Bun script, so it needs `bun` on PATH wherever you run
 it.
 
-**Fastest path — let your agent install it.** Paste into OpenClaw, or another
-agent with a terminal:
-
-> Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
-
-The agent downloads the package, runs this whole guide, asks you for the
-decisions that are yours, and verifies the result. The steps below are the
-same flow, by hand.
+**Fastest path — let your agent install it.** Paste into any agent with a
+terminal: *"Retrieve and follow the instructions in INSTALL_FOR_AGENTS.md"*
+(at the repo root and inside the release tarball). The agent runs this
+whole guide, asks you for the decisions that are yours, and verifies the
+result. The steps below are the same flow, by hand.
 
 Before first setup, read the full
 [four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
@@ -46,7 +42,7 @@ The preset prerequisites are:
 |---|---|
 | `local-first` | Gemini key for non-secure embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
 | `local-only` | Gemini key for non-secure embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers. Secure search is local keyword search, with no secure embedding model or local server required. |
+| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
 | `no-sensitive` | Gemini key for non-secure embeddings. Secure content is unavailable to answering. |
 
 A local runtime means a server actually answering at the effective policy's
@@ -65,17 +61,10 @@ in step 2. That choice is the heart of Olympus.
 
 ## 1. Install the plugin
 
-Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
-to obtain the designated package from GitHub. It retrieves the SHA-256 and
-byte count automatically from the release asset metadata; there is no separate
-receipt to request. For a manual download, open the
-[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.2)
-and choose `olympus-0.4.0.tgz` under Assets, not a source-code archive. Compare
-its SHA-256 and byte count with the pin in the linked download procedure and
-record the release tag, asset ID, digest, and size with your install results.
-Stop if the download is
-unavailable or either value differs. Do not build a replacement or substitute
-a Git checkout.
+The pilot installs the exact qualified tarball supplied by the maintainer.
+Before installing, compare its SHA-256 and byte count with the supplied
+receipt; stop on a mismatch or a missing receipt. Do not build a replacement
+or substitute a Git checkout. Record that identity with your install results.
 
 ```bash
 shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
@@ -213,12 +202,13 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   In `private-cloud-only`, secure answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. “Only” describes
   secure-data handling: Gemini still handles public and ordinary-private
-  embeddings, while secure search stays on this machine as keyword search.
+  embeddings, while secure search uses an approved Venice Private embedding model.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
-  release claim. Secure search remains lexical-only in `private-cloud-only`;
-  local presets configure local secure embeddings. Olympus never falls back
+  release claim. Existing lexical-only installations require an approved
+  embedding activation/backfill; preserve their current vectors and settings.
+  Local presets configure local secure embeddings. Olympus never falls back
   to an ordinary cloud embedding provider for secure data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
   sees secure data.
@@ -348,9 +338,8 @@ Base installation is ready when the chosen model prerequisites, worker health,
 and plugin/tool activation above are verified. No source connection is needed
 for that result. You can stop here and connect a source later.
 
-On OpenClaw **2026.9.2**, open **Olympus** in the Control UI sidebar when the
-installed Olympus artifact includes native Control UI support. The host version
-alone does not prove support. This requires **Settings → Labs → Custom plugin
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, open **Olympus** in the Control UI sidebar. This requires **Settings → Labs → Custom plugin
 UI** and the Gateway activation completed in Step 4, followed by a browser
 reload. The native page uses your signed-in permissions and
 keeps the worker bearer on the server, so no worker-token paste is needed.
@@ -367,7 +356,8 @@ olympus dashboard
 ```
 
 The standalone command prints three fields: the dashboard `url`, whether it
-`opened` a browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
+`opened` a
+browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
 token — and that is the URL that works. A browser cannot send a bearer
 header from the address bar, so the bare `/dashboard` path returns 401; copy
 the URL whole. Your browser lands on a local, token-protected dashboard:
@@ -413,6 +403,13 @@ Google's packaged shared pilot client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.
+
+For Drive and Dropbox, **Connect** only connects the account. Open **Choose
+folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
+only**, and **No ingestion** choices, then explicitly **Save scope and start**.
+The folder browser lists names without indexing or reading file contents.
+Unselected folders stay out. Entire-account ingestion requires an explicit
+selection and confirmation; a default configuration is not permission.
 
 All seven declared sources use the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and

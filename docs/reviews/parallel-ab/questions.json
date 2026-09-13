@@ -1,0 +1,306 @@
+{
+  "version": "2026-09-07.synthetic-ab.v1",
+  "description": "Explicitly fictional public-safe held-out questions for a paired main-vs-parallel comparison. Every canonical evidence record is named in the question id and points to an example.invalid URL. This dataset is synthetic comparison material only; it is not a real-provider or private-corpus qualification.",
+  "questions": [
+    {
+      "id": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+      "shape": "value_lookup",
+      "question": "What is the final signed Atlas contract value in dropbox-atlas-sow-v2?",
+      "expectedAnswerContains": ["EUR 52,500"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "hint": "Current signed Atlas statement of work v2"
+        }
+      ]
+    },
+    {
+      "id": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+      "shape": "value_lookup",
+      "question": "What consulting amount is quoted for Beacon in gmail-beacon-consulting-quote?",
+      "expectedAnswerContains": ["USD 8,750"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "hint": "Beacon consulting quote BC-2026-02"
+        }
+      ]
+    },
+    {
+      "id": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+      "shape": "trend_or_chronology",
+      "question": "How did the Atlas target launch date and budget change from the initial kickoff to the current signed SOW?",
+      "expectedAnswerContains": ["2026-04-30", "2026-05-15", "EUR 48,000", "EUR 52,500"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.gmail",
+          "providerItemId": "gmail-atlas-kickoff",
+          "uri": "https://example.invalid/records/gmail-atlas-kickoff",
+          "hint": "Initial Atlas launch and budget"
+        },
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-atlas-revision",
+          "uri": "https://example.invalid/records/telegram-atlas-revision",
+          "hint": "Atlas decision update changing date and ceiling"
+        },
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "hint": "Current signed Atlas SOW"
+        }
+      ]
+    },
+    {
+      "id": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+      "shape": "trend_or_chronology",
+      "question": "What is the Beacon field-test sequence from the approval record through start and completion, and what was the outcome?",
+      "expectedAnswerContains": ["2026-03-01", "2026-03-08", "zero critical defects"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "hint": "Beacon approval and scheduled test dates"
+        },
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-beacon-status",
+          "uri": "https://example.invalid/records/telegram-beacon-status",
+          "hint": "Beacon field test started"
+        },
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "hint": "Beacon field test accepted"
+        }
+      ]
+    },
+    {
+      "id": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+      "shape": "count_or_aggregate",
+      "question": "How many Atlas pilot sites are currently approved, and what is the vendor's total pilot-services subtotal?",
+      "expectedAnswerContains": ["three pilot sites", "EUR 9,600"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-atlas-count-correction",
+          "uri": "https://example.invalid/records/telegram-atlas-count-correction",
+          "hint": "Later correction confirming three approved sites"
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-vendor-pilot",
+          "uri": "https://example.invalid/records/whatsapp-atlas-vendor-pilot",
+          "hint": "Vendor rate and pilot-services subtotal"
+        }
+      ]
+    },
+    {
+      "id": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+      "shape": "count_or_aggregate",
+      "question": "What is Beacon's combined planned cost for consulting and hardware, and which two component amounts produce it?",
+      "expectedAnswerContains": ["USD 21,150", "USD 8,750", "USD 12,400"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "hint": "Beacon consulting amount"
+        },
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-beacon-hardware-quote",
+          "uri": "https://example.invalid/records/dropbox-beacon-hardware-quote",
+          "hint": "Beacon hardware amount"
+        }
+      ]
+    },
+    {
+      "id": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+      "shape": "locator",
+      "question": "Where is the current signed Atlas SOW v2, including its exact path and link?",
+      "expectedAnswerContains": ["/Projects/Atlas/contracts/atlas-sow-v2.pdf", "https://example.invalid/records/dropbox-atlas-sow-v2"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "hint": "Signed Atlas SOW v2 path and URL"
+        }
+      ],
+      "notes": "Locator grading requires the exact path and link for canonical record dropbox-atlas-sow-v2."
+    },
+    {
+      "id": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+      "shape": "locator",
+      "question": "Which chat channel contains the Beacon field-test acceptance, and on what date was it posted?",
+      "expectedAnswerContains": ["beacon-pilot", "2026-03-08"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "hint": "Beacon acceptance message in the beacon-pilot channel"
+        }
+      ],
+      "notes": "The canonical record id is telegram-beacon-acceptance."
+    },
+    {
+      "id": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+      "shape": "cross_source_synthesis",
+      "question": "Synthesize the current Atlas rollout state: launch date, signed budget, and approved pilot count.",
+      "expectedAnswerContains": ["2026-05-15", "EUR 52,500", "three pilot sites"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.google_drive",
+          "providerItemId": "drive-atlas-plan-v2",
+          "uri": "https://example.invalid/records/drive-atlas-plan-v2",
+          "hint": "Atlas plan v2 current schedule and pilot count"
+        },
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "hint": "Final signed Atlas budget"
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-vendor-pilot",
+          "uri": "https://example.invalid/records/whatsapp-atlas-vendor-pilot",
+          "hint": "Vendor confirmation of three sites"
+        }
+      ]
+    },
+    {
+      "id": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+      "shape": "cross_source_synthesis",
+      "question": "Which person owns Beacon's next action, and what accepted outcome was recorded after the field test?",
+      "expectedAnswerContains": ["Mira Chen", "2026-03-08", "zero critical defects"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "hint": "Beacon decision owner and planned completion"
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "providerItemId": "whatsapp-beacon-field-test",
+          "uri": "https://example.invalid/records/whatsapp-beacon-field-test",
+          "hint": "Beacon handoff naming Mira Chen"
+        },
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "hint": "Accepted Beacon result"
+        }
+      ]
+    },
+    {
+      "id": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "shape": "summary_or_sentiment",
+      "question": "Summarize the stakeholder sentiment around the Atlas launch and the team's practical next step.",
+      "expectedAnswerContains": ["cautiously optimistic", "schedule pressure", "three-site pilot"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "hint": "Atlas stakeholder sentiment"
+        },
+        {
+          "corpusId": "public.telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "hint": "Atlas launch thread and next step"
+        }
+      ]
+    },
+    {
+      "id": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+      "shape": "summary_or_sentiment",
+      "question": "What is the overall tone of the Beacon vendor delivery conversation, and what risk does it describe?",
+      "expectedAnswerContains": ["concerned", "delivery slipped", "2026-03-08"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.whatsapp_personal",
+          "providerItemId": "whatsapp-beacon-delivery",
+          "uri": "https://example.invalid/records/whatsapp-beacon-delivery",
+          "hint": "Beacon vendor delivery update and schedule risk"
+        }
+      ]
+    },
+    {
+      "id": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+      "shape": "coverage_negative",
+      "question": "What launch city did the Atlas team select? Answer honestly from the available records.",
+      "expectedAnswerContains": ["no evidence", "launch city"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "hint": "Atlas thread explicitly says no launch city was selected"
+        }
+      ],
+      "mustReportGap": true,
+      "notes": "Negative case: canonical record gmail-atlas-stakeholder-thread says the thread does not select a launch city; do not invent one."
+    },
+    {
+      "id": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+      "shape": "coverage_negative",
+      "question": "Who is the legal approver for Beacon? Answer honestly from the available records.",
+      "expectedAnswerContains": ["no evidence", "legal approver"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.google_drive",
+          "providerItemId": "drive-beacon-acceptance-criteria",
+          "uri": "https://example.invalid/records/drive-beacon-acceptance-criteria",
+          "hint": "Beacon criteria explicitly does not name a legal approver"
+        }
+      ],
+      "mustReportGap": true,
+      "notes": "Negative case: canonical record drive-beacon-acceptance-criteria does not name a legal approver; do not infer Mira Chen is legal."
+    },
+    {
+      "id": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+      "shape": "gap_honesty",
+      "question": "What is the exact penalty clause in the Atlas vendor addendum? State the extraction gap if the clause cannot be read.",
+      "expectedAnswerContains": ["unreadable", "no clause text available"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-atlas-addendum-unreadable",
+          "uri": "https://example.invalid/records/dropbox-atlas-addendum-unreadable",
+          "hint": "Atlas addendum metadata-only unreadable document"
+        }
+      ],
+      "mustReportGap": true,
+      "notes": "Gap case: canonical record dropbox-atlas-addendum-unreadable is present but its scanned text was not extracted."
+    },
+    {
+      "id": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+      "shape": "gap_honesty",
+      "question": "What is the exact unit price on the Beacon scanned invoice? State the extraction gap if the line cannot be read.",
+      "expectedAnswerContains": ["unreadable", "exact unit price cannot be determined"],
+      "expectedEvidence": [
+        {
+          "corpusId": "public.dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "hint": "Beacon invoice metadata-only unreadable unit-price line"
+        }
+      ],
+      "mustReportGap": true,
+      "notes": "Gap case: canonical record dropbox-beacon-invoice-unreadable does not expose a readable unit price."
+    }
+  ]
+}

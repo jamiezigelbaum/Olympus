@@ -278,7 +278,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       next: managedWorker.activation === 'failed' && workerState === 'active'
         ? 'The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status.'
         : workerState === 'active'
-          ? 'The managed worker is running; open the dashboard with olympus dashboard.'
+          ? 'The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access.'
           : workerState === 'not_started'
             ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
             : 'Run olympus worker install, then olympus worker status.',
@@ -287,7 +287,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     connections,
     dashboard: {
       url: 'http://127.0.0.1:8010/dashboard',
-      next: 'Open the local dashboard after the worker is running.',
+      next: 'Open Olympus in the OpenClaw Control UI (2026.9.2 with Custom plugin UI enabled), or run olympus dashboard for standalone access.',
     },
   };
 }

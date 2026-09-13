@@ -13,7 +13,7 @@ import {
 import { resolveConnectorStoreOptions } from './connector-store-embed.ts';
 
 const STORE_ID = 'connector-store';
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 12;
 const DEFAULT_BATCH_ITEMS = 1_000;
 const USAGE = 'Usage: bun run connector-store:locator-index --db <path> '
   + '[--max-items N] [--corpus-id <id> --family <family> --trust-domain <domain>] [--execute]';

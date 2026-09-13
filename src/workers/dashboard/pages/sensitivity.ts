@@ -51,12 +51,14 @@ export function renderDashboardSensitivityPage(
     meta: checked,
     body: renderDashboardSensitivityBody(view),
     styles: [DASHBOARD_POLICY_CSS],
+    controller: { ...(options?.controlSessionCsrfToken === undefined ? {} : { csrfToken: options.controlSessionCsrfToken }) },
     // Same poll as every other page, so the header's "checked Ns ago" keeps
     // moving; the body only swaps when a source actually changes.
     poll: {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 

@@ -17,11 +17,6 @@ import {
   isV04PublicCliInvocation,
   lifecycleRecoverySignalsFromWorkerHttpState,
   parseArgs,
-  parseEvalShardExportArgs,
-  parseQueuedContentRetargetArgs,
-  parseSourceSchedulerUnparkArgs,
-  parseTerminalContentRequalifyArgs,
-  parseXContentRecoveryArgs,
 } from '../src/cli.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
@@ -250,20 +245,6 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
-  test('X content recovery CLI stays bounded and inspect-first', () => {
-    expect(parseXContentRecoveryArgs([])).toEqual({ execute: false });
-    expect(parseXContentRecoveryArgs(['--limit', '9'])).toEqual({
-      execute: false,
-      limit: 9,
-    });
-    expect(parseXContentRecoveryArgs(['--execute', '--limit=1'])).toEqual({
-      execute: true,
-      limit: 1,
-    });
-    expect(() => parseXContentRecoveryArgs(['--limit', '101']))
-      .toThrow('limit must be between 1 and 100');
-  });
-
   test('source delete custody reads the configured credential-handle registry', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-custom-handle-registry-'));
     const home = join(dir, 'home');
@@ -305,158 +286,6 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
-  // A source with no public capability cannot be disconnected, so its delete
-  // custody falls through to the worker-inactive requirement — which only the
-  // caller can observe. The per-source branch used to omit `workerState`, so
-  // the requirement read `unknown` and the delete was refused at every worker
-  // state, with remediation guidance the branch could never act on.
-  test('per-source delete of a source outside the public capability set observes worker state', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-source-delete-worker-custody-'));
-    const home = join(dir, 'home');
-    const registryPath = join(dir, 'connected-handles.json');
-    try {
-      const storeDir = join(home, '.local', 'share', 'openclaw', 'olympus');
-      const storePath = join(storeDir, 'reflect-notes.sqlite');
-      mkdirSync(storeDir, { recursive: true });
-      writeFileSync(storePath, 'reflect notes');
-      writeFileSync(registryPath, JSON.stringify({ version: 1, handles: [] }));
-      // The probe must not depend on the host's service manager (CI runners
-      // have no user bus and report `unknown`, which fails custody closed).
-      // Shim both managers to the no-unit answer so the observed state is
-      // deterministically `missing` on every platform.
-      const shimDir = join(dir, 'bin');
-      mkdirSync(shimDir, { recursive: true });
-      writeFileSync(join(shimDir, 'systemctl'), '#!/bin/sh\necho inactive\nexit 3\n', { mode: 0o755 });
-      writeFileSync(join(shimDir, 'launchctl'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
-
-      const result = await runSourceCliExit([
-        'data',
-        'delete',
-        '--source',
-        'reflect.notes',
-      ], {
-        HOME: home,
-        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
-        OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
-      });
-
-      expect(result.code).toBe(0);
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        mode: 'source',
-        sourceId: 'reflect.notes',
-        custody: { requirement: 'worker_inactive', ready: true, observed: 'missing' },
-      });
-      expect(existsSync(storePath)).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  test('scheduler unpark parser requires the guarded task identity and reason', () => {
-    expect(() => parseSourceSchedulerUnparkArgs([])).toThrow(
-      'requires --source, --task, --expected-not-before, and --reason',
-    );
-    expect(parseSourceSchedulerUnparkArgs([
-      '--source', 'gmail.email',
-      '--task', 'gmail.email_store_pull',
-      '--expected-not-before', '2026-07-30T00:00:00.000Z',
-      '--reason', 'incident_probe',
-    ])).toEqual({
-      source: 'gmail.email',
-      task: 'gmail.email_store_pull',
-      expectedNotBefore: '2026-07-30T00:00:00.000Z',
-      reason: 'incident_probe',
-    });
-    expect(() => parseSourceSchedulerUnparkArgs([
-      '--source', 'gmail.email',
-      '--task', 'gmail.email_store_pull',
-      '--expected-not-before', '2026-07-30T00:00:00.000Z',
-      '--reason', 'incident_probe',
-      '--state-db', '/tmp/not-the-scheduler-store.sqlite',
-    ])).toThrow('Unknown source scheduler unpark option: --state-db');
-    expect(() => parseSourceSchedulerUnparkArgs([
-      '--source', 'gmail.email',
-      '--task', 'gmail.email_store_pull',
-      '--expected-not-before', '2026-07-30T00:00:00.000Z',
-      '--reason', 'not safe',
-    ])).toThrow('--reason must be a safe categorical token');
-  });
-
-  test('queued retarget bare invocation errors because scope is required', () => {
-    expect(() => parseQueuedContentRetargetArgs([])).toThrow('requires an explicit --scope');
-    expect(parseQueuedContentRetargetArgs([
-      '--scope',
-      '/1 Projects',
-      '--source-kind',
-      'local_vlm_pdf',
-      '--target-kind',
-      'venice_grok45_document',
-      '--target-version',
-      'grok-4-5',
-      '--limit',
-      '25',
-    ])).toEqual({
-      account: 'personal',
-      approved_scope_key: 'dropbox.personal:/1 Projects',
-      source_extractor_kind: 'local_vlm_pdf',
-      target_extractor_kind: 'venice_grok45_document',
-      target_extractor_version: 'grok-4-5',
-      limit: 25,
-      dry_run: true,
-    });
-  });
-
-  test('terminal requalify parser defaults to dry-run and accepts the bounded admin filters', () => {
-    expect(() => parseTerminalContentRequalifyArgs([])).toThrow('requires an explicit --scope');
-    expect(parseTerminalContentRequalifyArgs([
-      '--scope', '/1 Projects',
-      '--source-kind', 'local_ocr_tesseract',
-      '--source-version', 'ocr-v1',
-      '--statuses', 'failed_terminal,metadata_only',
-      '--target-kind', 'local_vlm_pdf',
-      '--target-version', '2026-07-16-night-requalify-v1',
-      '--limit', '180',
-      '--include-superseded',
-      '--reason', 'night_champion_vlm_requalify',
-    ])).toEqual({
-      account: 'personal',
-      approved_scope_key: 'dropbox.personal:/1 Projects',
-      source_extractor_kind: 'local_ocr_tesseract',
-      source_extractor_version: 'ocr-v1',
-      source_statuses: ['failed_terminal', 'metadata_only'],
-      target_extractor_kind: 'local_vlm_pdf',
-      target_extractor_version: '2026-07-16-night-requalify-v1',
-      limit: 180,
-      include_superseded: true,
-      reason: 'night_champion_vlm_requalify',
-      dry_run: true,
-    });
-    expect(() => parseTerminalContentRequalifyArgs([
-      '--scope', '/1 Projects',
-      '--source-kind', 'local_ocr_tesseract',
-      '--statuses', 'failed_terminal,queued',
-      '--target-kind', 'local_vlm_pdf',
-      '--target-version', 'night-v1',
-      '--no-limit',
-    ])).toThrow('subset of failed_terminal,metadata_only');
-  });
-
-  test('eval shard export parser requires explicit scope, count, and output and defaults dry-run', () => {
-    expect(() => parseEvalShardExportArgs([])).toThrow('requires an explicit --scope');
-    expect(parseEvalShardExportArgs([
-      '--scope', '/1 Projects',
-      '--count', '200',
-      '--out', '/tmp/vlm-eval',
-      '--doc-types', 'pdf,png',
-    ])).toEqual({
-      account: 'personal',
-      approved_scope_key: 'dropbox.personal:/1 Projects',
-      count: 200,
-      out_dir: '/tmp/vlm-eval',
-      doc_types: ['pdf', 'png'],
-      dry_run: true,
-    });
-  });
 
   test('package bin runs setup and worker dry-run commands from the bundled CLI', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-bin-test-'));
@@ -952,80 +781,39 @@ describe('CLI tool surface', () => {
   }, 30_000);
 
   test('--tools-json uses the shared operation exposure policy', async () => {
-    const tools = await runToolsJson({
-      email: {
-        localPacketsDevEnabled: true,
-        indexAdminDevEnabled: true,
-        requireLocalActiveModelForPrivateTools: true,
-      },
-      sourceIndex: {
-        answerDevEnabled: true,
-      },
-    });
+    const tools = await runToolsJson({});
     const names = tools.map((tool) => tool.name);
 
-    expect(names).toContain('source_answer');
-    expect(names).toContain('source_index_status');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('xanthos_file_deliver');
-    expect(names).not.toContain('castor_workspace');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-  }, 30_000);
-
-  test('--tools-json never exposes repository-only file delivery', async () => {
-    const tools = await runToolsJson({
-      fileDelivery: {
-        enabled: true,
-        baseUrl: 'http://xanthos-delivery.test/v1',
-      },
-    });
-
-    expect(tools.map((tool) => tool.name)).not.toContain('xanthos_file_deliver');
-  }, 30_000);
-
-  test('--tools-json never exposes repository-only Castor Workspace', async () => {
-    const tools = await runToolsJson({
-      castorWorkspace: {
-        enabled: true,
-        baseUrl: 'http://xanthos-workspace.test/v1',
-      },
-    });
-
-    expect(tools.map((tool) => tool.name)).not.toContain('castor_workspace');
-  }, 30_000);
-
-  test('--tools-json never exposes repository-only Domain Expert tools', async () => {
-    const tools = await runToolsJson({});
-
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_agent');
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_ask');
-    expect(tools.map((tool) => tool.name)).not.toContain('domain_doc');
-
-    const enabledTools = await runToolsJson({
-      domainExpert: {
-        enabled: true,
-        liveToolsEnabled: true,
-      },
-    });
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_agent');
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_ask');
-    expect(enabledTools.map((tool) => tool.name)).not.toContain('domain_doc');
+    expect(names).toEqual([
+      'argus_ping',
+      'argus_list_models',
+      'argus_complete',
+      'source_answer',
+      'source_index_status',
+      'source_index_search',
+      'olympus_doctor',
+    ]);
   }, 30_000);
 
   test('parseArgs accepts explicit false values for boolean flags', () => {
-    const domainAgent = operations.find((operation) => operation.name === 'domain_agent')!;
+    const sourceSearch = operations.find((operation) => operation.name === 'source_index_search')!;
 
-    expect(parseArgs(domainAgent, ['--action', 'bootstrap', '--dry-run=false'])).toEqual({
-      action: 'bootstrap',
-      dry_run: false,
-    });
-    expect(parseArgs(domainAgent, ['--action', 'bootstrap', '--dry-run', 'false'])).toEqual({
-      action: 'bootstrap',
-      dry_run: false,
+    expect(parseArgs(sourceSearch, ['fixture', '--corpus-id', 'internal.email', '--include-locators=false']))
+      .toEqual({
+        query: 'fixture',
+        corpus_id: 'internal.email',
+        include_locators: false,
+      });
+    expect(parseArgs(sourceSearch, [
+      'fixture',
+      '--corpus-id',
+      'internal.email',
+      '--include-locators',
+      'false',
+    ])).toEqual({
+      query: 'fixture',
+      corpus_id: 'internal.email',
+      include_locators: false,
     });
   });
 

@@ -1,0 +1,101 @@
+{
+  "kind": "olympus_real_host_ab_summary",
+  "schema_version": 1,
+  "status": "passed",
+  "completed_at": "2026-09-07T22:39:35Z",
+  "host": {
+    "os": "darwin",
+    "openclaw_version": "2026.7.1",
+    "openclaw_build": "2d2ddc4",
+    "service_commands_used": false,
+    "default_profile_used": false
+  },
+  "execution": {
+    "baseline_ran_and_was_inspected_before_candidate": true,
+    "profiles": "unique_named",
+    "homes_and_state": "separate_disposable_roots",
+    "gateway_base_port_separation": 300,
+    "config_mutation_path": "openclaw config set",
+    "install_force_used": false,
+    "foreground_processes_only": true,
+    "gateway_restart_method": "clean SIGTERM followed by identical foreground launch",
+    "worker_restart_method": "clean SIGTERM followed by identical foreground launch",
+    "all_final_ports_closed": true,
+    "test_tokens_recorded": false,
+    "real_provider_used": false,
+    "model_call_used": false
+  },
+  "baseline": {
+    "source_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+    "artifact_sha256": "bd47865f20c82d076d189948a1acb248f5929e7f9e73c50d35789cdd292cec0b",
+    "artifact_bytes": 670201,
+    "duration_ms": 109787,
+    "gateway_boot_reported_ms": [
+      1000,
+      3600
+    ],
+    "gateway_shutdown_reported_ms": [
+      255,
+      302
+    ],
+    "dist_index_bytes": 252573,
+    "dist_cli_bytes": 1873688,
+    "report": "baseline/reports/arm-report.json",
+    "result": "passed"
+  },
+  "candidate": {
+    "source_commit": "7aac1040d7235574925ddf94002dd1b42f8591ed",
+    "artifact_sha256": "468f21e26f98ba5d8490aac2c016d875605e15e125afeb19a9165a78a7975054",
+    "artifact_bytes": 679034,
+    "duration_ms": 108917,
+    "gateway_boot_reported_ms": [
+      2100,
+      1700
+    ],
+    "gateway_shutdown_reported_ms": [
+      550,
+      211
+    ],
+    "dist_index_bytes": 232216,
+    "dist_cli_bytes": 1860991,
+    "report": "candidate/reports/arm-report.json",
+    "result": "passed"
+  },
+  "comparison": {
+    "behavioral_result": "equivalent_pass",
+    "package_inventory_files_each": 29,
+    "candidate_artifact_bytes_delta": 8833,
+    "candidate_artifact_percent_delta": 1.3179,
+    "candidate_dist_index_bytes_delta": -20357,
+    "candidate_dist_cli_bytes_delta": -12697,
+    "candidate_combined_runtime_bytes_delta": -33054,
+    "candidate_total_duration_ms_delta": -870,
+    "performance_conclusion": "none; one sequential run per arm is not a benchmark"
+  },
+  "checks_passed_in_both_arms": [
+    "isolated noninteractive local onboarding with auth skipped and no daemon",
+    "npm-pack install without force",
+    "blessed email.baseUrl config set and config validate",
+    "installed plugin loaded and activated",
+    "exact 10-tool native contract and exact 7-tool materialized runtime list",
+    "installed Olympus CLI version and public help",
+    "worker lifecycle install dry-run",
+    "foreground worker health",
+    "authenticated direct source status and empty search",
+    "foreground Gateway health",
+    "Gateway tools.invoke source status and empty search",
+    "empty search returned zero hits and raw_source_exposed=false",
+    "Gateway clean stop while worker remained healthy",
+    "Gateway restart retained config, workspace, install, and empty-source behavior",
+    "worker clean stop while Gateway remained healthy",
+    "worker restart retained empty-source behavior",
+    "final Gateway and worker port closure"
+  ],
+  "observed_nonblocking_host_warnings": [
+    "plugins.allow was empty in each fresh profile; the explicitly installed Olympus plugin still loaded and inspect proved its identity",
+    "Bonjour resolved the disposable Gateways to conflict-free advertised names",
+    "macOS networksetup authorization probing warned inside the sandbox; loopback health and tool calls succeeded",
+    "the no-provider worker correctly deferred Dropbox extraction for missing credential_handle"
+  ],
+  "scope_limit": "This is a real local no-provider host test. It does not satisfy real-provider onboarding, automatic sync, extraction, citation, model, or full release qualification."
+}

@@ -13,13 +13,22 @@ const plan = JSON.parse(readFileSync(join(ROOT, 'config/release-qualification-pl
   assistance: { eligible: string[]; ineligible: string[] };
   assertion_contracts: Record<string, string[]>;
   normal_install_rule: string;
-  rollback_baseline: { source_commit: string; artifact_sha256: string; artifact_bytes: number };
+  rollback_baseline: { source_commit: string; artifact_sha256: string; artifact_bytes: number; package_files: string[] };
   candidate_artifact: { artifact_sha256: string; artifact_bytes: number };
   pilot_thresholds: { setup_success_without_engineering: number; participants_want_reuse: number };
   hermes_cell: { source_id: string; host_os: string; host_surface: string };
 };
 
 describe('Slice 3F exact qualification plan', () => {
+  test('requires explicit fixture mode before accepting a custom rehearsal plan', () => {
+    const result = Bun.spawnSync([
+      'bun', 'scripts/qualification/simulated-clean-home.ts',
+      '--plan', 'config/release-qualification-plan.json',
+    ], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain('custom simulation plan requires --fixture');
+  }, 30_000);
+
   test('pins the approved hosts, exact seven sources, executable owners, and normal-install rule', () => {
     expect(plan.simulated_matrix.map((entry) => entry.host_os)).toEqual(['darwin_arm64', 'linux_x64_ubuntu_lts']);
     for (const matrix of plan.simulated_matrix) {
@@ -38,7 +47,13 @@ describe('Slice 3F exact qualification plan', () => {
     expect(plan.assistance).toEqual({ eligible: ['documented_flow', 'documented_recovery'], ineligible: ['engineering_intervention'] });
     expect(plan.normal_install_rule).toContain('user or their AI');
     expect(plan.normal_install_rule).toContain('without code, database, config-file, service-manager, or undocumented repair work');
-    expect(plan.rollback_baseline).toEqual({ source_commit: '9d9fc02fa30e9dc6d1ceee6c3742da7b9b0c1ead', artifact_sha256: 'e70351832431110d7786ac77486bd1d4c3e06af1fae3b22770b18ef370b3aa81', artifact_bytes: 603128 });
+    expect(plan.rollback_baseline).toMatchObject({ source_commit: '911caf3f834433f3547049ca07a7bb8d8d268ee7', artifact_sha256: '65eab956e30c60dad513cb504c64709a0d64490a8b50911700b04b122d054f0c', artifact_bytes: 670223 });
+    // The historical rollback artifact predates both optional UI assets.
+    expect([...plan.rollback_baseline.package_files].sort()).toEqual(
+      V0_4_PUBLIC_PACKAGE_FILES
+        .filter((path) => !['assets/icon.png', 'dist/control-ui/index.js'].includes(path))
+        .sort(),
+    );
     expect(plan.assertion_contracts.rollback).toEqual(['previous_digest_restored', 'service_state_restored', 'config_retained', 'credentials_retained', 'indexed_data_retained']);
     expect(plan.assertion_contracts.real_provider_end_to_end).toEqual(['install', 'dashboard_onboarding', 'scope', 'automatic_sync', 'extraction_accounting', 'retrieval', 'citations', 'honest_gaps', 'fail_closed_security', 'restart_resume']);
     expect(plan.assertion_contracts.pilot_task).toContain('normal_question_answer_checked');

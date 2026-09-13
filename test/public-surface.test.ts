@@ -36,7 +36,14 @@ describe('v0.4 positive public surface', () => {
   test('declared operation surfaces exist, are unique, and are the only exposed operations', () => {
     const known = new Set(operations.map((operation) => operation.name));
     const config = defaultConfig();
+    const publicUnion = new Set([
+      ...V0_4_PUBLIC_NATIVE_TOOLS,
+      ...V0_4_PUBLIC_MCP_TOOLS,
+      ...V0_4_PUBLIC_CLI_OPERATIONS,
+    ]);
 
+    expect(publicUnion.size).toBe(10);
+    expect(operations.map((operation) => operation.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
     for (const [surface, names] of [
       ['native', V0_4_PUBLIC_NATIVE_TOOLS],
       ['mcp', V0_4_PUBLIC_MCP_TOOLS],

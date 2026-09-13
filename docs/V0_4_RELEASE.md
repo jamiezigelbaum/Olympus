@@ -1,6 +1,12 @@
 # Olympus 0.4 release plan
 
-Status: active
+Status in this branch: baseline reference for an unadopted parallel experiment.
+
+The current v0.4 testing continues independently on `main`. This branch follows
+[`PARALLEL_SIMPLIFICATION.md`](PARALLEL_SIMPLIFICATION.md); none of the historical
+completion receipts below qualify its different source or package bytes. Main's prompt-only bootstrap selects the
+published pilot; this candidate retains its supplied-package handoff so it
+cannot substitute the prior published archive for the candidate under review.
 
 Owner: Olympus product owner
 Planning authority: this document defines v0.4 scope, sequence, and completion. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
@@ -21,6 +27,47 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-10 — File-source consent before ingestion.** Drive and Dropbox
+  connections must stop at scope selection. Reuse the reviewed Finder-style
+  folder tree and its Full ingestion / Metadata only / No ingestion inspector;
+  expose it before the first sync and support Drive folder identities. Browse
+  metadata only on an explicit request, without indexing file content. An
+  explicit scope confirmation starts ingestion; empty/default configuration
+  and account authentication never authorize the whole account. Unapproved
+  cached file content is unavailable to retrieval, extraction, and embedding.
+  Preserve existing data and vectors until separately authorized cleanup.
+  Metadata progress must distinguish a completed bounded pass from a completed
+  traversal, and extraction is working only when execution evidence says so.
+  The candidate includes the scope gate and focused consent regression tests.
+  The picker opens the requested provider, keeps both providers in Locations,
+  and retains dashboard navigation and source-page return links. Setup cards
+  also link to source details.
+  Live folder-selection proof and the held-out source eval await the owner's
+  approved scope; affected sources stay disconnected until that choice.
+
+- **2026-09-10 — Secure embedding fallback.** Use a catalog-approved Venice
+  Private embedding model when no local embedding provider is configured.
+  The proposed default is Qwen3 Embedding 8B, 4096 dimensions; the live
+  catalog quotes $0.0125 per million input tokens. This supersedes the
+  private-cloud-only keyword-only limit below. Existing installations and
+  vectors remain unchanged until explicit activation with cost approval and
+  an embedding-ledger receipt. Local-only secure data stays local; Gemini
+  remains restricted to non-secure embeddings. Provider readiness must be
+  established before source Connect. The implementation passes typechecking
+  and focused runtime/store tests, including missing-credential and dynamic
+  corpus status regressions. Live activation and real-provider proof remain
+  pending; code delivery alone must preserve existing saved configuration.
+
+- **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
+  setup and worker/Gateway activation before optional dashboard source choice.
+  No mailbox is required for base-worker health. Preserve the approved
+  transition and full tier explanation as required user-facing blocks;
+  distinguish Venice secure answers from Gemini non-secure embeddings, and
+  authenticated password-manager CLI access from manual browser entry.
+  Native UI readiness requires a browser activation receipt, not just a loaded
+  backend. The Air's WebKit runtime rejected Secure plugin cookies on loopback
+  HTTP in a secret-free reproduction; supported browser/transport selection is
+  an explicit prerequisite, never a reason to weaken cookie or Gateway auth.
 - **2026-09-09 — Native macOS HTTPS pilot.** An isolated Gateway trial proved
   that the Mac app activates the published Olympus UI over trusted loopback
   HTTPS and reads its worker view. The authorized Air rollout preserves the
@@ -33,26 +80,6 @@ testers have exercised the normal product journey without custom engineering.
   archive and verifying its anonymous download are prerequisites for this
   download pin to reach `main`. This distributes the repaired installation
   guide without adopting the broader experimental source branch.
-
-- **2026-09-09 — Rehearsal repair.** Base installation completes privacy/model
-  setup and worker/Gateway activation before optional dashboard source choice.
-  No mailbox is required for base-worker health. Preserve the approved
-  transition and full tier explanation as required user-facing blocks;
-  distinguish Venice secure answers from Gemini non-secure embeddings, and
-  authenticated password-manager CLI access from manual browser entry.
-  Native UI readiness requires a browser activation receipt, not just a loaded
-  backend. The Air's WebKit runtime rejected Secure plugin cookies on loopback
-  HTTP in a secret-free reproduction; supported browser/transport selection is
-  an explicit prerequisite, never a reason to weaken cookie or Gateway auth.
-- **2026-09-09 — Prompt-only pilot installation.** A tester copies one prompt
-  from the repository into their agent. The agent downloads the designated
-  GitHub prerelease package and checks its SHA-256 and byte count against
-  the repository's candidate pin and GitHub's asset metadata automatically. No manually supplied tarball or
-  checksum receipt is required. `INSTALL_FOR_AGENTS.md#pilot-download` owns
-  candidate selection and the download procedure. GitHub prerelease hosting
-  makes the internal rehearsal package retrievable; it does not claim full
-  release qualification or replace the existing gates before inviting beta
-  testers. ClawHub publication remains after qualification and beta feedback.
 - **2026-08-26 — Product boundary.** Olympus is the OpenClaw plugin. Private deployment, credentials, incident response, and host maintenance belong in a private ops repository. The supported v0.4 topology is same-host macOS or Linux.
 - **2026-08-26 — Shared Google OAuth.** The pilot ships a publisher-owned Google Desktop OAuth client ID for Gmail and Drive. Google documents installed applications as public clients and accepts the authorization-code exchange with client ID plus PKCE; no client secret is required or packaged. Users click Connect, sign in, and consent. The dashboard names the unverified-app warning honestly. User grants and refresh tokens remain local; a client-ID-only BYO path remains an advanced fallback.
 - **2026-08-26 — Converge, verify, delete.** Preserve useful existing connector stores. Complete bounded replay/import only where legacy stores contain useful data absent from the canonical store, reuse embeddings only when identity and dimensions prove exact compatibility, re-fetch only missing/corrupt/unverifiable portions, then delete transition machinery. No general migration system ships.
@@ -90,8 +117,9 @@ testers have exercised the normal product journey without custom engineering.
   `13ae3694953b252b6805ef2c00f08585af78d433` binds all 427 preservation rows to
   current replacement bytes and owns the separately authorized, content-free
   previous -> candidate -> previous deployment proof. The non-packaged
-  `config/private-ops-disposition.json` is the itemized deletion authority;
-  Slice 3 cannot close while its live receipt remains pending.
+  The completed itemized deletion authority and its live receipt are retained
+  in baseline Git history. This parallel branch retires that one-time verifier;
+  present package inventory, credential, and privacy checks remain active.
 - **2026-08-30 — Public distribution.** ClawHub is the v0.4 OpenClaw
   discovery and distribution channel. The release candidate is first proved
   through OpenClaw's managed `npm-pack:` installation path; the byte-identical
@@ -140,10 +168,9 @@ testers have exercised the normal product journey without custom engineering.
   outside the release claim. The normal `private-cloud-only` route uses Venice
   through its ordinary API with a model that the live Venice catalog classifies
   as Private or plain TEE. Slice 4 adds no E2EE-specific mechanism. In this
-  posture, secure corpora remain lexical-only; the local presets configure
-  local secure embeddings. Adding a secure cloud embedding lane is deferred
-  and is not a Slice 4 gate. This accepted product limit must be visible in
-  setup, status, and the capability matrix.
+  posture, secure corpora originally remained lexical-only. The 2026-09-10
+  decision above supersedes that embedding limitation; the E2EE boundary
+  remains unchanged.
 - **2026-08-31 — Slice 4 beta shape.** The beta cohort is fluid; participant
   count is not a release constraint. Testers use whichever supported Mac or
   Linux machine they already have; Olympus does not assign them an operating
@@ -156,6 +183,15 @@ testers have exercised the normal product journey without custom engineering.
 - **2026-08-31 — Built artifacts.** `dist/` remains source-controlled for v0.4.
   CI rebuilds and checks it, and the release package contains only current,
   allowlisted built output.
+- **2026-09-07 — OpenClaw dashboard integration.** OpenClaw's native Control
+  UI is the default Olympus plugin interface when available. Target the
+  shipped `2026.9.2` API, with its explicit Custom plugin UI Labs opt-in and
+  same-Gateway HTTPS/localhost requirements. Reuse the existing dashboard
+  renderers and browser controls through scoped Gateway operations; keep the
+  worker bearer server-side. Preserve standalone dashboard access for older
+  hosts and future integrations. This repository change does not upgrade or
+  deploy Castor, change the qualified host floor, or close the clean-install
+  and real-provider qualification exits.
 - **Standing — Embedding control.** Any model, provider, dimension, epoch, or re-embed change requires the owner's advance approval with cost stated and an embedding-ledger entry. Existing vectors are never discarded merely to simplify a cutover.
 
 ## Qualification levels
@@ -404,22 +440,16 @@ that clean-install real-provider or pilot qualification has passed.
   passed the Slice 3 exit; do not substitute a source checkout or rebuilt
   artifact. The upgrade/rollback fixture uses the immediately preceding Slice
   3 artifact as its synthetic prior public version.
-- Before ClawHub publication, host the exact public-only `.tgz` as a
-  designated GitHub prerelease asset. The repo-page prompt sends the agent
-  to `INSTALL_FOR_AGENTS.md#pilot-download`; the agent retrieves the package
-  and its SHA-256 and byte count from GitHub without a file/receipt handoff
-  or a tester GitHub login. It verifies the downloaded bytes before using
-  the packaged guide and installs through the documented managed
+- Before ClawHub publication, give testers one access-controlled download of
+  that exact `.tgz`, together with its SHA-256 and byte count. They install it
+  through the documented managed
   `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
   command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
   hosts `--force` also overwrites an existing plugin, so the install guide's
   existing-install checks still apply. No tester builds a package or installs
   from a source checkout. README, Quickstart, and the agent install guide use
-  this same path. The agent records the release tag, asset ID, artifact digest,
-  and byte count in the install report so feedback can be tied to the exact
-  candidate. Download verification does not substitute for qualification.
-  The repository guide pins the qualified digest and size, so replacing an
-  asset under the same name cannot silently substitute a different build.
+  this same path and require the artifact digest and byte count in the install
+  report so feedback can be tied to the qualified candidate.
 - Before inviting testers, internally prove the same packaged product on clean
   Apple Silicon macOS and x86_64 Ubuntu LTS installations. On both operating
   systems, every declared source must complete install, onboarding, configured
@@ -569,8 +599,8 @@ file edits or an agent-only repair.
 | 0. Preserve and baseline | complete | Local gate, inventory, verified preservation receipts, capability matrix, private-ops copy, worktree cleanup, honest red held-out baseline, green exact-head CI run `32990841255`, and merged PR #40 recorded in `V0_4_BASELINE.md` |
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
-| 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. The prompt-only install handoff delegates package download and verification to the agent; publication of the designated GitHub pilot asset and its anonymous download proof remain required before that handoff is usable. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
+| 3. Standalone release candidate | complete at baseline | The baseline's exact commit/artifact passed 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. The historical disposition verifier is retired in this experimental branch; those receipts do not qualify its artifact. |
+| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,
