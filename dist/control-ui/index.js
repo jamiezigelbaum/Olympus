@@ -588,6 +588,8 @@ function mountDispositionsController(options) {
         branchCursors: new Map,
         expanded: new Set,
         loaded: false,
+        loadAttempted: false,
+        loading: false,
         busy: false,
         invalid: false,
         edited: false,
@@ -634,6 +636,10 @@ function mountDispositionsController(options) {
   }
   function scopeControls(form, draft) {
     const allowed = scopeAllowed(form, draft);
+    const loading = form.querySelector("[data-scope-loading]");
+    if (loading)
+      loading.hidden = !draft.loading;
+    form.querySelector("[data-scope-nodes]")?.setAttribute("aria-busy", String(draft.loading));
     form.querySelectorAll("button").forEach((button) => {
       button.disabled = !allowed;
     });
@@ -737,7 +743,7 @@ function mountDispositionsController(options) {
             const more2 = root.ownerDocument.createElement("button");
             more2.type = "button";
             more2.dataset.scopeMore = node.key;
-            more2.textContent = "Show more folders";
+            more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
             children.appendChild(more2);
           }
           wrapper.appendChild(children);
@@ -756,8 +762,10 @@ function mountDispositionsController(options) {
       row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
     });
     const more = form.querySelector('[data-scope-more=""]');
-    if (more)
+    if (more) {
       more.hidden = !draft.nextCursor;
+      more.textContent = draft.nodes.length >= 20 ? "Show more folders" : "Continue loading folders";
+    }
     renderScopeReview(form, draft);
   }
   async function browseScope(form, trail, append = false) {
@@ -766,9 +774,11 @@ function mountDispositionsController(options) {
       return;
     const parent = trail.at(-1)?.key;
     const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
+    draft.loadAttempted = true;
+    draft.loading = true;
     draft.busy = true;
     scopeControls(form, draft);
-    scopeMessage(form, "Listing folder names…");
+    scopeMessage(form, "Loading folders…");
     try {
       const result = await options.transport.read({
         view: "dispositions",
@@ -822,6 +832,12 @@ function mountDispositionsController(options) {
       } else {
         draft.nodes = nodes;
         draft.nextCursor = page.next_cursor;
+        if (!append) {
+          draft.branches.clear();
+          draft.branchCursors.clear();
+          draft.expanded.clear();
+          draft.catalog.clear();
+        }
       }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
@@ -834,6 +850,7 @@ function mountDispositionsController(options) {
       if (!disposed && root.contains(form))
         scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
     } finally {
+      draft.loading = false;
       draft.busy = false;
       if (!disposed && root.contains(form))
         scopeControls(form, draft);
@@ -910,10 +927,11 @@ function mountDispositionsController(options) {
       });
       const location = form.querySelector("[data-scope-location]");
       if (location)
-        location.textContent = "Top level";
+        location.textContent = "Folders";
       const fresh = scopeDraft(form);
       renderScopeReview(form, fresh);
-      scopeMessage(form, "Changes cancelled. Browse again to review the saved scope.");
+      scopeMessage(form, "Changes cancelled. Loading saved folders…");
+      browseScope(form, []);
       return true;
     }
     if (!scopeAllowed(form, draft))
@@ -1019,7 +1037,12 @@ function mountDispositionsController(options) {
       slot.textContent = text;
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => scopeControls(form, scopeDraft(form)));
+    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => {
+      const draft = scopeDraft(form);
+      scopeControls(form, draft);
+      if (presented && !form.closest("[data-scope-panel]")?.hidden && !draft.loadAttempted && scopeAllowed(form, draft))
+        browseScope(form, []);
+    });
     if (appliedCanWrite === canWrite)
       return;
     appliedCanWrite = canWrite;
@@ -1098,6 +1121,7 @@ function mountDispositionsController(options) {
     panels.forEach((panel) => {
       panel.hidden = panel.dataset.scopePanel !== sourceId;
     });
+    applyWriteCapability();
   }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;

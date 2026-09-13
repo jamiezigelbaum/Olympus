@@ -712,10 +712,11 @@ describe('folder scope before ingestion', () => {
     const dropbox = root.querySelector<HTMLElement>('[data-scope-panel="dropbox.files"]')!;
     expect(dropbox.hidden).toBe(false); expect(drive.hidden).toBe(true);
     expect(Array.from(dropbox.querySelectorAll('.location'), (node) => node.textContent)).toEqual(['◆Google Drive', '◆Dropbox']);
-    expect(reads).toHaveLength(0);
-    click(dropbox, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toHaveLength(1);
+    await happyWindow.happyDOM.waitUntilComplete();
     click(dropbox, '[data-scope-select]'); click(dropbox, '[data-scope-state="metadata_only"]');
     click(dropbox, '[data-scope-switch="google_drive.docs"]');
+    await happyWindow.happyDOM.waitUntilComplete();
     expect(drive.hidden).toBe(false); expect(dropbox.hidden).toBe(true);
     const connect = drive.querySelector<HTMLAnchorElement>('.scope-back a')!;
     connect.dataset.olympusNav = connect.getAttribute('href')!; connect.href = 'https://gateway.test/native-page';
@@ -729,7 +730,7 @@ describe('folder scope before ingestion', () => {
     click(drive, '[data-scope-switch="dropbox.files"]');
     expect(dropbox.hidden).toBe(false);
     expect(dropbox.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
-    expect(reads).toHaveLength(1); expect(writes).toHaveLength(0);
+    expect(reads).toHaveLength(2); expect(writes).toHaveLength(0);
     controller.dispose();
   });
 
@@ -770,7 +771,7 @@ describe('folder scope before ingestion', () => {
     controller.dispose();
   });
 
-  test('retains the Finder layout and does no browse or ingestion until explicit actions', async () => {
+  test('loads folder names when opened while ingestion still requires explicit approval', async () => {
     const { root, form } = scopeRoot();
     const reads: unknown[] = []; const writes: unknown[] = []; const navigation: string[] = [];
     const controller = mountDispositionsController({
@@ -781,7 +782,7 @@ describe('folder scope before ingestion', () => {
     expect(root.querySelector('.finder-window .finder-sidebar')).not.toBeNull();
     expect(root.querySelector('.finder-window .finder-main')).not.toBeNull();
     expect(root.querySelector('.finder-window .finder-inspector')).not.toBeNull();
-    expect(reads).toHaveLength(0); expect(writes).toHaveLength(0);
+    expect(reads).toHaveLength(1); expect(writes).toHaveLength(0);
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     expect(writes).toHaveLength(0);
     click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
@@ -802,6 +803,47 @@ describe('folder scope before ingestion', () => {
     }]);
     expect(navigation).toEqual(['/dashboard?source=google_drive.docs']);
     controller.dispose();
+  });
+
+  test('shows loading, avoids duplicate automatic requests, and Update preserves draft choices', async () => {
+    const { root, form } = scopeRoot();
+    let complete!: (value: ReturnType<typeof page>) => void;
+    const pending = new Promise<ReturnType<typeof page>>(resolve => { complete = resolve; });
+    let reads = 0; let writes = 0;
+    const controller = mountDispositionsController({ root,
+      transport: { read: async () => { reads += 1; return pending; }, async control() { writes += 1; return { status: 200, body: { ok: true } }; } },
+      navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0,
+    });
+    expect(reads).toBe(1);
+    expect(root.querySelector<HTMLElement>('[data-scope-loading]')?.hidden).toBe(false);
+    expect(root.querySelector('[data-scope-nodes]')?.getAttribute('aria-busy')).toBe('true');
+    expect(root.querySelector('[data-scope-browse-root]')?.textContent).toBe('Update');
+    controller.update({ canWrite: true });
+    expect(reads).toBe(1);
+    expect(writes).toBe(0);
+    complete(page()); await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector<HTMLElement>('[data-scope-loading]')?.hidden).toBe(true);
+    click(root, '[data-scope-select]'); click(root, '[data-scope-state="metadata_only"]');
+    click(root, '[data-scope-browse-root]'); await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(2);
+    expect(root.querySelector('.scope-folder-status')?.textContent).toBe('Metadata only');
+    expect(writes).toBe(0);
+    expect(form.querySelector('[data-scope-nodes]')?.getAttribute('aria-busy')).toBe('false');
+    controller.dispose();
+  });
+
+  test('never automatically loads folders for a read-only or hidden page', async () => {
+    for (const input of [{ canWrite: false, presented: true }, { canWrite: true, presented: false }]) {
+      const { root } = scopeRoot(); let reads = 0;
+      const controller = mountDispositionsController({ root,
+        transport: { async read() { reads += 1; return page(); }, async control() { throw new Error('unexpected mutation'); } },
+        navigate() {}, refresh: async () => undefined, returnUrl: 'https://gateway.test/', ...input,
+        signal: new AbortController().signal, pollIntervalMs: 0,
+      });
+      await happyWindow.happyDOM.waitUntilComplete();
+      expect(reads).toBe(0); controller.dispose();
+    }
   });
 
   test('whole-account use needs a separate explicit confirmation and read-only callers cannot activate', async () => {

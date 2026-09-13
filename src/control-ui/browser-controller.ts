@@ -655,6 +655,8 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     nextCursor?: string | undefined;
     selected?: OlympusFolderScopeNode | undefined;
     loaded: boolean;
+    loadAttempted: boolean;
+    loading: boolean;
     busy: boolean;
     invalid: boolean;
     edited: boolean;
@@ -672,7 +674,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (!draft) {
       draft = {
         generation: form.dataset.accountGeneration || '', revision: form.dataset.scopeRevision || '',
-        selections: new Map(), names: new Map(), ancestors: new Map(), nodes: [], catalog: new Map(), branches: new Map(), branchCursors: new Map(), expanded: new Set(), loaded: false,
+        selections: new Map(), names: new Map(), ancestors: new Map(), nodes: [], catalog: new Map(), branches: new Map(), branchCursors: new Map(), expanded: new Set(), loaded: false, loadAttempted: false, loading: false,
         busy: false, invalid: false, edited: false,
         whole: form.querySelector<HTMLInputElement>('[data-scope-whole-account]')?.checked === true,
       };
@@ -714,6 +716,9 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
 
   function scopeControls(form: HTMLFormElement, draft: ScopeDraft): void {
     const allowed = scopeAllowed(form, draft);
+    const loading = form.querySelector<HTMLElement>('[data-scope-loading]');
+    if (loading) loading.hidden = !draft.loading;
+    form.querySelector('[data-scope-nodes]')?.setAttribute('aria-busy', String(draft.loading));
     form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = !allowed; });
     form.querySelectorAll<HTMLInputElement>('input').forEach((input) => { input.disabled = !allowed || !draft.loaded; });
     form.querySelectorAll<HTMLButtonElement>('[data-scope-state]').forEach((button) => {
@@ -798,7 +803,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
           children.setAttribute('role', 'group'); children.setAttribute('aria-label', node.name);
           appendNodes(children, draft.branches.get(node.key) || [], new Set([...seen, node.key]));
           if (draft.branchCursors.has(node.key)) {
-            const more = root.ownerDocument.createElement('button'); more.type = 'button'; more.dataset.scopeMore = node.key; more.textContent = 'Show more folders'; children.appendChild(more);
+            const more = root.ownerDocument.createElement('button'); more.type = 'button'; more.dataset.scopeMore = node.key; more.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? 'Show more folders' : 'Continue loading folders'; children.appendChild(more);
           }
           wrapper.appendChild(children);
         }
@@ -811,7 +816,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     }
     const needle = form.querySelector<HTMLInputElement>('[data-scope-search]')?.value.trim().toLowerCase() || '';
     list.querySelectorAll<HTMLElement>('.scope-folder').forEach((row) => { row.hidden = !!needle && !(row.textContent || '').toLowerCase().includes(needle); });
-    const more = form.querySelector<HTMLElement>('[data-scope-more=""]'); if (more) more.hidden = !draft.nextCursor;
+    const more = form.querySelector<HTMLElement>('[data-scope-more=""]'); if (more) { more.hidden = !draft.nextCursor; more.textContent = draft.nodes.length >= 20 ? 'Show more folders' : 'Continue loading folders'; }
     renderScopeReview(form, draft);
   }
 
@@ -820,7 +825,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (!scopeAllowed(form, draft) || !options.transport.read) return;
     const parent = trail.at(-1)?.key;
     const cursor = append ? (parent ? draft.branchCursors.get(parent) : draft.nextCursor) : undefined;
-    draft.busy = true; scopeControls(form, draft); scopeMessage(form, 'Listing folder names…');
+    draft.loadAttempted = true; draft.loading = true; draft.busy = true; scopeControls(form, draft); scopeMessage(form, 'Loading folders…');
     try {
       const result = await options.transport.read({
         view: 'dispositions', action: 'browse_folder_scope',
@@ -858,7 +863,10 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       if (parent) {
         draft.branches.set(parent, nodes); draft.expanded.add(parent);
         if (page.next_cursor) draft.branchCursors.set(parent, page.next_cursor); else draft.branchCursors.delete(parent);
-      } else { draft.nodes = nodes; draft.nextCursor = page.next_cursor; }
+      } else {
+        draft.nodes = nodes; draft.nextCursor = page.next_cursor;
+        if (!append) { draft.branches.clear(); draft.branchCursors.clear(); draft.expanded.clear(); draft.catalog.clear(); }
+      }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
         draft.names.set(node.key, [...trail.map((entry) => entry.name), node.name].join(' / '));
@@ -869,7 +877,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     } catch {
       if (!disposed && root.contains(form)) scopeMessage(form, 'Folder browsing failed. Your choices are still here; retry when the connection is ready.');
     } finally {
-      draft.busy = false;
+      draft.loading = false; draft.busy = false;
       if (!disposed && root.contains(form)) scopeControls(form, draft);
     }
   }
@@ -923,8 +931,8 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       const empty = form.querySelector<HTMLElement>('[data-scope-inspector-empty]'); if (empty) empty.hidden = false;
       const content = form.querySelector<HTMLElement>('[data-scope-inspector-content]'); if (content) content.hidden = true;
       form.querySelectorAll<HTMLElement>('[data-scope-more]').forEach((element) => { element.hidden = true; });
-      const location = form.querySelector('[data-scope-location]'); if (location) location.textContent = 'Top level';
-      const fresh = scopeDraft(form); renderScopeReview(form, fresh); scopeMessage(form, 'Changes cancelled. Browse again to review the saved scope.'); return true;
+      const location = form.querySelector('[data-scope-location]'); if (location) location.textContent = 'Folders';
+      const fresh = scopeDraft(form); renderScopeReview(form, fresh); scopeMessage(form, 'Changes cancelled. Loading saved folders…'); void browseScope(form, []); return true;
     }
     if (!scopeAllowed(form, draft)) return true;
     if (target.closest('[data-scope-browse-root]')) { void browseScope(form, []); return true; }
@@ -1006,7 +1014,12 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   }
 
   function applyWriteCapability(): void {
-    root.querySelectorAll<HTMLFormElement>('form[data-folder-scope-source]').forEach((form) => scopeControls(form, scopeDraft(form)));
+    root.querySelectorAll<HTMLFormElement>('form[data-folder-scope-source]').forEach((form) => {
+      const draft = scopeDraft(form);
+      scopeControls(form, draft);
+      if (presented && !form.closest<HTMLElement>('[data-scope-panel]')?.hidden
+        && !draft.loadAttempted && scopeAllowed(form, draft)) void browseScope(form, []);
+    });
     if (appliedCanWrite === canWrite) return;
     appliedCanWrite = canWrite;
     root.querySelectorAll<HTMLButtonElement>('form[data-dispositions-source] button[type="submit"]')
@@ -1087,6 +1100,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     if (!panels.some((panel) => panel.dataset.scopePanel === sourceId)) return;
     activeScopeSource = sourceId;
     panels.forEach((panel) => { panel.hidden = panel.dataset.scopePanel !== sourceId; });
+    applyWriteCapability();
   }
 
   function onClick(event: Event): void {

@@ -62947,6 +62947,8 @@ function mountDispositionsController(options) {
         branchCursors: new Map,
         expanded: new Set,
         loaded: false,
+        loadAttempted: false,
+        loading: false,
         busy: false,
         invalid: false,
         edited: false,
@@ -62993,6 +62995,10 @@ function mountDispositionsController(options) {
   }
   function scopeControls(form, draft) {
     const allowed = scopeAllowed(form, draft);
+    const loading = form.querySelector("[data-scope-loading]");
+    if (loading)
+      loading.hidden = !draft.loading;
+    form.querySelector("[data-scope-nodes]")?.setAttribute("aria-busy", String(draft.loading));
     form.querySelectorAll("button").forEach((button) => {
       button.disabled = !allowed;
     });
@@ -63096,7 +63102,7 @@ function mountDispositionsController(options) {
             const more2 = root.ownerDocument.createElement("button");
             more2.type = "button";
             more2.dataset.scopeMore = node.key;
-            more2.textContent = "Show more folders";
+            more2.textContent = (draft.branches.get(node.key)?.length || 0) >= 20 ? "Show more folders" : "Continue loading folders";
             children.appendChild(more2);
           }
           wrapper.appendChild(children);
@@ -63115,8 +63121,10 @@ function mountDispositionsController(options) {
       row.hidden = !!needle && !(row.textContent || "").toLowerCase().includes(needle);
     });
     const more = form.querySelector('[data-scope-more=""]');
-    if (more)
+    if (more) {
       more.hidden = !draft.nextCursor;
+      more.textContent = draft.nodes.length >= 20 ? "Show more folders" : "Continue loading folders";
+    }
     renderScopeReview(form, draft);
   }
   async function browseScope(form, trail, append = false) {
@@ -63125,9 +63133,11 @@ function mountDispositionsController(options) {
       return;
     const parent = trail.at(-1)?.key;
     const cursor = append ? parent ? draft.branchCursors.get(parent) : draft.nextCursor : undefined;
+    draft.loadAttempted = true;
+    draft.loading = true;
     draft.busy = true;
     scopeControls(form, draft);
-    scopeMessage(form, "Listing folder names…");
+    scopeMessage(form, "Loading folders…");
     try {
       const result = await options.transport.read({
         view: "dispositions",
@@ -63181,6 +63191,12 @@ function mountDispositionsController(options) {
       } else {
         draft.nodes = nodes;
         draft.nextCursor = page.next_cursor;
+        if (!append) {
+          draft.branches.clear();
+          draft.branchCursors.clear();
+          draft.expanded.clear();
+          draft.catalog.clear();
+        }
       }
       page.nodes.forEach((node) => {
         draft.catalog.set(node.key, node);
@@ -63193,6 +63209,7 @@ function mountDispositionsController(options) {
       if (!disposed && root.contains(form))
         scopeMessage(form, "Folder browsing failed. Your choices are still here; retry when the connection is ready.");
     } finally {
+      draft.loading = false;
       draft.busy = false;
       if (!disposed && root.contains(form))
         scopeControls(form, draft);
@@ -63269,10 +63286,11 @@ function mountDispositionsController(options) {
       });
       const location = form.querySelector("[data-scope-location]");
       if (location)
-        location.textContent = "Top level";
+        location.textContent = "Folders";
       const fresh = scopeDraft(form);
       renderScopeReview(form, fresh);
-      scopeMessage(form, "Changes cancelled. Browse again to review the saved scope.");
+      scopeMessage(form, "Changes cancelled. Loading saved folders…");
+      browseScope(form, []);
       return true;
     }
     if (!scopeAllowed(form, draft))
@@ -63378,7 +63396,12 @@ function mountDispositionsController(options) {
       slot.textContent = text;
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => scopeControls(form, scopeDraft(form)));
+    root.querySelectorAll("form[data-folder-scope-source]").forEach((form) => {
+      const draft = scopeDraft(form);
+      scopeControls(form, draft);
+      if (presented && !form.closest("[data-scope-panel]")?.hidden && !draft.loadAttempted && scopeAllowed(form, draft))
+        browseScope(form, []);
+    });
     if (appliedCanWrite === canWrite)
       return;
     appliedCanWrite = canWrite;
@@ -63457,6 +63480,7 @@ function mountDispositionsController(options) {
     panels.forEach((panel) => {
       panel.hidden = panel.dataset.scopePanel !== sourceId;
     });
+    applyWriteCapability();
   }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
@@ -68781,7 +68805,7 @@ function renderSourceDispositionsFragment(view, selectedSourceId) {
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
-        <p>Connecting an account does not start indexing. Browse folders, choose what Olympus may use,
+        <p>Connecting an account does not start indexing. Choose what Olympus may use,
         then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
         processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
@@ -68805,9 +68829,10 @@ function renderFolderScopeSource(source, locations, selected) {
         </aside>
         <section class="finder-main">
           <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
-          <div class="scope-browser-toolbar"><button type="button" data-scope-browse-root${unavailable ? " disabled" : ""}>Browse folders</button>
-            <span data-scope-location>Folders</span></div>
-          <p class="scope-browser-note">${source.error ? escapeHtml2(source.error) : source.connected ? "Browsing lists folder names only. No file contents are read or indexed until you confirm your scope." : "Connect this account first, then return here to choose folders. Connecting will not start ingestion."}</p>
+          <div class="scope-browser-toolbar"><span data-scope-location>Folders</span>
+            <button type="button" data-scope-browse-root${unavailable ? " disabled" : ""}>Update</button>
+            <span data-scope-loading role="status" aria-live="polite" hidden>Loading folders…</span></div>
+          <p class="scope-browser-note">${source.error ? escapeHtml2(source.error) : source.connected ? "Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope." : "Connect this account first, then return here to choose folders. Connecting will not start ingestion."}</p>
           ${source.connected ? "" : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml2(source.label)} →</a>`}
           <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>
           <button type="button" data-scope-more hidden>Show more folders</button>
@@ -75602,23 +75627,43 @@ function createDropboxFolderScopeBrowser(options) {
       const parent = normalizeDropboxParent(request.parentKey);
       const providerCursor = decodeCursor2("dropbox.files", parent, request.cursor);
       const api2 = await metadataClient();
-      const page = providerCursor ? await api2.listFolderContinue({ cursor: providerCursor, limit: BROWSE_PAGE_SIZE }) : await api2.listFolder({
-        path: parent === "/" ? "" : parent,
-        recursive: false,
-        limit: BROWSE_PAGE_SIZE,
-        includeDeleted: false
-      });
-      return {
-        nodes: page.entries.filter((entry) => entry.tag === "folder").map((entry) => ({
-          key: normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`),
-          ...request.parentKey ? { parent_key: parent } : {},
-          name: entry.name,
-          kind: "folder",
-          has_children: true,
-          selectable: true
-        })),
-        ...page.hasMore && page.cursor ? { nextCursor: encodeCursor2("dropbox.files", parent, page.cursor) } : {}
-      };
+      const nodes = [];
+      let cursor = providerCursor;
+      const seenCursors = new Set;
+      for (let pages = 0;pages < 10; pages += 1) {
+        const page = cursor ? await api2.listFolderContinue({ cursor, limit: BROWSE_PAGE_SIZE }) : await api2.listFolder({
+          path: parent === "/" ? "" : parent,
+          recursive: false,
+          limit: BROWSE_PAGE_SIZE,
+          includeDeleted: false
+        });
+        for (const entry of page.entries) {
+          if (entry.tag !== "folder")
+            continue;
+          const key = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
+          if (!nodes.some((node) => node.key === key))
+            nodes.push({
+              key,
+              ...request.parentKey ? { parent_key: parent } : {},
+              name: entry.name,
+              kind: "folder",
+              has_children: true,
+              selectable: true
+            });
+        }
+        if (!page.hasMore) {
+          cursor = undefined;
+          break;
+        }
+        if (!page.cursor || seenCursors.has(page.cursor) || page.cursor === cursor) {
+          throw new Error("Dropbox folder listing did not advance. Update folders to retry.");
+        }
+        cursor = page.cursor;
+        seenCursors.add(cursor);
+        if (nodes.length >= 20)
+          break;
+      }
+      return { nodes, ...cursor ? { nextCursor: encodeCursor2("dropbox.files", parent, cursor) } : {} };
     },
     async validateSelections(selections) {
       const api2 = await metadataClient();

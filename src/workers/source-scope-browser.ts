@@ -142,29 +142,33 @@ export function createDropboxFolderScopeBrowser(options: {
       const parent = normalizeDropboxParent(request.parentKey);
       const providerCursor = decodeCursor('dropbox.files', parent, request.cursor);
       const api = await metadataClient();
-      const page = providerCursor
-        ? await api.listFolderContinue({ cursor: providerCursor, limit: BROWSE_PAGE_SIZE })
-        : await api.listFolder({
-            path: parent === '/' ? '' : parent,
-            recursive: false,
-            limit: BROWSE_PAGE_SIZE,
-            includeDeleted: false,
+      const nodes: OlympusFolderScopeNode[] = [];
+      let cursor = providerCursor;
+      const seenCursors = new Set<string>();
+      // Provider pages mix files and folders. Fill a visible folder page rather
+      // than asking the user to paginate through pages of discarded files.
+      // Bound each request; a sparse listing can explicitly continue afterward.
+      for (let pages = 0; pages < 10; pages += 1) {
+        const page = cursor
+          ? await api.listFolderContinue({ cursor, limit: BROWSE_PAGE_SIZE })
+          : await api.listFolder({ path: parent === '/' ? '' : parent, recursive: false,
+              limit: BROWSE_PAGE_SIZE, includeDeleted: false });
+        for (const entry of page.entries) {
+          if (entry.tag !== 'folder') continue;
+          const key = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
+          if (!nodes.some(node => node.key === key)) nodes.push({
+            key, ...(request.parentKey ? { parent_key: parent } : {}),
+            name: entry.name, kind: 'folder', has_children: true, selectable: true,
           });
-      return {
-        nodes: page.entries
-          .filter((entry) => entry.tag === 'folder')
-          .map((entry) => ({
-            key: normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`),
-            ...(request.parentKey ? { parent_key: parent } : {}),
-            name: entry.name,
-            kind: 'folder' as const,
-            has_children: true,
-            selectable: true,
-          })),
-        ...(page.hasMore && page.cursor
-          ? { nextCursor: encodeCursor('dropbox.files', parent, page.cursor) }
-          : {}),
-      };
+        }
+        if (!page.hasMore) { cursor = undefined; break; }
+        if (!page.cursor || seenCursors.has(page.cursor) || page.cursor === cursor) {
+          throw new Error('Dropbox folder listing did not advance. Update folders to retry.');
+        }
+        cursor = page.cursor; seenCursors.add(cursor);
+        if (nodes.length >= 20) break;
+      }
+      return { nodes, ...(cursor ? { nextCursor: encodeCursor('dropbox.files', parent, cursor) } : {}) };
     },
     async validateSelections(selections) {
       const api = await metadataClient();

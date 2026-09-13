@@ -527,7 +527,7 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose folders</h1>
-        <p>Connecting an account does not start indexing. Browse folders, choose what Olympus may use,
+        <p>Connecting an account does not start indexing. Choose what Olympus may use,
         then press <strong>Save scope and start</strong>. Unselected folders stay out. Choose <strong>Metadata only</strong>
         for large photo or video folders — or anything you want searchable by name and date without
         processing its contents. Choose <strong>No ingestion</strong> to keep a folder out of Olympus
@@ -552,10 +552,11 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: re
         </aside>
         <section class="finder-main">
           <div class="finder-toolbar"><input type="search" data-scope-search placeholder="Search listed folders" aria-label="Search listed folders"></div>
-          <div class="scope-browser-toolbar"><button type="button" data-scope-browse-root${unavailable ? ' disabled' : ''}>Browse folders</button>
-            <span data-scope-location>Folders</span></div>
+          <div class="scope-browser-toolbar"><span data-scope-location>Folders</span>
+            <button type="button" data-scope-browse-root${unavailable ? ' disabled' : ''}>Update</button>
+            <span data-scope-loading role="status" aria-live="polite" hidden>Loading folders…</span></div>
           <p class="scope-browser-note">${source.error ? escapeHtml(source.error) : source.connected
-            ? 'Browsing lists folder names only. No file contents are read or indexed until you confirm your scope.'
+            ? 'Opening this page loads folder names only. No file contents are read or indexed until you confirm your scope.'
             : 'Connect this account first, then return here to choose folders. Connecting will not start ingestion.'}</p>
           ${source.connected ? '' : `<a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
           <div class="tree-viewport scope-browser-list" data-scope-nodes role="list" aria-label="Folders"></div>

@@ -410,6 +410,8 @@ For Drive and Dropbox, **Connect** only connects the account. Open **Choose
 folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
 only**, and **No ingestion** choices, then explicitly **Save scope and start**.
 The folder browser lists names without indexing or reading file contents.
+Folder names load automatically when Choose folders opens. Update refreshes
+the listing; the loading indicator stays visible while requests are in flight.
 Unselected folders stay out. Entire-account ingestion requires an explicit
 selection and confirmation; a default configuration is not permission.
 

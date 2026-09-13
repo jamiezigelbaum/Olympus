@@ -590,3 +590,33 @@ test('queued scheduler work is revision-bound and refuses an account switch befo
   await expect(source.tasks[0]!.run()).rejects.toThrow('scope approval is required');
   expect(runs).toBe(0);
 });
+
+
+test('Dropbox fills a folder page across mixed provider pages before Show more', async () => {
+  const calls: string[] = [];
+  const folder = (n: number) => ({ tag: 'folder' as const, id: `id:${n}`, name: `Folder ${n}`, pathLower: `/folder-${n}` });
+  const browser = createDropboxFolderScopeBrowser({ credentialHandle: 'dropbox.personal', metadataClient: {
+    async listFolder(request) {
+      expect(request.recursive).toBe(false); calls.push('first');
+      return { entries: [folder(1), ...Array.from({ length: 99 }, (_, n) => ({ tag: 'file' as const, id: `file:${n}`, name: 'file.txt' }))], hasMore: true, cursor: 'next-1' };
+    },
+    async listFolderContinue({ cursor }) {
+      calls.push(cursor);
+      return { entries: Array.from({ length: 19 }, (_, n) => folder(n + 2)), hasMore: true, cursor: 'next-2' };
+    },
+  } });
+  const page = await browser.browse({});
+  expect(calls).toEqual(['first', 'next-1']);
+  expect(page.nodes).toHaveLength(20);
+  expect(page.nextCursor).toBeDefined();
+});
+
+test('Dropbox exhausts file-only continuations when fewer than twenty folders exist', async () => {
+  let continued = false;
+  const browser = createDropboxFolderScopeBrowser({ credentialHandle: 'dropbox.personal', metadataClient: {
+    async listFolder() { return { entries: [{ tag: 'folder' as const, id: 'id:1', name: 'Only folder', pathLower: '/only' }], hasMore: true, cursor: 'next' }; },
+    async listFolderContinue() { continued = true; return { entries: [{ tag: 'file' as const, id: 'file:1', name: 'file.txt' }], hasMore: false }; },
+  } });
+  const page = await browser.browse({});
+  expect(continued).toBe(true); expect(page.nodes).toHaveLength(1); expect(page.nextCursor).toBeUndefined();
+});

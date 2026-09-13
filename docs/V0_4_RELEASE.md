@@ -27,6 +27,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-13 — Folder-picker loading.** Opening Choose folders authorizes
+  listing folder names for the visible connected source. Load them automatically,
+  show a loading state beside Folders, and offer Update for an explicit refresh.
+  Fill toward at least 20 folders across mixed provider pages before ordinary
+  pagination; a bounded sparse scan may offer Continue loading instead. No
+  content is fetched or indexed until the existing explicit scope approval.
+  Refresh preserves unsaved choices; hidden, disconnected, and read-only
+  sources do not start automatic browsing.
 - **2026-09-13 — Expert implementation belongs to Expert Agents.** Removed
   the duplicate worker, client, expert skills, tools, configuration, and serve
   command. An architecture guard prevents their return. Olympus's generic
