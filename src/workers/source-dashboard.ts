@@ -1,3 +1,4 @@
+import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1316,7 +1317,7 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
   policy_basis: 'enforced',
   tiers: [
     {
-      name: 'Secrets',
+      name: SENSITIVITY_TIER_LABELS.secrets,
       tier_label: 'S5',
       meaning: 'Refused before storage — content never stored and never reaches any model',
       local: false,
@@ -1324,15 +1325,15 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
       frontier: false,
     },
     {
-      name: 'Secure',
+      name: SENSITIVITY_TIER_LABELS.secure,
       tier_label: 'S4',
-      meaning: 'Kept in your secure store — local models and Venice only, never frontier cloud',
+      meaning: 'Sensitive personal material — local models and Venice only, never frontier cloud',
       local: true,
       venice: true,
       frontier: false,
     },
     {
-      name: 'Private',
+      name: SENSITIVITY_TIER_LABELS.private,
       tier_label: 'S1–S3',
       meaning: 'Everyday mail, files, and notes',
       local: true,
@@ -1340,7 +1341,7 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
       frontier: true,
     },
     {
-      name: 'Public',
+      name: SENSITIVITY_TIER_LABELS.public,
       tier_label: 'S0',
       meaning: 'Freely shareable material',
       local: true,
@@ -4439,7 +4440,7 @@ const DASHBOARD_TRUST_DOMAINS = ['secure_local', 'internal', 'public_safe'];
  * pool carries no explicit order its members are equals — dispatch picks from
  * recent health and latency (`selection: 'health_latency'` in the worker's
  * route plan). Reading `.members` and printing it as a "then" chain asserted a
- * try-this-first order that does not exist, which on the Secure card claimed
+ * try-this-first order that does not exist, which on the Private card claimed
  * the on-device model always answers before the encrypted-cloud one.
  */
 function modelLaneLabels(sovereigntyEngine: SovereigntyEngine, trustDomain: string): {
@@ -4543,11 +4544,11 @@ function familyLabel(family: string): string {
 function trustDomainLabel(trustDomain: string): string {
   switch (trustDomain) {
     case 'secure_local':
-      return 'Secure';
+      return SENSITIVITY_TIER_LABELS.secure;
     case 'internal':
-      return 'Private';
+      return SENSITIVITY_TIER_LABELS.private;
     case 'public_safe':
-      return 'Public';
+      return SENSITIVITY_TIER_LABELS.public;
     default:
       return titleCase(trustDomain.replace(/[_-]/g, ' '));
   }

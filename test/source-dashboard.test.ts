@@ -2246,7 +2246,7 @@ describe('dashboard misreporting where private data lives', () => {
     expect(view.unassigned_corpora.corpus_count).toBe(0);
   });
 
-  test('the internal, cloud-answerable Dropbox band is a visible tier on the Dropbox card, not 100% Secure', () => {
+  test('the internal, cloud-answerable Dropbox band is a visible tier on the Dropbox card, not 100% Private', () => {
     const status = statusWithCorpora([
       dropboxFilesCorpus(4000, 4000),
       retiredLibraryCorpus(900, 900),
@@ -2262,8 +2262,8 @@ describe('dashboard misreporting where private data lives', () => {
 
     const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files');
     expect(dropbox?.tier_composition).toEqual(expect.arrayContaining([
-      { trust_domain: 'secure_local', label: 'Secure', indexed_items: 4000, content_ready_items: 4000 },
-      { trust_domain: 'internal', label: 'Private', indexed_items: 900, content_ready_items: 900 },
+      { trust_domain: 'secure_local', label: 'Private', indexed_items: 4000, content_ready_items: 4000 },
+      { trust_domain: 'internal', label: 'Personal', indexed_items: 900, content_ready_items: 900 },
     ]));
     expect(view.summary.total_indexed_items).toBe(4900);
     expect(view.where_your_data_lives.find((card) => card.trust_domain === 'secure_local')?.indexed_items).toBe(4000);
@@ -2369,8 +2369,8 @@ describe('dashboard misreporting where private data lives', () => {
     const gmail = view.sources.find((source) => source.source_id === 'gmail.email');
     expect(gmail?.coverage.indexed_items).toBe(13000);
     expect(gmail?.tier_composition).toEqual(expect.arrayContaining([
-      { trust_domain: 'secure_local', label: 'Secure', indexed_items: 10000, content_ready_items: 10000 },
-      { trust_domain: 'internal', label: 'Private', indexed_items: 3000, content_ready_items: 3000 },
+      { trust_domain: 'secure_local', label: 'Private', indexed_items: 10000, content_ready_items: 10000 },
+      { trust_domain: 'internal', label: 'Personal', indexed_items: 3000, content_ready_items: 3000 },
     ]));
     expect(view.summary.total_indexed_items).toBe(13000);
     expect(view.where_your_data_lives.find((card) => card.trust_domain === 'secure_local')?.indexed_items).toBe(10000);

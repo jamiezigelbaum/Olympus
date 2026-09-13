@@ -6,6 +6,12 @@ this resolver plus the tool descriptions; do not read skill files with bash,
 shell, OpenClaw exec, local file reads, or session logs in ordinary calling-assistant
 sessions.
 
+Use the tier names Public, Personal, Private, and Secrets when explaining
+results. Personal maps to `internal` (S1–S3); Private maps to `secure_local`
+(S4). Existing IDs and tool flags such as `include_secure_local` keep their
+spelling. In schema-v1 sensitivity maps, `private` means Personal and `secure`
+means Private; never substitute one for the other.
+
 ## Local Model Usage
 
 | Trigger | Skill |
@@ -106,7 +112,7 @@ doctor repair. Test one real item before any batch.
 - If source-index tools are unavailable, do not fall back to raw shell,
   `sqlite3`, local database files, or provider CLIs in ordinary calling-assistant
   sessions.
-- Secure source reasoning normally leaves `analyst_provider` unset so the
+- Private source reasoning normally leaves `analyst_provider` unset so the
   deployment-approved pool selects by health/latency or follows an explicit
   configured order. If the owner explicitly constrains the request to Venice,
   use `source_answer` with `analyst_provider: venice` plus the exact requested

@@ -19,7 +19,7 @@ export function defineGmailSecureLocalCorpus(): SourceIndexCorpusDefinition {
     family: 'email',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    description: 'Private Gmail evidence stored and retrieved through the shared connector store.',
+    description: 'Personal Gmail evidence stored and retrieved through the shared connector store.',
   });
 }
 

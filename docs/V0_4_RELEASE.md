@@ -27,6 +27,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-13 — Tier and setup terminology.** Display Public, Personal
+  (formerly Private), Private (formerly Secure), and Secrets throughout the
+  current product and setup guidance. Use Local models with Venice fallback,
+  Local models, Venice, and Don't ingest Private data as the four option labels.
+  Schema-v1 keys (`private` → S3/internal; `secure` → S4/secure_local), preset
+  IDs, stored classifications, and routing permissions remain unchanged.
+  Current guides spell out this compatibility mapping; dated receipts below
+  retain the terminology used when they were recorded. Rebuild and qualify
+  the replacement rehearsal candidate before the next clean test.
+
 - **2026-09-13 — Packaged manual key entry.** Manual Gemini, Venice, and
   Readwise key entry uses `connect <source> --api-key-prompt`, with masked
   controlling-terminal input and no generated shell scripts. The existing

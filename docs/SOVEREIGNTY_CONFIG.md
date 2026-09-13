@@ -30,32 +30,32 @@ reconnecting the key does not repair them. See the
 An **answer model** reads retrieved evidence and writes an answer.
 An **embedding model** turns permitted material into vectors for semantic
 search. Buying a Venice account does not configure embeddings. A provider
-approved for secure answers is not automatically approved for secure vectors.
+approved for Private answers is not automatically approved for Private vectors.
 
-Here, **non-secure** means public data and classified private data that you
-permit ordinary cloud models to process. **Secure** includes health, finance,
+Public data and classified **Personal** data may use ordinary cloud models
+when you permit that processing. **Private** includes health, finance,
 legal, and similarly sensitive material. Secrets are denied to every model.
 
-| Preset | Non-secure embeddings | Secure search | Secure answers | You supply |
+| Preset | Public and Personal embeddings | Private search | Private answers | You supply |
 |---|---|---|---|---|
-| `private-cloud-only` — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
-| `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
-| `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key |
+| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
+| Local models (`local-only`) | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
+| Local models with Venice fallback (`local-first`) | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
+| Don't ingest Private data (`no-sensitive`) | Gemini Embedding 2 | Private content is unavailable to answering | None | Gemini key |
 
-“Private cloud only” describes **secure-data handling**: secure answers use
-Venice, and secure semantic search uses a separately configured Venice Private
+The **Venice** preset describes **Private-data handling**: Private answers use
+Venice, and Private semantic search uses a separately configured Venice Private
 embedding model when no local provider is configured. It does not route all
-Olympus traffic through Venice; Gemini serves public and ordinary-private
+Olympus traffic through Venice; Gemini serves Public and Personal
 embeddings. Explain that distinction before asking for either provider key.
 
-`local-only` describes the handling of **secure** data; the shipped preset
-still uses Gemini for non-secure embeddings. It is not an all-offline preset.
+`local-only` describes the handling of **Private** data; the shipped preset
+still uses Gemini for Public and Personal embeddings. It is not an all-offline preset.
 The ordinary answer path uses the host's configured inference route by default.
 Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
 
-Secure content never goes to Gemini. The private-cloud-only preset does not
-require a GPU or a local embedding server. Local presets retain local secure
+Private content never goes to Gemini. The private-cloud-only preset does not
+require a GPU or a local embedding server. Local presets retain local Private
 embeddings; an unavailable local server does not silently change the vector
 model. Venice E2EE integration remains outside this release. Existing saved
 configurations are preserved: a previously lexical-only install needs explicit
@@ -118,7 +118,7 @@ permission to read it; keep the value out of output, files, notes, and logs.
    Google's [API-key instructions](https://ai.google.dev/gemini-api/docs/api-key).
 2. Review the current [Gemini pricing and data-use terms](https://ai.google.dev/gemini-api/docs/pricing#gemini-embedding-2).
    Free and paid tiers have different data-use terms. Do not infer a privacy
-   guarantee from the label "private" in Olympus, and do not enable billing
+   guarantee from a tier label in Olympus, and do not enable billing
    without your own approval. Set appropriate quota/billing alerts; an alert
    alone is not a spending cap.
 3. Create a key for this installation, keep it in your password manager, and
@@ -167,8 +167,8 @@ This step applies to `private-cloud-only` and `local-first`.
 
 Verify both the key and one small, consented model request: a valid key may
 still be blocked by an empty balance or a per-key limit. Use only a model the
-live Venice catalog and Olympus policy accept for secure answers. Do not
-respond to an unavailable route by sending secure data to an ordinary cloud
+live Venice catalog and Olympus policy accept for Private answers. Do not
+respond to an unavailable route by sending Private data to an ordinary cloud
 provider. Keep the preset's existing model choice unless you approve a change.
 
 ### Local models: bring a running server
@@ -197,8 +197,8 @@ registered `secure-local-qwen3-embed` model defaults to 2560; an existing
 Do not assign that model ID to a different model or vector space. An
 unregistered model without an explicit dimension still refuses startup, and
 the current custom-settings limitation applies to that case.
-Keep secure embedding requests on loopback; local reasoning with optional
-Venice escalation does not permit Venice or Gemini to receive secure
+For local-model presets, keep Private embedding requests on loopback; local reasoning with optional
+Venice escalation does not permit Venice or Gemini to receive Private
 embedding inputs.
 
 ### Verify readiness, then connect a source
@@ -223,20 +223,34 @@ own proof. Do not repair testers' machines through undocumented edits.
 
 Olympus should let each user define what data sovereignty means for them.
 
-The long-term product should not assume that private always means local. A user
-may choose local MLX models for secure data, encrypted web models for private
-work, ordinary cloud models for public material, or a mix.
+The long-term product should not assume that Private always means local. A user
+may choose local MLX models for Private data, encrypted web models for Personal
+work, ordinary cloud models for Public material, or a mix.
 
 ## Configuration Concepts
 
 ### Data Classes
 
 A data class describes what kind of information is being handled. User-facing
-language is public, private, secure, and secrets; internally those map to the
+language is Public, Personal, Private, and Secrets; internally those map to the
 existing granular trust scale (`public_safe`, `internal`, `secure_local`, and
-S5).
+S5) through the legacy stored keys shown below.
 
-Examples:
+| User-facing data class | Legacy stored key | Granular trust scale |
+|---|---|---|
+| Public | `public` | `public_safe` (S0) |
+| Personal | `private` | `internal` (S3) |
+| Private | `secure` | `secure_local` (S4) |
+| Secrets | `secrets` | S5 |
+
+These are display names over unchanged machine keys: the enum values, the
+schema, and `targetTierName` all keep their stored names. The trap is the
+collision — the legacy `private` key means Personal, so sensitive Private data
+is still written as `secure` (`"targetTierName": "secure"`). Never write
+`private` for sensitive Private data; that maps it to Personal.
+
+Examples of the stored keys (`public` = Public, `private` = Personal,
+`secure` = Private, `secrets` = Secrets):
 
 - `public`
 - `private`
@@ -277,7 +291,7 @@ The policy should fail closed. If no approved model is available for a data
 class, Olympus should ask for approval or refuse the operation rather than
 silently falling back to a less trusted model.
 
-For secure data, the primary abstraction is the **secure analyst pool**: the
+For Private data, the primary abstraction is the **secure analyst pool**: the
 deployment-approved set of equal, first-class model profiles that may receive
 raw `secure_local` evidence. This deployment approves loopback Delphi/local
 profiles plus Venice models whose catalog category is Private or TEE. Another
@@ -291,11 +305,11 @@ for that deployment (the `local-first` preset is one such configured ordering).
 Existing `analyst: [...]` route lists remain accepted and are parsed as an
 explicit order, preserving deployed behavior during migration.
 
-The secure-answer E2EE gate is temporarily narrower than Venice's category
+The Private-answer E2EE gate is temporarily narrower than Venice's category
 floor: any normalized `e2ee-*` model id configured as a secure-pool member gets
 a typed policy refusal. Those models need local key handling Olympus has not
 built. The gate is enforced in code before worker construction; it is not a
-documentation warning. The current secure Venice defaults are `kimi-k3`
+documentation warning. The current Private Venice defaults are `kimi-k3`
 (strong) and `inkling` (normal tier).
 
 ### Retrieval Trust Domains
@@ -305,17 +319,18 @@ which embedding backends may be used to build those spaces.
 
 Technical route keys:
 
-- `secure_local`: secure corpora. Local retrieval, local embeddings, and
+- `secure_local`: Private corpora. Local retrieval and local embeddings,
+  or separately approved Venice Private embeddings when configured;
   secure-custodian callers only.
-- `internal`: private corpora approved for ordinary assistant reasoning. Cloud
-  embeddings are allowed by default once material is classified private.
-- `public_safe`: explicitly public corpora. Cloud embeddings are allowed in
-  stores that never mix with private or secure material.
+- `internal`: Personal corpora approved for ordinary assistant reasoning. Cloud
+  embeddings are allowed by default once material is classified Personal.
+- `public_safe`: explicitly Public corpora. Cloud embeddings are allowed in
+  stores that never mix with Personal or Private material.
 
 Retrieval trust domains govern search, embedding, and model-context routing.
 They do not by themselves forbid approved cloud service providers from acting as
-vaults, OAuth custodians, evidence stores, or credential brokers for secure or
-secrets material.
+vaults, OAuth custodians, evidence stores, or credential brokers for Private or
+Secrets material.
 
 Retrieval policy must fail closed just like model routing. A query may only hit
 the corpus collections allowed for the current caller, session, task, and trust
@@ -329,17 +344,17 @@ embedding epoch used to build derived vectors.
 
 Rules:
 
-- ordinary cloud embeddings are never allowed for secure data; a future
-  secure-provider embedding lane would need its own explicit provider approval,
-  corpus policy, and audit proof
-- cloud embeddings are the default for classified private and public corpora,
+- ordinary cloud embeddings are never allowed for Private data; the Venice
+  embedding lane requires its own explicit provider approval, corpus policy,
+  and audit proof
+- cloud embeddings are the default for classified Personal and Public corpora,
   because those corpora are approved for ordinary cloud-model use
-- the default cloud-capable embedding provider for private and public corpora
+- the default cloud-capable embedding provider for Personal and Public corpora
   is Gemini Embedding 2, so text, images, diagrams, video, audio, and documents
   can live in one multimodal semantic space per corpus
 - local embeddings may still be used for offline, cost, fallback, or evaluation
   reasons, but they are not the durable default for cloud-approved material
-- private and public stores must remain separate even when they use the same
+- Personal and Public stores must remain separate even when they use the same
   embedding provider or model family
 - local and cloud embeddings must not mix inside the same corpus generation
   epoch
@@ -437,7 +452,7 @@ Hard invariants remain enforced outside user control:
   chat fetch, and residual non-cooperative orphans are counted content-free
 - consecutive member failures open a worker-local cooldown breaker; skipped
   members are recorded in the analyst-leg trace without source content
-- secure embeddings use loopback local providers or an explicitly selected,
+- Private embeddings use loopback local providers or an explicitly selected,
   catalog-approved Venice Private provider; other cloud providers are refused
 - secrets are hard-denied everywhere
 - empty or exhausted fallback chains fail closed
@@ -463,12 +478,12 @@ olympus sovereignty init --preset no-sensitive
 
 The bundled presets are:
 
-| Preset | Operator label | Secure content posture |
+| Preset | Operator label | Private content posture |
 |---|---|---|
-| `local-first` | Local models and private cloud | Secure pool with explicit local → Venice Private order |
-| `local-only` | Local models only | Local source-answer only |
-| `private-cloud-only` | Private cloud only | Venice Private `kimi-k3` only |
-| `no-sensitive` | Do not add secure data to Olympus | Metadata-only gap; secure content is not added |
+| Local models with Venice fallback (`local-first`) | Local models with Venice fallback | Private pool with explicit local → Venice Private order |
+| Local models (`local-only`) | Local models | Local source-answer only |
+| Venice (`private-cloud-only`) | Venice | Venice Private `kimi-k3` only |
+| Don't ingest Private data (`no-sensitive`) | Don't ingest Private data | Metadata-only gap; Private content is not added |
 
 ### Default posture for new users (owner decision, 2026-07-06)
 

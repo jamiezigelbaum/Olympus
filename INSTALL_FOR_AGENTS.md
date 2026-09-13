@@ -406,11 +406,11 @@ sensitivity conversation:
 > **Public** — things that are public or meant to be: your published
 > writing, posts, public links. Any model can work with these.
 >
-> **Private** — ordinary personal and work life: schedules, newsletters,
+> **Personal** — ordinary personal and work life: schedules, newsletters,
 > routine email, most projects. Your assistant's regular models can reason
 > over this — the same models you'd paste it into today.
 >
-> **Secure** — the things you'd only tell someone you trust: health, money,
+> **Private** — the things you'd only tell someone you trust: health, money,
 > legal matters, therapy, your family. This tier is the reason Olympus
 > exists. It never goes to ordinary cloud models, full stop. What *can*
 > happen with it is the one big choice you'll make in a few minutes:
@@ -421,13 +421,13 @@ sensitivity conversation:
 > these, in any lane. Olympus will only ever tell you *where* a secret
 > lives, never what it says.
 >
-> Two rules are hard-wired and not up for configuration: secure data never
+> Two rules are hard-wired and not up for configuration: Private data never
 > touches ordinary cloud models, and when Olympus isn't allowed to answer
 > something, it tells you so instead of quietly downgrading your privacy to
 > get an answer.
 >
 > The tiers are fixed, but what goes *in* them is personal — one person's
-> "eh, whatever" is another person's secure. So tell me about your data:
+> "eh, whatever" is another person's Private. So tell me about your data:
 > what do you want your assistant to know about, and what are you
 > protective of? Talk normally — I'll turn what you say into your personal
 > sensitivity map and read it back to you before anything gets saved.
@@ -448,14 +448,14 @@ Reflect back a proposed map before writing anything — in sentences, in
 the operator's own words, never as a `tier: item, item, item` cram-list:
 
 > Here's what I heard. Your blog and anything you've published stays
-> public. Day-to-day email, calendars, and work projects are private —
+> Public. Day-to-day email, calendars, and work projects are Personal —
 > your regular assistant keeps working with those like it does now.
 > Anything about your health, your finances, and your kids gets the
-> secure treatment we just talked about. And passwords or keys — no model
+> Private treatment we just talked about. And passwords or keys — no model
 > ever sees those. Did I get that right, and is there anything you'd move?
 
-Keep revising until the operator says yes. Default categories to **secure**
-unless the operator explicitly says **secrets**. The map is written before
+Keep revising until the operator says yes. Default categories to **Private**
+unless the operator explicitly says **Secrets**. The map is written before
 `olympus setup` runs, so its directory does not exist yet on a fresh
 machine — create it first, or the write fails with `ENOENT`. Create it
 **owner-only**: this directory holds the operator's sensitivity map, and a
@@ -516,9 +516,27 @@ it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 1:
 }
 ```
 
-For this phase, do not write public/private categories into the map: Olympus
-uses it only as raise-only guidance. It may raise matching items to secure or
-secrets, never downgrade them. Validate it before continuing:
+**Stored keys are legacy; labels are display-only.** The JSON above uses the
+legacy machine keys. Never write a key you invented to match a display label:
+the stored `private` key means **Personal** data, and sensitive **Private**
+data is still written as `secure`. Never write `private` (or `targetTierName`
+`private`) for sensitive Private data. The validator rejects Personal
+raise-only categories and mismatched target fields; preserve this exact mapping:
+
+| Stored key (JSON) | Trust tier / domain | Display label |
+|---|---|---|
+| `public` | `S0` / `public_safe` | Public |
+| `private` | `S3` / `internal` | Personal |
+| `secure` | `S4` / `secure_local` | Private |
+| `secrets` | `S5` / `secure_local` | Secrets |
+
+So a therapy category is written with `"targetTierName": "secure"` — never
+`"targetTierName": "private"` — even though you will describe that result to
+the operator as Private.
+
+For this phase, do not write Public/Personal categories into the map: Olympus
+uses it only as raise-only guidance. It may raise matching items to Private or
+Secrets, never downgrade them. Validate it before continuing:
 
 ```bash
 olympus sensitivity validate
@@ -555,6 +573,10 @@ for them, then present all four.
 The operator has likely never heard of Venice, so introduce it once,
 before the options name it:
 
+Use these display labels in conversation and setup summaries. Preset IDs in
+parentheses are command values; keep those IDs in commands and configuration.
+The setup result also supplies `presetLabel` for its human-facing name.
+
 > Two of these options use Venice (venice.ai) — a privacy-focused AI
 > cloud. What it offers is a provider that does not train on your
 > conversations or retain them the way an ordinary cloud model does.
@@ -564,43 +586,42 @@ before the options name it:
 > to read a question. Olympus does not provide or qualify
 > end-to-end-encrypted inference in this version.
 >
-> How do you want to handle your secure data?
+> How do you want to handle your Private data?
 >
-> 1. **Local models and private cloud** (`local-first`) — recommended if
->    you run local models. Secure questions are answered on your own
+> 1. **Local models with Venice fallback** (`local-first`) — recommended if
+>    you run local models. Private questions are answered on your own
 >    machine first; Venice is the approved second step when the local lane
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
 >    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
->    key (free tier available) for public and ordinary-private search indexing.
+>    key (free tier available) for Public and Personal search indexing.
 >    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
-> 2. **Local models only** (`local-only`) — secure questions are answered
+> 2. **Local models** (`local-only`) — Private questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
 >    runtime with lots of fast memory, plus a Gemini API key (free tier
->    available) for public and ordinary-private search indexing. Trade-off: no
->    sensitive-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
+>    available) for Public and Personal search indexing. Trade-off: no
+>    Private-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
-> 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
->    not run local models. Secure content goes only to Venice, on its
+> 3. **Venice** (`private-cloud-only`) — recommended if you do
+>    not run local models. Private content goes only to Venice, on its
 >    Private model path — `kimi-k3` for answers and a separately approved
->    private embedding model for secure search. Requires: a
+>    Private embedding model for Private search. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
->    available) for public and ordinary-private search indexing. Secure search
->    uses Venice Private embeddings when no local provider is configured;
->    secure content never goes to Gemini. “Only” describes secure-data handling, not all Olympus traffic.
+>    available). Venice protects your Private tier while Gemini indexes only
+>    your Public and Personal data; Private content never goes to Gemini.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
->    for secure answers and embeddings, on that provider's word rather than on
+>    for Private answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
-> 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
->    keeps its hands off secure data entirely: it is not imported, not
+> 4. **Don't ingest Private data** (`no-sensitive`) — Olympus
+>    keeps its hands off Private data entirely: it is not imported, not
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    a Gemini API key (free tier available) for public and ordinary-private
+>    a Gemini API key (free tier available) for Public and Personal
 >    source indexing.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
@@ -649,7 +670,7 @@ olympus setup --preset <chosen-preset> --cloud-lane subscription --yes
 
 **Reading the summary: an honest gap looks like a leak until you know the
 shape.** On `no-sensitive` the summary and later `olympus doctor` output
-still show the secure corpora as configured with nothing in them, and the
+still show the Private corpora as configured with nothing in them, and the
 sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
 empty pool. That is `no-sensitive` working: the tier exists so Olympus can
 answer "that's not indexed" honestly, and it is routed nowhere. Do not
@@ -672,8 +693,8 @@ report "your keys are set up" after the fact.
 
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
-before this step. It separates Gemini non-secure embeddings, local secure
-embeddings, Venice secure reasoning, and the approved Venice secure embedding
+before this step. It separates Gemini Public and Personal embeddings, local Private
+embeddings, Venice Private reasoning, and the approved Venice Private embedding
 fallback when no local provider is configured.
 The worker uses registered dimensions for shipped models when there is no
 override (Gemini Embedding 2: 3072; registered local embedding model: 2560;
@@ -875,7 +896,7 @@ three checks are reporting the same gap", or "no mailbox is connected yet"
 — never as a count of failures.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
-internal name for the analyst that serves the secure tier (local models
+internal name for the analyst that serves the Private tier (local models
 or Venice, per the posture) — operators have never heard it. If the
 operator's posture has no local lane, say nothing about Argus, local
 models, or local endpoints: a "note about local models" to someone who
@@ -1168,12 +1189,12 @@ Use the provider-specific connect and readiness checks already documented in
 Step 3, then prove the worker consumes that wiring with the existing
 `olympus doctor` and `olympus worker status` checks. The receipt must name:
 
-- **Gemini — every posture.** Its wiring is for public and ordinary-private
-  embeddings. Gemini is not the secure-answer provider and is never a secure
+- **Gemini — every posture.** Its wiring is for Public and Personal
+  embeddings. Gemini is not the Private-answer provider and is never a Private
   embedding requirement.
 - **Venice — only when the posture uses it.** `local-first` uses Venice as
-  the approved secure-answer escalation; `private-cloud-only` uses Venice for
-  secure answers and, without a local provider, secure embeddings. Verify the
+  the approved Private-answer escalation; `private-cloud-only` uses Venice for
+  Private answers and, without a local provider, Private embeddings. Verify the
   embedding model separately: Private catalog classification, endpoint
   readiness, matching dimensions, and approved cost. `local-only` and
   `no-sensitive` do not require Venice, so do not ask for or block on a Venice
@@ -1198,8 +1219,8 @@ Give the operator this honest summary before the source handoff, adapting only
 the observed facts:
 
 > Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
-> for public and ordinary-private embeddings: `<verified or still open>`.
-> Venice secure-answer and secure-embedding wiring, reported separately:
+> for Public and Personal embeddings: `<verified or still open>`.
+> Venice Private-answer and Private-embedding wiring, reported separately:
 > `<verified, not required for this posture, or
 > still open>`. Worker consumer checks: `<green or name the open check>`. No
 > source is connected yet, and I will wait to invite Connect until every
@@ -1510,8 +1531,8 @@ stdout. Its exit status is the pass/fail signal — you do not have to grade
 the output yourself. Exit 0 is green.
 
 Confirm in the answer's audit block that `analyst_backend` matches the
-chosen posture (e.g. `venice` for private-cloud-only secure answers, `local`
-for local-only secure answers).
+chosen posture (e.g. `venice` for `private-cloud-only` Private answers, `local`
+for `local-only` Private answers).
 
 The private source worker lane is on by default, so a fresh install
 should not see `email_not_configured` at all. If it does, the lane was
@@ -1545,7 +1566,7 @@ the worker only if it reports `resolved_restart_required`);
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
 should be absent. Then show the operator Olympus in OpenClaw: source freshness
-and where public, private, secure, and secrets are allowed to go. Use
+and where Public, Personal, Private, and Secrets are allowed to go. Use
 `olympus dashboard` when standalone access is needed.
 
 Report to the operator: what was installed, the chosen posture, which

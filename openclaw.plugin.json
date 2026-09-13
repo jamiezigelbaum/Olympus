@@ -702,7 +702,7 @@
       "help": "Versioned model-routing and retrieval policy. Config files use secret references, never inline keys."
     },
     "email": {
-      "label": "Private Email Lane",
+      "label": "Email source worker",
       "help": "Gateway-local private email source worker. OAuth and raw email access must stay outside ordinary cloud-model context."
     },
     "sourceIndex": {

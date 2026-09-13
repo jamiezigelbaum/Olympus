@@ -21,10 +21,10 @@ describe('dashboard sensitivity categories', () => {
   test('lists the owner categories with their own words and the tier they raise into', () => {
     const html = renderDashboardSensitivityBody(fixtureView({ sensitivity: fixtureSensitivity() }));
 
-    expect(html).toContain('<div class="sect">Secure categories</div>');
+    expect(html).toContain('<div class="sect">Private categories</div>');
     expect(html).toContain('<span class="name">Financial</span>');
     expect(html).toContain('statements, tax, banking');
-    expect(html).toContain('Secure (S4) · 12 match terms');
+    expect(html).toContain('Private (S4) · 12 match terms');
     expect(html).toContain('<span class="name">Credentials</span>');
     expect(html).toContain('Secrets (S5) · 1 match term');
   });
@@ -63,8 +63,8 @@ describe('dashboard sensitivity categories', () => {
   test('says one plain sentence when no map is configured, and invents no rows', () => {
     const html = renderDashboardSensitivityBody(fixtureView());
 
-    expect(html).toContain('<div class="sect">Secure categories</div>');
-    expect(html).toContain('No secure categories are configured.');
+    expect(html).toContain('<div class="sect">Private categories</div>');
+    expect(html).toContain('No Private categories are configured.');
     expect(html).not.toContain('Financial');
     expect(html).not.toContain('Health');
     expect(html).not.toContain('Therapy');
@@ -75,7 +75,7 @@ describe('dashboard sensitivity categories', () => {
       fixtureView({ sensitivity: { configured: true, editable: false, categories: [] } }),
     );
 
-    expect(html).toContain('No secure categories are configured.');
+    expect(html).toContain('No Private categories are configured.');
     expect(html).not.toContain('class="catrow"');
   });
 
@@ -116,7 +116,7 @@ describe('dashboard sensitivity categories', () => {
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('&quot;quoted&quot; &amp; odd');
     // No match terms means no trailing separator dangling after the tier.
-    expect(html).toContain('<span class="tier">Secure (S4)</span>');
+    expect(html).toContain('<span class="tier">Private (S4)</span>');
   });
 });
 
@@ -243,7 +243,7 @@ function fixtureTiers(): DashboardSensitivityTiers {
         frontier: false,
       },
       {
-        name: 'Secure',
+        name: 'Private',
         tier_label: 'S4',
         meaning: 'Kept in your secure store — local models and Venice only, never frontier cloud',
         local: true,
@@ -251,7 +251,7 @@ function fixtureTiers(): DashboardSensitivityTiers {
         frontier: false,
       },
       {
-        name: 'Private',
+        name: 'Personal',
         tier_label: 'S1–S3',
         meaning: 'Everyday mail, files, and notes',
         local: true,

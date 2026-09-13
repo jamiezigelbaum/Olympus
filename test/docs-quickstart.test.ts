@@ -13,9 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('secure search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Private search uses an approved Venice Private embedding model');
     expect(docs).toContain('Existing lexical-only installations require an approved');
-    expect(docs).toContain('Local presets configure local secure embeddings');
+    expect(docs).toContain('Local presets configure local Private embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -25,7 +25,7 @@ describe('first-run docs', () => {
     expect(docs).toContain('olympus connect google --client-id <google-oauth-client-id>');
     expect(docs).toContain('olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready');
     expect(docs).toContain("printf '%s' \"$VENICE_API_KEY\" | olympus connect venice --api-key-stdin");
-    expect(docs).toContain('secure answers are served by the approved Venice');
+    expect(docs).toContain('Private answers are served by the approved Venice');
     expect(docs).not.toContain('E2EE secure-answer ids remain gated until');
     expect(docs).toContain('raise-only guidance');
 
@@ -42,9 +42,9 @@ describe('first-run docs', () => {
 
     const normalizedInstall = install.replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(normalizedInstall).toContain('So tell me about your data: what do you want your assistant to know about, and what are you protective of?');
-    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your secure data?'));
+    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
     expect(install).toContain('Gmail already lives on Google\'s servers');
-    expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
+    expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
     expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
     expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
@@ -77,7 +77,7 @@ describe('first-run docs', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const scripts = [
       ["> Olympus is installed. Quick proof:", 'd3f1f9fddd7d6b9a376a7ffcfa81ad841ca87524f8298a58d8a1df62934a9aab'],
-      ["> Here's how Olympus treats your data", '6572236609c7e45c9f11f3f2974605f752f98dddda33dc47d7c2a4fb7966f5ad'],
+      ["> Here's how Olympus treats your data", '2767c6bb05e4026fbd7dad2d0f6882ab00c15661279b87e27cfa161304e167d9'],
     ];
     for (const [start, digest] of scripts) {
       const from = install.indexOf(start!);
@@ -128,15 +128,15 @@ describe('first-run docs', () => {
     }
   });
 
-  test('private cloud only distinguishes secure search from ordinary embeddings', () => {
+  test('Venice option distinguishes Private search from Public and Personal embeddings', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const posture = install.slice(install.indexOf('> 3. **Private cloud only**'), install.indexOf('> 4. **Do not add'))
+    const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Don't ingest Private data**"))
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
-    expect(posture).toContain('Secure content goes only to Venice');
-    expect(posture).toContain('public and ordinary-private search indexing');
-    expect(posture).toContain('Venice Private embeddings when no local provider is configured');
-    expect(posture).toContain('secure content never goes to Gemini');
-    expect(posture).toContain('“Only” describes secure-data handling');
+    expect(posture).toContain('Private content goes only to Venice');
+    expect(posture).toContain('Gemini indexes only your Public and Personal data');
+    expect(posture).toContain('separately approved Private embedding model for Private search');
+    expect(posture).toContain('Private content never goes to Gemini');
+    expect(posture).not.toContain('Private cloud only');
   });
 
   test('native dashboard guidance checks artifact support and preserves standalone authentication', () => {

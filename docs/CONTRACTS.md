@@ -4,6 +4,14 @@ Status: stable, versioned architecture canon
 Owner: CTO
 Updated: 2026-08-29
 
+## Display terminology
+
+Use Public, Personal, Private, and Secrets in user-facing explanations.
+[TRUST_MODEL.md](TRUST_MODEL.md#product-tier-names) defines their mapping to
+unchanged S0–S5 tiers and `public_safe` / `internal` / `secure_local` domains.
+In technical names below, `secure_local` and secure-pool symbols refer to the
+Private tier. This terminology update changes no contract or routing semantics.
+
 ## What this is
 
 Three interfaces define every boundary in the Olympus source pipeline. They

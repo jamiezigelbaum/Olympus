@@ -26,7 +26,7 @@ result. The steps below are the same flow, by hand.
 
 Before first setup, read the full
 [four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
-then describe your sensitivity preferences and choose how to handle secure data.
+then describe your sensitivity preferences and choose how to handle Private data.
 For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
@@ -40,10 +40,10 @@ The preset prerequisites are:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` | Gemini key for non-secure embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
-| `local-only` | Gemini key for non-secure embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
-| `no-sensitive` | Gemini key for non-secure embeddings. Secure content is unavailable to answering. |
+| `local-first` — Local models with Venice fallback | Gemini key for Public and Personal embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
+| `local-only` — Local models | Gemini key for Public and Personal embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
+| `private-cloud-only` — Venice | Gemini key for Public and Personal embeddings; a funded Venice API key for Private answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
+| `no-sensitive` — Don't ingest Private data | Gemini key for Public and Personal embeddings. Private content is unavailable to answering. |
 
 A local runtime means a server actually answering at the effective policy's
 endpoints and serving its exact answer and embedding model IDs. An
@@ -54,7 +54,7 @@ Setup and `olympus doctor` print any missing preset prerequisites with the
 exact command or local-server action to take.
 
 Nothing in this guide sends your data anywhere until *you* describe what
-counts as public, private, secure, and secrets, then choose a privacy posture
+counts as Public, Personal, Private, and Secrets, then choose a privacy posture
 in step 2. That choice is the heart of Olympus.
 
 ---
@@ -145,10 +145,12 @@ change it. Setting it yourself first means it never has to.
 
 The installer-agent flow asks this conversationally: "Tell me about your data
 — what do you want your assistant to know about, and what are your privacy
-concerns?" For the hand path, write only secure/secrets categories in this
-phase. Public/private entries are not accepted yet because the map is
-raise-only guidance: it may raise matching items to secure or secrets, never
-downgrade them.
+concerns?" For the hand path, write only Private/Secrets categories in this
+phase. Public/Personal entries are not accepted yet because the map is
+raise-only guidance: it may raise matching items to Private or Secrets, never
+downgrade them. The stored keys keep their legacy names — `secure` is Private,
+and the legacy `private` key means Personal — so sensitive Private data is
+written with `"targetTierName": "secure"`, never `"private"`.
 
 ```bash
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes
@@ -190,9 +192,9 @@ file — do not hand-edit it. A key containing a single quote is refused rather
 than stored; rotate it at the provider for one without.
 
 For `local-first` and `local-only`, start your local OpenAI-compatible model
-server before relying on secure source answers.
+server before relying on Private source answers.
 
-On `no-sensitive`, setup and doctor still list the secure corpora as configured
+On `no-sensitive`, setup and doctor still list the Private corpora as configured
 and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
 gap the preset promises, not a misconfiguration.
 
@@ -207,27 +209,27 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 
 - **Your privacy posture** — the one decision that matters. Four presets:
 
-  | Preset | Public/private content | Secure content: health, finance, legal, therapy, family |
+  | Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
   |---|---|---|
-  | `local-first` | frontier cloud | secure pool explicitly ordered local → Venice Private |
+  | `local-first` | frontier cloud | Private pool explicitly ordered local → Venice Private |
   | `local-only` | frontier cloud | your own local models only |
   | `private-cloud-only` | frontier cloud | Venice Private `kimi-k3` only |
-  | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a secure lane) |
+  | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a Private lane) |
 
-  In `private-cloud-only`, secure answers are served by the approved Venice
-  Private model, with no local-model prerequisite or fallback. “Only” describes
-  secure-data handling: Gemini still handles public and ordinary-private
-  embeddings, while secure search uses an approved Venice Private embedding model.
+  In `private-cloud-only`, Private answers are served by the approved Venice
+  Private model, with no local-model prerequisite or fallback. The Venice
+  option handles Private data: Gemini still handles Public and Personal
+  embeddings, while Private search uses an approved Venice Private embedding model.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
   release claim. Existing lexical-only installations require an approved
   embedding activation/backfill; preserve their current vectors and settings.
-  Local presets configure local secure embeddings. Olympus never falls back
-  to an ordinary cloud embedding provider for secure data. `local-only` never uses
+  Local presets configure local Private embeddings. Olympus never falls back
+  to an ordinary cloud embedding provider for Private data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
-  sees secure data.
-  Turning secure data off is
+  sees Private data.
+  Turning Private data off is
   always an explicit preset choice, never a silent default.
 - **Your cloud lane** — by default Olympus reasons through your existing
   OpenClaw subscription (no API key needed). API-key providers are the

@@ -7853,7 +7853,7 @@ function parseCategory(value, label) {
   }
   const targetTierName = enumString2(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`);
   if (targetTierName === "public" || targetTierName === "private") {
-    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: public/private downgrade guidance is not supported yet.`);
+    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`);
   }
   const targetTrustTier = enumString2(record.targetTrustTier, SOURCE_TRUST_TIERS, `${label}.targetTrustTier`);
   const targetTrustDomain = enumString2(record.targetTrustDomain, SOURCE_TRUST_DOMAINS, `${label}.targetTrustDomain`);
@@ -21062,7 +21062,7 @@ function defineGmailSecureLocalCorpus() {
     family: "email",
     trustDomain: "secure_local",
     activationMode: "hybrid_shadow",
-    description: "Private Gmail evidence stored and retrieved through the shared connector store."
+    description: "Personal Gmail evidence stored and retrieved through the shared connector store."
   });
 }
 function defineInternalEmailCorpus() {
@@ -34049,7 +34049,7 @@ async function connectPublicApiKeySource(options) {
       handles: [],
       registryPath,
       secretRefs: ["store:venice.api_key"],
-      next: "Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Secure answers use that configured pool; E2EE model ids remain gated pending local key handling."
+      next: "Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Private answers use that configured pool; E2EE model ids remain gated pending local key handling."
     };
   }
   await validatePublicApiKeySource({
@@ -34746,6 +34746,23 @@ var init_connect = __esm(() => {
     "expired_token",
     "redirect_uri_mismatch"
   ]);
+});
+
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+  PRIVACY_PRESET_LABELS = {
+    "local-first": "Local models with Venice fallback",
+    "local-only": "Local models",
+    "private-cloud-only": "Venice",
+    "no-sensitive": "Don't ingest Private data"
+  };
 });
 
 // src/core/ingestion-throughput.ts
@@ -37690,11 +37707,11 @@ function familyLabel(family) {
 function trustDomainLabel(trustDomain) {
   switch (trustDomain) {
     case "secure_local":
-      return "Secure";
+      return SENSITIVITY_TIER_LABELS.secure;
     case "internal":
-      return "Private";
+      return SENSITIVITY_TIER_LABELS.private;
     case "public_safe":
-      return "Public";
+      return SENSITIVITY_TIER_LABELS.public;
     default:
       return titleCase(trustDomain.replace(/[_-]/g, " "));
   }
@@ -37721,6 +37738,7 @@ function round12(value) {
 }
 var DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
+  init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -37810,7 +37828,7 @@ var init_source_dashboard = __esm(() => {
     policy_basis: "enforced",
     tiers: [
       {
-        name: "Secrets",
+        name: SENSITIVITY_TIER_LABELS.secrets,
         tier_label: "S5",
         meaning: "Refused before storage — content never stored and never reaches any model",
         local: false,
@@ -37818,15 +37836,15 @@ var init_source_dashboard = __esm(() => {
         frontier: false
       },
       {
-        name: "Secure",
+        name: SENSITIVITY_TIER_LABELS.secure,
         tier_label: "S4",
-        meaning: "Kept in your secure store — local models and Venice only, never frontier cloud",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
         local: true,
         venice: true,
         frontier: false
       },
       {
-        name: "Private",
+        name: SENSITIVITY_TIER_LABELS.private,
         tier_label: "S1–S3",
         meaning: "Everyday mail, files, and notes",
         local: true,
@@ -37834,7 +37852,7 @@ var init_source_dashboard = __esm(() => {
         frontier: true
       },
       {
-        name: "Public",
+        name: SENSITIVITY_TIER_LABELS.public,
         tier_label: "S0",
         meaning: "Freely shareable material",
         local: true,
@@ -66902,13 +66920,13 @@ function renderDashboardSensitivityBody(view) {
 function renderCategories(view) {
   const categories = dashboardSensitivityCategories(view);
   const head = [
-    '<div class="sect">Secure categories</div>',
+    '<div class="sect">Private categories</div>',
     '<div class="quiet">What you name here never reaches a frontier cloud model —' + " everything else is tiered automatically.</div>"
   ].join(`
 `);
   if (categories.length === 0) {
     return `${head}
-<div class="foot">No secure categories are configured.</div>`;
+<div class="foot">No Private categories are configured.</div>`;
   }
   const rows = categories.map((category) => categoryRow({
     name: category.label,
@@ -66934,7 +66952,7 @@ function renderTiers(view) {
   const rows = tiers.map((tier) => `
           <tr><td class="tname">${escapeHtml(tier.name)}</td><td>${escapeHtml(tier.tier_label)}</td><td>${escapeHtml(tier.meaning)}</td>` + `${permissionCell(tier.local)}${permissionCell(tier.venice)}${permissionCell(tier.frontier)}</tr>`).join("");
   return `<div class="sect gap">Tiers</div>
-        <p class="tiersnote">Every item is tiered as it is indexed, and the tier decides which models may read it.` + ` Your secure categories raise items into Secure; detected secrets are refused before their content is stored.</p>
+        <p class="tiersnote">Every item is tiered as it is indexed, and the tier decides which models may read it.` + ` Your Private categories raise items into Private; detected secrets are refused before their content is stored.</p>
         <table>
           <tr><th>Tier</th><th></th><th>What it means</th><th>Local models</th><th>Venice</th><th>Frontier cloud</th></tr>${rows}
         </table>
@@ -66942,11 +66960,12 @@ function renderTiers(view) {
 }
 var TIER_NAMES;
 var init_sensitivity = __esm(() => {
+  init_privacy_language();
   init_components();
   init_vocabulary();
   TIER_NAMES = {
-    secure: "Secure",
-    secrets: "Secrets"
+    secure: SENSITIVITY_TIER_LABELS.secure,
+    secrets: SENSITIVITY_TIER_LABELS.secrets
   };
 });
 
@@ -80112,6 +80131,7 @@ init_sovereignty();
 init_sensitivity_map();
 
 // src/core/setup.ts
+init_privacy_language();
 import { randomBytes as randomBytes5 } from "node:crypto";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { homedir as homedir28 } from "node:os";
@@ -80120,10 +80140,10 @@ init_sovereignty();
 init_setup_preflight();
 init_worker_auth();
 var VENICE_PITCH_TEXT = [
-  "Secure source answers follow the selected preset: local-first tries your local lane before Venice; private-cloud-only uses Venice without a local-model requirement.",
+  `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS["local-first"]} tries your local lane first; ${PRIVACY_PRESET_LABELS["private-cloud-only"]} has no local-model requirement.`,
   "In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.",
-  "Secure search is lexical-only with private-cloud-only; local presets use local secure embeddings. Olympus never falls back to an ordinary cloud embedding provider for secure data.",
-  "Turning the secure tier off is a deliberate choice after this screen."
+  "Private semantic search uses local embeddings or an approved Venice Private embedding model. Gemini indexes Public and Personal content; Private content never goes to ordinary cloud embedding providers.",
+  `Choosing ${PRIVACY_PRESET_LABELS["no-sensitive"]} is a deliberate choice after this screen.`
 ];
 function runSetupDependencyCheck(input = {}) {
   const platform2 = normalizeSetupPlatform(input.platform ?? process.platform);
@@ -80245,6 +80265,7 @@ async function runSetupWizard(options) {
       text: [...VENICE_PITCH_TEXT]
     },
     preset: options.preset,
+    presetLabel: PRIVACY_PRESET_LABELS[options.preset],
     secureTierDecision: secureTierDecisionForPreset(options.preset),
     unmet_prerequisites: unmetPrerequisites,
     cloudLane,

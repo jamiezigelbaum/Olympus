@@ -1,3 +1,4 @@
+import { SENSITIVITY_TIER_LABELS } from '../../../core/privacy-language.ts';
 /**
  * Sensitivity: the categories the owner named as secure, and the tier table
  * that says which models may read which tier.
@@ -32,8 +33,8 @@ import type { DashboardPageOptions } from './home.ts';
 
 /** The tier names the map can target, in the words the tier table uses. */
 const TIER_NAMES: Readonly<Record<string, string>> = {
-  secure: 'Secure',
-  secrets: 'Secrets',
+  secure: SENSITIVITY_TIER_LABELS.secure,
+  secrets: SENSITIVITY_TIER_LABELS.secrets,
 };
 
 export function renderDashboardSensitivityPage(
@@ -77,12 +78,12 @@ export function renderDashboardSensitivityBody(view: SourceDashboardViewModel): 
 function renderCategories(view: SourceDashboardViewModel): string {
   const categories = dashboardSensitivityCategories(view);
   const head = [
-    '<div class="sect">Secure categories</div>',
+    '<div class="sect">Private categories</div>',
     '<div class="quiet">What you name here never reaches a frontier cloud model —'
     + ' everything else is tiered automatically.</div>',
   ].join('\n');
   if (categories.length === 0) {
-    return `${head}\n<div class="foot">No secure categories are configured.</div>`;
+    return `${head}\n<div class="foot">No Private categories are configured.</div>`;
   }
   const rows = categories.map((category) =>
     categoryRow({
@@ -123,7 +124,7 @@ function renderTiers(view: SourceDashboardViewModel): string {
     + `${permissionCell(tier.local)}${permissionCell(tier.venice)}${permissionCell(tier.frontier)}</tr>`).join('');
   return `<div class="sect gap">Tiers</div>
         <p class="tiersnote">Every item is tiered as it is indexed, and the tier decides which models may read it.`
-    + ` Your secure categories raise items into Secure; detected secrets are refused before their content is stored.</p>
+    + ` Your Private categories raise items into Private; detected secrets are refused before their content is stored.</p>
         <table>
           <tr><th>Tier</th><th></th><th>What it means</th><th>Local models</th><th>Venice</th><th>Frontier cloud</th></tr>${rows}
         </table>

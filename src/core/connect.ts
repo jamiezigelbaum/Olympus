@@ -814,7 +814,7 @@ export async function connectPublicApiKeySource(options: {
       handles: [],
       registryPath,
       secretRefs: ['store:venice.api_key'],
-      next: 'Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Secure answers use that configured pool; E2EE model ids remain gated pending local key handling.',
+      next: 'Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Private answers use that configured pool; E2EE model ids remain gated pending local key handling.',
     };
   }
 

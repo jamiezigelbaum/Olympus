@@ -5294,6 +5294,17 @@ var init_connected_handles = __esm(() => {
   init_credential_broker();
 });
 
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+});
+
 // src/core/ingestion-throughput.ts
 function dropboxContentExtractionStallHours(env = process.env) {
   const raw = env[DROPBOX_CONTENT_EXTRACTION_STALL_HOURS_ENV];
@@ -5613,7 +5624,7 @@ function parseCategory(value, label) {
   }
   const targetTierName = enumString2(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`);
   if (targetTierName === "public" || targetTierName === "private") {
-    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: public/private downgrade guidance is not supported yet.`);
+    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`);
   }
   const targetTrustTier = enumString2(record.targetTrustTier, SOURCE_TRUST_TIERS, `${label}.targetTrustTier`);
   const targetTrustDomain = enumString2(record.targetTrustDomain, SOURCE_TRUST_DOMAINS, `${label}.targetTrustDomain`);
@@ -8617,8 +8628,9 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join8(homedir7(), ".local", "share");
   return join8(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
-var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
+var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -8632,6 +8644,43 @@ var init_source_dashboard = __esm(() => {
   init_public_source_capabilities();
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
+  DASHBOARD_SENSITIVITY_TIERS = {
+    policy_basis: "enforced",
+    tiers: [
+      {
+        name: SENSITIVITY_TIER_LABELS.secrets,
+        tier_label: "S5",
+        meaning: "Refused before storage — content never stored and never reaches any model",
+        local: false,
+        venice: false,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.secure,
+        tier_label: "S4",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
+        local: true,
+        venice: true,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.private,
+        tier_label: "S1–S3",
+        meaning: "Everyday mail, files, and notes",
+        local: true,
+        venice: true,
+        frontier: true
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.public,
+        tier_label: "S0",
+        meaning: "Freely shareable material",
+        local: true,
+        venice: true,
+        frontier: true
+      }
+    ]
+  };
 });
 
 // src/workers/google-connectors/gmail-live-control.ts

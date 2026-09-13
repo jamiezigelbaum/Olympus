@@ -53,7 +53,7 @@ mailbox.
 
 ## How it works
 
-Every item you ingest is classified as public, private, secure, or secrets
+Every item you ingest is classified as Public, Personal, Private, or Secrets
 (internally S0-S5), and every tier
 routes only to the model lanes your sovereignty policy allows:
 
@@ -76,8 +76,8 @@ flowchart LR
     subgraph lanes["Model lanes you approved"]
         direction TB
         CLOUD[Frontier cloud<br/>everyday content]
-        PRIVATE[Venice Private cloud<br/>secure content when routed]
-        LOCAL[Your local models<br/>secure content]
+        PRIVATE[Venice<br/>Private content when routed]
+        LOCAL[Your local models<br/>Private content]
     end
 
     AGENT[Your agent<br/>cited, bounded answers]
@@ -87,23 +87,28 @@ flowchart LR
     CLOUD & PRIVATE & LOCAL --> AGENT
 ```
 
+Olympus uses four tiers: **Public**, **Personal** (ordinary personal and work
+content), **Private** (sensitive material), and **Secrets** (never model input).
+See the [tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
+storage identifiers.
+
 Four postures, chosen (and changeable) in setup — a config file, not a code
 fork:
 
-| Preset | Public/private content | Secure content: health, finance, legal, therapy, family |
+| Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
 |---|---|---|
-| **Local models and private cloud** (`local-first`) | frontier cloud | approved secure pool with explicit local → [Venice](https://venice.ai) Private order |
-| **Local models only** (`local-only`) | frontier cloud | your own local models only |
-| **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
-| **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
+| **Local models with Venice fallback** (`local-first`) | frontier cloud | approved Private pool with explicit local → [Venice](https://venice.ai) Private order |
+| **Local models** (`local-only`) | frontier cloud | your own local models only |
+| **Venice** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
+| **Don't ingest Private data** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
-“Private cloud only” describes **secure-data handling**: Venice answers secure
-questions and its approved Private embedding model provides secure semantic
+The **Venice** option handles the Private tier: Venice answers Private
+questions and its approved Private embedding model provides Private semantic
 search when no local provider is configured. Gemini still supplies
-embeddings for public and ordinary-private content. Secure content never goes
+embeddings for Public and Personal content. Private content never goes
 to Gemini.
 
-Some rules are not configurable, by design: secure content never routes to
+Some rules are not configurable, by design: Private content never routes to
 ordinary cloud models, secrets are denied to every lane, and an
 exhausted policy chain refuses rather than silently downgrading.
 
@@ -173,7 +178,7 @@ when custom plugin UI is off, and for direct access when needed. See the
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
-It explains the separate secure/non-secure routes, registered embedding
+It explains the separate Private and Public/Personal routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
 
 Choose how to supply each key: paste it yourself from your password manager's
