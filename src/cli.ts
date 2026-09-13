@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
+import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
 import {
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
@@ -206,8 +207,19 @@ async function main(): Promise<void> {
       console.log(runDashboardTokenCommand());
       return;
     }
-    const result = runDashboardCommand();
-    console.log(JSON.stringify(result, null, 2));
+    try {
+      // Async because the opening link is MINTED against this install's own
+      // configured worker, with a ticket that only that worker can redeem.
+      const result = args.includes('--read-only') ? runDashboardReadOnlyCommand() : await runDashboardCommand();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
     return;
   }
 
@@ -447,7 +459,7 @@ function printHelp(): void {
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
-  console.log('  olympus dashboard');
+  console.log('  olympus dashboard [--read-only]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1429,42 +1441,196 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
+type DashboardFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface DashboardCommandDependencies {
+  /** The bearer-mint round trip. Injected by tests; production uses fetch. */
+  fetchImpl?: DashboardFetch;
+  /** The desktop opener. Injected by tests; production uses open/xdg-open. */
+  openImpl?: (url: string) => boolean;
+}
+
+const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The bounded standalone opening handoff (owner request, 2026-09-13).
+ *
+ * The reader runs one command and gets one link. Everything that used to be
+ * their problem is now this function's: it resolves the worker token the way
+ * `olympus dashboard token` already does (worker.env outranks a stale config),
+ * asks THIS install's OWN configured worker — never a host from a response,
+ * never a redirect — for a 120-second single-use ticket bound to that origin,
+ * and returns a link whose fragment carries only that ticket. The page at
+ * `/dashboard/launch` clears the fragment and redeems it, and the worker
+ * answers with the same origin-bound HttpOnly control cookie a manual unlock
+ * mints. So the reader never finds rootDir, never copies a durable token, and
+ * never pastes a secret into a page.
+ *
+ * There is no fallback on failure. A reader who is handed the old link without
+ * being told is a reader who cannot unlock the controls, which is the exact
+ * confusion this replaces; the error names the worker that refused. The legacy
+ * read-only view link stays available, by name, as `--read-only`.
+ */
+export async function runDashboardCommand(
+  dependencies: DashboardCommandDependencies = {},
+): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
-  // The same resolution `olympus dashboard token` uses, and for the same
-  // reason: this token is minted into a URL the reader is about to open.
+  const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
-  const url = `${base}/dashboard`;
-  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
-  const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
+  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
   let opened = false;
   try {
-    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    const child = Bun.spawnSync([opener, openUrl], { stdout: 'ignore', stderr: 'ignore' });
-    opened = child.exitCode === 0;
+    opened = dependencies.openImpl
+      ? dependencies.openImpl(openUrl)
+      : openInDesktopBrowser(openUrl);
   } catch {
     opened = false;
   }
-  // The URL printed is the URL that works. `dash_` is a DERIVED, read-only view
-  // token, not the worker bearer: workers/dashboard/index.ts states it is the
-  // only way a browser reaches this HTML, because a bearer header cannot be
-  // typed into an address bar. workers/http.ts admits it to GET /dashboard and
-  // GET /dashboard.json, and to nothing else — no control route, and no method
-  // but GET. Printing the bare path handed the reader a URL that 401s and no
-  // way to tell why (clean-install rehearsal, 2026-09-05). It carries no
-  // control authority, so it is not the secret the token command exists to hand
-  // over — that one still never appears here.
   return {
     url: openUrl,
     opened,
-    hint: dashboardToken
-      ? 'This URL carries the read-only view token, not the worker token;'
-        + ` unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.`
-      : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then`
-        + ` ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value`
-        + ' (rootDir comes from openclaw plugins inspect olympus --json).',
+    hint: 'This link carries a single-use 120-second ticket, not the worker token;'
+      + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
+      + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
+}
+
+/**
+ * The legacy read-only view link: `?token=dash_` on GET /dashboard.
+ *
+ * `dash_` is a DERIVED read token, not the worker bearer: `workers/http.ts`
+ * admits it to GET /dashboard and GET /dashboard.json and to nothing else — no
+ * control route, and no method but GET. It therefore authorizes reading and no
+ * control, which is why it is the right default for a heads-up view and the
+ * wrong one for "open my dashboard and let me act". Printing the bare path
+ * handed the reader a URL that 401s and no way to tell why (clean-install
+ * rehearsal, 2026-09-05), so a URL without a token is never printed.
+ */
+function runDashboardReadOnlyCommand(): { url: string; opened: boolean; hint: string } {
+  const config = loadConfig();
+  const base = workerRootBaseUrl(config.email.baseUrl);
+  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
+  const openUrl = dashboardToken
+    ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}`
+    : '';
+  if (!openUrl) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is no read-only view link to mint.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  let opened = false;
+  try {
+    opened = openInDesktopBrowser(openUrl);
+  } catch {
+    opened = false;
+  }
+  return {
+    url: openUrl,
+    opened,
+    hint: 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
+      + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+  };
+}
+
+/** The worker ROOT: the configured base without its /v1 API suffix. */
+function workerRootBaseUrl(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL is not a valid URL.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  if (url.username || url.password) {
+    throw new OperationError('config_error', 'The configured worker URL must not carry embedded credentials.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL must use HTTP or HTTPS.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+  if (path !== '/' && path !== '/v1') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL path must be /v1 or the origin root.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  return url.origin;
+}
+
+/**
+ * Mint the opening ticket from this install's own worker.
+ *
+ * `redirect: 'error'` is the load-bearing part: the bearer travels with this
+ * request, so a worker (or anything answering as one) that tries to redirect
+ * it is refused outright rather than followed to a host the reader never
+ * configured. A refusal, an invalid body, or an unreachable worker is an
+ * error naming that worker — never a silent downgrade to the old link.
+ */
+async function mintDashboardOpeningUrl(
+  base: string,
+  token: string | undefined,
+  dependencies: DashboardCommandDependencies,
+): Promise<string> {
+  if (!token) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is nothing to unlock.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: 'error',
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker did not answer the opening request.',
+      `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`,
+    );
+  }
+  if (!response.ok) {
+    throw new OperationError(
+      'email_unreachable',
+      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
+      `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`,
+    );
+  }
+  let ticket: unknown;
+  try {
+    ticket = (await response.json() as { ticket?: unknown }).ticket;
+  } catch {
+    ticket = undefined;
+  }
+  if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker answered the opening request without a ticket.',
+      'This worker predates the standalone opening handoff; upgrade it, then run this again.',
+    );
+  }
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+}
+
+/** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */
+function openInDesktopBrowser(url: string): boolean {
+  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  return Bun.spawnSync([opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
 }
 
 /**

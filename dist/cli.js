@@ -417,6 +417,9 @@ var init_public_surface = __esm(() => {
     { method: "GET", path: "/dashboard.json" },
     { method: "GET", path: "/dashboard/ui" },
     { method: "GET", path: "/dashboard/auth-check" },
+    { method: "GET", path: "/dashboard/launch" },
+    { method: "POST", path: "/dashboard/control/launch" },
+    { method: "POST", path: "/dashboard/control/launch/redeem" },
     { method: "POST", path: "/dashboard/control/session" },
     { method: "GET", path: "/dashboard/dispositions" },
     { method: "GET", path: "/dashboard/dispositions.json" },
@@ -3347,6 +3350,135 @@ var init_config = __esm(() => {
   ];
 });
 
+// src/core/dashboard-launch.ts
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin) {
+    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
+    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+    const ticket = randomBytes2(32).toString("base64url");
+    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+function dashboardLaunchPageHeaders() {
+  const script = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
+  const scriptHash = createHash("sha256").update(script).digest("base64");
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+  };
+}
+var DASHBOARD_LAUNCH_PAGE_PATH = "/dashboard/launch", DASHBOARD_LAUNCH_MINT_PATH = "/dashboard/control/launch", DASHBOARD_LAUNCH_REDEEM_PATH = "/dashboard/control/launch/redeem", DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
+var init_dashboard_launch = __esm(() => {
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var status = document.getElementById('status');
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          return new URLSearchParams(hash).get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            window.location.replace('/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
   return [
@@ -3591,7 +3723,7 @@ var init_http_timeout = __esm(() => {
 });
 
 // src/core/oauth-relay.ts
-import { createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 function oauthRelayUrl(env = process.env) {
   const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
   if (!override)
@@ -3626,10 +3758,10 @@ function googlePublisherExchangeRefreshUrl(env = process.env) {
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 function createOAuthRelayNonce() {
-  return randomBytes2(32).toString("base64url");
+  return randomBytes3(32).toString("base64url");
 }
 function createOAuthRelayStateKey() {
-  return randomBytes2(32).toString("base64url");
+  return randomBytes3(32).toString("base64url");
 }
 function createOAuthRelayStateKeys() {
   return { current: createOAuthRelayStateKey() };
@@ -4171,7 +4303,7 @@ var init_connected_handles = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
 import { dirname as dirname5 } from "node:path";
 function isCredentialProvider(value) {
@@ -4198,7 +4330,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash("sha256").update(handle).digest("hex");
+    const digest = createHash2("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -5520,7 +5652,7 @@ function isBoundedSourceCheckpoint(value) {
 var SOURCE_CHECKPOINT_MAX_LENGTH = 32768;
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -5581,7 +5713,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash2("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash3("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -5998,7 +6130,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -6344,7 +6476,7 @@ function resumedPageOffset(cursor, page) {
   return cursor.pageDigest === metadataPageDigest(page) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page) {
-  return createHash3("sha256").update(JSON.stringify({
+  return createHash4("sha256").update(JSON.stringify({
     entries: page.entries,
     cursor: page.cursor?.trim() || null,
     hasMore: Boolean(page.hasMore)
@@ -6371,7 +6503,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash3("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash4("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -6535,7 +6667,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
@@ -7190,7 +7322,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS;
 var init_embeddings = __esm(() => {
@@ -7204,7 +7336,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -7300,7 +7432,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash5("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash6("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: sync.cursor ?? null
       };
@@ -7311,7 +7443,7 @@ function createDropboxProviderStoreSyncHandler(options) {
 function dropboxConnectorIdForScope(account, approvedScopeKey) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
-  const scopeHash = createHash5("sha256").update(`${normalizedAccount}\x00${normalizedScope}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash6("sha256").update(`${normalizedAccount}\x00${normalizedScope}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function observedCompletion(connector) {
@@ -7550,14 +7682,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash6("sha256").update(block).digest());
+    blockDigests.push(createHash7("sha256").update(block).digest());
   }
-  return createHash6("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash7("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -8657,7 +8789,7 @@ function closeSqliteStore(db, options = {}) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID4 } from "node:crypto";
 import { lstatSync as lstatSync3, mkdirSync as mkdirSync5, statSync as statSync2 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
 import { Database } from "bun:sqlite";
@@ -9573,7 +9705,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash7("sha256");
+  const digest = createHash8("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -10891,7 +11023,7 @@ function requireNonEmpty2(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash7("sha256").update(value).digest("hex");
+  return createHash8("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -11576,7 +11708,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash7("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash8("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -12220,8 +12352,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash7("sha256");
-      const outputDigest = createHash7("sha256");
+      const inputDigest = createHash8("sha256");
+      const outputDigest = createHash8("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -12291,8 +12423,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash7("sha256");
-      const outputDigest = createHash7("sha256");
+      const inputDigest = createHash8("sha256");
+      const outputDigest = createHash8("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -19075,7 +19207,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
 import { join as join10 } from "node:path";
 
@@ -19620,7 +19752,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash8("sha256").update(value).digest("hex");
+  return createHash9("sha256").update(value).digest("hex");
 }
 var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
 var init_gmail = __esm(() => {
@@ -19665,7 +19797,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
@@ -19918,7 +20050,7 @@ function taskOutcome(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash9("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash10("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError(error) {
   if (error instanceof TypeError)
@@ -19950,7 +20082,7 @@ var init_gmail_live_sync = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { homedir as homedir10 } from "node:os";
 import { join as join11 } from "node:path";
 
@@ -20594,7 +20726,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash10("sha256").update(value).digest("hex");
+  return createHash11("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -20655,7 +20787,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function createGoogleDriveConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGoogleDriveLiveSyncConfig(env);
@@ -20892,7 +21024,7 @@ function taskOutcome2(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash11("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash12("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -21023,7 +21155,7 @@ var init_corpus_adapter2 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 import { existsSync as existsSync10, lstatSync as lstatSync4, readFileSync as readFileSync10, readdirSync } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { join as join13 } from "node:path";
@@ -21416,7 +21548,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha256(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_SPOOL_BYTES = 768000000, MAX_RECORDS = 1e6, MAX_TEXT_CHARS = 4000000, DEFAULT_PAGE_LIMIT2 = 500, MAX_PAGE_LIMIT2 = 1e4;
 var init_capture_spool_connector = __esm(() => {
@@ -21853,7 +21985,7 @@ var init_corpus_adapter3 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync11 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { dirname as dirname10, join as join14 } from "node:path";
@@ -22228,7 +22360,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash13("sha256").update(JSON.stringify({
+      contentHash: createHash14("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -22423,7 +22555,7 @@ var init_live_control = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -22590,7 +22722,7 @@ function taskOutcome3(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash14("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash15("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -23121,7 +23253,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
 import { join as join15 } from "node:path";
 function createXBookmarksSourceConnector(options) {
@@ -23228,7 +23360,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash15("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
+      contentHash: createHash16("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -23275,7 +23407,7 @@ var init_connector3 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash16, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash17, randomUUID as randomUUID6 } from "node:crypto";
 import { chmodSync as chmodSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync9 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname11, join as join16 } from "node:path";
@@ -24092,7 +24224,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash16("sha256").update(resourceId).digest("hex");
+  return createHash17("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -24212,7 +24344,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash17, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash18, randomUUID as randomUUID7 } from "node:crypto";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync10 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { dirname as dirname12, join as join17 } from "node:path";
@@ -26373,7 +26505,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash17("sha256").update(JSON.stringify({
+  return createHash18("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -26396,7 +26528,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash17("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash18("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -26609,7 +26741,7 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -27312,7 +27444,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context, policy = X_BOO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash18("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash19("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -27510,7 +27642,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash19, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash20, randomUUID as randomUUID8 } from "node:crypto";
 import {
   chmodSync as chmodSync6,
   existsSync as existsSync11,
@@ -27558,7 +27690,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash19("sha256").update(account).digest("hex"),
+    account_sha256: createHash20("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -27581,7 +27713,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash19("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash20("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -28158,7 +28290,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash20, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash21, randomUUID as randomUUID9 } from "node:crypto";
 import {
   chmodSync as chmodSync7,
   renameSync as renameSync4,
@@ -28357,7 +28489,7 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash20("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash21("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
@@ -28468,7 +28600,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash20("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash21("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty3(value, label) {
   const normalized = value.trim();
@@ -29308,7 +29440,7 @@ var init_store_sync2 = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -29351,7 +29483,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash21("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash22("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
     }
@@ -30866,7 +30998,7 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash23, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash24, randomUUID as randomUUID11 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   existsSync as existsSync15,
@@ -30916,7 +31048,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash23("sha256").update(JSON.stringify([
+  return createHash24("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -31982,7 +32114,7 @@ function addMilliseconds(timestamp2, deltaMs) {
   return new Date(Date.parse(timestamp2) + deltaMs).toISOString();
 }
 function sha2562(value) {
-  return createHash23("sha256").update(value, "utf8").digest("hex");
+  return createHash24("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH2 = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -33466,7 +33598,7 @@ var init_unpaired_sources = __esm(() => {
 // src/core/connect.ts
 import { Buffer as Buffer3 } from "node:buffer";
 import { spawn } from "node:child_process";
-import { createHash as createHash24, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash25, randomBytes as randomBytes4 } from "node:crypto";
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir23 } from "node:os";
@@ -33701,11 +33833,11 @@ async function finishOAuthSourceConnection(options) {
   }
 }
 function createOAuthPkceState() {
-  const verifier = base64Url(randomBytes3(32));
+  const verifier = base64Url(randomBytes4(32));
   return {
     verifier,
-    challenge: base64Url(createHash24("sha256").update(verifier).digest()),
-    state: base64Url(randomBytes3(24))
+    challenge: base64Url(createHash25("sha256").update(verifier).digest()),
+    state: base64Url(randomBytes4(24))
   };
 }
 function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
@@ -55418,7 +55550,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync11, mkdirSync as mkdirSync20 } from "node:fs";
-import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID14 } from "node:crypto";
 import { homedir as homedir29 } from "node:os";
 import { dirname as dirname24, join as join34 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
@@ -56478,7 +56610,7 @@ function makeJobId() {
   return `fx_${randomUUID14()}`;
 }
 function hashString5(value) {
-  return createHash27("sha256").update(value).digest("hex");
+  return createHash28("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -58521,9 +58653,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash28("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash29("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -59146,7 +59278,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -59625,7 +59757,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash29("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash30("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -59740,7 +59872,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash29("sha256").update(value).digest("hex");
+  return createHash30("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -61236,7 +61368,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash30 } from "node:crypto";
+import { createHash as createHash31 } from "node:crypto";
 import { existsSync as existsSync24, readFileSync as readFileSync25 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir32 } from "node:os";
@@ -61709,7 +61841,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2564(value) {
-  return createHash30("sha256").update(value, "utf8").digest("hex");
+  return createHash31("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -63793,7 +63925,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -63853,14 +63985,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash31("sha256").update(normalised).digest("hex");
+  return createHash32("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash31("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash32("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -63969,11 +64101,11 @@ function actionButton(action) {
 }
 function dashboardControlGate(input) {
   if (input.connected) {
-    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">` + `<div class="grow"><span class="name">Dashboard controls unlocked</span>` + `<span class="why"> — on this browser for 30 days from the paste, or until the worker token is rotated</span></div>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn quiet" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
+    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">` + `<div class="grow"><span class="name">Dashboard controls unlocked</span>` + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn quiet" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Input token</span>` + `<span class="why"> — unlocks every action on this dashboard; never stored by the page.</span></div>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn primary" type="submit">Unlock</button>` + `<button class="btn" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Where is my token?</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Getting the worker token</h4>` + `<p>Ask your agent — copy this prompt into it:</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus, from the plugin directory:</p>` + `<div class="promptbox"><code>&lt;rootDir&gt;/bin/olympus dashboard token</code></div>` + `<p class="hint">rootDir comes from <code>openclaw plugins inspect olympus --json</code>.</p>` + `</div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after two minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 function attentionRow(input) {
   const why = (input.why ?? "").trim();
@@ -64239,7 +64371,7 @@ var DONUT_CIRCUMFERENCE = 12.566, HEX_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashbo
 var init_components = __esm(() => {
   init_theme();
   HEX_COLOR = /^#[0-9A-Fa-f]{3,8}$/;
-  DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from " + "`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read " + "OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste " + "it into the dashboard. Do not change any configuration.";
+  DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
 });
 
 // src/workers/dashboard/lane-state.ts
@@ -66929,7 +67061,7 @@ var init_control_ui_contract = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac3, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv2(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -66948,6 +67080,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const authToken = normalizeWorkerAuthToken(options.authToken);
   const basePath = normalizeBasePath(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
+  const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
   return async (request) => {
     const presentedAuthorization = request.headers.get("Authorization");
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -66956,8 +67089,33 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
     }
+    if (isDashboardLaunchPageRequest(request)) {
+      return new Response(DASHBOARD_LAUNCH_PAGE_HTML, {
+        status: 200,
+        headers: dashboardLaunchPageHeaders()
+      });
+    }
     if (!authToken) {
       return workerAuthRequiredResponse();
+    }
+    if (isDashboardLaunchMintRequest(request)) {
+      if (!hasValidWorkerBearerToken(presentedAuthorization, authToken))
+        return unauthorizedWorkerResponse();
+      const origin = sameRequestOrigin(request);
+      if (!origin)
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      return dashboardLaunchMintedResponse(launchTickets.mint(origin));
+    }
+    if (isDashboardLaunchRedeemRequest(request)) {
+      const origin = sameRequestOrigin(request);
+      if (!origin)
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
+      if (consumed.status === "ok") {
+        const minted = mintDashboardControlSession(authToken, origin, now());
+        return dashboardLaunchRedeemedResponse(minted, now());
+      }
+      return dashboardLaunchRefusedResponse(consumed.status);
     }
     if (isDashboardControlLockRequest(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), true);
@@ -67045,6 +67203,109 @@ function isDashboardHtmlNavigationRoute(request) {
 function isDashboardControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === "/dashboard/control/session";
 }
+function isDashboardLaunchPageRequest(request) {
+  return request.method === "GET" && new URL(request.url).pathname === DASHBOARD_LAUNCH_PAGE_PATH;
+}
+function isDashboardLaunchMintRequest(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LAUNCH_MINT_PATH;
+}
+function isDashboardLaunchRedeemRequest(request) {
+  return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LAUNCH_REDEEM_PATH;
+}
+async function dashboardLaunchTicketFromBody(request) {
+  if (request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return;
+  const reader = request.body?.getReader();
+  if (!reader)
+    return;
+  const chunks = [];
+  let bytes = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    reader.cancel().catch(() => {});
+  }, 5000);
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done)
+        break;
+      bytes += chunk.value.byteLength;
+      if (bytes > 4096) {
+        reader.cancel().catch(() => {});
+        return;
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  if (timedOut || bytes === 0)
+    return;
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(buffer);
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed?.ticket === "string" ? parsed.ticket : undefined;
+  } catch {
+    return;
+  }
+}
+function dashboardLaunchMintedResponse(ticket) {
+  return new Response(JSON.stringify({
+    ok: true,
+    ticket,
+    expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+    policy: {
+      single_use: true,
+      origin_bound: true,
+      durable_secret_in_url: false
+    }
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+  });
+}
+function dashboardLaunchRedeemedResponse(session, nowMs) {
+  return new Response(JSON.stringify({
+    ok: true,
+    csrf_token: session.csrfToken,
+    next: "/dashboard",
+    policy: {
+      http_only_cookie: true,
+      csrf_required: true,
+      origin_bound: true
+    }
+  }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Set-Cookie": dashboardControlSessionCookie(session.sessionId, remainingSessionSeconds(session.expiresAtMs, nowMs))
+    }
+  });
+}
+function dashboardLaunchRefusedResponse(status) {
+  return new Response(JSON.stringify({
+    error: {
+      code: status === "origin_mismatch" ? "dashboard_launch_origin_mismatch" : "dashboard_launch_ticket_invalid",
+      status: 403,
+      message: "This opening link is no longer valid. Run the dashboard command again for a fresh one."
+    },
+    policy: { single_use: true, origin_bound: true, durable_secret_in_url: false }
+  }), {
+    status: 403,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+  });
+}
 function isDashboardControlLockRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === "/dashboard/control/session/lock";
 }
@@ -67110,7 +67371,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(authToken, origin, nowMs) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes5(24).toString("base64url"),
+    nonce: randomBytes6(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(authToken, origin)
   };
@@ -67403,6 +67664,7 @@ function optionalEnv(value) {
 var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2";
 var init_http = __esm(() => {
   init_worker_auth();
+  init_dashboard_launch();
   DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 });
 
@@ -68781,7 +69043,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -68809,7 +69071,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash32("sha256").update(value).digest("hex");
+  return createHash33("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -69000,7 +69262,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash34, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync29, statSync as statSync9 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
 import { join as join43, resolve as resolve7 } from "node:path";
@@ -71691,7 +71953,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual3(createHash33("sha256").update(expected).digest(), createHash33("sha256").update(state).digest());
+  return timingSafeEqual3(createHash34("sha256").update(expected).digest(), createHash34("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -73383,7 +73645,7 @@ var init_source_scheduler_state = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -74049,7 +74311,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash34("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash35("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -74609,7 +74871,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash34("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash35("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -74798,7 +75060,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash35, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash36, randomUUID as randomUUID16 } from "node:crypto";
 import { existsSync as existsSync27, readFileSync as readFileSync30 } from "node:fs";
 import { dirname as dirname30, join as join45 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -74813,7 +75075,7 @@ function connectedFileSourceAccountGeneration(sourceId, registry2) {
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash35("sha256").update(JSON.stringify([
+  const generation = createHash36("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -74972,7 +75234,7 @@ function readState(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash35("sha256").update(raw).digest("hex");
+  const digest = createHash36("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -77655,7 +77917,8 @@ var init_server4 = __esm(async () => {
 
 // src/cli.ts
 init_config();
-import { randomBytes as randomBytes6 } from "node:crypto";
+init_dashboard_launch();
+import { randomBytes as randomBytes7 } from "node:crypto";
 import { readFileSync as readFileSync31 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -77675,7 +77938,7 @@ init_sovereignty();
 init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
-import { createHash as createHash22, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash23, randomUUID as randomUUID10 } from "node:crypto";
 import {
   closeSync as closeSync4,
   existsSync as existsSync14,
@@ -78158,7 +78421,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File(path) {
-  const hash = createHash22("sha256");
+  const hash = createHash23("sha256");
   const descriptor = openSync4(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -78406,7 +78669,7 @@ init_version();
 
 // src/core/lifecycle.ts
 init_atomic_file();
-import { createHash as createHash26 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync19, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
@@ -78415,7 +78678,7 @@ import { dirname as dirname23, isAbsolute as isAbsolute5, join as join33 } from 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash25, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash26, randomUUID as randomUUID12 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import {
   chmodSync as chmodSync10,
@@ -78443,7 +78706,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash25("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash26("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join31(tmpdir(), ".olympus-artifact-snapshot-"));
   const artifactPath = join31(snapshotDir, "artifact.tgz");
   const descriptor = openSync6(artifactPath, "wx", 384);
@@ -78693,7 +78956,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest = createHash25("sha256");
+  const digest = createHash26("sha256");
   hashVersionTree(root, "", digest);
   return digest.digest("hex");
 }
@@ -79494,7 +79757,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2563(value) {
-  return createHash26("sha256").update(value).digest("hex");
+  return createHash27("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts
@@ -79506,7 +79769,7 @@ init_sovereignty();
 init_sensitivity_map();
 
 // src/core/setup.ts
-import { randomBytes as randomBytes4 } from "node:crypto";
+import { randomBytes as randomBytes5 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { homedir as homedir28 } from "node:os";
 init_operation_error();
@@ -79753,7 +80016,7 @@ function repairHint(platform2, dependency) {
   return platform2 === "darwin" ? "Install Go from https://go.dev/doc/install or with brew install go." : "Install Go from https://go.dev/doc/install or your OS package manager.";
 }
 function generateWorkerToken() {
-  return randomBytes4(32).toString("base64url");
+  return randomBytes5(32).toString("base64url");
 }
 function shellQuote2(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -79889,8 +80152,18 @@ async function main2() {
       console.log(runDashboardTokenCommand());
       return;
     }
-    const result = runDashboardCommand();
-    console.log(JSON.stringify(result, null, 2));
+    try {
+      const result = args.includes("--read-only") ? runDashboardReadOnlyCommand() : await runDashboardCommand();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error2) {
+      if (error2 instanceof OperationError) {
+        console.error(`Error [${error2.code}]: ${error2.message}`);
+        if (error2.suggestion)
+          console.error(`Fix: ${error2.suggestion}`);
+        process.exit(1);
+      }
+      throw error2;
+    }
     return;
   }
   if (args[0] === "data") {
@@ -80096,7 +80369,7 @@ function printHelp() {
   console.log("  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]");
   console.log("  olympus worker install [--platform darwin|linux] [--dry-run]");
   console.log("  olympus worker start|stop|restart|status|foreground|upgrade|uninstall");
-  console.log("  olympus dashboard");
+  console.log("  olympus dashboard [--read-only]");
   console.log("  olympus dashboard token");
   console.log("  olympus doctor");
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
@@ -80414,7 +80687,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes6(32).toString("base64url");
+  return randomBytes7(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};
@@ -80942,26 +81215,96 @@ function runDashboardTokenCommand(env = process.env) {
   }
   return token;
 }
-function runDashboardCommand() {
+var DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 1e4;
+async function runDashboardCommand(dependencies = {}) {
   const config2 = loadConfig();
-  const base = config2.email.baseUrl.replace(/\/v1\/?$/, "");
+  const base = workerRootBaseUrl(config2.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config2);
-  const url = `${base}/dashboard`;
-  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
-  const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
+  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
   let opened = false;
   try {
-    const opener = process.platform === "darwin" ? "open" : "xdg-open";
-    const child = Bun.spawnSync([opener, openUrl], { stdout: "ignore", stderr: "ignore" });
-    opened = child.exitCode === 0;
+    opened = dependencies.openImpl ? dependencies.openImpl(openUrl) : openInDesktopBrowser(openUrl);
   } catch {
     opened = false;
   }
   return {
     url: openUrl,
     opened,
-    hint: dashboardToken ? `This URL carries the read-only view token, not the worker token; unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.` : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value (rootDir comes from openclaw plugins inspect olympus --json).`
+    hint: `This link carries a single-use 120-second ticket, not the worker token; open it in the browser you want unlocked, and the dashboard unlocks itself. For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`
   };
+}
+function runDashboardReadOnlyCommand() {
+  const config2 = loadConfig();
+  const base = workerRootBaseUrl(config2.email.baseUrl);
+  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config2));
+  const openUrl = dashboardToken ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}` : "";
+  if (!openUrl) {
+    throw new OperationError("config_error", "No worker auth token is configured, so there is no read-only view link to mint.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+  }
+  let opened = false;
+  try {
+    opened = openInDesktopBrowser(openUrl);
+  } catch {
+    opened = false;
+  }
+  return {
+    url: openUrl,
+    opened,
+    hint: `This URL carries the read-only view token, not the worker token, so it cannot change anything; open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`
+  };
+}
+function workerRootBaseUrl(baseUrl) {
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new OperationError("config_error", "The configured worker URL is not a valid URL.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  if (url.username || url.password) {
+    throw new OperationError("config_error", "The configured worker URL must not carry embedded credentials.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new OperationError("config_error", "The configured worker URL must use HTTP or HTTPS.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path !== "/" && path !== "/v1") {
+    throw new OperationError("config_error", "The configured worker URL path must be /v1 or the origin root.", "Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.");
+  }
+  return url.origin;
+}
+async function mintDashboardOpeningUrl(base, token, dependencies) {
+  if (!token) {
+    throw new OperationError("config_error", "No worker auth token is configured, so there is nothing to unlock.", `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
+  }
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  let response;
+  try {
+    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: "error",
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS)
+    });
+  } catch {
+    throw new OperationError("email_unreachable", "The configured Olympus worker did not answer the opening request.", `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`);
+  }
+  if (!response.ok) {
+    throw new OperationError("email_unreachable", `The configured Olympus worker refused the opening request with HTTP ${response.status}.`, `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`);
+  }
+  let ticket;
+  try {
+    ticket = (await response.json()).ticket;
+  } catch {
+    ticket = undefined;
+  }
+  if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    throw new OperationError("email_unreachable", "The configured Olympus worker answered the opening request without a ticket.", "This worker predates the standalone opening handoff; upgrade it, then run this again.");
+  }
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+}
+function openInDesktopBrowser(url) {
+  const opener = process.platform === "darwin" ? "open" : "xdg-open";
+  return Bun.spawnSync([opener, url], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 }
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
 if (__require.main == __require.module) {
@@ -80989,6 +81332,7 @@ function formatCliFatalError(error2) {
 export {
   v04PublicCliCommandName,
   runDashboardTokenCommand,
+  runDashboardCommand,
   resolveCliOperation,
   parseArgs,
   lifecycleRecoverySignalsFromWorkerHttpState,
