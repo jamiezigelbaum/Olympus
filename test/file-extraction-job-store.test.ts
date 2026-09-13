@@ -999,6 +999,45 @@ describe('extraction job store: corpus readiness', () => {
     });
   });
 
+  test('filters stale item identities without losing the current actionable clock', () => {
+    const { store, dbPath } = newStore();
+    const currentJob = enqueueOne(store, 'current');
+    const staleJob = enqueueOne(store, 'stale');
+    const currentArrivedAt = '2026-01-02T00:00:00.000Z';
+    backdate(dbPath, currentJob, { created_at: currentArrivedAt, updated_at: currentArrivedAt });
+    backdate(dbPath, staleJob, {
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    const snapshot = createExtractionReadinessLedger(store, {
+      lanesForCorpus: () => [LANE],
+      currentItem: (item) => item.providerItemId === 'current',
+    }).snapshotForCorpus(LANE.corpusId);
+
+    expect(snapshot?.counts.extraction_jobs_queued).toBe(1);
+    expect(snapshot?.contentExtractionThroughput?.oldest_actionable_at).toBe(currentArrivedAt);
+  });
+
+  test('keeps scoped failure actionability and per-item policy supersession semantics', () => {
+    const { store } = newStore();
+    settle(store, 'rescued', 'failed_terminal');
+    settle(store, 'rescued', 'indexed', 'local_ocr');
+    settle(store, 'deferred-then-read', 'metadata_only');
+    settle(store, 'deferred-then-read', 'indexed', 'local_ocr');
+
+    const counts = createExtractionReadinessLedger(store, {
+      lanesForCorpus: () => [LANE],
+      currentItem: () => true,
+    }).snapshotForCorpus(LANE.corpusId)?.counts;
+
+    expect(counts).toMatchObject({
+      extraction_jobs_failed: 1,
+      extraction_jobs_failed_actionable: 0,
+      qa_metadata_only_expected: 0,
+    });
+  });
+
   test('keeps the actionable stall clock anchored to job arrival across retries', () => {
     const { store, dbPath } = newStore();
     const jobId = enqueueOne(store, 'retrying');

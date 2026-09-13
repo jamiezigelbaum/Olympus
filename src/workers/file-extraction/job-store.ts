@@ -394,6 +394,12 @@ export interface ExtractionCorpusReadiness {
   newestTerminalProgressAt?: string;
 }
 
+export interface ExtractionScopedReadinessOptions {
+  now?: Date;
+  /** Current store identity/scope fence for rows read from this separate queue. */
+  currentItem?: (ref: ExtractionItemRef) => boolean;
+}
+
 interface ExtractionJobSqlRow {
   job_id: string;
   corpus_id: string;
@@ -1198,6 +1204,102 @@ export class LocalFileExtractionJobStore {
       const status = jobStatus(row.status);
       return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
     });
+  }
+
+  /**
+   * Readiness across an explicit set of current lanes, retaining the corpus
+   * roll-up's per-item supersession and timestamp semantics.
+   */
+  scopedReadiness(
+    lanes: readonly ExtractionLaneKey[],
+    options: ExtractionScopedReadinessOptions = {},
+  ): ExtractionCorpusReadiness {
+    const uniqueLanes = new Map<string, ExtractionLaneKey>();
+    for (const lane of lanes) {
+      const key = requireLaneKey(lane);
+      uniqueLanes.set(JSON.stringify(key), key);
+    }
+    const select = this.db.query(`
+      SELECT * FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+    `);
+    const byJobId = new Map<string, ExtractionJobSqlRow>();
+    for (const lane of uniqueLanes.values()) {
+      const rows = select.all(
+        lane.corpusId,
+        lane.provider,
+        lane.accountScope,
+        lane.approvedScopeKey,
+      ) as ExtractionJobSqlRow[];
+      for (const row of rows) byJobId.set(row.job_id, row);
+    }
+    const rows = [...byJobId.values()].filter((row) => (
+      options.currentItem ? options.currentItem(refFromRow(row)) : true
+    ));
+    const byItem = new Map<string, ExtractionJobSqlRow[]>();
+    for (const row of rows) {
+      const existing = byItem.get(row.local_item_id);
+      if (existing) existing.push(row);
+      else byItem.set(row.local_item_id, [row]);
+    }
+    let blockedByPolicyItems = 0;
+    let metadataOnlyExpectedItems = 0;
+    for (const itemRows of byItem.values()) {
+      if (itemRows.some((row) => row.status === 'indexed')) continue;
+      if (itemRows.some((row) => row.status === 'blocked_policy')) {
+        blockedByPolicyItems += 1;
+      } else if (itemRows.some((row) => (
+        row.status === 'metadata_only'
+        || row.status === 'skipped_unsupported'
+        || row.status === 'skipped_too_large'
+      ))) {
+        metadataOnlyExpectedItems += 1;
+      }
+    }
+    const now = (options.now ?? new Date()).toISOString();
+    const count = (status: ExtractionJobStatus): number => rows
+      .filter((row) => row.status === status).length;
+    const failedRows = rows.filter((row) => (
+      row.status === 'failed_retryable' || row.status === 'failed_terminal'
+    ));
+    const failedActionableJobs = failedRows.filter((row) => !(
+      byItem.get(row.local_item_id)?.some((candidate) => candidate.status === 'indexed') ?? false
+    )).length;
+    const retryableDueRows = rows.filter((row) => (
+      row.status === 'failed_retryable'
+      && (row.next_retry_at === null || row.next_retry_at <= now)
+    ));
+    const actionableRows = rows.filter((row) => (
+      row.status === 'queued'
+      || (row.status === 'failed_retryable' && (row.next_retry_at === null || row.next_retry_at <= now))
+    ));
+    const terminalRows = rows.filter((row) => (
+      row.status === 'indexed'
+      || row.status === 'metadata_only'
+      || row.status === 'skipped_unsupported'
+      || row.status === 'skipped_too_large'
+      || row.status === 'blocked_policy'
+      || row.status === 'failed_terminal'
+    ));
+    const oldestActionableAt = actionableRows
+      .map((row) => row.created_at)
+      .sort()[0];
+    const newestTerminalProgressAt = terminalRows
+      .map((row) => row.updated_at)
+      .sort()
+      .at(-1);
+    return {
+      blockedByPolicyItems,
+      metadataOnlyExpectedItems,
+      queuedJobs: count('queued'),
+      leasedJobs: count('leased'),
+      failedRetryableJobs: count('failed_retryable'),
+      failedTerminalJobs: count('failed_terminal'),
+      failedActionableJobs,
+      retryableDueJobs: retryableDueRows.length,
+      ...(oldestActionableAt ? { oldestActionableAt } : {}),
+      ...(newestTerminalProgressAt ? { newestTerminalProgressAt } : {}),
+    };
   }
 
   /**

@@ -23,9 +23,9 @@ import type { ContentExtractionThroughputSignal } from '../../core/ingestion-thr
 import type {
   ExtractionCorpusReadiness,
   ExtractionLaneKey,
-  ExtractionStatusCount,
   LocalFileExtractionJobStore,
 } from './job-store.ts';
+import type { ExtractionItemRef } from './types.ts';
 
 /**
  * The readiness ledger backed by the shared extraction queue.
@@ -40,19 +40,26 @@ import type {
  */
 export function createExtractionReadinessLedger(
   jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
-    & Partial<Pick<LocalFileExtractionJobStore, 'counts'>>,
+    & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness'>>,
   options: {
     /** Current approved lanes; undefined preserves the ordinary corpus-wide ledger. */
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
+    /** Current store identity/scope fence for scoped queue rows. */
+    currentItem?: (ref: ExtractionItemRef) => boolean;
   } = {},
 ): SourceIndexReadinessLedger {
   return {
     snapshotForCorpus(corpusId: string) {
       const lanes = options.lanesForCorpus?.(corpusId);
       if (lanes !== undefined) {
-        return jobs.counts
-          ? scopedReadinessSnapshot({ counts: jobs.counts.bind(jobs) }, lanes)
-          : undefined;
+        if (!jobs.scopedReadiness) return undefined;
+        try {
+          return readinessSnapshot(jobs.scopedReadiness(lanes, {
+            ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+          }));
+        } catch {
+          return undefined;
+        }
       }
       let readiness: ExtractionCorpusReadiness;
       try {
@@ -63,63 +70,32 @@ export function createExtractionReadinessLedger(
         // fallback, which understates rather than claiming a full corpus.
         return undefined;
       }
-      return {
-        counts: {
-          [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
-          [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
-          extraction_jobs_queued: readiness.queuedJobs,
-          extraction_jobs_queued_actionable: readiness.queuedJobs,
-          extraction_jobs_leased: readiness.leasedJobs,
-          extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
-          extraction_jobs_failed_actionable: readiness.failedActionableJobs,
-          extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
-        },
-        contentExtractionThroughput: {
-          actionable_queued: readiness.queuedJobs,
-          actionable_retryable_due: readiness.retryableDueJobs,
-          ...(readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {}),
-          ...(readiness.newestTerminalProgressAt
-            ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt }
-            : {}),
-        } satisfies ContentExtractionThroughputSignal,
-      };
+      return readinessSnapshot(readiness);
     },
   };
 }
 
-function scopedReadinessSnapshot(
-  jobs: Pick<LocalFileExtractionJobStore, 'counts'>,
-  lanes: readonly ExtractionLaneKey[],
+function readinessSnapshot(
+  readiness: ExtractionCorpusReadiness,
 ): ReturnType<SourceIndexReadinessLedger['snapshotForCorpus']> {
-  let rows: ExtractionStatusCount[];
-  try {
-    const unique = new Map(lanes.map((lane) => [JSON.stringify(lane), lane]));
-    rows = [...unique.values()].flatMap((lane) => jobs.counts(lane));
-  } catch {
-    return undefined;
-  }
-  const count = (status: ExtractionStatusCount['status']): number => rows
-    .filter((row) => row.status === status)
-    .reduce((total, row) => total + row.jobs, 0);
-  const queued = count('queued');
-  const leased = count('leased');
-  const failedRetryable = count('failed_retryable');
-  const failedTerminal = count('failed_terminal');
   return {
     counts: {
-      extraction_jobs_queued: queued,
-      extraction_jobs_queued_actionable: queued,
-      extraction_jobs_leased: leased,
-      extraction_jobs_failed: failedRetryable + failedTerminal,
-      extraction_jobs_failed_actionable: failedRetryable + failedTerminal,
-      // Lane counts carry no retry timestamp. Counting retryable jobs as due
-      // overstates attention rather than readiness until the queue grows a
-      // scoped corpusReadiness query.
-      extraction_jobs_retryable_due_actionable: failedRetryable,
+      [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
+      [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
+      extraction_jobs_queued: readiness.queuedJobs,
+      extraction_jobs_queued_actionable: readiness.queuedJobs,
+      extraction_jobs_leased: readiness.leasedJobs,
+      extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
+      extraction_jobs_failed_actionable: readiness.failedActionableJobs,
+      extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
     },
     contentExtractionThroughput: {
-      actionable_queued: queued,
-      actionable_retryable_due: failedRetryable,
-    },
+      actionable_queued: readiness.queuedJobs,
+      actionable_retryable_due: readiness.retryableDueJobs,
+      ...(readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {}),
+      ...(readiness.newestTerminalProgressAt
+        ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt }
+        : {}),
+    } satisfies ContentExtractionThroughputSignal,
   };
 }

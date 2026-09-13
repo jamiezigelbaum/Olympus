@@ -1821,6 +1821,37 @@ export class LocalConnectorStore {
     return row?.matched === 1;
   }
 
+  /** Current scoped identity check for a job read from the separate extraction queue. */
+  itemMatchesExtractionRef(
+    ref: Pick<ConnectorStoreExtractionCandidate['identity'],
+      'localItemId' | 'providerItemId' | 'provider' | 'accountScope' | 'sourceVersion'>
+      & { contentHash?: string },
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean {
+    const predicate = connectorStoreFilterSql(filters);
+    const row = this.db.query(`
+      SELECT i.source_version, i.content_hash
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.provider_item_id = ?
+        AND i.provider = ?
+        AND i.account_scope = ?
+        AND i.tombstoned = 0
+        ${predicate.sql}
+      LIMIT 1
+    `).get(
+      ref.localItemId,
+      ref.providerItemId,
+      ref.provider,
+      ref.accountScope,
+      ...predicate.params,
+    ) as { source_version: string | null; content_hash: string | null } | null;
+    if (!row) return false;
+    if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion) return false;
+    if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash) return false;
+    return true;
+  }
+
   [READ_RESULT_PROJECTION_LOCATOR_URI](
     identity: SourceItemIdentity,
     locatorPathScope?: string,

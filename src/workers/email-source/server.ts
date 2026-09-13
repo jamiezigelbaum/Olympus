@@ -2381,6 +2381,15 @@ export async function main(): Promise<void> {
       ...(fileExtractionRuntime
         ? {
             readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+              currentItem(ref) {
+                if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+                  return false;
+                }
+                const readScope = connectorStoreReadScope(dropboxConnectorStore);
+                return readScope.allowed
+                  && readScope.contentAllowed
+                  && dropboxConnectorStore.itemMatchesExtractionRef(ref, readScope.contentFilters);
+              },
               lanesForCorpus(corpusId) {
                 if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
                 const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');

@@ -11034,6 +11034,27 @@ var init_local_index = __esm(() => {
     `).get(localItemId, ...accountScope ? [accountScope] : [], ...predicate.params);
       return row?.matched === 1;
     }
+    itemMatchesExtractionRef(ref, filters) {
+      const predicate = connectorStoreFilterSql(filters);
+      const row = this.db.query(`
+      SELECT i.source_version, i.content_hash
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.provider_item_id = ?
+        AND i.provider = ?
+        AND i.account_scope = ?
+        AND i.tombstoned = 0
+        ${predicate.sql}
+      LIMIT 1
+    `).get(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope, ...predicate.params);
+      if (!row)
+        return false;
+      if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+        return false;
+      if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+        return false;
+      return true;
+    }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
       const rows = this.db.query(`
@@ -55882,6 +55903,64 @@ class LocalFileExtractionJobStore {
       return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
     });
   }
+  scopedReadiness(lanes, options = {}) {
+    const uniqueLanes = new Map;
+    for (const lane of lanes) {
+      const key = requireLaneKey(lane);
+      uniqueLanes.set(JSON.stringify(key), key);
+    }
+    const select = this.db.query(`
+      SELECT * FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+    `);
+    const byJobId = new Map;
+    for (const lane of uniqueLanes.values()) {
+      const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
+      for (const row of rows2)
+        byJobId.set(row.job_id, row);
+    }
+    const rows = [...byJobId.values()].filter((row) => options.currentItem ? options.currentItem(refFromRow(row)) : true);
+    const byItem = new Map;
+    for (const row of rows) {
+      const existing = byItem.get(row.local_item_id);
+      if (existing)
+        existing.push(row);
+      else
+        byItem.set(row.local_item_id, [row]);
+    }
+    let blockedByPolicyItems = 0;
+    let metadataOnlyExpectedItems = 0;
+    for (const itemRows of byItem.values()) {
+      if (itemRows.some((row) => row.status === "indexed"))
+        continue;
+      if (itemRows.some((row) => row.status === "blocked_policy")) {
+        blockedByPolicyItems += 1;
+      } else if (itemRows.some((row) => row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large")) {
+        metadataOnlyExpectedItems += 1;
+      }
+    }
+    const now = (options.now ?? new Date).toISOString();
+    const count = (status) => rows.filter((row) => row.status === status).length;
+    const failedRows = rows.filter((row) => row.status === "failed_retryable" || row.status === "failed_terminal");
+    const failedActionableJobs = failedRows.filter((row) => !(byItem.get(row.local_item_id)?.some((candidate) => candidate.status === "indexed") ?? false)).length;
+    const retryableDueRows = rows.filter((row) => row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
+    const actionableRows = rows.filter((row) => row.status === "queued" || row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
+    const terminalRows = rows.filter((row) => row.status === "indexed" || row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large" || row.status === "blocked_policy" || row.status === "failed_terminal");
+    const oldestActionableAt = actionableRows.map((row) => row.created_at).sort()[0];
+    const newestTerminalProgressAt = terminalRows.map((row) => row.updated_at).sort().at(-1);
+    return {
+      blockedByPolicyItems,
+      metadataOnlyExpectedItems,
+      queuedJobs: count("queued"),
+      leasedJobs: count("leased"),
+      failedRetryableJobs: count("failed_retryable"),
+      failedTerminalJobs: count("failed_terminal"),
+      failedActionableJobs,
+      retryableDueJobs: retryableDueRows.length,
+      ...oldestActionableAt ? { oldestActionableAt } : {},
+      ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
+    };
+  }
   corpusReadiness(corpusId, now = new Date) {
     const corpus = requireKeyPart(corpusId, "corpusId");
     const items = this.db.query(`
@@ -59998,7 +60077,15 @@ function createExtractionReadinessLedger(jobs, options = {}) {
     snapshotForCorpus(corpusId) {
       const lanes = options.lanesForCorpus?.(corpusId);
       if (lanes !== undefined) {
-        return jobs.counts ? scopedReadinessSnapshot({ counts: jobs.counts.bind(jobs) }, lanes) : undefined;
+        if (!jobs.scopedReadiness)
+          return;
+        try {
+          return readinessSnapshot(jobs.scopedReadiness(lanes, {
+            ...options.currentItem ? { currentItem: options.currentItem } : {}
+          }));
+        } catch {
+          return;
+        }
       }
       let readiness;
       try {
@@ -60006,52 +60093,27 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       } catch {
         return;
       }
-      return {
-        counts: {
-          [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
-          [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
-          extraction_jobs_queued: readiness.queuedJobs,
-          extraction_jobs_queued_actionable: readiness.queuedJobs,
-          extraction_jobs_leased: readiness.leasedJobs,
-          extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
-          extraction_jobs_failed_actionable: readiness.failedActionableJobs,
-          extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
-        },
-        contentExtractionThroughput: {
-          actionable_queued: readiness.queuedJobs,
-          actionable_retryable_due: readiness.retryableDueJobs,
-          ...readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {},
-          ...readiness.newestTerminalProgressAt ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt } : {}
-        }
-      };
+      return readinessSnapshot(readiness);
     }
   };
 }
-function scopedReadinessSnapshot(jobs, lanes) {
-  let rows;
-  try {
-    const unique = new Map(lanes.map((lane) => [JSON.stringify(lane), lane]));
-    rows = [...unique.values()].flatMap((lane) => jobs.counts(lane));
-  } catch {
-    return;
-  }
-  const count = (status) => rows.filter((row) => row.status === status).reduce((total, row) => total + row.jobs, 0);
-  const queued = count("queued");
-  const leased = count("leased");
-  const failedRetryable = count("failed_retryable");
-  const failedTerminal = count("failed_terminal");
+function readinessSnapshot(readiness) {
   return {
     counts: {
-      extraction_jobs_queued: queued,
-      extraction_jobs_queued_actionable: queued,
-      extraction_jobs_leased: leased,
-      extraction_jobs_failed: failedRetryable + failedTerminal,
-      extraction_jobs_failed_actionable: failedRetryable + failedTerminal,
-      extraction_jobs_retryable_due_actionable: failedRetryable
+      [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
+      [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
+      extraction_jobs_queued: readiness.queuedJobs,
+      extraction_jobs_queued_actionable: readiness.queuedJobs,
+      extraction_jobs_leased: readiness.leasedJobs,
+      extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
+      extraction_jobs_failed_actionable: readiness.failedActionableJobs,
+      extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
     },
     contentExtractionThroughput: {
-      actionable_queued: queued,
-      actionable_retryable_due: failedRetryable
+      actionable_queued: readiness.queuedJobs,
+      actionable_retryable_due: readiness.retryableDueJobs,
+      ...readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {},
+      ...readiness.newestTerminalProgressAt ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt } : {}
     }
   };
 }
@@ -76701,6 +76763,13 @@ async function main() {
     retrievalAvailability,
     ...fileExtractionRuntime ? {
       readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+        currentItem(ref) {
+          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+            return false;
+          }
+          const readScope = connectorStoreReadScope(dropboxConnectorStore);
+          return readScope.allowed && readScope.contentAllowed && dropboxConnectorStore.itemMatchesExtractionRef(ref, readScope.contentFilters);
+        },
         lanesForCorpus(corpusId) {
           if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
             return;
