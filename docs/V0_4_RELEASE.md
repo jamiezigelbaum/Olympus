@@ -332,8 +332,9 @@ together at one exact commit and against one exact package artifact.
   deletion CLI-only with dry-run and explicit worker/store custody. Web scope
   edits author and preview rules; destructive purge/strip remains a separate
   CLI flow.
-- For Google, make the shared pilot client, unverified warning, and advanced
-  BYO fallback truthful, and request Gmail and Drive scopes contextually. For
+- For Google, use the publisher Web client and server-side token exchange on
+  every dashboard origin, including localhost. Keep the unverified warning and
+  advanced BYO fallback truthful, and request Gmail and Drive scopes contextually. For
   X, guide users through their own developer app, prove the supported OAuth
   shape, and expose cost and provider ceilings.
 

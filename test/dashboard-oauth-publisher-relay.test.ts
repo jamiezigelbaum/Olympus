@@ -54,8 +54,13 @@ import {
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
 const GATEWAY_PUBLIC_ORIGIN = 'https://127.0.0.1:18789';
-const LOOPBACK_HTTP_ORIGIN = 'http://127.0.0.1:18789';
 const PILOT_CLIENT_ID = '123456789012-olympusdesktopfixture.apps.googleusercontent.com';
+const GOOGLE_LOOPBACK_ORIGINS = [
+  'http://localhost:18789',
+  'http://127.0.0.1:18789',
+  'http://[::1]:18789',
+  GATEWAY_PUBLIC_ORIGIN,
+] as const;
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
@@ -81,11 +86,14 @@ interface Fixture {
 
 function fixture(
   initialSecrets: Record<string, string> = {},
-  options: { attemptExpiresInMs?: number } = {},
+  options: { attemptExpiresInMs?: number; secretReads?: string[]; secretWrites?: string[] } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
   dirs.push(dir);
-  const secretStore = memorySecretStore(initialSecrets);
+  const secretStore = memorySecretStore(initialSecrets, {
+    ...(options.secretReads ? { reads: options.secretReads } : {}),
+    ...(options.secretWrites ? { writes: options.secretWrites } : {}),
+  });
   const exchanges: URLSearchParams[] = [];
   const exchangeUrls: string[] = [];
   const oauthFetch: OAuthFetch = async (url, init) => {
@@ -595,48 +603,43 @@ describe('native Gateway public-origin context', () => {
     });
   });
 
-  test('HTTPS loopback uses the publisher Web client, signed relay, and HTTPS target for Gmail and Drive', async () => {
+  test('HTTP and HTTPS loopback complete Gmail and Drive through the publisher Web relay without local Google secrets', async () => {
     await withPilotClient(async () => {
-      for (const source of ['gmail', 'google-drive'] as const) {
-        const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance, { source }, GATEWAY_PUBLIC_ORIGIN));
-        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
-        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
-        const state = started.searchParams.get('state')!;
-        expect(statePayload(state)).toMatchObject({
-          origin: GATEWAY_PUBLIC_ORIGIN,
-          source,
-        });
+      for (const origin of GOOGLE_LOOPBACK_ORIGINS) {
+        for (const source of ['gmail', 'google-drive'] as const) {
+          const callbackOrigin = origin.startsWith('http:')
+            ? 'http://127.0.0.1:18789'
+            : origin;
+          const secretReads: string[] = [];
+          const secretWrites: string[] = [];
+          const instance = fixture({
+            'google.personal.oauth.client_id': DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            'google.personal.oauth.client_secret': 'must-not-be-read-google-secret',
+            [`${source}.personal.oauth.client_id`]: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            [`${source}.personal.oauth.client_secret`]: 'must-not-be-read-source-secret',
+          }, { secretReads, secretWrites });
+          const started = await authorizationUrl(await startConnect(instance, { source }, origin));
+          expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+          expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const state = started.searchParams.get('state')!;
+          expect(state.split('.')).toHaveLength(2);
+          expect(statePayload(state)).toMatchObject({ origin: callbackOrigin, source });
 
-        const callback = await instance.fetch(new Request(
-          `${GATEWAY_PUBLIC_ORIGIN}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
-        ));
-        expect(callback.status).toBe(303);
-        const location = callback.headers.get('Location')!;
-        expect(location).toBe(`/oauth/callback/${source}/done`);
-        const done = await instance.fetch(new Request(`${GATEWAY_PUBLIC_ORIGIN}${location}`));
-        expect(done.status).toBe(200);
-        expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
-        expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const callback = await instance.fetch(new Request(
+            `${callbackOrigin}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+          ));
+          expect(callback.status).toBe(303);
+          const location = callback.headers.get('Location')!;
+          expect(location).toBe(`/oauth/callback/${source}/done`);
+          const done = await instance.fetch(new Request(`${callbackOrigin}${location}`));
+          expect(done.status).toBe(200);
+          expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+          expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+          expect(secretReads.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+          expect(secretWrites.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+        }
       }
-    });
-  });
-
-  test('HTTP loopback preserves the Desktop pilot client and direct callback exchange', async () => {
-    await withPilotClient(async () => {
-      const instance = fixture();
-      const started = await authorizationUrl(await startConnect(instance, { source: 'gmail' }, LOOPBACK_HTTP_ORIGIN));
-      expect(started.searchParams.get('client_id')).toBe(PILOT_CLIENT_ID);
-      expect(started.searchParams.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
-      const state = started.searchParams.get('state')!;
-      expect(state).not.toContain('.');
-
-      const callback = await instance.fetch(new Request(
-        `${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail?code=gmail-http-code&state=${encodeURIComponent(state)}`,
-      ));
-      expect(callback.status).toBe(303);
-      expect(instance.exchangeUrls).toEqual(['https://oauth2.googleapis.com/token']);
-      expect(instance.exchanges[0]!.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
     });
   });
 });
@@ -1128,17 +1131,23 @@ function fixtureStatus(): SourceIndexStatusResult {
   } as unknown as SourceIndexStatusResult;
 }
 
-function memorySecretStore(initial: Record<string, string> = {}): SecretStore {
+function memorySecretStore(
+  initial: Record<string, string> = {},
+  activity: { reads?: string[]; writes?: string[] } = {},
+): SecretStore {
   const secrets = new Map(Object.entries(initial));
   return {
     label: 'memory',
     async get(key) {
+      activity.reads?.push(key);
       return secrets.get(key);
     },
     getSync(key) {
+      activity.reads?.push(key);
       return secrets.get(key);
     },
     async set(key, value) {
+      activity.writes?.push(key);
       secrets.set(key, value);
     },
     async delete(key) {

@@ -1352,8 +1352,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
           // Resolved after the client id, because which stored secret may be
-          // sent depends on which client this flow is going out with.
-          const clientSecret = await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record.client_secret), clientId);
+          // sent depends on which client this flow is going out with. The
+          // publisher Google Web client's secret exists only at the publisher
+          // exchange, so this path does not even probe local secret namespaces:
+          // an old local value must never accompany the Web client, reach the
+          // exchange request, or be persisted again.
+          const clientSecret = publisher && dashboardGoogleOAuthSource(source)
+            ? undefined
+            : await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record.client_secret), clientId);
           if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
             throw new EmailSourceWorkerError(409, 'oauth_client_secret_missing', `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
           }
@@ -5176,12 +5182,13 @@ function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): st
  *   that matches a CURRENT publisher key). Reading "is a client_id present"
  *   instead stuck a completed publisher connection in bring-your-own the
  *   moment it needed reauthentication (Codex round 3 on e75598f7).
- * - **Google on an HTTP loopback dashboard keeps the loopback redirect.** The
- *   pilot client is a Desktop app client and a Desktop client cannot register
- *   an HTTPS redirect URI. An HTTPS loopback dashboard therefore uses the
- *   publisher Web client and the relay, just like any other HTTPS origin.
- * - **Everything else goes through the relay** with `redirect_uri` = the one
- *   registered relay URL and a signed state naming this dashboard's origin.
+ * - **Publisher Google always uses the Web client and relay.** This includes
+ *   HTTP and HTTPS loopback dashboards: one publisher client, one registered
+ *   relay redirect, and one publisher-side exchange keep the confidential Web
+ *   client secret out of every Olympus install.
+ * - **Publisher Dropbox also goes through the relay** with `redirect_uri` =
+ *   the one registered relay URL and a signed state naming this dashboard's
+ *   origin.
  *
  * The Dropbox default ships filled in (the owner's "Olympus-Plugin" app,
  * created 2026-09-03), as does the Google Web client default (the owner's
@@ -5204,14 +5211,6 @@ function dashboardPublisherOAuthFlow(
   if (source === 'x') return undefined;
   if (ownClientId) return undefined;
   if (dashboardGoogleOAuthSource(source)) {
-    const pilotClientId = dashboardGooglePilotClientId();
-    if (pilotClientId && dashboardLoopbackOrigin(dashboardOrigin)) {
-      return {
-        clientId: pilotClientId,
-        redirectUri: `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`,
-        relay: false,
-      };
-    }
     const webClientId = googlePublisherWebClientId();
     return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
   }
@@ -5230,17 +5229,6 @@ function dashboardPublisherOAuthSources(
     dashboardOrigin,
     dashboardOAuthClientIdForSource(source, ownClientIds),
   ) !== undefined);
-}
-
-/** Whether an origin this worker derived for itself is a loopback one. */
-function dashboardLoopbackOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== 'http:') return false;
-    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
-  } catch {
-    return false;
-  }
 }
 
 async function dashboardOAuthClientSecretAvailability(

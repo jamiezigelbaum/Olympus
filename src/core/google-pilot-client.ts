@@ -1,5 +1,6 @@
 /**
- * Public Google Desktop OAuth client identity for the shared-OAuth path.
+ * Public Google Desktop OAuth client identity for legacy or explicitly
+ * configured direct OAuth paths.
  * Google documents installed applications as public clients and the token
  * exchange accepts client_id + PKCE without a client_secret, so this id is
  * non-confidential by design.
@@ -10,12 +11,13 @@
  *    from `OLYMPUS_GOOGLE_PILOT_CLIENT_ID`, which release builds still require.
  * 2. `DEFAULT_GOOGLE_PILOT_CLIENT_ID` below, which ships in source. A
  *    repository install has no release substitution, so without a real default
- *    every repo-installed pilot is forced onto the advanced BYO-OAuth path —
- *    the opposite of the v0.4 shared-OAuth decision.
+ *    every repo-installed direct pilot path is forced onto BYO OAuth.
  *
  * The default is empty until the publisher mints (or hands over) the shared
  * Desktop client. Fill in the literal below — nothing else needs to change.
- * An empty default keeps today's behaviour: fail closed to BYO OAuth.
+ * New publisher dashboard flows do not use this identity; they use the Google
+ * Web client, signed relay, and publisher exchange for every dashboard origin.
+ * An empty default keeps direct pilot behavior fail-closed to BYO OAuth.
  */
 export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = '';
 

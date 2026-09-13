@@ -69286,7 +69286,7 @@ function createEmailSourceWorker(options = {}) {
             if (!clientId) {
               throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
-            const clientSecret = await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record3.client_secret), clientId);
+            const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record3.client_secret), clientId);
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
               throw new EmailSourceWorkerError(409, "oauth_client_secret_missing", `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
             }
@@ -71669,14 +71669,6 @@ function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
   if (ownClientId)
     return;
   if (dashboardGoogleOAuthSource(source)) {
-    const pilotClientId = dashboardGooglePilotClientId();
-    if (pilotClientId && dashboardLoopbackOrigin(dashboardOrigin)) {
-      return {
-        clientId: pilotClientId,
-        redirectUri: `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`,
-        relay: false
-      };
-    }
     const webClientId = googlePublisherWebClientId();
     return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
   }
@@ -71686,16 +71678,6 @@ function dashboardPublisherOAuthFlow(source, dashboardOrigin, ownClientId) {
 function dashboardPublisherOAuthSources(dashboardOrigin, ownClientIds) {
   const sources = ["gmail", "google-drive", "dropbox", "x"];
   return sources.filter((source) => dashboardPublisherOAuthFlow(source, dashboardOrigin, dashboardOAuthClientIdForSource(source, ownClientIds)) !== undefined);
-}
-function dashboardLoopbackOrigin(origin) {
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== "http:")
-      return false;
-    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
-  } catch {
-    return false;
-  }
 }
 async function dashboardOAuthClientSecretAvailability(secretStore) {
   const output = {};
