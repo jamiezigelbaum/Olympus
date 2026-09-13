@@ -27,6 +27,12 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-13 — Expert implementation belongs to Expert Agents.** Removed
+  the duplicate worker, client, expert skills, tools, configuration, and serve
+  command. An architecture guard prevents their return. Olympus's generic
+  approved-file library connector remains part of its source system. This is
+  repository separation; installed worker retirement is a separate platform
+  operation and must preserve existing corpora and routing.
 - **2026-09-10 — File-source consent before ingestion.** Drive and Dropbox
   connections must stop at scope selection. Reuse the reviewed Finder-style
   folder tree and its Full ingestion / Metadata only / No ingestion inspector;

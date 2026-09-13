@@ -51,6 +51,73 @@ const DELETED_PATHS = [
   'src/workers/google-ingest/index.ts',
 ];
 
+// The legacy expert-agent execution subsystem and expert-only skills were
+// removed from this repository on 2026-09-13. Their implementation now
+// lives in the separate Expert-Agents repository. These paths and names must
+// not come back into Olympus: a reintroduced module is a second answer lane
+// with its own trust boundary, which is exactly what the extraction removed.
+const EXPERT_SUBSYSTEM_DELETED_PATHS = [
+  'src/workers/domain-expert/index.ts',
+  'src/workers/domain-expert/server.ts',
+  'src/core/domain-expert.ts',
+  'src/core/domain-expert-client.ts',
+  'skills/agent-workshop/SKILL.md',
+  'skills/governance-research/SKILL.md',
+  'skills/annas-archive-acquisition/SKILL.md',
+];
+
+const EXPERT_SUBSYSTEM_ACTIVE_GLOBS = [
+  'src/**/*.ts',
+  'scripts/**/*.ts',
+  'scripts/**/*.sh',
+  'scripts/**/*.zsh',
+  'config/**/*',
+  'package.json',
+  'test/**/*.ts',
+];
+
+// The guard names what it bans, so it is the one file allowed to spell the
+// forbidden spellings.
+const EXPERT_SUBSYSTEM_GUARD_FILE = 'test/architecture-guard.test.ts';
+
+// The public-runtime strip test asserts the `domainExpert` config key is absent
+// from the stripped public default config, so it must be able to name the key.
+const EXPERT_SUBSYSTEM_ALLOWED_NAMED_KEY_FILES = new Set<string>([
+  EXPERT_SUBSYSTEM_GUARD_FILE,
+  'test/public-runtime-config-defaults.test.ts',
+  // The candidate's public-runtime absence assertions live in this consolidated test.
+  'test/public-runtime.test.ts',
+]);
+
+// These connector files retain persisted credential role and capability
+// strings. Changing them would orphan an existing secret-store key or
+// reinterpret a stored grant; they are compatibility metadata, not an expert
+// worker/tool/config surface.
+const EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_FILES = new Set<string>([
+  'src/core/connect-gcp.ts',
+  'src/core/connect.ts',
+  'test/connect-gcp.test.ts',
+  'test/connect-oauth.test.ts',
+]);
+
+const EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_IDENTIFIER =
+  new RegExp(['domain', 'expert'].join('_'));
+
+// Built from fragments so this file does not itself trip the rules above.
+const EXPERT_SUBSYSTEM_FORBIDDEN_IDENTIFIERS: ReadonlyArray<RegExp> = [
+  new RegExp(['domain', 'agent'].join('_')),
+  new RegExp(['domain', 'ask'].join('_')),
+  new RegExp(['domain', 'source'].join('_')),
+  new RegExp(['domain', 'doc'].join('_')),
+  new RegExp(['rag', 'corpus'].join('_')),
+  new RegExp(['annas', 'archive'].join('_')),
+  new RegExp(['domain', 'Expert'].join('')),
+  new RegExp(['domain', 'Expert', 'Client'].join('')),
+];
+
+const EXPERT_SUBSYSTEM_FORBIDDEN_IMPORT =
+  new RegExp(`from\\s+['"][^'"]*(?:domain[-_]expert)['"]`);
+
 const CANONICAL_EXPLICIT_SOURCE_CONNECTOR_IMPLEMENTATIONS = [
   'src/workers/google-connectors/drive.ts',
   'src/workers/google-connectors/gmail.ts',
@@ -373,6 +440,36 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     for (const rel of DELETED_PATHS) {
       expect(existsSync(join(repoRoot, rel))).toBe(false);
     }
+  });
+
+  test('the extracted expert subsystem stays out of Olympus', () => {
+    for (const rel of EXPERT_SUBSYSTEM_DELETED_PATHS) {
+      expect(existsSync(join(repoRoot, rel))).toBe(false);
+    }
+
+    const offenders: string[] = [];
+    for (const rel of EXPERT_SUBSYSTEM_ACTIVE_GLOBS.flatMap((glob) =>
+      [...new Glob(glob).scanSync({ cwd: repoRoot })].map((path) => path.split('\\').join('/')))) {
+      const content = read(rel);
+      // The guard file itself lists the deleted client path as data, so the
+      // path-shaped check exempts it the same way the identifier check does.
+      if (!EXPERT_SUBSYSTEM_ALLOWED_NAMED_KEY_FILES.has(rel) && /domain[-_]expert[-_]client/.test(content)) {
+        offenders.push(`${rel}: expert client module path`);
+      }
+      if (!EXPERT_SUBSYSTEM_ALLOWED_NAMED_KEY_FILES.has(rel)) {
+        for (const pattern of EXPERT_SUBSYSTEM_FORBIDDEN_IDENTIFIERS) {
+          if (pattern.test(content)) offenders.push(`${rel}: ${pattern.source}`);
+        }
+      }
+      if (!EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_FILES.has(rel)
+        && EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_IDENTIFIER.test(content)) {
+        offenders.push(`${rel}: ${EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_IDENTIFIER.source}`);
+      }
+      if (EXPERT_SUBSYSTEM_FORBIDDEN_IMPORT.test(content)) {
+        offenders.push(`${rel}: import of a removed expert module`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   test('the retired embedding importer cannot return under another module name', () => {

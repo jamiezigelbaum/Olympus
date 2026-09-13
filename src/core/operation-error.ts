@@ -21,12 +21,7 @@ export type OperationErrorCode =
   | 'file_delivery_error'
   | 'castor_workspace_not_configured'
   | 'castor_workspace_unreachable'
-  | 'castor_workspace_error'
-  | 'domain_expert_not_configured'
-  | 'annas_archive_not_configured'
-  | 'domain_expert_unreachable'
-  | 'domain_expert_error'
-  | 'domain_expert_policy_violation';
+  | 'castor_workspace_error';
 
 export class OperationError extends Error {
   code: OperationErrorCode;
