@@ -42,9 +42,9 @@ export function createExtractionReadinessLedger(
   jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
     & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness'>>,
   options: {
-    /** Current approved lanes; undefined preserves the ordinary corpus-wide ledger. */
+    // Current approved lanes; undefined preserves the ordinary corpus-wide ledger.
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
-    /** Current store identity/scope fence for scoped queue rows. */
+    // Current store identity/scope fence for scoped queue rows.
     currentItem?: (ref: ExtractionItemRef) => boolean;
   } = {},
 ): SourceIndexReadinessLedger {
