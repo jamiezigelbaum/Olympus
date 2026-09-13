@@ -833,7 +833,7 @@ describe('runDoctor', () => {
     expect(prerequisites.ok).toBe(false);
     expect(prerequisites.detail).toContain('venice.api_key');
     expect(prerequisites.detail).not.toContain('127.0.0.1:8000/v1');
-    expect(prerequisites.hint).toContain('olympus connect venice --api-key-stdin');
+    expect(prerequisites.hint).toContain('olympus connect venice --api-key-prompt');
   });
 
   test('reads the sovereignty policy setup wrote at the default path, without an explicit config path', async () => {

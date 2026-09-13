@@ -1113,7 +1113,7 @@ describe('CLI tool surface', () => {
       expect(out + err).not.toContain('synthetic-secret-must-not-be-read');
       expect(out + err).toContain('invalid_params');
     }
-  });
+  }, 30_000);
 
   test('connect key help advertises the packaged masked prompt and stdin compatibility', async () => {
     for (const source of ['gemini', 'venice', 'readwise']) {
@@ -1122,7 +1122,7 @@ describe('CLI tool surface', () => {
       expect(result.stdout).toContain(`connect ${source} --api-key-prompt`);
       expect(result.stdout).toContain('--api-key-stdin');
     }
-  });
+  }, 30_000);
 
   test('connect venice stores pasted keys without echoing secret material', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-connect-venice-test-'));

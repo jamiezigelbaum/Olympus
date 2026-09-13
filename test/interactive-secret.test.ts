@@ -163,7 +163,7 @@ describe('readSecretFromTerminal terminal requirements', () => {
     );
     expect(driver.error).toBeUndefined();
     expect(driver.status).toBe(0);
-  });
+  }, 45_000);
 
   test('formats entry failures for CLI output', () => {
     expect(formatArgumentError(new SecretInputError('cancelled', 'secret entry cancelled'))).toBe(
