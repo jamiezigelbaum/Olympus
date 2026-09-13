@@ -159,8 +159,23 @@ user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
 worker rather than installing a second one.
 
-If setup reports unmet prerequisites, follow the printed remedies before your
-first indexing or `source_answer` call. Common examples:
+If setup reports unmet prerequisites, finish them before your first indexing or
+`source_answer` call. For manual key entry, run one command at a time on the Olympus host, completing
+its prompt before starting the next:
+
+```bash
+olympus connect gemini --api-key-prompt
+olympus connect venice --api-key-prompt
+```
+
+Each command opens a masked terminal prompt. Paste only when prompted; the key
+is not echoed or entered into shell history. Empty Enter waits again. The agent
+should provide the resolved executable path if `olympus` is not on PATH.
+
+For an already authenticated password-manager CLI, the existing stdin route
+remains available. These variables represent in-memory manager output, never
+keys pasted into commands:
+
 
 ```bash
 printf '%s' "$GEMINI_API_KEY" | olympus connect gemini --api-key-stdin

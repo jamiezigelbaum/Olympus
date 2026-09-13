@@ -1098,6 +1098,32 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('masked key input is explicit and incompatible input modes fail before reading', async () => {
+    for (const args of [
+      ['connect', 'gemini', '--api-key-prompt', '--api-key-stdin'],
+      ['connect', 'venice', '--api-key-prompt', '--api-key-stdin'],
+      ['connect', 'google', '--api-key-prompt'],
+    ]) {
+      const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
+        cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      });
+      proc.stdin.write('synthetic-secret-must-not-be-read'); proc.stdin.end();
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(code).not.toBe(0);
+      expect(out + err).not.toContain('synthetic-secret-must-not-be-read');
+      expect(out + err).toContain('invalid_params');
+    }
+  });
+
+  test('connect key help advertises the packaged masked prompt and stdin compatibility', async () => {
+    for (const source of ['gemini', 'venice', 'readwise']) {
+      const result = await runSourceCliExit(['connect', source, '--help']);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`connect ${source} --api-key-prompt`);
+      expect(result.stdout).toContain('--api-key-stdin');
+    }
+  });
+
   test('connect venice stores pasted keys without echoing secret material', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-connect-venice-test-'));
     const secretPath = join(dir, 'secrets.enc');

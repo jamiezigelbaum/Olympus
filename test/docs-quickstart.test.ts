@@ -123,7 +123,8 @@ describe('first-run docs', () => {
       expect(doc).toContain('op://vault/item/field');
       expect(doc).toContain('authenticated `op` access');
       expect(doc).toMatch(/No password-manager desktop app or CLI is required|requires no password-manager desktop app or CLI/);
-      expect(doc).toContain('silent terminal input');
+      expect(doc).toMatch(/silent terminal input|built-in masked terminal prompt/);
+      expect(doc).toContain('--api-key-prompt');
     }
   });
 

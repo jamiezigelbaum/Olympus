@@ -1,3 +1,4 @@
+import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
@@ -468,8 +469,8 @@ function printHelp(): void {
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --session-path <path>');
-  console.log('  olympus connect venice|readwise --api-key-stdin');
-  console.log('  olympus connect gemini --api-key-stdin');
+  console.log('  olympus connect venice|readwise --api-key-prompt');
+  console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
@@ -497,9 +498,9 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect dropbox': 'olympus connect dropbox --client-id <id>',
   'connect telegram': 'olympus connect telegram --session-path <path>',
   'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
-  'connect venice': 'olympus connect venice --api-key-stdin',
-  'connect readwise': 'olympus connect readwise --api-key-stdin',
-  'connect gemini': 'olympus connect gemini --api-key-stdin',
+  'connect venice': 'olympus connect venice --api-key-prompt',
+  'connect readwise': 'olympus connect readwise --api-key-prompt',
+  'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
   dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
@@ -519,6 +520,9 @@ function printPublicLeafCommandHelp(args: string[]): boolean {
   const usage = PUBLIC_LEAF_USAGE[commandName];
   if (!usage) throw new Error(`Missing public leaf help for ${commandName}.`);
   console.log(`Usage: ${usage}`);
+  if (['connect gemini', 'connect venice', 'connect readwise'].includes(commandName)) {
+    console.log('For an authenticated password-manager pipeline, use --api-key-stdin instead.');
+  }
   return true;
 }
 
@@ -562,8 +566,8 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]',
     '  olympus connect dropbox --client-id <id>',
     '  olympus connect telegram|whatsapp --session-path <path>',
-    '  olympus connect venice|readwise --api-key-stdin',
-    '  olympus connect gemini --api-key-stdin',
+    '  olympus connect venice|readwise --api-key-prompt',
+    '  olympus connect gemini --api-key-prompt',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1034,8 +1038,8 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
-        'olympus connect venice|readwise --api-key-stdin',
-        'olympus connect gemini --api-key-stdin',
+        'olympus connect venice|readwise --api-key-prompt',
+        'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
       ],
     };
@@ -1066,6 +1070,12 @@ async function runConnect(args: string[]): Promise<unknown> {
   const source = rawSource as ConnectSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.apiKeyPrompt && options.apiKeyStdin) {
+    throw new OperationError('invalid_params', 'Choose either --api-key-prompt or --api-key-stdin, not both.');
+  }
+  if (options.apiKeyPrompt && source !== 'gemini' && source !== 'venice' && source !== 'readwise') {
+    throw new OperationError('invalid_params', '--api-key-prompt is supported only for Gemini, Venice, and Readwise.');
+  }
   const secretStore = createDefaultSecretStore({
     env: {
       ...process.env,
@@ -1145,18 +1155,22 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'gemini') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
-    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
+    return connectGeminiApiKey({ apiKey: options.apiKeyPrompt
+      ? await readSecretFromTerminal('Gemini API key (input hidden): ')
+      : await readApiKeyFromStdin() });
   }
   if (source === 'venice' || source === 'readwise') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
     return connectPublicApiKeySource({
       source,
-      apiKey: await readApiKeyFromStdin(),
+      apiKey: options.apiKeyPrompt
+        ? await readSecretFromTerminal(`${source === 'venice' ? 'Venice' : 'Readwise'} API key (input hidden): `)
+        : await readApiKeyFromStdin(),
       ...(options.accountRole ? { accountRole: options.accountRole } : {}),
       ...(options.registryPath ? { registryPath: options.registryPath } : {}),
       secretStore,
@@ -1185,8 +1199,9 @@ function parseConnectOptions(args: string[]): {
   sessionPath?: string;
   sessionReady: boolean;
   apiKeyStdin: boolean;
+  apiKeyPrompt: boolean;
 } {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
+  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -1250,6 +1265,9 @@ function parseConnectOptions(args: string[]): {
         break;
       case '--session-ready':
         options.sessionReady = true;
+        break;
+      case '--api-key-prompt':
+        options.apiKeyPrompt = true;
         break;
       case '--api-key-stdin':
         options.apiKeyStdin = true;

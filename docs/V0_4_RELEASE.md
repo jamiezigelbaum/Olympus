@@ -27,6 +27,12 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-13 — Packaged manual key entry.** Manual Gemini, Venice, and
+  Readwise key entry uses `connect <source> --api-key-prompt`, with masked
+  controlling-terminal input and no generated shell scripts. The existing
+  stdin route remains for authenticated password-manager pipelines. Reset the
+  two disposable Hetzner Olympus installs only after the replacement candidate
+  is reviewed and packaged; preserve their host agents and ChatGPT logins.
 - **2026-09-13 — Folder-picker loading.** Opening Choose folders authorizes
   listing folder names for the visible connected source. Load them automatically,
   show a loading state beside Folders, and offer Update for an explicit refresh.

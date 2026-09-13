@@ -1601,12 +1601,12 @@ var init_source_ingestion_exclusions = __esm(() => {
 // src/core/atomic-file.ts
 import { randomUUID } from "node:crypto";
 import {
-  closeSync,
+  closeSync as closeSync2,
   existsSync as existsSync3,
   fsyncSync,
   lstatSync,
   mkdirSync,
-  openSync,
+  openSync as openSync2,
   renameSync,
   rmSync,
   writeFileSync
@@ -1635,12 +1635,12 @@ async function writePrivateFileAtomic(path, text) {
 function writePrivateFileAtomicSync(path, text) {
   const temp = temporaryPathFor(path);
   try {
-    const descriptor = openSync(temp, "wx", 384);
+    const descriptor = openSync2(temp, "wx", 384);
     try {
       writeFileSync(descriptor, text, { encoding: "utf8" });
       fsyncSync(descriptor);
     } finally {
-      closeSync(descriptor);
+      closeSync2(descriptor);
     }
     renameSync(temp, path);
   } catch (error) {
@@ -1730,7 +1730,7 @@ async function syncDirectory(path) {
   }
 }
 function syncDirectorySync(path) {
-  const descriptor = openSync(path, "r");
+  const descriptor = openSync2(path, "r");
   try {
     try {
       fsyncSync(descriptor);
@@ -1739,7 +1739,7 @@ function syncDirectorySync(path) {
         throw error;
     }
   } finally {
-    closeSync(descriptor);
+    closeSync2(descriptor);
   }
 }
 function resolveTrustedRoot(root) {
@@ -1781,10 +1781,10 @@ var init_atomic_file = () => {};
 import { execFileSync } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import {
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync2,
-  openSync as openSync2,
+  openSync as openSync3,
   readFileSync as readFileSync3,
   statSync,
   unlinkSync,
@@ -1915,7 +1915,7 @@ class SyncFileLeaseOwner {
         }
       }
     } finally {
-      closeSync2(this.descriptor);
+      closeSync3(this.descriptor);
     }
   }
 }
@@ -1952,12 +1952,12 @@ function acquireFileLeaseSync(targetPath, options) {
   while (true) {
     const token = randomUUID2();
     try {
-      const descriptor = openSync2(lockPath, "wx", 384);
+      const descriptor = openSync3(lockPath, "wx", 384);
       try {
         writeFileSync2(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
         fsyncSync2(descriptor);
       } catch (error) {
-        closeSync2(descriptor);
+        closeSync3(descriptor);
         throw error;
       }
       return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
@@ -2052,12 +2052,12 @@ function withSyncCommitGuard(targetPath, lockPath, options, callback) {
   let descriptor;
   while (descriptor === undefined) {
     try {
-      descriptor = openSync2(guardPath, "wx", 384);
+      descriptor = openSync3(guardPath, "wx", 384);
       writeFileSync2(descriptor, JSON.stringify(leaseRecord(token)), "utf8");
       fsyncSync2(descriptor);
     } catch (error) {
       if (descriptor !== undefined) {
-        closeSync2(descriptor);
+        closeSync3(descriptor);
         descriptor = undefined;
         try {
           unlinkSync(guardPath);
@@ -2084,7 +2084,7 @@ function withSyncCommitGuard(targetPath, lockPath, options, callback) {
         }
       }
     } finally {
-      closeSync2(descriptor);
+      closeSync3(descriptor);
     }
   }
 }
@@ -2482,7 +2482,7 @@ var init_file_lease = __esm(() => {
 });
 
 // src/core/secret-store.ts
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir3, platform } from "node:os";
@@ -2810,7 +2810,7 @@ function commandExists(command, runner) {
   return runner(command, ["--version"]).status === 0;
 }
 function runCommand(command, args, input) {
-  const result = spawnSync(command, args, {
+  const result = spawnSync2(command, args, {
     input,
     encoding: "utf8",
     maxBuffer: 1024 * 1024
@@ -30047,10 +30047,10 @@ function unquoteEnvValue(value) {
 var init_worker_auth = () => {};
 
 // src/core/worker-service.ts
-import { chmodSync as chmodSync8, closeSync as closeSync3, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync12, openSync as openSync3, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync4, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
 import { homedir as homedir20, platform as osPlatform } from "node:os";
 import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join22, relative as relative4, sep as sep4 } from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 function installWorkerService(options = {}) {
   const platform2 = normalizePlatform(options.platform ?? osPlatform());
   const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
@@ -30146,11 +30146,11 @@ function lastLogLine(path) {
       return;
     const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
     const buffer = Buffer.alloc(length);
-    const handle = openSync3(path, "r");
+    const handle = openSync4(path, "r");
     try {
       readSync(handle, buffer, 0, length, size - length);
     } finally {
-      closeSync3(handle);
+      closeSync4(handle);
     }
     text = buffer.toString("utf8");
   } catch {
@@ -30361,7 +30361,7 @@ function boundedServiceDetail(result) {
   return text.slice(0, 240);
 }
 function defaultWorkerServiceExec(command, args) {
-  const result = spawnSync2(command, args, { encoding: "utf8" });
+  const result = spawnSync3(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -33304,7 +33304,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return `printf '%s' "$KEY" | olympus connect gemini --api-key-stdin`;
+    return "olympus connect gemini --api-key-prompt";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -33332,7 +33332,7 @@ function localServerPrerequisite(profileId, profile) {
 }
 function storeSecretRemedy(key) {
   if (key === "venice.api_key") {
-    return `printf '%s' "$KEY" | olympus connect venice --api-key-stdin`;
+    return "olympus connect venice --api-key-prompt";
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
@@ -33342,7 +33342,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync10, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
+import { closeSync as closeSync6, constants, fstatSync, lstatSync as lstatSync10, openSync as openSync6, readFileSync as readFileSync16 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -33369,7 +33369,7 @@ function readRecordText(path) {
   const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
   let fd;
   try {
-    fd = openSync5(path, flags);
+    fd = openSync6(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -33387,7 +33387,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync5(fd);
+      closeSync6(fd);
     } catch {}
   }
 }
@@ -38838,7 +38838,7 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/core/doctor.ts
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync19, mkdirSync as mkdirSync18, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname21, join as join29 } from "node:path";
 async function runDoctor(input) {
@@ -39880,7 +39880,7 @@ function defaultCommandExists(command) {
   return path.split(":").some((dir) => Boolean(dir) && existsSync19(join29(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
-  const proc = spawnSync3(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const proc = spawnSync4(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
 function asRecord9(value) {
@@ -77960,6 +77960,304 @@ var init_server4 = __esm(async () => {
   if (false) {}
 });
 
+// src/core/interactive-secret.ts
+import { spawnSync } from "node:child_process";
+import { closeSync, openSync, writeSync } from "node:fs";
+import { ReadStream } from "node:tty";
+import { TextDecoder as TextDecoder2 } from "node:util";
+
+class SecretInputError extends Error {
+  code;
+  constructor(code, message) {
+    super(message);
+    this.name = "SecretInputError";
+    this.code = code;
+  }
+}
+var SECRET_MAX_BYTES = 4096;
+var TTY_PATH = "/dev/tty";
+var PASTE_START = Buffer.from("\x1B[200~");
+var PASTE_END = Buffer.from("\x1B[201~");
+var DELETE_SEQ = Buffer.from("\x1B[3~");
+var ESCAPE_SEQUENCES = [PASTE_START, PASTE_END, DELETE_SEQ];
+var lineBreak = (byte) => byte === 10 || byte === 13;
+function malformed() {
+  return new SecretInputError("malformed_input", "malformed control character in secret input");
+}
+
+class SecretInput {
+  buf = Buffer.alloc(0);
+  secret = "";
+  bytes = 0;
+  inPaste = false;
+  decoder = new TextDecoder2("utf-8", { fatal: true });
+  feed(chunk) {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    while (this.buf.length > 0) {
+      const b = this.buf[0];
+      if (b === 3)
+        throw new SecretInputError("cancelled", "secret entry cancelled");
+      if (b === 4)
+        throw new SecretInputError("eof", "no secret was entered");
+      if (b === 27) {
+        const startsWith = (seq) => this.buf.subarray(0, seq.length).equals(seq);
+        if (startsWith(PASTE_START)) {
+          if (this.inPaste)
+            throw malformed();
+          this.inPaste = true;
+          this.buf = this.buf.subarray(PASTE_START.length);
+          continue;
+        }
+        if (startsWith(PASTE_END)) {
+          if (!this.inPaste)
+            throw malformed();
+          this.inPaste = false;
+          this.buf = this.buf.subarray(PASTE_END.length);
+          continue;
+        }
+        if (startsWith(DELETE_SEQ)) {
+          this.backspace();
+          this.buf = this.buf.subarray(DELETE_SEQ.length);
+          continue;
+        }
+        if (ESCAPE_SEQUENCES.some((seq) => prefixOf(this.buf, seq))) {
+          return;
+        }
+        throw malformed();
+      }
+      if (b === 127 || b === 8) {
+        this.backspace();
+        this.buf = this.buf.subarray(1);
+        continue;
+      }
+      if (lineBreak(b)) {
+        if (this.inPaste) {
+          this.emitChar(b === 13 ? "\r" : `
+`);
+          this.buf = this.buf.subarray(1);
+          continue;
+        }
+        this.buf = this.buf.subarray(1);
+        if (this.buf.length > 0 && lineBreak(this.buf[0]) && this.buf[0] !== b) {
+          this.buf = this.buf.subarray(1);
+        }
+        if (this.secret.length === 0 && this.buf.length > 0)
+          continue;
+        if (this.buf.length > 0)
+          throw malformed();
+        return this.complete();
+      }
+      if (b < 32)
+        throw malformed();
+      const width = utf8SequenceWidth(b);
+      if (width === 0)
+        throw malformed();
+      if (width === 1) {
+        this.emitChar(String.fromCharCode(b));
+        this.buf = this.buf.subarray(1);
+        continue;
+      }
+      if (this.buf.length < width)
+        return;
+      const slice = this.buf.subarray(0, width);
+      let text;
+      try {
+        text = this.decoder.decode(slice);
+      } catch {
+        throw malformed();
+      }
+      if (Array.from(text).length !== 1)
+        throw malformed();
+      this.emitChar(text);
+      this.buf = this.buf.subarray(width);
+    }
+    return;
+  }
+  emitChar(char) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (this.bytes + size > SECRET_MAX_BYTES) {
+      throw new SecretInputError("too_large", `secret exceeds ${SECRET_MAX_BYTES} bytes`);
+    }
+    this.bytes += size;
+    this.secret += char;
+  }
+  backspace() {
+    const chars = Array.from(this.secret);
+    if (chars.length === 0)
+      return;
+    this.secret = chars.slice(0, -1).join("");
+    this.bytes -= Buffer.byteLength(chars[chars.length - 1], "utf8");
+  }
+  collect() {
+    let value = this.secret;
+    if (value.endsWith(`\r
+`) || value.endsWith(`
+\r`))
+      value = value.slice(0, -2);
+    else if (/[\r\n]$/.test(value))
+      value = value.slice(0, -1);
+    this.secret = "";
+    this.bytes = 0;
+    return value;
+  }
+  complete() {
+    if (this.secret.length === 0) {
+      return "";
+    }
+    const value = this.collect();
+    if (value.length === 0)
+      return "";
+    if (/[\r\n]/.test(value))
+      throw malformed();
+    if (Buffer.byteLength(value, "utf8") > SECRET_MAX_BYTES) {
+      throw new SecretInputError("too_large", `secret exceeds ${SECRET_MAX_BYTES} bytes`);
+    }
+    return value;
+  }
+}
+function terminalState(fd) {
+  const result = spawnSync("/bin/stty", ["-g"], {
+    encoding: "utf8",
+    stdio: [fd, "pipe", "ignore"]
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string")
+    return;
+  const state = result.stdout.trim();
+  return state.length > 0 ? state : undefined;
+}
+function restoreTerminal(fd, state) {
+  const result = spawnSync("/bin/stty", [state], {
+    stdio: [fd, "ignore", "ignore"]
+  });
+  return result.status === 0;
+}
+function safeClose(fd) {
+  if (fd === undefined)
+    return;
+  try {
+    closeSync(fd);
+  } catch {}
+}
+function utf8SequenceWidth(lead) {
+  if (lead < 128)
+    return 1;
+  if (lead >= 194 && lead <= 223)
+    return 2;
+  if (lead >= 224 && lead <= 239)
+    return 3;
+  if (lead >= 240 && lead <= 244)
+    return 4;
+  return 0;
+}
+function prefixOf(buffered, seq) {
+  return buffered.length < seq.length && buffered.equals(seq.subarray(0, buffered.length));
+}
+async function readSecretFromTerminal(prompt) {
+  const platform = process.platform;
+  if (platform !== "darwin" && platform !== "linux") {
+    throw new SecretInputError("unsupported_platform", `masked secret entry is only supported on macOS and Linux, not ${platform}`);
+  }
+  let controlFd;
+  let inputFd;
+  try {
+    controlFd = openSync(TTY_PATH, "r+");
+    inputFd = openSync(TTY_PATH, "r+");
+  } catch {
+    safeClose(inputFd);
+    safeClose(controlFd);
+    throw new SecretInputError("no_terminal", "a terminal is required for masked secret entry");
+  }
+  const originalState = terminalState(controlFd);
+  if (originalState === undefined) {
+    safeClose(inputFd);
+    safeClose(controlFd);
+    throw new SecretInputError("no_terminal", "could not capture the terminal state for masked input");
+  }
+  let stream;
+  try {
+    stream = new ReadStream(inputFd);
+    stream.setRawMode(true);
+  } catch {
+    restoreTerminal(controlFd, originalState);
+    if (stream === undefined)
+      safeClose(inputFd);
+    else
+      stream.destroy();
+    safeClose(controlFd);
+    throw new SecretInputError("no_terminal", "could not enable masked terminal input");
+  }
+  const writeTerminal = (text) => {
+    try {
+      writeSync(controlFd, text);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const state = new SecretInput;
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled)
+        return;
+      settled = true;
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGTERM", onSigterm);
+      stream.removeListener("data", onData);
+      stream.removeListener("error", onStreamError);
+      stream.removeListener("end", onEnd);
+      const restored = restoreTerminal(controlFd, originalState);
+      try {
+        stream.destroy();
+      } catch {}
+      try {
+        writeSync(controlFd, `
+`);
+      } catch {}
+      safeClose(controlFd);
+      if (!restored) {
+        reject(new SecretInputError("no_terminal", "could not restore the terminal after masked input"));
+      } else if (error !== undefined)
+        reject(error);
+      else
+        resolve(value);
+    };
+    const onData = (chunk) => {
+      try {
+        const line = state.feed(chunk);
+        if (line === undefined)
+          return;
+        if (line === "") {
+          if (!writeTerminal(`
+${prompt}`)) {
+            finish(new SecretInputError("no_terminal", "could not write the terminal prompt"));
+          }
+          return;
+        }
+        finish(undefined, line);
+      } catch (error) {
+        finish(error);
+      }
+    };
+    const onStreamError = () => finish(new SecretInputError("no_terminal", "could not read the terminal"));
+    const onEnd = () => finish(new SecretInputError("eof", "no secret was entered"));
+    const onSignal = (signal) => {
+      finish(new SecretInputError("cancelled", "secret entry cancelled"));
+      process.kill(process.pid, signal);
+    };
+    const onSigint = () => onSignal("SIGINT");
+    const onSigterm = () => onSignal("SIGTERM");
+    stream.on("data", onData);
+    stream.on("error", onStreamError);
+    stream.on("end", onEnd);
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+    if (!writeTerminal(prompt)) {
+      finish(new SecretInputError("no_terminal", "could not write the terminal prompt"));
+    }
+  });
+}
+
 // src/cli.ts
 init_config();
 init_dashboard_launch();
@@ -77985,12 +78283,12 @@ init_public_source_capabilities();
 init_worker_service();
 import { createHash as createHash23, randomUUID as randomUUID10 } from "node:crypto";
 import {
-  closeSync as closeSync4,
+  closeSync as closeSync5,
   existsSync as existsSync14,
   fsyncSync as fsyncSync3,
   lstatSync as lstatSync8,
   mkdirSync as mkdirSync13,
-  openSync as openSync4,
+  openSync as openSync5,
   readSync as readSync2,
   readdirSync as readdirSync3,
   readFileSync as readFileSync15,
@@ -78467,7 +78765,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
 }
 function sha256File(path) {
   const hash = createHash23("sha256");
-  const descriptor = openSync4(path, "r");
+  const descriptor = openSync5(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
     for (;; ) {
@@ -78477,7 +78775,7 @@ function sha256File(path) {
       hash.update(buffer.subarray(0, bytesRead));
     }
   } finally {
-    closeSync4(descriptor);
+    closeSync5(descriptor);
   }
   return hash.digest("hex");
 }
@@ -78537,22 +78835,22 @@ function makeDurableDirectory(path, boundary) {
   }
 }
 function syncFileSync(path) {
-  const descriptor = openSync4(path, "r");
+  const descriptor = openSync5(path, "r");
   try {
     fsyncSync3(descriptor);
   } finally {
-    closeSync4(descriptor);
+    closeSync5(descriptor);
   }
 }
 function syncDirectorySync2(path) {
-  const descriptor = openSync4(path, "r");
+  const descriptor = openSync5(path, "r");
   try {
     fsyncSync3(descriptor);
   } catch (error) {
     if (!isUnsupportedDirectorySyncError(error))
       throw error;
   } finally {
-    closeSync4(descriptor);
+    closeSync5(descriptor);
   }
 }
 function sanitizeForExport(value) {
@@ -78715,7 +79013,7 @@ init_version();
 // src/core/lifecycle.ts
 init_atomic_file();
 import { createHash as createHash27 } from "node:crypto";
-import { spawnSync as spawnSync5 } from "node:child_process";
+import { spawnSync as spawnSync6 } from "node:child_process";
 import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync19, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
 import { dirname as dirname23, isAbsolute as isAbsolute5, join as join33 } from "node:path";
@@ -78724,15 +79022,15 @@ import { dirname as dirname23, isAbsolute as isAbsolute5, join as join33 } from 
 init_atomic_file();
 init_operation_error();
 import { createHash as createHash26, randomUUID as randomUUID12 } from "node:crypto";
-import { spawnSync as spawnSync4 } from "node:child_process";
+import { spawnSync as spawnSync5 } from "node:child_process";
 import {
   chmodSync as chmodSync10,
-  closeSync as closeSync6,
+  closeSync as closeSync7,
   existsSync as existsSync20,
   fsyncSync as fsyncSync4,
   lstatSync as lstatSync11,
   mkdtempSync,
-  openSync as openSync6,
+  openSync as openSync7,
   readFileSync as readFileSync21,
   readdirSync as readdirSync4,
   renameSync as renameSync6,
@@ -78754,12 +79052,12 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactSha256 = createHash26("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join31(tmpdir(), ".olympus-artifact-snapshot-"));
   const artifactPath = join31(snapshotDir, "artifact.tgz");
-  const descriptor = openSync6(artifactPath, "wx", 384);
+  const descriptor = openSync7(artifactPath, "wx", 384);
   try {
     writeFileSync8(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
-    closeSync6(descriptor);
+    closeSync7(descriptor);
   }
   syncDirectorySync(snapshotDir);
   try {
@@ -78899,7 +79197,7 @@ function extractArchive(artifactPath, staging) {
   runTar(["-xzf", artifactPath, "-C", staging, "--strip-components=1"], "extract");
 }
 function runTar(args, action) {
-  const result = spawnSync4("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync5("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (result.status !== 0) {
     throw new OperationError("invalid_params", `Could not ${action} the Olympus upgrade artifact.`, (result.stderr || result.stdout || "").trim().slice(0, 240) || undefined);
   }
@@ -78935,7 +79233,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
     throw new OperationError("invalid_params", "Upgrade artifact package and plugin manifest versions do not match.");
   }
   if (executePreflight) {
-    const result = spawnSync4(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
+    const result = spawnSync5(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
     if (result.status !== 0 || result.stdout.trim() !== `olympus ${version}`) {
       throw new OperationError("invalid_params", "Upgrade artifact CLI preflight did not report its declared Olympus version.");
     }
@@ -78991,11 +79289,11 @@ function syncVersionTree(root) {
       syncVersionTree(path);
       continue;
     }
-    const descriptor = openSync6(path, "r");
+    const descriptor = openSync7(path, "r");
     try {
       fsyncSync4(descriptor);
     } finally {
-      closeSync6(descriptor);
+      closeSync7(descriptor);
     }
   }
   syncDirectorySync(root);
@@ -79712,7 +80010,7 @@ function defaultWorkerReadinessProbe(url, bunBin) {
     "} catch { process.exit(1); }"
   ].join(`
 `);
-  const result = spawnSync5(executable, ["-e", script, url], {
+  const result = spawnSync6(executable, ["-e", script, url], {
     encoding: "utf8",
     stdio: ["ignore", "ignore", "ignore"],
     timeout: 5000
@@ -79815,7 +80113,7 @@ init_sensitivity_map();
 
 // src/core/setup.ts
 import { randomBytes as randomBytes5 } from "node:crypto";
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { homedir as homedir28 } from "node:os";
 init_operation_error();
 init_sovereignty();
@@ -80023,17 +80321,17 @@ function normalizeSetupPlatform(platform2) {
   return "other";
 }
 function defaultCommandExists2(command) {
-  const result = spawnSync6("sh", ["-lc", `command -v ${shellQuote2(command)} >/dev/null 2>&1`], {
+  const result = spawnSync7("sh", ["-lc", `command -v ${shellQuote2(command)} >/dev/null 2>&1`], {
     stdio: "ignore"
   });
   return result.status === 0;
 }
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
-  const result = spawnSync6(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const result = spawnSync7(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return result.status === 0;
 }
 function defaultCommandVersion(command) {
-  const result = spawnSync6(command, ["--version"], {
+  const result = spawnSync7(command, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -80421,8 +80719,8 @@ function printHelp() {
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect telegram|whatsapp --session-path <path>");
-  console.log("  olympus connect venice|readwise --api-key-stdin");
-  console.log("  olympus connect gemini --api-key-stdin");
+  console.log("  olympus connect venice|readwise --api-key-prompt");
+  console.log("  olympus connect gemini --api-key-prompt");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
   console.log("  olympus data export --output <dir> [--source <id>]");
   console.log("  olympus data verify --input <dir>");
@@ -80449,9 +80747,9 @@ var PUBLIC_LEAF_USAGE = {
   "connect dropbox": "olympus connect dropbox --client-id <id>",
   "connect telegram": "olympus connect telegram --session-path <path>",
   "connect whatsapp": "olympus connect whatsapp --session-path <path>",
-  "connect venice": "olympus connect venice --api-key-stdin",
-  "connect readwise": "olympus connect readwise --api-key-stdin",
-  "connect gemini": "olympus connect gemini --api-key-stdin",
+  "connect venice": "olympus connect venice --api-key-prompt",
+  "connect readwise": "olympus connect readwise --api-key-prompt",
+  "connect gemini": "olympus connect gemini --api-key-prompt",
   "connect status": "olympus connect status [google|gmail|google-drive|dropbox]",
   dashboard: "olympus dashboard [--read-only] [--no-open]",
   "data export": "olympus data export --output <dir> [--source <id>]",
@@ -80472,6 +80770,9 @@ function printPublicLeafCommandHelp(args) {
   if (!usage)
     throw new Error(`Missing public leaf help for ${commandName}.`);
   console.log(`Usage: ${usage}`);
+  if (["connect gemini", "connect venice", "connect readwise"].includes(commandName)) {
+    console.log("For an authenticated password-manager pipeline, use --api-key-stdin instead.");
+  }
   return true;
 }
 var COMMAND_GROUP_HELP = {
@@ -80514,8 +80815,8 @@ var COMMAND_GROUP_HELP = {
     "  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]",
     "  olympus connect dropbox --client-id <id>",
     "  olympus connect telegram|whatsapp --session-path <path>",
-    "  olympus connect venice|readwise --api-key-stdin",
-    "  olympus connect gemini --api-key-stdin"
+    "  olympus connect venice|readwise --api-key-prompt",
+    "  olympus connect gemini --api-key-prompt"
   ],
   data: [
     "Usage: olympus data <command>",
@@ -80926,8 +81227,8 @@ async function runConnect(args) {
         "olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
         "olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
         "olympus connect telegram|whatsapp --session-path <path> [--session-ready]",
-        "olympus connect venice|readwise --api-key-stdin",
-        "olympus connect gemini --api-key-stdin",
+        "olympus connect venice|readwise --api-key-prompt",
+        "olympus connect gemini --api-key-prompt",
         "olympus connect status [google|gmail|google-drive|dropbox]"
       ]
     };
@@ -80954,6 +81255,12 @@ async function runConnect(args) {
   const source = rawSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.apiKeyPrompt && options.apiKeyStdin) {
+    throw new OperationError("invalid_params", "Choose either --api-key-prompt or --api-key-stdin, not both.");
+  }
+  if (options.apiKeyPrompt && source !== "gemini" && source !== "venice" && source !== "readwise") {
+    throw new OperationError("invalid_params", "--api-key-prompt is supported only for Gemini, Venice, and Readwise.");
+  }
   const secretStore = createDefaultSecretStore({
     env: {
       ...process.env,
@@ -81031,18 +81338,18 @@ async function runConnect(args) {
     });
   }
   if (source === "gemini") {
-    if (!options.apiKeyStdin) {
-      throw new OperationError("invalid_params", "--api-key-stdin is required so API keys are not exposed in shell history.");
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError("invalid_params", "Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.");
     }
-    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
+    return connectGeminiApiKey({ apiKey: options.apiKeyPrompt ? await readSecretFromTerminal("Gemini API key (input hidden): ") : await readApiKeyFromStdin() });
   }
   if (source === "venice" || source === "readwise") {
-    if (!options.apiKeyStdin) {
-      throw new OperationError("invalid_params", "--api-key-stdin is required so API keys are not exposed in shell history.");
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError("invalid_params", "Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.");
     }
     return connectPublicApiKeySource({
       source,
-      apiKey: await readApiKeyFromStdin(),
+      apiKey: options.apiKeyPrompt ? await readSecretFromTerminal(`${source === "venice" ? "Venice" : "Readwise"} API key (input hidden): `) : await readApiKeyFromStdin(),
       ...options.accountRole ? { accountRole: options.accountRole } : {},
       ...options.registryPath ? { registryPath: options.registryPath } : {},
       secretStore
@@ -81051,7 +81358,7 @@ async function runConnect(args) {
   throw new OperationError("invalid_params", `Unsupported connect source: ${source}`);
 }
 function parseConnectOptions(args) {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, clientSecretStdin: false };
+  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false };
   for (let index = 0;index < args.length; index += 1) {
     const arg = args[index];
     if (!arg)
@@ -81116,6 +81423,9 @@ function parseConnectOptions(args) {
         break;
       case "--session-ready":
         options.sessionReady = true;
+        break;
+      case "--api-key-prompt":
+        options.apiKeyPrompt = true;
         break;
       case "--api-key-stdin":
         options.apiKeyStdin = true;

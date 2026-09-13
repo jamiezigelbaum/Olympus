@@ -691,7 +691,8 @@ Ask where the operator keeps the key and offer these two supported routes:
 
 - **Manual web route:** the operator opens their password manager's website
   and pastes the key themselves into a supported local dashboard field or
-  silent terminal input. For Gemini, use the documented CLI stdin flow below.
+  the built-in masked terminal prompt described below. No shell function or
+  helper script is needed.
   No password-manager desktop app or CLI is required for this route. Never
   ask them to paste the key into chat.
 - **Authenticated CLI route:** if they want the agent to fetch the key,
@@ -738,7 +739,7 @@ knowing where a credential lives never authorizes fetching it. Hard limits:
   restarts; the worker env is written once at setup and workers must
   not re-read the manager at runtime.
 - If the operator prefers to paste, that is their call: the dashboard
-  field and stdin flow remain the paste paths, and secrets never go
+  field and built-in masked prompt remain the paste paths, and secrets never go
   through chat.
 
 Setup prints `unmet_prerequisites` with an exact remedy per item. Follow
@@ -755,15 +756,25 @@ them. Typical items:
 printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
 ```
 
-  `$KEY` must be populated without the value reaching your shell history,
-  a log, or chat. Two supported ways, per the credential-sourcing rule
-  above: read it out of the operator's password manager with that
-  manager's CLI, after their per-credential yes and by the exact item name
-  they gave you (`KEY="$(op read '<their reference>')"`, or the Keychain's
-  `security find-generic-password … -w`); or have the operator type it
-  into a silent read in a shell they control (`read -rs KEY`), which
-  echoes nothing. Never `export` it, never echo it back to confirm it, and
-  unset it when the connect returns.
+  The pipeline above is for the authenticated password-manager route only.
+  For manual entry, resolve the installed executable yourself and give the
+  operator one command, using its actual absolute path:
+
+```bash
+"$OLYMPUS_BIN" connect gemini --api-key-prompt
+```
+
+  Substitute the resolved path before handing this to the operator; do not ask
+  them to discover `rootDir` or define `$OLYMPUS_BIN`. Run it in a real terminal
+  on the machine hosting Olympus, under the same user as the worker. For a
+  remote host, identify that host and account explicitly and use the operator's
+  existing SSH access; do not tell them to run a remote path on their laptop.
+  An agent's captured terminal is not a user input surface unless it genuinely
+  hands control to the operator. Never provide a heredoc, `read -rs` function,
+  regex redaction wrapper, or generated helper script. The command reads from
+  the controlling terminal with echo disabled, rejects malformed input, waits
+  again on an empty Enter, and restores terminal settings when it exits.
+  The key is never an argument, environment variable, or chat message.
 
   The command itself is the remedy setup prints for this item, verbatim. The
   command validates the key against Gemini before storing anything, writes
@@ -786,8 +797,10 @@ printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
   [Venice account and API setup](docs/SOVEREIGNTY_CONFIG.md#venice-create-an-account-with-api-access)
   instructions. The operator needs a usable API balance and an Inference Only
   key with an agreed consumption limit; a chat subscription alone is not proof
-  of API readiness. Then connect it via stdin so it never appears in
-  shell history or logs (you run this; do not show it as a copy block):
+  of API readiness. For manual entry, give the resolved equivalent of
+  `"$OLYMPUS_BIN" connect venice --api-key-prompt`; the same terminal rules above
+  apply. For an authenticated manager pipeline, connect via stdin (you run
+  this; do not show it as a copy block):
 
 ```bash
 printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
