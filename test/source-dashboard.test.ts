@@ -593,7 +593,7 @@ describe('multi-source source dashboard', () => {
     expect(setupResponse.status).toBe(200);
     expect(setupHtml).not.toContain(workerBearerToken);
     expect(setupHtml).toContain('id="dashboard-controls"');
-    expect(setupHtml).toContain('Input token');
+    expect(setupHtml).toContain('Open dashboard controls');
     // The field has no name, so a scriptless submit carries no token; the form
     // POSTs to the session route rather than putting a bearer in a URL.
     expect(setupHtml).toContain('data-dashboard-control-token');

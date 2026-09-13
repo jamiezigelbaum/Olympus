@@ -156,6 +156,11 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'GET', path: '/dashboard.json' },
   { method: 'GET', path: '/dashboard/ui' },
   { method: 'GET', path: '/dashboard/auth-check' },
+  // The standalone opening handoff: a public constant page, a bearer-only
+  // mint, and a ticket-authenticated redeem. See core/dashboard-launch.ts.
+  { method: 'GET', path: '/dashboard/launch' },
+  { method: 'POST', path: '/dashboard/control/launch' },
+  { method: 'POST', path: '/dashboard/control/launch/redeem' },
   { method: 'POST', path: '/dashboard/control/session' },
   { method: 'GET', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/dashboard/dispositions.json' },

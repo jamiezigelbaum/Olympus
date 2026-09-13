@@ -395,21 +395,12 @@ export interface DashboardControlGateInput {
 /** Anchor every locked control links back to: the one place the token goes. */
 export const DASHBOARD_CONTROL_GATE_ID = 'dashboard-controls';
 
-/**
- * The prompt a reader hands their agent to get the worker token (owner ruling,
- * 2026-09-01: the agent may read it out of the worker env file and hand it
- * over in chat). Names the file and the command, never the value.
- *
- * `olympus` is NOT on PATH on a fresh install — the install guide runs it as
- * `"$OLYMPUS_BIN"` for exactly that reason — so a bare command sent the reader
- * to "command not found" (clean-install rehearsal, 2026-09-05). The prompt and
- * the CLI line below both name where the binary lives.
- */
+/** Opening-link handoff for the host-owning agent; never request a durable secret. */
 export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
-  'I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from '
-  + '`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read '
-  + 'OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste '
-  + 'it into the dashboard. Do not change any configuration.';
+  'Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, '
+  + 'resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, '
+  + 'run `<rootDir>/bin/olympus dashboard`, and give me the new opening link. '
+  + 'Do not read or print the worker token. Do not change configuration or connect sources.';
 
 /**
  * The one dashboard-level custody gate for every mutating source control.
@@ -424,7 +415,7 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
     return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>`
       + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">`
       + `<div class="grow"><span class="name">Dashboard controls unlocked</span>`
-      + `<span class="why"> — on this browser for 30 days from the paste, or until the worker token is rotated</span></div>`
+      + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>`
       // Lock clears this browser's cookie. Same custody proof as any control
       // (cookie, same origin, CSRF); a scriptless submit posts nothing useful.
       + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">`
@@ -435,29 +426,22 @@ export function dashboardControlGate(input: DashboardControlGateInput): string {
   const promptId = `${sheetId}-prompt`;
   return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>`
     + `<div class="attncard" data-dashboard-control-gate data-state="locked">`
-    + `<div class="grow"><span class="name">Input token</span>`
-    + `<span class="why"> — unlocks every action on this dashboard; never stored by the page.</span></div>`
-    // Fail closed without JavaScript: the field carries NO name, so a native
-    // submit sends no token anywhere, and the form's own method is POST to
-    // the session route, so a scriptless submit can never put the bearer in
-    // a URL, the history, or a request log. The script reads the field by
-    // its data attribute and sends the bearer as a header, never as a body.
-    + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">`
-    + `<input class="keyfield" data-dashboard-control-token type="password"`
-    + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">`
-    + `<button class="btn primary" type="submit">Unlock</button>`
-    + `<button class="btn" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Where is my token?</button>`
-    + `<span class="actmsg" data-action-message role="status"></span></form></div>`
+    + `<div class="grow"><span class="name">Open dashboard controls</span>`
+    + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>`
+    + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>`
     + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">`
-    + `<h4>Getting the worker token</h4>`
-    + `<p>Ask your agent — copy this prompt into it:</p>`
+    + `<h4>Open dashboard controls</h4>`
+    + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after two minutes.</p>`
     + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>`
     + `<button class="btn primary" type="button" data-copy-target="#${promptId}">Copy prompt</button>`
     + `<span class="copystatus" data-copy-status aria-live="polite"></span>`
-    + `<p style="margin-top:12px">Or run this on the machine that hosts Olympus, from the plugin directory:</p>`
-    + `<div class="promptbox"><code>&lt;rootDir&gt;/bin/olympus dashboard token</code></div>`
-    + `<p class="hint">rootDir comes from <code>openclaw plugins inspect olympus --json</code>.</p>`
-    + `</div>`;
+    + `<details><summary>Advanced: use a worker token</summary>`
+    // No name: native form submission cannot put a bearer in a URL or body.
+    + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">`
+    + `<input class="keyfield" data-dashboard-control-token type="password"`
+    + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">`
+    + `<button class="btn" type="submit">Unlock</button>`
+    + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 
 export interface DashboardAttentionRowInput {

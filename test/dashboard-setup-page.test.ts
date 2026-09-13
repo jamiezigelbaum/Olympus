@@ -604,9 +604,9 @@ describe('dashboard setup framing and copy', () => {
       controlSessionCsrfToken: 'csrf-fixture',
     });
 
-    expect(locked).toContain('Input token');
-    expect(locked).toContain('Where is my token?');
-    expect(locked).toContain('&lt;rootDir&gt;/bin/olympus dashboard token');
+    expect(locked).toContain('Open dashboard controls');
+    expect(locked).toContain('Get opening link');
+    expect(locked).toContain('&lt;rootDir&gt;/bin/olympus dashboard');
     expect(connected).toContain('Dashboard controls unlocked');
     expect(connected).not.toContain('name="worker_token"');
 

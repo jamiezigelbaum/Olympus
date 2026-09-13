@@ -1,5 +1,14 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
+import {
+  DASHBOARD_LAUNCH_MINT_PATH,
+  DASHBOARD_LAUNCH_PAGE_HTML,
+  DASHBOARD_LAUNCH_PAGE_PATH,
+  DASHBOARD_LAUNCH_REDEEM_PATH,
+  DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+  DashboardLaunchTickets,
+  dashboardLaunchPageHeaders,
+} from '../core/dashboard-launch.ts';
 
 export const DEFAULT_WORKER_BIND_HOST = '127.0.0.1';
 
@@ -8,6 +17,11 @@ export interface WorkerBearerAuthOptions {
   basePath?: string;
   /** Test seam for bounded control-session expiry. */
   now?: () => number;
+  /**
+   * Test seam and process singleton for bounded opening tickets. Defaults to one
+   * store per wrapper, which is one per worker process.
+   */
+  launchTickets?: DashboardLaunchTickets;
 }
 
 /**
@@ -76,6 +90,7 @@ export function withWorkerBearerAuth(
   const authToken = normalizeWorkerAuthToken(options.authToken);
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
+  const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
   return async (request: Request): Promise<Response> => {
     const presentedAuthorization = request.headers.get('Authorization');
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
@@ -84,8 +99,43 @@ export function withWorkerBearerAuth(
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
     }
+    if (isDashboardLaunchPageRequest(request)) {
+      // Public by construction: a constant page with no install fact in it,
+      // reached so the opening ticket can travel in the URL fragment, which no
+      // browser sends to a server, and be cleared before any fetch is made.
+      return new Response(DASHBOARD_LAUNCH_PAGE_HTML, {
+        status: 200,
+        headers: dashboardLaunchPageHeaders(),
+      });
+    }
     if (!authToken) {
       return workerAuthRequiredResponse();
+    }
+    if (isDashboardLaunchMintRequest(request)) {
+      // Bearer only, and only the bearer: never the derived dash_ view token,
+      // never a live control cookie. The origin check is the same one every
+      // control POST already proves, so the browser in the URL is the browser
+      // the page will be opened in.
+      if (!hasValidWorkerBearerToken(presentedAuthorization, authToken)) return unauthorizedWorkerResponse();
+      const origin = sameRequestOrigin(request);
+      if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
+      return dashboardLaunchMintedResponse(launchTickets.mint(origin));
+    }
+    if (isDashboardLaunchRedeemRequest(request)) {
+      // No bearer and no cookie: the proof is the ticket itself, bound to the
+      // origin that minted it, unexpired, and consumed atomically. A ticket
+      // that arrives from anywhere else is refused with the same answer a
+      // spent one gets, so a cross-origin page learns nothing from its probe.
+      const origin = sameRequestOrigin(request);
+      if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
+      const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
+      if (consumed.status === 'ok') {
+        // The existing control session, minted the same way the manual unlock
+        // mints it: HttpOnly, SameSite=Strict, origin-tagged, 30 days.
+        const minted = mintDashboardControlSession(authToken, origin, now());
+        return dashboardLaunchRedeemedResponse(minted, now());
+      }
+      return dashboardLaunchRefusedResponse(consumed.status);
     }
     if (isDashboardControlLockRequest(request)) {
       // Lock this browser: proven the same way any control is (cookie, same
@@ -209,6 +259,115 @@ function isDashboardHtmlNavigationRoute(request: Request): boolean {
 
 function isDashboardControlSessionRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === '/dashboard/control/session';
+}
+
+function isDashboardLaunchPageRequest(request: Request): boolean {
+  return request.method === 'GET' && new URL(request.url).pathname === DASHBOARD_LAUNCH_PAGE_PATH;
+}
+
+function isDashboardLaunchMintRequest(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LAUNCH_MINT_PATH;
+}
+
+function isDashboardLaunchRedeemRequest(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LAUNCH_REDEEM_PATH;
+}
+
+/**
+ * The ticket the page POSTs.
+ *
+ * Bounded rather than trusted: a body that is not a small JSON object with a
+ * string ticket is simply no ticket, which the caller already handles as an
+ * unknown one. Reading the body at all is safe here because this route's
+ * authorization is the ticket, not anything the body could name.
+ */
+async function dashboardLaunchTicketFromBody(request: Request): Promise<string | undefined> {
+  if (request.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') return undefined;
+  const reader = request.body?.getReader();
+  if (!reader) return undefined;
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 5000);
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > 4096) { void reader.cancel().catch(() => {}); return undefined; }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  if (timedOut || bytes === 0) return undefined;
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  const text = new TextDecoder().decode(buffer);
+  try {
+    const parsed = JSON.parse(text) as { ticket?: unknown };
+    return typeof parsed?.ticket === 'string' ? parsed.ticket : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function dashboardLaunchMintedResponse(ticket: string): Response {
+  return new Response(JSON.stringify({
+    ok: true,
+    // The ticket and its lifetime, never the worker token and never a session.
+    ticket,
+    expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+    policy: {
+      single_use: true,
+      origin_bound: true,
+      durable_secret_in_url: false,
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
+function dashboardLaunchRedeemedResponse(session: AuthorizedDashboardControlSession, nowMs: number): Response {
+  return new Response(JSON.stringify({
+    ok: true,
+    csrf_token: session.csrfToken,
+    next: '/dashboard',
+    policy: {
+      http_only_cookie: true,
+      csrf_required: true,
+      origin_bound: true,
+    },
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'Set-Cookie': dashboardControlSessionCookie(
+        session.sessionId,
+        remainingSessionSeconds(session.expiresAtMs, nowMs),
+      ),
+    },
+  });
+}
+
+function dashboardLaunchRefusedResponse(status: 'unknown' | 'expired' | 'origin_mismatch'): Response {
+  return new Response(JSON.stringify({
+    error: {
+      code: status === 'origin_mismatch' ? 'dashboard_launch_origin_mismatch' : 'dashboard_launch_ticket_invalid',
+      status: 403,
+      message: 'This opening link is no longer valid. Run the dashboard command again for a fresh one.',
+    },
+    policy: { single_use: true, origin_bound: true, durable_secret_in_url: false },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
 }
 
 function isDashboardControlLockRequest(request: Request): boolean {

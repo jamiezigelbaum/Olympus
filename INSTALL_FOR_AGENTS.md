@@ -980,6 +980,11 @@ stop the background service first so the two do not race.
 
 ## Step 5 — Validate, then restart the gateway (in this order)
 
+**Hermes MCP-only:** skip the native OpenClaw Gateway activation and restart
+paragraphs in this step. An OpenClaw Gateway is not required for Hermes to use
+the Olympus worker. Follow the Hermes MCP instructions below, verify an actual
+MCP status call, then use the standalone opening-link handoff in Step 6.
+
 Resolve the selected dashboard's prerequisites before this restart. If the
 artifact declares native Control UI support, check its Labs opt-in, browser/
 transport compatibility, and Gateway origin described in Step 6 now. Apply
@@ -1252,52 +1257,32 @@ olympus dashboard
 
 Use the required handoff above once the selected dashboard is open.
 
-The standalone `olympus dashboard` command prints `url`, `opened` (whether it
-opened a browser), and `hint`. Hand the printed `url` to the operator exactly
-as printed, including `?token=dash_…`. The bare `/dashboard` path returns 401;
-do not remove the read-only view token.
+The standalone `olympus dashboard` command returns `url`, `opened`, and
+`hint`. Run the already-resolved `$OLYMPUS_BIN dashboard` yourself and give the
+operator its opening link. They should click a link, not find an installation
+directory, run a terminal command, or copy an internal credential.
 
-The `hint` is the sentence that explains the split, and it is worth
-reading to the operator almost verbatim:
+The opening link contains a short-lived, single-use authorization ticket. It
+expires after two minutes, so generate it at handoff time; if it expires or has
+already been used, run the command again. Do not fetch the link as a preview or
+probe before giving it to the operator. The browser removes the ticket from its
+address bar, exchanges it for the existing HttpOnly control session, and opens
+the dashboard with controls available. Verify that actual browser result before
+claiming the handoff is complete. Keep opening links out of public issues and
+shared logs; they authorize dashboard controls while valid.
 
-```
-This URL carries the read-only view token, not the worker token; unlocking the controls still needs <rootDir>/bin/olympus dashboard token.
-```
+The durable worker bearer stays on the host. `olympus dashboard token` remains
+an advanced compatibility command: never paste it into chat, a summary, or a
+note, and never use it as the ordinary installation handoff. A missing worker
+credential means setup has not completed; an unreachable worker needs its
+existing readiness repair. Neither error is a reason to print its secret or
+silently hand over a read-only page as if controls were ready.
 
-(If no worker token exists yet, the hint instead says
-`No worker auth token found; run <rootDir>/bin/olympus setup first, then
-<rootDir>/bin/olympus dashboard token for the unlock value (rootDir comes
-from openclaw plugins inspect olympus --json).` — that means setup has not
-run, not that the dashboard is broken.)
-
-**The `dash_` token is not the worker token.** It is derived from the
-worker bearer, it is read-only, and the worker admits it on exactly two
-routes — `GET /dashboard` and `GET /dashboard.json` — and no others: no
-control route, and no method but GET. So it is not the secret MUST NOT #2
-governs; treat it as you would the dashboard screen itself. Fine to hand
-the operator, not something to drop into a public issue or a shared log,
-because it does open their dashboard to whoever holds the link.
-
-**`olympus dashboard token` is the secret — treat it like one.** That
-command prints the worker bearer, which authorizes every change
-(**Connect**, **Sync now**, **Disconnect**, Unpair), and MUST NOT #2
-covers it exactly as it covers an API key: never paste it into chat, a
-summary, a note, or a commit. The operator pastes it into the dashboard's
-"Worker token" field with their own hands. When they need it, the
-dashboard's "Where is my token?" sheet gives them the command as
-`<rootDir>/bin/olympus dashboard token`, with `rootDir comes from
-openclaw plugins inspect olympus --json` under it — the same path your
-`$OLYMPUS_BIN` already resolves to, so what you tell them and what the
-page tells them agree. Follow that method, and if you cannot, give them
-the command to run themselves rather than running it and relaying the
-value.
-
-Both commands resolve the worker token the same way — worker.env first,
-then config — so the URL you hand over and the token the operator pastes
-always belong to the same worker. If an older build shows you an `auth`
-field beside the URL, or prints a `url` with no `dash_` query token at
-all, that build predates this guide: do not read the `auth` field as the
-token, and do not hand over a tokenless URL as if it worked.
+The `dash_` token is not the worker token. Existing read-only dashboard links
+continue to authorize only their documented read routes. They cannot mint an
+opening ticket or authorize a control action. To operate the dashboard, obtain
+a fresh opening link from the installed CLI. Native OpenClaw access continues
+to use the signed-in Gateway identity and does not need this standalone step.
 
 Follow the source the operator chose; do not bulk-connect anything yourself.
 Other sources can be added later from the same dashboard. Your job is to narrate, run one-time setup when a

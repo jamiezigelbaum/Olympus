@@ -372,31 +372,20 @@ backend health alone is not a successful UI handoff:
 olympus dashboard
 ```
 
-The standalone command prints three fields: the dashboard `url`, whether it
-`opened` a
-browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
-token — and that is the URL that works. A browser cannot send a bearer
-header from the address bar, so the bare `/dashboard` path returns 401; copy
-the URL whole. Your browser lands on a local, token-protected dashboard:
-source freshness, how much is indexed, and where public, private, secure,
-and secrets are allowed to go. The hint says the split out loud: *"This URL
-carries the read-only view token, not the worker token; unlocking the
-controls still needs `<rootDir>/bin/olympus dashboard token`."*
+The command opens the standalone dashboard with its controls authorized. If
+Olympus runs on another machine, your agent gives you the returned opening
+link for the browser connection you configured. You do not need the plugin's
+installation directory or its worker token.
 
-That `dash_` token is derived from the worker token, is read-only, and is
-accepted on exactly two routes — `GET /dashboard` and `GET /dashboard.json`
-— so it cannot connect, reauthenticate, sync, disconnect, or unpair. Anyone
-with the link can read your dashboard, so treat the URL like the screen
-itself rather than like a secret to be scrubbed.
+The link expires after two minutes and works once. Open it promptly; if it has
+expired or was already used, ask your agent to run `olympus dashboard` again.
+The browser clears the link's ticket and keeps an HttpOnly control session;
+the durable worker token never enters the URL or browser storage. Treat an
+unused opening link as access to your dashboard and keep it out of public logs.
 
-In the standalone dashboard, changing anything (connecting, reauthenticating,
-sync now) asks once for the **worker token**, which is a different value and is a real secret:
-`<rootDir>/bin/olympus dashboard token` prints it — `rootDir` comes from
-`openclaw plugins inspect olympus --json`, because `olympus` is not on PATH
-after a clean install. It authorizes changes, so keep it out of chat logs
-and notes —
-or ask your agent for the command using the dashboard's "Where is my token?"
-button. The agent must never retrieve and relay the value through chat.
+Old `dash_` links remain read-only. Use a fresh opening link when you need the
+controls. `olympus dashboard token` is an advanced compatibility command, not a
+required setup step; do not copy its secret into chat.
 
 Choose the source you want now; the source roster is not an all-seven checklist. Follow its credential or pairing → scope → initial sync → source
 health → cited-answer readiness journey. Other sources can be added later.
@@ -406,13 +395,9 @@ cards have a **Sync now** button for an immediate run. Dropbox starts from a
 neutral account-root metadata listing until you install a narrower
 operator-approved ingestion policy.
 
-For standalone access, the URL
-carries the read-only dashboard token and nothing more. The first mutable
-action asks for the worker bearer once, exchanges it for a signed HttpOnly
-local control session, and discards the pasted value; origin and CSRF checks
-protect every control request. The page does not put the worker bearer in
-browser storage, and pasting the `dash_` URL token into the unlock field is
-refused.
+Standalone control requests retain their signed HttpOnly session, same-origin,
+and CSRF checks. The opening link authorizes the browser; it does not connect a
+source or start ingestion by itself.
 
 Connect only the source you chose, using its dashboard card and the
 [per-source guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).

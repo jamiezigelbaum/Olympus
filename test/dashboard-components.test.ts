@@ -188,21 +188,24 @@ describe('control links', () => {
 });
 
 describe('dashboard-level control gate', () => {
-  test('asks for the worker token once at dashboard level and names where it comes from', () => {
+  test('leads with an opening link and retains manual token entry only as an advanced option', () => {
     const html = dashboardControlGate({ connected: false });
     expect(html).toContain(`id="${DASHBOARD_CONTROL_GATE_ID}"`);
-    expect(html).toContain('Input token');
-    expect(html).toContain('Where is my token?');
+    expect(html).toContain('Open dashboard controls');
+    expect(html).toContain('Get opening link');
     expect(html).toContain('data-sheet-toggle');
     // Where it comes from now lives behind the disclosure, and says both ways
     // of getting it: the agent prompt and the command that prints it.
     expect(html).toContain(escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT));
     // `olympus` is not on PATH on a fresh install, so neither line may say a
     // bare command: both name the plugin's own bin and where rootDir comes from.
-    expect(html).toContain('&lt;rootDir&gt;/bin/olympus dashboard token');
+    expect(html).toContain('&lt;rootDir&gt;/bin/olympus dashboard');
     expect(html).toContain('openclaw plugins inspect olympus --json');
-    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).toContain('<rootDir>/bin/olympus dashboard token');
+    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).toContain('<rootDir>/bin/olympus dashboard');
     expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).toContain('openclaw plugins inspect olympus --json');
+    expect(html).toContain('<details><summary>Advanced: use a worker token</summary>');
+    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).not.toContain('dashboard token');
+    expect(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT).not.toContain('worker.env');
     expect(html).toContain('data-control-session-kind="unlock"');
     // The field is addressed by its data attribute and carries NO name, so a
     // scriptless native submit sends no token anywhere; the form's own POST to
@@ -223,7 +226,7 @@ describe('dashboard-level control gate', () => {
     const html = dashboardControlGate({ connected: true });
     expect(html).toContain('Dashboard controls unlocked');
     // The truth about the lifetime, and the way to end it on this browser.
-    expect(html).toContain('for 30 days from the paste, or until the worker token is rotated');
+    expect(html).toContain('for 30 days from opening, or until the worker token is rotated');
     expect(html).toContain('data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock"');
     expect(html).toContain('>Lock</button>');
     expect(html).toContain('data-state="connected"');

@@ -256,8 +256,8 @@ flowchart LR
 | `olympus setup --preset <preset> --yes` | writes sovereignty policy and worker auth for the chosen posture |
 | `olympus connect <source> ...` | records OAuth, session, or API-key credentials with source-specific flags |
 | `olympus worker foreground\|install\|start\|stop\|restart\|status\|upgrade\|uninstall` | one versioned lifecycle for the local engine, foreground or supervised |
-| `olympus dashboard` | opens the standalone dashboard when direct access is needed |
-| `olympus dashboard token` | prints the token for the standalone dashboard's Unlock field |
+| `olympus dashboard` | opens the standalone dashboard with a short-lived authorization link; no worker-token copying |
+| `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |

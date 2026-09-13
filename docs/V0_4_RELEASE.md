@@ -328,6 +328,10 @@ together at one exact commit and against one exact package artifact.
   names the next supported action.
 - Use a short-lived local control session with CSRF and origin protection;
   never place the worker bearer token in browser local storage.
+- Standalone dashboard handoff must open authorized controls through a
+  short-lived, single-use CLI-minted link. The operator never has to resolve
+  the plugin directory or copy the durable worker token. Preserve read-only
+  links and the existing control-session origin and CSRF boundaries.
 - Derive file-source selection, extraction and embedding populations from the
   current approved scope. Count files separately from folders and show policy
   deferrals separately from the user's full-ingestion choice. Completed metadata
