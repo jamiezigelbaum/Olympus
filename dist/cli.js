@@ -62038,6 +62038,7 @@ function mountDashboardController(options) {
   let presented = options.presented !== false;
   const root = options.root;
   const oauthSubmittedValues = new WeakMap;
+  const startedFromSheet = new WeakSet;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -62468,6 +62469,11 @@ function mountDashboardController(options) {
       const open4 = sheet.classList.toggle("on");
       sheet.setAttribute("aria-hidden", open4 ? "false" : "true");
       toggle.setAttribute("aria-expanded", open4 ? "true" : "false");
+      const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
+      if (open4 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+        startedFromSheet.add(form);
+        form.requestSubmit();
+      }
       return;
     }
     const copy = target.closest("[data-copy-target]");
@@ -63859,7 +63865,7 @@ function connectSetupSheet(input) {
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
   const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   if (input.publisher) {
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
     return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${prompt}` + `</details>` + `</div>`;
   }
   return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${cancel}` + `${prompt}` + `</div>`;

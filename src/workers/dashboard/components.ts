@@ -993,7 +993,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // The one-click form carries the source and NOTHING else: no client id
     // field to fill, no redirect URI to register, no console to visit. The
     // start route reads the absence of a client id as "use the publisher app".
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? '' : ' data-oauth-autostart'} style="margin-top:12px">`
       + sourceField
       + `<button class="btn primary" type="submit">${submitLabel}</button>`
       + `<span class="actmsg" data-action-message role="status"></span>`

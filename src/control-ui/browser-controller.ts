@@ -64,6 +64,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   let presented = options.presented !== false;
   const root = options.root;
   const oauthSubmittedValues = new WeakMap<HTMLFormElement, Record<string, string>>();
+  const startedFromSheet = new WeakSet<HTMLFormElement>();
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -516,6 +517,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const open = sheet.classList.toggle('on');
       sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
       toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      // A Connect gesture starts the fieldless publisher flow immediately.
+      // Keep BYO forms and pending attempts for explicit input/review, and do
+      // not create another attempt when this same panel is reopened.
+      const form = sheet.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"][data-oauth-autostart]');
+      if (open && form && (canWrite || csrfToken) && !startedFromSheet.has(form)
+        && !form.hasAttribute('data-native-oauth-unavailable')) {
+        startedFromSheet.add(form);
+        form.requestSubmit();
+      }
       return;
     }
     const copy = target.closest<HTMLElement>('[data-copy-target]');

@@ -15,6 +15,7 @@ function mountDashboardController(options) {
   let presented = options.presented !== false;
   const root = options.root;
   const oauthSubmittedValues = new WeakMap;
+  const startedFromSheet = new WeakSet;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -445,6 +446,11 @@ function mountDashboardController(options) {
       const open = sheet.classList.toggle("on");
       sheet.setAttribute("aria-hidden", open ? "false" : "true");
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
+      if (open && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+        startedFromSheet.add(form);
+        form.requestSubmit();
+      }
       return;
     }
     const copy = target.closest("[data-copy-target]");

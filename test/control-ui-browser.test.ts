@@ -11,6 +11,7 @@ import {
 } from '../src/control-ui/browser-controller.ts';
 import { buildDispositionsPreviewView } from '../scripts/control-ui-preview.ts';
 import { renderSourceDispositionsControlUi } from '../src/workers/source-dispositions.ts';
+import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -85,6 +86,47 @@ function oauthResult(url: string): OlympusDashboardControlResult {
 }
 
 describe('OAuth browser handoff', () => {
+  for (const mode of ['publisher', 'byo', 'pending', 'read-only'] as const) {
+    test(`Setup Connect opens ${mode} sheet and starts only ready publisher OAuth`, async () => {
+      const root = document.createElement('div');
+      root.innerHTML = '<button data-sheet-toggle="#gmail-connect">Connect</button>' + connectSetupSheet({
+        id: 'gmail-connect', heading: 'Connect Gmail', intro: 'Connect your app', promptText: 'Help connect Gmail',
+        source: 'gmail', fields: [{ name: 'client_id', label: 'Client ID', required: true, secret: false }],
+        ...(mode !== 'byo' ? { publisher: { intro: 'Connect Gmail', byoSummary: 'Use my own app instead' } } : {}),
+        cancellable: mode === 'pending',
+      });
+      document.body.append(root);
+      const calls: unknown[] = [];
+      const handoffs: unknown[] = [];
+      let finish!: (value: OlympusDashboardControlResult) => void;
+      const pending = new Promise<OlympusDashboardControlResult>((resolve) => { finish = resolve; });
+      Object.defineProperty(window, 'webkit', { configurable: true, value: {
+        messageHandlers: { openclawLink: { postMessage: (message: unknown) => handoffs.push(message) } },
+      } });
+      const controller = mountDashboardController({
+        root, transport: { control: async (params) => { calls.push(params); return pending; } },
+        navigate() {}, async refresh() { return undefined; },
+        returnUrl: 'https://gateway.test/?view=setup', canWrite: mode !== 'read-only',
+        signal: new AbortController().signal, pollIntervalMs: 0,
+      });
+      const toggle = root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!;
+      toggle.click();
+      expect(root.querySelector('.sheet')?.classList.contains('on')).toBe(true);
+      expect(calls.length).toBe(mode === 'publisher' ? 1 : 0);
+      toggle.click();
+      toggle.click();
+      expect(calls.length).toBe(mode === 'publisher' ? 1 : 0);
+      if (mode === 'publisher') {
+        expect(calls[0]).toMatchObject({ action: 'start_oauth', source: 'gmail' });
+        const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=one-click';
+        finish(oauthResult(authorizationUrl));
+        await happyWindow.happyDOM.waitUntilComplete();
+        expect(handoffs).toEqual([{ type: 'open-link', url: authorizationUrl, target: 'external' }]);
+      }
+      controller.dispose();
+    });
+  }
+
   test('uses OpenClaw native handoff without opening a WebKit popup', async () => {
     const { root, form } = oauthFormRoot();
     const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state&code=auth-code';
