@@ -58999,11 +58999,16 @@ function metadataForItem(stored, ref, requested) {
   const name = ref.name ?? stored.name;
   const merged = {
     ...name ? { name } : {},
-    ...stored.locatorUri ? { locatorUri: stored.locatorUri } : {},
     ...stored.authoredAt ? { authoredAt: stored.authoredAt } : {},
     ...stored.updatedAt ? { updatedAt: stored.updatedAt } : {},
     ...requested ?? {}
   };
+  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS)
+    delete merged[key];
+  if (stored.locatorUri) {
+    merged["locatorUri"] = stored.locatorUri;
+    merged["pathDisplay"] = stored.locatorUri;
+  }
   delete merged["contentHash"];
   return merged;
 }
@@ -59136,6 +59141,7 @@ function planExtractionSinkWrite(store, request) {
 }
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded";
 var init_store_sink = __esm(() => {
+  init_source_ingestion_exclusions();
   init_connector_store();
 });
 
