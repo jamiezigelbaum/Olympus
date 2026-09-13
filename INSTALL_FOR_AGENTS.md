@@ -1258,9 +1258,11 @@ olympus dashboard
 Use the required handoff above once the selected dashboard is open.
 
 The standalone `olympus dashboard` command returns `url`, `opened`, and
-`hint`. Run the already-resolved `$OLYMPUS_BIN dashboard` yourself and give the
+`hint`. Run the already-resolved `$OLYMPUS_BIN dashboard --no-open` yourself and give the
 operator its opening link. They should click a link, not find an installation
 directory, run a terminal command, or copy an internal credential.
+Use `--no-open` for an agent handoff so a browser on the host cannot consume
+the single-use link before the operator opens it.
 
 The opening link contains a short-lived, single-use authorization ticket. It
 expires after two minutes, so generate it at handoff time; if it expires or has

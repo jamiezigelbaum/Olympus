@@ -21,8 +21,13 @@ import {
   type DashboardCommandDependencies,
 } from '../src/cli.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from '../src/core/dashboard-launch.ts';
+import {
+  DASHBOARD_LAUNCH_REDEEM_PATH,
+  DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY,
+  DashboardLaunchTickets,
+} from '../src/core/dashboard-launch.ts';
 import { OperationError } from '../src/core/operation-error.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
@@ -776,6 +781,50 @@ describe('CLI tool surface', () => {
     }
   });
 
+  test('dashboard no-open leaves the auth-wrapper ticket fresh and redeemable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-no-open-redeemable-'));
+    const origin = 'http://127.0.0.1:18010';
+    const workerToken = 'no-open-worker-token';
+    const tickets = new DashboardLaunchTickets();
+    const guardedFetch = withWorkerBearerAuth(
+      async () => new Response('unexpected route', { status: 404 }),
+      { authToken: workerToken, launchTickets: tickets },
+    );
+    const fetchImpl: DashboardFetch = async (input, init) => guardedFetch(new Request(input, init));
+    const env = withTemporaryEnv({
+      HOME: dir,
+      OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: `${origin}/v1`,
+      OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
+    });
+    let openerCalls = 0;
+    try {
+      const result = await runDashboardCommand({
+        fetchImpl,
+        noOpen: true,
+        openImpl: () => { openerCalls += 1; return true; },
+      });
+      expect(result.opened).toBe(false);
+      expect(openerCalls).toBe(0);
+      expect(result.hint).toContain('not opened locally');
+      expect(tickets.size).toBe(1);
+
+      const launchUrl = new URL(result.url);
+      const ticket = new URLSearchParams(launchUrl.hash.slice(1)).get(DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY);
+      expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const redeem = await guardedFetch(new Request(`${origin}${DASHBOARD_LAUNCH_REDEEM_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin },
+        body: JSON.stringify({ ticket }),
+      }));
+      expect(redeem.status).toBe(200);
+      expect(tickets.size).toBe(0);
+    } finally {
+      env.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('dashboard CLI mints, prints, and opens a bounded launch link without surfacing the bearer', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-test-'));
     const binDir = join(dir, 'bin');
@@ -806,13 +855,14 @@ describe('CLI tool surface', () => {
       const address = server.address();
       if (!address || typeof address === 'string') throw new Error('Missing test server address');
       const workerOrigin = `http://127.0.0.1:${address.port}`;
-      const { stdout, stderr } = await runSourceCli(['dashboard'], {
+      const cliEnv = {
         HOME: dir,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: `${workerOrigin}/v1`,
         OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
-      });
+      };
+      const { stdout, stderr } = await runSourceCli(['dashboard'], cliEnv);
 
       const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
       const expectedUrl = `${workerOrigin}/dashboard/launch#olympus_launch_ticket=${ticket}`;
@@ -831,6 +881,16 @@ describe('CLI tool surface', () => {
       for (const surfaced of [stdout, stderr, readFileSync(openerLog, 'utf8')]) {
         expect(surfaced).not.toContain(workerToken);
       }
+
+      const handoff = await runSourceCli(['dashboard', '--no-open'], cliEnv);
+      const handoffOutput = JSON.parse(handoff.stdout) as { url: string; opened: boolean; hint: string };
+      expect(handoffOutput).toMatchObject({ url: expectedUrl, opened: false });
+      expect(handoffOutput.hint).toContain('not opened locally');
+      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(requests).toHaveLength(2);
+
+      const help = await runSourceCli(['dashboard', '--help']);
+      expect(help.stdout).toContain('Usage: olympus dashboard [--read-only] [--no-open]');
     } finally {
       server.closeAllConnections();
       if (serverOpen) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -930,24 +990,34 @@ describe('CLI tool surface', () => {
     // trip, so an install whose worker is older than the opening handoff can
     // still be viewed, and the reader is told which link they got.
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-readonly-test-'));
+    const binDir = join(dir, 'bin');
+    const openerLog = join(dir, 'opener.url');
     try {
+      mkdirSync(binDir, { recursive: true });
+      const openerScript = ['#!/bin/sh', `printf '%s\\n' "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
+      for (const opener of ['open', 'xdg-open']) {
+        writeFileSync(join(binDir, opener), openerScript);
+        chmodSync(join(binDir, opener), 0o755);
+      }
       const env = withTemporaryEnv({
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
         OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
         OLYMPUS_WORKER_AUTH_TOKEN: 'read-only-view-worker-token',
       });
       try {
-        const { stdout } = await runSourceCli(['dashboard', '--read-only'], {
-          PATH: process.env.PATH ?? '',
+        const { stdout } = await runSourceCli(['dashboard', '--read-only', '--no-open'], {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
           OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
           OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
           OLYMPUS_WORKER_AUTH_TOKEN: 'read-only-view-worker-token',
         });
-        const output = JSON.parse(stdout) as { url: string; hint: string };
+        const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
         const expectedToken = dashboardQueryTokenFromWorkerAuthToken('read-only-view-worker-token');
         expect(output.url).toBe(`http://127.0.0.1:8010/dashboard?token=${encodeURIComponent(expectedToken!)}`);
-        expect(output.hint).toContain('read-only view token');
-        expect(output.hint).toContain('dashboard (without --read-only)');
+        expect(output.opened).toBe(false);
+        expect(output.hint).toContain('read-only view link');
+        expect(output.hint).toContain('not opened locally');
+        expect(existsSync(openerLog)).toBe(false);
         expect(output.url).not.toContain('read-only-view-worker-token');
       } finally {
         env.restore();

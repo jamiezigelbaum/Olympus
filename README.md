@@ -257,6 +257,7 @@ flowchart LR
 | `olympus connect <source> ...` | records OAuth, session, or API-key credentials with source-specific flags |
 | `olympus worker foreground\|install\|start\|stop\|restart\|status\|upgrade\|uninstall` | one versioned lifecycle for the local engine, foreground or supervised |
 | `olympus dashboard` | opens the standalone dashboard with a short-lived authorization link; no worker-token copying |
+| `olympus dashboard --no-open` | generates an unused opening link for an agent to hand to you |
 | `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |

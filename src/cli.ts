@@ -210,7 +210,10 @@ async function main(): Promise<void> {
     try {
       // Async because the opening link is MINTED against this install's own
       // configured worker, with a ticket that only that worker can redeem.
-      const result = args.includes('--read-only') ? runDashboardReadOnlyCommand() : await runDashboardCommand();
+      const noOpen = args.includes('--no-open');
+      const result = args.includes('--read-only')
+        ? runDashboardReadOnlyCommand({ noOpen })
+        : await runDashboardCommand({ noOpen });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -459,7 +462,7 @@ function printHelp(): void {
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
-  console.log('  olympus dashboard [--read-only]');
+  console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -498,7 +501,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect readwise': 'olympus connect readwise --api-key-stdin',
   'connect gemini': 'olympus connect gemini --api-key-stdin',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
-  dashboard: 'olympus dashboard',
+  dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
@@ -1448,6 +1451,8 @@ export interface DashboardCommandDependencies {
   fetchImpl?: DashboardFetch;
   /** The desktop opener. Injected by tests; production uses open/xdg-open. */
   openImpl?: (url: string) => boolean;
+  /** Mint and return the link without consuming it in a local browser. */
+  noOpen?: boolean;
 }
 
 const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
@@ -1479,19 +1484,23 @@ export async function runDashboardCommand(
   const token = resolveWorkerAuthToken(process.env, config);
   const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
   let opened = false;
-  try {
-    opened = dependencies.openImpl
-      ? dependencies.openImpl(openUrl)
-      : openInDesktopBrowser(openUrl);
-  } catch {
-    opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
   }
   return {
     url: openUrl,
     opened,
-    hint: 'This link carries a single-use 120-second ticket, not the worker token;'
-      + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
-      + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
+    hint: dependencies.noOpen
+      ? 'This fresh single-use 120-second link was not opened locally and is ready to hand to the intended browser.'
+      : 'This link carries a single-use 120-second ticket, not the worker token;'
+        + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
+        + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
 }
 
@@ -1506,7 +1515,9 @@ export async function runDashboardCommand(
  * handed the reader a URL that 401s and no way to tell why (clean-install
  * rehearsal, 2026-09-05), so a URL without a token is never printed.
  */
-function runDashboardReadOnlyCommand(): { url: string; opened: boolean; hint: string } {
+function runDashboardReadOnlyCommand(
+  dependencies: Pick<DashboardCommandDependencies, 'noOpen' | 'openImpl'> = {},
+): { url: string; opened: boolean; hint: string } {
   const config = loadConfig();
   const base = workerRootBaseUrl(config.email.baseUrl);
   const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
@@ -1521,16 +1532,22 @@ function runDashboardReadOnlyCommand(): { url: string; opened: boolean; hint: st
     );
   }
   let opened = false;
-  try {
-    opened = openInDesktopBrowser(openUrl);
-  } catch {
-    opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
   }
   return {
     url: openUrl,
     opened,
-    hint: 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
-      + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+    hint: dependencies.noOpen
+      ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
+      : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
+        + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
   };
 }
 

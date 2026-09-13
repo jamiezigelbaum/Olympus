@@ -373,8 +373,8 @@ olympus dashboard
 ```
 
 The command opens the standalone dashboard with its controls authorized. If
-Olympus runs on another machine, your agent gives you the returned opening
-link for the browser connection you configured. You do not need the plugin's
+Olympus runs on another machine, your agent runs `olympus dashboard --no-open`
+and gives you the returned opening link for the browser connection you configured. You do not need the plugin's
 installation directory or its worker token.
 
 The link expires after two minutes and works once. Open it promptly; if it has

@@ -399,7 +399,7 @@ export const DASHBOARD_CONTROL_GATE_ID = 'dashboard-controls';
 export const DASHBOARD_WORKER_TOKEN_AGENT_PROMPT =
   'Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, '
   + 'resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, '
-  + 'run `<rootDir>/bin/olympus dashboard`, and give me the new opening link. '
+  + 'run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. '
   + 'Do not read or print the worker token. Do not change configuration or connect sources.';
 
 /**
