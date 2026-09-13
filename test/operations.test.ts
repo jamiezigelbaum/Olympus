@@ -6,26 +6,10 @@ import { defaultConfig } from '../src/core/config.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
-import {
-  planAnnasArchiveImport,
-  planDomainAgent,
-  planDomainAsk,
-  planDomainDoc,
-  planDomainSource,
-  planRagCorpus,
-} from '../src/core/domain-expert.ts';
 import { operations, operationDescription, operationToolSchema } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-
-// The domain expert's cloud tenant is deployment configuration with no
-// committed default (see `DOMAIN_GCP_PROJECT_ENV` /
-// `DOMAIN_GCS_BUCKET_TEMPLATE_ENV`). These suites exercise a *configured*
-// deployment, so they supply invented tenant values; the unconfigured
-// fail-closed behaviour has its own test that clears them.
-process.env.OLYMPUS_DOMAIN_EXPERT_GCP_PROJECT = 'olympus-fixture-project';
-process.env.OLYMPUS_DOMAIN_EXPERT_GCS_BUCKET_TEMPLATE = 'fixture-{domain}-rag';
 
 describe('operations', () => {
   test('defines the current operation surface', () => {
@@ -52,13 +36,6 @@ describe('operations', () => {
       'source_watch_cancel',
       'xanthos_file_deliver',
       'castor_workspace',
-      'domain_agent',
-      'domain_ask',
-      'domain_source',
-      'rag_corpus',
-      'domain_doc',
-      'annas_archive_search',
-      'annas_archive_import',
       'email_search',
       'email_index_sync',
       'email_index_embed',
@@ -81,13 +58,6 @@ describe('operations', () => {
     expect(operations.find((operation) => operation.name === 'source_media_ingest')?.nativeExposure).toBe('sourceIndexAnswerDevOnly');
     expect(operations.find((operation) => operation.name === 'source_index_promotion_propose')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'source_index_promotion_decide')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'domain_agent')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'domain_ask')?.mutating).toBe(false);
-    expect(operations.find((operation) => operation.name === 'domain_source')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'rag_corpus')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'domain_doc')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'annas_archive_search')?.mutating).toBe(false);
-    expect(operations.find((operation) => operation.name === 'annas_archive_import')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'source_index_status')?.mutating).toBe(false);
     expect(operations.find((operation) => operation.name === 'source_answer')?.nativeExposure).toBe('sourceIndexEnabledOnly');
     expect(operations.find((operation) => operation.name === 'source_index_status')?.nativeExposure).toBe('sourceIndexEnabledOnly');
@@ -2320,216 +2290,6 @@ describe('operations', () => {
       action: 'list',
       root_id: 'castor_workspace',
     })).rejects.toThrow('Delegated workspace client is not configured');
-  });
-
-  test('domain expert backend planners remain reusable and enforce policy', async () => {
-    const domainDoc = operations.find((operation) => operation.name === 'domain_doc');
-
-    const bootstrap = planDomainAgent({
-      action: 'bootstrap',
-      domainId: 'governance',
-    }) as Record<string, any>;
-
-    expect(bootstrap).toMatchObject({
-      kind: 'domain_agent_plan',
-      status: 'dry_run_scaffold_ready',
-      domain: {
-        domain_id: 'governance',
-        display_name: 'Solon',
-        workspace_relative_path: 'castor-solon',
-        gcp_project: 'olympus-fixture-project',
-      },
-      openclaw_agent: {
-        agent_id: 'solon',
-        display_name: 'Solon',
-        created_by_skill: 'agent-workshop',
-        operating_skill: 'governance-research',
-      },
-    });
-    expect(bootstrap.openclaw_agent.scoped_tools).not.toContain('domain_agent');
-    expect(bootstrap.domain.corpora).toEqual([{
-      id: 'governance-jamie-docs',
-      description: "Single Solon governance corpus for the owner's governance writing, essays by Vitalik and other authors, and governance books; author attribution lives on source records and display names.",
-    }]);
-    expect(bootstrap.workspace_scaffold.files.map((file: { relative_path: string }) => file.relative_path)).toContain(
-      'castor-solon/domain.manifest.json',
-    );
-
-    const datingBootstrap = planDomainAgent({
-      action: 'bootstrap',
-      domainId: 'dating',
-      displayName: 'Ariadne',
-    }) as Record<string, any>;
-    expect(datingBootstrap).toMatchObject({
-      openclaw_agent: {
-        agent_id: 'dating',
-        display_name: 'Ariadne',
-        created_by_skill: 'agent-workshop',
-        operating_skill: 'dating-research',
-      },
-    });
-
-    const answerPlan = planDomainAsk({
-      domainId: 'governance',
-      question: 'Where does my governance writing leave open questions?',
-    }) as Record<string, any>;
-    expect(answerPlan).toMatchObject({
-      kind: 'domain_ask_plan',
-      status: 'requires_gemini_enterprise_rag_backend',
-      retrieval: {
-        backend: 'gemini_enterprise_rag_engine',
-        cross_corpus_retrieval: true,
-      },
-      policy: {
-        source_pipeline_contracts_unchanged: true,
-        per_question_answer_logic_in_olympus: false,
-      },
-    });
-    expect(answerPlan.retrieval.corpora).toEqual(['governance-jamie-docs']);
-
-    const sourcePlan = planDomainSource({
-      action: 'add',
-      domainId: 'governance',
-      sourceKind: 'blog_post',
-      title: 'Vitalik governance essay',
-      url: 'https://vitalik.eth.limo/general/governance-example',
-      copyrightPosture: 'public web essay, cite and refresh',
-    }) as Record<string, any>;
-    expect(sourcePlan).toMatchObject({
-      kind: 'domain_source_plan',
-      source_record: {
-        domain_id: 'governance',
-        kind: 'blog_post',
-        ingest_status: 'planned',
-      },
-    });
-    expect(sourcePlan.ingest_pipeline).toContain('import into the selected Gemini Enterprise corpus');
-
-    const corpusPlan = planRagCorpus({
-      action: 'web_import',
-      domainId: 'governance',
-      corpusId: 'governance-jamie-docs',
-      urls: ['https://www.youtube.com/watch?v=abc123'],
-      transcriptMode: 'asr',
-    }) as Record<string, any>;
-    expect(corpusPlan).toMatchObject({
-      kind: 'rag_corpus_plan',
-      corpus: {
-        corpus_id: 'governance-jamie-docs',
-        web_import: {
-          urls: ['https://www.youtube.com/watch?v=abc123'],
-          transcript_mode: 'asr',
-        },
-      },
-    });
-    const notionCorpusPlan = planRagCorpus({
-      action: 'notion_import',
-      domainId: 'governance',
-      corpusId: 'governance-jamie-docs',
-      urls: ['https://notion.site/Solon-11111111111111111111111111111111'],
-      pageIds: ['22222222222222222222222222222222'],
-      databaseIds: ['33333333333333333333333333333333'],
-      batchId: 'notion-batch',
-    }) as Record<string, any>;
-    expect(notionCorpusPlan).toMatchObject({
-      kind: 'rag_corpus_plan',
-      corpus: {
-        corpus_id: 'governance-jamie-docs',
-        notion_import: {
-          urls: ['https://notion.site/Solon-11111111111111111111111111111111'],
-          page_ids: ['22222222222222222222222222222222'],
-          database_ids: ['33333333333333333333333333333333'],
-          workspace_relative_path: 'castor-solon/sources/notion-imports/notion-batch',
-          target_corpus_id: 'governance-jamie-docs',
-        },
-      },
-    });
-    const listFilesPlan = planRagCorpus({
-      action: 'list_files',
-      domainId: 'governance',
-      corpusId: 'governance-jamie-docs',
-      pageToken: 'next-page',
-    }) as Record<string, any>;
-    expect(listFilesPlan).toMatchObject({
-      kind: 'rag_corpus_plan',
-      action: 'list_files',
-      corpus: {
-        corpus_id: 'governance-jamie-docs',
-        page_token: 'next-page',
-      },
-    });
-    const deleteFilePlan = planRagCorpus({
-      action: 'delete_file',
-      domainId: 'governance',
-      corpusId: 'governance-jamie-docs',
-      ragFileName: 'projects/123456789012/locations/us-central1/ragCorpora/7777777777777777777/ragFiles/file-1',
-    }) as Record<string, any>;
-    expect(deleteFilePlan).toMatchObject({
-      kind: 'rag_corpus_plan',
-      action: 'delete_file',
-      corpus: {
-        corpus_id: 'governance-jamie-docs',
-        rag_file_name: 'projects/123456789012/locations/us-central1/ragCorpora/7777777777777777777/ragFiles/file-1',
-      },
-    });
-    expect(() => planRagCorpus({
-      action: 'import',
-      domainId: 'governance',
-      gcsUri: 'gs://other-bucket/batch-1',
-    })).toThrow('domain allowlisted prefixes');
-
-    const docPlan = planDomainDoc({
-      action: 'visual_insert',
-      domainId: 'governance',
-      documentId: 'doc-123',
-      text: 'A visible proposed addition.',
-    }) as Record<string, any>;
-    expect(docPlan).toMatchObject({
-      kind: 'domain_doc_plan',
-      google_docs_posture: {
-        native_suggestion_mode_created_by_api: false,
-        direct_visual_edits_require_approval: true,
-      },
-      visual_review_style: {
-        prefix_marker: '[Solon]',
-      },
-    });
-    expect(() => planDomainDoc({
-      action: 'visual_insert',
-      domainId: 'governance',
-      documentId: 'doc-123',
-      text: 'Live edit.',
-      dryRun: false,
-    })).toThrow('requires approval_id');
-
-    const importPlan = planAnnasArchiveImport({
-      domainId: 'governance',
-      annasArchiveId: 'md5:abc123',
-      format: 'epub',
-      copyrightPosture: 'operator-approved private research library import',
-    }) as Record<string, any>;
-    expect(importPlan).toMatchObject({
-      kind: 'annas_archive_import_plan',
-      status: 'dry_run_acquisition_ready',
-      acquisition: {
-        format: 'epub',
-        destination: 'xanthos_books_folder',
-      },
-      rag_ingest: { status: 'not_requested' },
-    });
-    expect(() => planAnnasArchiveImport({
-      domainId: 'governance',
-      annasArchiveId: 'md5:abc123',
-      copyrightPosture: 'operator-approved private research library import',
-      dryRun: false,
-    })).toThrow('requires approval_id');
-
-    expect(operationToolSchema(domainDoc!)).toMatchObject({
-      required: ['action', 'document_id'],
-      properties: {
-        action: { enum: ['read', 'comment', 'visual_insert', 'visual_replace', 'accept_visual_edits', 'reject_visual_edits'] },
-      },
-    });
   });
 
   test('email_index_sync delegates bounded admin parameters to private email lane', async () => {

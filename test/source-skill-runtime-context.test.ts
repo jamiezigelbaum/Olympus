@@ -132,34 +132,4 @@ describe('source skill runtime context', () => {
       expect(agents).not.toContain(staleOrUnsafeGuidance);
     }
   });
-
-  test('agent-workshop remains repository-only and outside the public artifact', () => {
-    const agentWorkshop = readFileSync(join(ROOT, 'skills', 'agent-workshop', 'SKILL.md'), 'utf8');
-    const governance = readFileSync(join(ROOT, 'skills', 'governance-research', 'SKILL.md'), 'utf8');
-    const resolver = readFileSync(join(ROOT, 'skills', 'RESOLVER.md'), 'utf8');
-    const manifest = JSON.parse(readFileSync(join(ROOT, 'skills', 'manifest.json'), 'utf8')) as {
-      skills: Array<{ name: string; path: string; description: string }>;
-    };
-
-    expect(manifest.skills.find((entry) => entry.name === 'agent-workshop')).toBeUndefined();
-    expect(agentWorkshop).toContain('Agent Workshop is the factory');
-    expect(agentWorkshop).toContain('Call `domain_agent` first');
-    expect(agentWorkshop).toContain('Use OpenClaw `skill_workshop`');
-    expect(agentWorkshop).toContain('The OpenClaw workspace is not the source library of record');
-    expect(agentWorkshop).toContain('Gemini lane deployment checklist per domain');
-    expect(governance).toContain('Do not use this skill to create new agents');
-    // The skill ships in the release tarball to every installation, so it names
-    // the unpackaged deployment note by path instead of carrying one tenant's
-    // service account, project, bucket and corpus resource in its body.
-    expect(governance).toContain('docs/roles/researcher/GOVERNANCE_RAG_DEPLOYMENT.md');
-    expect(governance).not.toContain('gserviceaccount.com');
-    expect(governance).not.toContain('8463231270061604864');
-    expect(governance).not.toContain('olympus-491816');
-    expect(governance).not.toContain('castor-493710');
-    expect(governance).not.toContain('gs://castor-governance-rag');
-    expect(governance).not.toContain('When the owner asks to create a new domain agent');
-    expect(resolver).toContain('| User asks Castor to create, bootstrap, spin up, register, bind, or clone a new domain-specific agent | `skills/agent-workshop/SKILL.md` |');
-    expect(resolver).toContain('Do not put generic agent-creation behavior inside');
-    expect(resolver).toContain('The OpenClaw workspace holds scaffold, doctrine, memory, registry');
-  });
 });

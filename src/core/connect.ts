@@ -1058,7 +1058,7 @@ export async function connectApiKeySource(options: {
       handles: [handle],
       registryPath,
       secretRefs: [`store:${secretKey}`],
-      next: 'Wire the domain-expert worker with OLYMPUS_DOMAIN_EXPERT_NOTION_TOKEN from store:notion.<account-role>.integration_token before running notion_import. Share each target page or database with the Notion integration first.',
+      next: 'Share each target page or database with the Notion integration before syncing it.',
     };
   });
 }

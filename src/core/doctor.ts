@@ -1312,21 +1312,8 @@ function hasSyncRecord(corpus: Record<string, unknown>): boolean {
 }
 
 function doctorVisibleCorpora(deps: DoctorDeps, corpora: unknown[]): unknown[] {
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  return corpora.filter((entry) => {
-    const corpus = asRecord(entry);
-    const corpusId = typeof corpus.corpus_id === 'string' ? corpus.corpus_id : '';
-    return !isDomainCorpus(corpusId) || deps.config.domainExpert.enabled === true;
-  });
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   return corpora;
 }
-
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-function isDomainCorpus(corpusId: string): boolean {
-  return corpusId.startsWith('internal.solon.') || corpusId.startsWith('secure_local.solon.');
-}
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
 function staleTaskAttempt(task: Record<string, unknown>, deps: DoctorDeps): boolean {
   const attemptedAt = typeof task.last_attempt_at === 'string' ? task.last_attempt_at : undefined;

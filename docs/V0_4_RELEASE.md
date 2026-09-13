@@ -53,6 +53,12 @@ testers have exercised the normal product journey without custom engineering.
   makes the internal rehearsal package retrievable; it does not claim full
   release qualification or replace the existing gates before inviting beta
   testers. ClawHub publication remains after qualification and beta feedback.
+- **2026-09-13 — Expert implementation belongs to Expert Agents.** Removed
+  the duplicate worker, client, expert skills, tools, configuration, and serve
+  command. An architecture guard prevents their return. Olympus's generic
+  approved-file library connector remains part of its source system. This is
+  repository separation; installed worker retirement is a separate platform
+  operation and must preserve existing corpora and routing.
 - **2026-08-26 — Product boundary.** Olympus is the OpenClaw plugin. Private deployment, credentials, incident response, and host maintenance belong in a private ops repository. The supported v0.4 topology is same-host macOS or Linux.
 - **2026-08-26 — Shared Google OAuth.** The pilot ships a publisher-owned Google Desktop OAuth client ID for Gmail and Drive. Google documents installed applications as public clients and accepts the authorization-code exchange with client ID plus PKCE; no client secret is required or packaged. Users click Connect, sign in, and consent. The dashboard names the unverified-app warning honestly. User grants and refresh tokens remain local; a client-ID-only BYO path remains an advanced fallback.
 - **2026-08-26 — Converge, verify, delete.** Preserve useful existing connector stores. Complete bounded replay/import only where legacy stores contain useful data absent from the canonical store, reuse embeddings only when identity and dimensions prove exact compatibility, re-fetch only missing/corrupt/unverifiable portions, then delete transition machinery. No general migration system ships.

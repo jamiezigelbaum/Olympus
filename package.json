@@ -71,7 +71,6 @@
     "email-source:serve": "bun src/workers/email-source/server.ts",
     "file-delivery:serve": "bun src/workers/file-delivery/server.ts",
     "castor-workspace:serve": "bun src/workers/castor-workspace/server.ts",
-    "domain-expert:serve": "bun src/workers/domain-expert/server.ts",
     "test": "bun run build && bun test",
     "test:focus": "bun test",
     "test:fast": "bun run build && bun scripts/test-lane.ts fast && bun run test:exchange",

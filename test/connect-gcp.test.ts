@@ -30,7 +30,7 @@ describe('olympus connect gcp', () => {
 
     expect(execCalls).toContain('gcloud projects create olympus-fixture-project');
     expect(execCalls).toContain('gcloud services enable aiplatform.googleapis.com storage.googleapis.com --project olympus-fixture-project');
-    expect(execCalls).toContain("gcloud iam service-accounts create olympus-secure --project olympus-fixture-project --display-name 'Olympus domain expert'");
+    expect(execCalls).toContain("gcloud iam service-accounts create olympus-secure --project olympus-fixture-project --display-name 'Olympus GCP connector'");
     expect(execCalls).toContain('gcloud projects add-iam-policy-binding olympus-fixture-project --member=serviceAccount:olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --role=roles/aiplatform.user');
     expect(execCalls).toContain('gcloud projects add-iam-policy-binding olympus-fixture-project --member=serviceAccount:olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --role=roles/storage.admin');
     expect(execCalls).toContain('gcloud iam service-accounts keys create /dev/stdout --iam-account=olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --project olympus-fixture-project');
@@ -172,7 +172,7 @@ describe('olympus connect gcp', () => {
       'Dry run: no gcloud commands, network calls, secret writes, or registry writes will run.',
       'gcloud projects create olympus-fixture-project',
       'gcloud services enable aiplatform.googleapis.com storage.googleapis.com --project olympus-fixture-project',
-      "gcloud iam service-accounts create olympus-secure --project olympus-fixture-project --display-name 'Olympus domain expert'",
+      "gcloud iam service-accounts create olympus-secure --project olympus-fixture-project --display-name 'Olympus GCP connector'",
       'gcloud projects add-iam-policy-binding olympus-fixture-project --member=serviceAccount:olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --role=roles/aiplatform.user',
       'gcloud projects add-iam-policy-binding olympus-fixture-project --member=serviceAccount:olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --role=roles/storage.admin',
       'gcloud iam service-accounts keys create /dev/stdout --iam-account=olympus-secure@olympus-fixture-project.iam.gserviceaccount.com --project olympus-fixture-project',

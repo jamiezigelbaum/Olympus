@@ -10,7 +10,6 @@ import { createEmailTransport, EmailClient } from '../core/email.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import { createFileDeliveryTransport, FileDeliveryClient } from '../core/file-delivery.ts';
 import { createCastorWorkspaceTransport, CastorWorkspaceClient } from '../core/castor-workspace.ts';
-import { createDomainExpertTransport, DomainExpertClient } from '../core/domain-expert-client.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import { shouldExposeOperation } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
@@ -87,7 +86,6 @@ function makeContext(): OperationContext {
     // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
     fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
     castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-    domainExpert: new DomainExpertClient(config, createDomainExpertTransport(config)),
     // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   };
 }

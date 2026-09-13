@@ -148,7 +148,7 @@ describe('private extension point: the public tree', () => {
     // under the public manifest. They must stay refused by this artifact.
     const email = manifest.configSchema.properties.email as { properties: Record<string, unknown> };
     const sourceIndex = manifest.configSchema.properties.sourceIndex as { properties: Record<string, unknown> };
-    for (const key of ['fileDelivery', 'castorWorkspace', 'domainExpert']) {
+    for (const key of ['fileDelivery', 'castorWorkspace']) {
       expect(Object.keys(manifest.configSchema.properties)).not.toContain(key);
     }
     expect(Object.keys(email.properties)).not.toContain('localPacketsDevEnabled');

@@ -82,30 +82,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
   // Renaming any of them orphans data or breaks a required CI context, so they
   // survive the flip by owner decision (PR #134, "Persisted identifiers").
   {
-    path: 'src/core/domain-expert.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs`: also the live Vertex RAG display name, so renaming means renaming the live corpus.',
-  },
-  {
-    path: 'skills/governance-research/SKILL.md',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` named in the skill that queries it.',
-  },
-  {
-    path: 'test/domain-expert-worker.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` in fixtures for the worker that resolves it.',
-  },
-  {
-    path: 'test/operations.test.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: 'Corpus id `governance-jamie-docs` in operations fixtures.',
-  },
-  {
     path: 'src/workers/embedding-ledger.ts',
     label: 'a tenant or host identity',
     match: /^jamie$/i,
@@ -191,7 +167,7 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
   // This file carries a handful of the literals it sanctions, because an
   // allowlist that cannot name what it allows is not auditable. It is only
   // acceptable because the same strings already sit in the negative-guard tests
-  // (`pkm-doctrine`, `lifecycle`, `release-artifact`, `source-skill-runtime-context`)
+  // (`pkm-doctrine`, `lifecycle`, and `release-artifact`)
   // that assert the packaged output never contains them — this adds no new
   // disclosure. Rows whose literal ends up regex-escaped here never match and
   // are dead weight; `SANCTIONED_HITS` is asserted live against the real tree.
@@ -288,19 +264,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     match: /^gs:\/\/castor-governance-rag$/i,
     reason: 'Forbidden-string assertion for the packaged artifact.',
   },
-  {
-    path: 'test/source-skill-runtime-context.test.ts',
-    label: 'a Google Cloud project id',
-    match: /^(?:olympus-491816|castor-493710)$/i,
-    reason: 'Forbidden-string assertion: the rendered governance skill context must not contain these project ids.',
-  },
-  {
-    path: 'test/source-skill-runtime-context.test.ts',
-    label: 'a named GCS bucket',
-    match: /^gs:\/\/castor-governance-rag$/i,
-    reason: 'Forbidden-string assertion for the rendered governance skill context.',
-  },
-
   // ---- 6. Obviously synthetic key material in redaction fixtures. ----------
   {
     path: 'test/data-lifecycle.test.ts',

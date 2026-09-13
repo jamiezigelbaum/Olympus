@@ -332,27 +332,6 @@ describe('native OpenClaw plugin adapter', () => {
     expect(manifest.activation.onStartup).toBe(true);
   });
 
-  test('keeps domain tools outside the public surface regardless of internal gates', () => {
-    const names = registeredToolNames({
-      domainExpert: {
-        enabled: false,
-        liveToolsEnabled: true,
-      },
-    });
-
-    expect(names).not.toContain('domain_agent');
-    expect(names).not.toContain('domain_ask');
-
-    const liveNames = registeredToolNames({
-      domainExpert: {
-        enabled: true,
-        liveToolsEnabled: true,
-      },
-    });
-    expect(liveNames).not.toContain('domain_agent');
-    expect(liveNames).not.toContain('domain_ask');
-  });
-
   test('declares the native tool contract required by current OpenClaw', () => {
     const registeredToolNames: string[] = [];
 

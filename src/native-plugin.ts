@@ -6,7 +6,6 @@ import { createEmailTransport, EmailClient } from './core/email.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import { createFileDeliveryTransport, FileDeliveryClient } from './core/file-delivery.ts';
 import { createCastorWorkspaceTransport, CastorWorkspaceClient } from './core/castor-workspace.ts';
-import { createDomainExpertTransport, DomainExpertClient } from './core/domain-expert-client.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import { shouldExposeOperation } from './core/operation-exposure.ts';
 import { workerAuthTokenFromConfig } from './core/worker-auth.ts';
@@ -240,7 +239,6 @@ const plugin = {
       ...(PUBLIC_RUNTIME_BUILD ? {} : {
         fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
         castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-        domainExpert: new DomainExpertClient(config, createDomainExpertTransport(config)),
       }),
       // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
       ...(privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}),
