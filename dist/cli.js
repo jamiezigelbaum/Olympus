@@ -71099,7 +71099,7 @@ function createEmailSourceWorker(options = {}) {
           sourceDashboard.checkModelSetup().catch(() => {
             return;
           });
-          return json({ ok: true, status_message: "Checking model connections…" });
+          return json({ ok: true, status_message: "Readiness check requested. See the Models cards above for the result." });
         }
         if (request.method === "POST" && url.pathname === "/dashboard/connect/api-key") {
           return await withDashboardGrantMutation(async () => {

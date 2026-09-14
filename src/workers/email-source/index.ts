@@ -1500,7 +1500,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // Synthetic model checks are explicit operator work, never dashboard polling.
           // Return promptly; the authoritative Models card receives their result.
           void sourceDashboard.checkModelSetup().catch(() => undefined);
-          return json({ ok: true, status_message: 'Checking model connections…' });
+          return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {

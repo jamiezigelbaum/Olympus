@@ -37,6 +37,11 @@ testers have exercised the normal product journey without custom engineering.
   request first sync without waiting for a full import. Telegram/WhatsApp must
   have packaged, verified private pairing and explicit capture scope before
   this beta is sent; missing-helper wording alone does not satisfy this scope.
+  The batch is implemented and independently reviewed, with exact-candidate CI
+  passing and the managed Hetzner OpenClaw rehearsal updated. Live Setup shows
+  existing Gemini/Venice keys ready and connected-source management controls;
+  the current package and all shipped docs are staged for Hermes. Real Telegram
+  and WhatsApp account pairing and capture remain the next qualification proof.
 
 - **2026-09-14 — Installation completion includes dashboard handoff.** The
   final reply must contain a verified operator-reachable dashboard link,
