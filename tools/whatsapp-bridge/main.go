@@ -40,6 +40,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"os"
@@ -152,12 +153,14 @@ func main() {
 	dbPath := filepath.Join(stateDir, sessionDBName)
 	bridgeLog := waLog.Stdout("Database", "WARN", true)
 	clientLog := waLog.Stdout("Client", "INFO", true)
+	unsupportedLinkStep := make(chan string, 1)
 	if *pairOnly {
 		// Pairing stdout is a small JSON protocol consumed by the TypeScript
 		// launcher. Provider logs can contain account identifiers, so keep them
 		// out of that channel and out of agent transcripts.
 		bridgeLog = waLog.Noop
-		clientLog = waLog.Noop
+		_ = os.Remove(filepath.Join(stateDir, "pairing-status.json"))
+		clientLog = &pairingDiagnosticLogger{stateDir: stateDir, unsupported: unsupportedLinkStep}
 	}
 	container, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", bridgeLog)
 	if err != nil {
@@ -170,7 +173,9 @@ func main() {
 
 	client := whatsmeow.NewClient(device, clientLog)
 	if *pairOnly {
-		if err := runPairOnly(ctx, client, container, stateDir); err != nil {
+		pairCtx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := runPairOnly(pairCtx, client, container, stateDir, unsupportedLinkStep); err != nil {
 			// runPairOnly returns stable error codes only. Never print provider
 			// errors here: they can include the linked account identifier.
 			log.Fatalf("olympus-whatsapp-bridge: %s", err)
@@ -254,8 +259,19 @@ func main() {
 	}
 }
 
-func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlstore.Container, stateDir string) error {
+func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlstore.Container, stateDir string, unsupported <-chan string) (resultErr error) {
 	defer removePairOnlyQR(stateDir)
+	stopCancellation := context.AfterFunc(ctx, client.Disconnect)
+	defer stopCancellation()
+	defer func() {
+		status := map[string]string{"status": "linked"}
+		if resultErr != nil {
+			status = map[string]string{"status": "failed", "reason": resultErr.Error()}
+		}
+		writePairingStatus(stateDir, status)
+	}()
+	terminal := openPairingTerminal()
+	defer terminal.close()
 	if client.Store.ID == nil {
 		qrCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
@@ -263,26 +279,47 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 		if err != nil {
 			return errors.New("qr_channel_failed")
 		}
-		if err := client.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+		if err := client.ConnectContext(ctx); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
 			return errors.New("connect_failed")
 		}
 		paired := false
-		for item := range qrChan {
-			switch item.Event {
-			case whatsmeow.QRChannelEventCode:
-				path, err := emitPairOnlyQR(item.Code, stateDir)
-				if err != nil {
-					return errors.New("qr_artifact_failed")
+	pairLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return errors.New("pairing_cancelled")
+			case step := <-unsupported:
+				client.Disconnect()
+				return errors.New("unsupported_" + step)
+			case item, ok := <-qrChan:
+				if !ok {
+					break pairLoop
 				}
-				emitPairingEvent(map[string]any{"event": "qr", "qr_png_path": path})
-			case whatsmeow.QRChannelSuccess.Event:
-				paired = true
-			case whatsmeow.QRChannelTimeout.Event:
-				removePairOnlyQR(stateDir)
-				return errors.New("pairing_timeout")
-			case whatsmeow.QRChannelEventError:
-				removePairOnlyQR(stateDir)
-				return errors.New("pairing_failed")
+				switch item.Event {
+				case whatsmeow.QRChannelEventCode:
+					path, err := writeQRPNG(item.Code, stateDir)
+					if err != nil {
+						return errors.New("qr_artifact_failed")
+					}
+					terminal.showQR(item.Code, item.Timeout)
+					emitPairingEvent(map[string]any{"event": "qr", "qr_png_path": path})
+				case whatsmeow.QRChannelSuccess.Event:
+					paired = true
+				case whatsmeow.QRChannelTimeout.Event:
+					removePairOnlyQR(stateDir)
+					return errors.New("pairing_timeout")
+				case whatsmeow.QRChannelEventError:
+					removePairOnlyQR(stateDir)
+					return errors.New("pairing_failed")
+				case whatsmeow.QRChannelClientOutdated.Event:
+					return errors.New("client_outdated")
+				case whatsmeow.QRChannelScannedWithoutMultidevice.Event:
+					return errors.New("scan_requires_linked_devices")
+				case whatsmeow.QRChannelErrUnexpectedEvent.Event:
+					return errors.New("unexpected_link_state")
+				case whatsmeow.QRChannelEventPasskeyRequest, whatsmeow.QRChannelEventPasskeyResponse:
+					return errors.New("unsupported_passkey_verification")
+				}
 			}
 		}
 		if !paired {
@@ -290,13 +327,18 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 			return errors.New("pairing_not_confirmed")
 		}
 	} else {
-		if err := client.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+		if err := client.ConnectContext(ctx); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
 			return errors.New("connect_failed")
 		}
 	}
 
 	if !client.WaitForConnection(20*time.Second) || !client.IsLoggedIn() {
 		removePairOnlyQR(stateDir)
+		select {
+		case step := <-unsupported:
+			return errors.New("unsupported_" + step)
+		default:
+		}
 		return errors.New("authenticated_connection_not_confirmed")
 	}
 	persisted, err := container.GetFirstDevice(ctx)
@@ -313,6 +355,56 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 		"capture_started": false,
 	})
 	return nil
+}
+
+// Only these two fixed protocol indicators can leave the provider logger.
+// Never format arbitrary provider messages, account IDs, keys or payloads.
+type pairingDiagnosticLogger struct {
+	stateDir    string
+	unsupported chan<- string
+}
+
+func (l *pairingDiagnosticLogger) Debugf(format string, args ...interface{}) {
+	if format == "Rotating ADV secrets in remaining QR codes" && len(args) == 0 {
+		writePairingStatus(l.stateDir, map[string]string{"status": "qr_refreshed", "step": "companion_reg_refresh"})
+		return
+	}
+	if format != "Unhandled notification with type %s" || len(args) != 1 {
+		return
+	}
+	kind, ok := args[0].(string)
+	if !ok || (kind != "companion_reg_refresh" && kind != "passkey_prologue_request") {
+		return
+	}
+	// This contains a fixed protocol name only, never the notification body.
+	writePairingStatus(l.stateDir, map[string]string{"status": "unsupported_link_step", "step": kind})
+	emitPairingEvent(map[string]any{"event": "link_status", "status": "unsupported_link_step", "step": kind})
+	select {
+	case l.unsupported <- kind:
+	default:
+	}
+}
+func (l *pairingDiagnosticLogger) Infof(string, ...interface{})  {}
+func (l *pairingDiagnosticLogger) Warnf(string, ...interface{})  {}
+func (l *pairingDiagnosticLogger) Errorf(string, ...interface{}) {}
+func (l *pairingDiagnosticLogger) Sub(string) waLog.Logger       { return l }
+
+func writePairingStatus(stateDir string, status map[string]string) {
+	data, _ := json.Marshal(status)
+	file, err := os.CreateTemp(stateDir, ".pairing-status-*")
+	if err != nil {
+		return
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if _, err = file.Write(append(data, '\n')); err != nil {
+		file.Close()
+		return
+	}
+	if err = file.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(name, filepath.Join(stateDir, "pairing-status.json"))
 }
 
 func pairingReceiptReady(authenticated bool, currentID, persistedID *types.JID) bool {
@@ -1089,24 +1181,47 @@ func writeQRPNG(code string, stateDir string) (string, error) {
 	return path, nil
 }
 
-func emitPairOnlyQR(code string, stateDir string) (string, error) {
-	path, err := writeQRPNG(code, stateDir)
-	if err != nil {
-		return "", err
+type pairingTerminal struct {
+	writer io.WriteCloser
+	shown  bool
+	count  int
+}
+
+func openPairingTerminal() *pairingTerminal {
+	terminal := &pairingTerminal{}
+	if pairTTYQREnabled() {
+		terminal.writer, _ = os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	}
-	// A human running over SSH can scan the QR directly from their controlling
-	// terminal. This bypasses stdout entirely, which remains the safe JSON event
-	// channel consumed by agents; the QR payload can therefore never be copied
-	// into an agent transcript by the launcher.
-	terminal, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err == nil && pairTTYQREnabled() {
-		fmt.Fprintln(terminal, "Scan with WhatsApp: Settings > Linked Devices > Link a Device")
-		qrterminal.GenerateHalfBlock(code, qrterminal.L, terminal)
+	return terminal
+}
+
+func (terminal *pairingTerminal) showQR(code string, lifetime time.Duration) {
+	if terminal.writer == nil {
+		return
 	}
-	if err == nil && terminal != nil {
-		terminal.Close()
+	if !terminal.shown {
+		// Alternate screen preserves the user's shell and removes expired QR
+		// codes from view when pairing ends, without clearing scrollback.
+		fmt.Fprint(terminal.writer, "\033[?1049h")
+		terminal.shown = true
 	}
-	return path, nil
+	terminal.count++
+	fmt.Fprint(terminal.writer, "\033[2J\033[H")
+	fmt.Fprintf(terminal.writer, "WhatsApp pairing — current QR %d (refreshes in %ds)\n", terminal.count, int(lifetime.Seconds()))
+	fmt.Fprintln(terminal.writer, "Scan with WhatsApp: Settings > Linked devices > Link a device")
+	fmt.Fprintln(terminal.writer, "Only this QR is current. Waiting for WhatsApp to confirm linking…")
+	qrterminal.GenerateHalfBlock(code, qrterminal.L, terminal.writer)
+}
+
+func (terminal *pairingTerminal) close() {
+	if terminal.writer == nil {
+		return
+	}
+	if terminal.shown {
+		fmt.Fprint(terminal.writer, "\033[?1049l")
+	}
+	terminal.writer.Close()
+	terminal.writer = nil
 }
 
 func pairTTYQREnabled() bool {

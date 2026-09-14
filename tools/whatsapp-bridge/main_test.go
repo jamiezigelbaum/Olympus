@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,58 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+type terminalBuffer struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (b *terminalBuffer) Close() error { b.closed = true; return nil }
+
+func TestPairingShowsOnlyCurrentQRAndRestoresTerminal(t *testing.T) {
+	writer := &terminalBuffer{}
+	terminal := &pairingTerminal{writer: writer}
+	terminal.showQR("first-fixture", 60*time.Second)
+	before := writer.Len()
+	terminal.showQR("second-fixture", 20*time.Second)
+	update := writer.String()[before:]
+	if !strings.HasPrefix(update, "\033[2J\033[H") || !strings.Contains(update, "current QR 2 (refreshes in 20s)") {
+		t.Fatal("replacement did not clear the previous QR or identify expiry")
+	}
+	terminal.close()
+	terminal.close()
+	if strings.Count(writer.String(), "\033[?1049h") != 1 || strings.Count(writer.String(), "\033[?1049l") != 1 || !writer.closed {
+		t.Fatal("terminal must enter once and restore once")
+	}
+}
+
+func TestPairingDiagnosticsAllowOnlyFixedProtocolIndicators(t *testing.T) {
+	dir := t.TempDir()
+	signals := make(chan string, 1)
+	logger := &pairingDiagnosticLogger{stateDir: dir, unsupported: signals}
+	secret := "fixture-private-provider-payload"
+	logger.Debugf(secret)
+	logger.Debugf("Unhandled notification with type %s", secret)
+	logger.Warnf("Unhandled notification with type %s", "passkey_prologue_request")
+	logger.Errorf("provider error: %s", secret)
+	if _, err := os.Stat(filepath.Join(dir, "pairing-status.json")); !os.IsNotExist(err) {
+		t.Fatal("arbitrary provider logs must produce no diagnostic file")
+	}
+	for _, kind := range []string{"passkey_prologue_request", "companion_reg_refresh"} {
+		logger.Debugf("Unhandled notification with type %s", kind)
+		if <-signals != kind {
+			t.Fatal("missing fixed protocol signal")
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "pairing-status.json"))
+		if err != nil || strings.Contains(string(data), secret) {
+			t.Fatal("invalid private-safe diagnostic")
+		}
+		var result map[string]string
+		if json.Unmarshal(data, &result) != nil || len(result) != 2 || result["step"] != kind || result["status"] != "unsupported_link_step" {
+			t.Fatal("diagnostic must contain only the two allowed fields")
+		}
+	}
+}
 
 func TestOperationalLogsDoNotExposeWhatsAppIdentifiers(t *testing.T) {
 	line := existingSessionConnectedLogLine()

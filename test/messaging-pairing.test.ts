@@ -265,6 +265,26 @@ describe('packaged messaging pairing', () => {
     })).rejects.toThrow(/configured WhatsApp pairing bridge does not exist/);
   });
 
+  for (const code of ['unsupported_passkey_verification', 'client_outdated', 'unexpected_link_state']) {
+    test(`reports ${code} without publishing a connected handle or exposing provider text`, async () => {
+      const root = packageFixture();
+      let registered = false;
+      let errorText = '';
+      try {
+        await pairMessagingSource({
+          source: 'whatsapp', packageRoot: root,
+          whatsappBridgePath: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
+          runCommand: async () => ({ exitCode: 1, stdoutLines: [], stderr: `private fixture payload\n{"error":"${code}"}` }),
+          registerSession: async () => { registered = true; throw new Error('must not register'); },
+        });
+      } catch (error) { errorText = (error as Error).message; }
+      expect(errorText).not.toBe('');
+      expect(errorText).not.toContain('private fixture payload');
+      expect(errorText).not.toContain('/bin/olympus-whatsapp-bridge');
+      expect(registered).toBe(false);
+    });
+  }
+
   test('builds pinned WhatsApp sources into a versioned owner cache when toolchains exist', async () => {
     const root = packageFixture();
     let builtPath = '';

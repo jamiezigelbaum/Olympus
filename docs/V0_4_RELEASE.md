@@ -42,6 +42,11 @@ testers have exercised the normal product journey without custom engineering.
   existing Gemini/Venice keys ready and connected-source management controls;
   the current package and all shipped docs are staged for Hermes. Real Telegram
   and WhatsApp account pairing and capture remain the next qualification proof.
+  The first live WhatsApp QR attempt did not establish a linked device or
+  capture grant. Its June bridge dependency predates upstream's September
+  companion-refresh fix; the follow-up pins the current upstream library,
+  replaces expired terminal QR codes, and reports fixed linking failures.
+  A real retry remains required before declaring WhatsApp qualified.
 
 - **2026-09-14 — Installation completion includes dashboard handoff.** The
   final reply must contain a verified operator-reachable dashboard link,

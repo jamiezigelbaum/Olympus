@@ -5858,7 +5858,7 @@ async function pairMessagingSource(options) {
     }
   }
   if (result.exitCode !== 0) {
-    throw pairingFailure(options.source, safeErrorCode(result.stderr), packageRoot);
+    throw pairingFailure(options.source, safeErrorCode(result.stderr));
   }
   const receipt = parseReadyReceipt(stdoutEvents, options.source);
   if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve3(receipt.session_path) !== resolve3(sessionPath))) {
@@ -6120,7 +6120,16 @@ function parseTelegramDialogs(value) {
 function proofForReceipt(source, receipt) {
   return source === "telegram" ? `telegram:${String(receipt.proof.account_ref)}` : "whatsapp:authenticated-linked-device";
 }
-function pairingFailure(source, code, packageRoot) {
+function pairingFailure(source, code) {
+  if (source === "whatsapp" && code?.startsWith("unsupported_")) {
+    return new Error(`WhatsApp requested a linking step this bridge does not support (${code}). No account was connected or capture started. Ask your agent to check compatibility before another scan.`);
+  }
+  if (source === "whatsapp" && code === "client_outdated") {
+    return new Error("WhatsApp rejected this bridge as outdated. No account was connected. Ask your agent to update the supported bridge before another scan.");
+  }
+  if (source === "whatsapp" && code === "scan_requires_linked_devices") {
+    return new Error("Scan the current QR through WhatsApp Settings > Linked devices > Link a device, then wait for linking to finish.");
+  }
   if (code === "pairing_cancelled")
     return new Error(`${sourceLabel(source)} pairing was cancelled before readiness was proved.`);
   if (code === "pairing_timeout")
@@ -6131,8 +6140,7 @@ function pairingFailure(source, code, packageRoot) {
   if (source === "telegram" && code === "controlling_terminal_required") {
     return new Error("Telegram pairing needs the private controlling terminal so credentials and login codes never enter argv, logs, or chat.");
   }
-  const helper = source === "telegram" ? join9(packageRoot, "scripts", "telegram-pair.py") : join9(packageRoot, "bin", "olympus-whatsapp-bridge");
-  return new Error(`${sourceLabel(source)} pairing failed safely (${code ?? "helper_failed"}). Retry with the packaged helper: ${helper}`);
+  return new Error(`${sourceLabel(source)} pairing failed safely (${code ?? "helper_failed"}). Re-run olympus connect ${source} --pair in your private terminal.`);
 }
 function safeErrorCode(stderr) {
   for (const line of stderr.split(/\r?\n/).reverse()) {

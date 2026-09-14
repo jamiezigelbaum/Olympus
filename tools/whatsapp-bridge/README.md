@@ -78,6 +78,18 @@ was reacted to.
 
 ## First run: pairing
 
+For a packaged Olympus install, use `olympus connect whatsapp --pair`. Its
+private terminal shows only the current QR and replaces it when WhatsApp
+refreshes the handshake. Expired codes are removed from view. Authentication
+and persisted-device proof must succeed before Olympus asks for capture scope.
+The bridge pins an upstream revision containing the September 2026 companion
+registration refresh support. Passkey-required linking is reported explicitly;
+this terminal flow does not implement browser passkey verification. Fixed,
+content-free results are saved in `pairing-status.json` for diagnosis, without
+account identifiers, keys, QR payloads, or provider response bodies.
+
+The older direct-daemon flow below is for advanced manual deployments:
+
 1. Start the daemon in a terminal: `./olympus-whatsapp-bridge`
 2. It prints a QR code to stdout and writes the same code to
    `$STATE_DIR/qr.txt` (plain text — `cat` it over SSH if the terminal
