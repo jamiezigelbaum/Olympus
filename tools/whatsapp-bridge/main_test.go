@@ -16,9 +16,76 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+func TestSDKRotationKeepsOlympusPairingOpenUntilSuccess(t *testing.T) {
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	incoming, overflow, cleanup := pairingEvents(client)
+	defer cleanup()
+	state := pairingQRState{codes: []string{"ref-a,pub,identity,old-secret", "ref-b,pub,identity,old-secret"}}
+	state.next()
+	client.DangerousInternals().DispatchEvent(&events.RotateADVSecret{OldSecret: "old-secret", NewSecret: "new-secret"})
+	select {
+	case raw, open := <-incoming:
+		rotation, ok := raw.(*events.RotateADVSecret)
+		if !open || !ok || !state.rotate(rotation.OldSecret, rotation.NewSecret) {
+			t.Fatal("rotation closed or invalidated pairing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rotation event missing")
+	}
+	if code, _, ok := state.next(); !ok || code != "ref-a,pub,identity,new-secret" {
+		t.Fatal("current QR was not refreshed")
+	}
+	if code, _, ok := state.next(); !ok || code != "ref-b,pub,identity,new-secret" {
+		t.Fatal("remaining QR was not refreshed")
+	}
+	client.DangerousInternals().DispatchEvent(&events.PairSuccess{})
+	select {
+	case raw, open := <-incoming:
+		if _, ok := raw.(*events.PairSuccess); !open || !ok {
+			t.Fatal("success after rotation was lost")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pair success missing")
+	}
+	select {
+	case <-overflow:
+		t.Fatal("unexpected overflow")
+	default:
+	}
+	// Receiving the event alone still does not constitute authentication proof.
+	if pairingReceiptReady(false, nil, nil) {
+		t.Fatal("events must not bypass persisted authentication")
+	}
+}
+
+func TestPairingEventsExcludeMessageContentAndRefuseOverload(t *testing.T) {
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	incoming, overflow, cleanup := pairingEvents(client)
+	defer cleanup()
+	client.DangerousInternals().DispatchEvent(&events.Message{})
+	select {
+	case <-incoming:
+		t.Fatal("message entered pairing queue")
+	default:
+	}
+	for i := 0; i < 17; i++ {
+		client.DangerousInternals().DispatchEvent(&events.QR{})
+	}
+	select {
+	case <-overflow:
+	default:
+		t.Fatal("overload must fail closed")
+	}
+	if pairingEventError(&events.PairPasskeyRequest{}) != "unsupported_passkey_verification" {
+		t.Fatal("passkey requirement was not preserved")
+	}
+}
 
 type terminalBuffer struct {
 	bytes.Buffer

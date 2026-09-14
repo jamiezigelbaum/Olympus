@@ -261,6 +261,7 @@ func main() {
 
 func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlstore.Container, stateDir string, unsupported <-chan string) (resultErr error) {
 	defer removePairOnlyQR(stateDir)
+	defer client.Disconnect()
 	stopCancellation := context.AfterFunc(ctx, client.Disconnect)
 	defer stopCancellation()
 	defer func() {
@@ -275,56 +276,72 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 	if client.Store.ID == nil {
 		qrCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		qrChan, err := client.GetQRChannel(qrCtx)
-		if err != nil {
-			return errors.New("qr_channel_failed")
-		}
-		if err := client.ConnectContext(ctx); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+		incoming, overflow, removeHandler := pairingEvents(client)
+		defer removeHandler()
+		if err := client.ConnectContext(qrCtx); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
 			return errors.New("connect_failed")
 		}
+		var qr pairingQRState
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+		defer timer.Stop()
+		var expires <-chan time.Time
+		displayNext := func() error {
+			code, lifetime, ok := qr.next()
+			if !ok {
+				return errors.New("pairing_timeout")
+			}
+			path, err := writeQRPNG(code, stateDir)
+			if err != nil {
+				return errors.New("qr_artifact_failed")
+			}
+			terminal.showQR(code, lifetime)
+			emitPairingEvent(map[string]any{"event": "qr", "qr_png_path": path})
+			timer.Reset(lifetime)
+			expires = timer.C
+			return nil
+		}
 		paired := false
-	pairLoop:
-		for {
+		for !paired {
 			select {
-			case <-ctx.Done():
-				return errors.New("pairing_cancelled")
-			case step := <-unsupported:
-				client.Disconnect()
-				return errors.New("unsupported_" + step)
-			case item, ok := <-qrChan:
-				if !ok {
-					break pairLoop
+			case <-qrCtx.Done():
+				if ctx.Err() != nil {
+					return errors.New("pairing_cancelled")
 				}
-				switch item.Event {
-				case whatsmeow.QRChannelEventCode:
-					path, err := writeQRPNG(item.Code, stateDir)
-					if err != nil {
-						return errors.New("qr_artifact_failed")
+				return errors.New("pairing_timeout")
+			case <-overflow:
+				return errors.New("pairing_event_overflow")
+			case step := <-unsupported:
+				return errors.New("unsupported_" + step)
+			case <-expires:
+				if err := displayNext(); err != nil {
+					return err
+				}
+			case raw := <-incoming:
+				switch event := raw.(type) {
+				case *events.QR:
+					qr.codes = append([]string(nil), event.Codes...)
+					if err := displayNext(); err != nil {
+						return err
 					}
-					terminal.showQR(item.Code, item.Timeout)
-					emitPairingEvent(map[string]any{"event": "qr", "qr_png_path": path})
-				case whatsmeow.QRChannelSuccess.Event:
+				case *events.RotateADVSecret:
+					// The SDK owns crypto rotation. Replace only its opaque
+					// token in the displayed/remaining codes; keep pairing open.
+					if !qr.rotate(event.OldSecret, event.NewSecret) {
+						return errors.New("qr_refresh_invalid")
+					}
+					writePairingStatus(stateDir, map[string]string{"status": "qr_refreshed", "step": "companion_reg_refresh"})
+					if err := displayNext(); err != nil {
+						return err
+					}
+				case *events.PairSuccess:
 					paired = true
-				case whatsmeow.QRChannelTimeout.Event:
-					removePairOnlyQR(stateDir)
-					return errors.New("pairing_timeout")
-				case whatsmeow.QRChannelEventError:
-					removePairOnlyQR(stateDir)
-					return errors.New("pairing_failed")
-				case whatsmeow.QRChannelClientOutdated.Event:
-					return errors.New("client_outdated")
-				case whatsmeow.QRChannelScannedWithoutMultidevice.Event:
-					return errors.New("scan_requires_linked_devices")
-				case whatsmeow.QRChannelErrUnexpectedEvent.Event:
-					return errors.New("unexpected_link_state")
-				case whatsmeow.QRChannelEventPasskeyRequest, whatsmeow.QRChannelEventPasskeyResponse:
-					return errors.New("unsupported_passkey_verification")
+				default:
+					if code := pairingEventError(raw); code != "" {
+						return errors.New(code)
+					}
 				}
 			}
-		}
-		if !paired {
-			removePairOnlyQR(stateDir)
-			return errors.New("pairing_not_confirmed")
 		}
 	} else {
 		if err := client.ConnectContext(ctx); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
@@ -355,6 +372,80 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 		"capture_started": false,
 	})
 	return nil
+}
+
+// The upstream convenience QR channel closes on RotateADVSecret in the pinned
+// version. Consume public SDK events directly; all authentication and crypto
+// remain in the SDK. This queue never carries message events or closes on a QR
+// refresh, and overload refuses instead of dropping a consequential event.
+func pairingEvents(client *whatsmeow.Client) (<-chan any, <-chan struct{}, func()) {
+	incoming := make(chan any, 16)
+	overflow := make(chan struct{}, 1)
+	id := client.AddEventHandler(func(raw any) {
+		switch raw.(type) {
+		case *events.QR, *events.RotateADVSecret, *events.PairSuccess, *events.PairError,
+			*events.Disconnected, *events.ClientOutdated, *events.QRScannedWithoutMultidevice,
+			*events.PairPasskeyRequest, *events.PairPasskeyConfirmation, *events.PairPasskeyError,
+			*events.ConnectFailure, *events.LoggedOut, *events.TemporaryBan:
+			select {
+			case incoming <- raw:
+			default:
+				select {
+				case overflow <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+	return incoming, overflow, func() { client.RemoveEventHandler(id) }
+}
+
+type pairingQRState struct {
+	codes   []string
+	current string
+}
+
+func (state *pairingQRState) next() (string, time.Duration, bool) {
+	if len(state.codes) == 0 {
+		return "", 0, false
+	}
+	lifetime := 20 * time.Second
+	if len(state.codes) == 6 {
+		lifetime = 60 * time.Second
+	}
+	state.current, state.codes = state.codes[0], state.codes[1:]
+	return state.current, lifetime, true
+}
+func (state *pairingQRState) rotate(oldSecret, newSecret string) bool {
+	if oldSecret == "" || newSecret == "" || state.current == "" {
+		return false
+	}
+	refreshed := append([]string{state.current}, state.codes...)
+	for index, code := range refreshed {
+		if strings.Count(code, oldSecret) != 1 {
+			return false
+		}
+		refreshed[index] = strings.Replace(code, oldSecret, newSecret, 1)
+	}
+	state.codes = refreshed
+	return true
+}
+func pairingEventError(raw any) string {
+	switch raw.(type) {
+	case *events.PairPasskeyRequest, *events.PairPasskeyConfirmation:
+		return "unsupported_passkey_verification"
+	case *events.ClientOutdated:
+		return "client_outdated"
+	case *events.QRScannedWithoutMultidevice:
+		return "scan_requires_linked_devices"
+	case *events.Disconnected:
+		return "pairing_disconnected"
+	case *events.PairError, *events.PairPasskeyError:
+		return "pairing_failed"
+	case *events.ConnectFailure, *events.LoggedOut, *events.TemporaryBan:
+		return "link_rejected"
+	}
+	return ""
 }
 
 // Only these two fixed protocol indicators can leave the provider logger.
