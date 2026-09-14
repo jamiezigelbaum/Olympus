@@ -6323,7 +6323,7 @@ class MessagingCaptureSupervisor {
       await this.stop();
       return { state: "blocked", reason: "grant_invalid" };
     }
-    const handle = readConnectedHandleRegistry(registryPath).handles.find((candidate) => candidate.handle === grant.handle);
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
@@ -6461,6 +6461,7 @@ var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
   init_secret_store();
+  init_unpaired_sources();
   init_connected_handles();
 });
 

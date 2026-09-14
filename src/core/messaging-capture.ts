@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
+import { withoutUnpairedLaneHandles } from '../workers/credential-broker/unpaired-sources.ts';
 import {
   defaultHandleRegistryPath,
   readConnectedHandleRegistry,
@@ -104,7 +105,10 @@ export class MessagingCaptureSupervisor {
       await this.stop();
       return { state: 'blocked', reason: 'grant_invalid' };
     }
-    const handle = readConnectedHandleRegistry(registryPath).handles.find((candidate) => candidate.handle === grant.handle);
+    // The durable Unpair latch is authoritative even if a crash left the
+    // grant, session and registry handle intact. Unreadable latches fail closed.
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath)
+      .find((candidate) => candidate.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
       await this.stop();
       return { source: grant.source, state: 'stopped', reason: 'handle_unavailable' };

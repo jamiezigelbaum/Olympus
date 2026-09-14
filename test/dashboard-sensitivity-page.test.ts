@@ -168,9 +168,10 @@ describe('dashboard sensitivity page shell', () => {
 
     expect(html).toContain('<title>Olympus / Sensitivity</title>');
     expect(html).toContain('checked 12s ago');
-    // No status word: policy is not Fresh or Working.
-    expect(html).not.toContain('Working');
-    expect(html).not.toContain('Fresh');
+    // Inspect rendered content, not the shared controller's pending-message literals.
+    const content = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+    expect(content).not.toContain('Working');
+    expect(content).not.toContain('Fresh');
   });
 });
 

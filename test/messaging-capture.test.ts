@@ -55,6 +55,29 @@ function telegramPairing(sessionPath: string): MessagingPairingConnectedResult {
 }
 
 describe('messaging capture supervisor', () => {
+  for (const state of ['unpair_in_progress', 'unpaired', 'unpair_incomplete', 'unreadable']) {
+    test(`does not resume a retained session when the durable latch is ${state}`, async () => {
+      const root = mkdtempSync(join(tmpdir(), 'olympus-capture-unpaired-'));
+      const registryPath = join(root, 'handles.json');
+      const grantPath = join(root, 'grant.json');
+      const sessionPath = join(root, 'telegram');
+      writeRegistry(registryPath, true);
+      writeFileSync(`${sessionPath}.session`, 'fixture');
+      saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+      writeFileSync(`${registryPath}.unpaired`, state === 'unreadable' ? '{broken' : JSON.stringify({
+        version: 1, sources: [{ source_id: 'telegram.messages', state }],
+      }));
+      let spawned = false;
+      const supervisor = new MessagingCaptureSupervisor({
+        source: 'telegram', registryPath, grantPath,
+        secretStore: secretStore({ [TELEGRAM_API_ID_SECRET_KEY]: '12345', [TELEGRAM_API_HASH_SECRET_KEY]: 'fixture' }),
+        spawn: () => { spawned = true; throw new Error('must not spawn'); },
+      });
+      expect(await supervisor.reconcile()).toEqual({ source: 'telegram', state: 'stopped', reason: 'handle_unavailable' });
+      expect(spawned).toBe(false);
+    });
+  }
+
   test('starts only from stored scope plus an available handle, then stops on handle revocation', async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-messaging-capture-'));
     const registryPath = join(root, 'handles.json');
