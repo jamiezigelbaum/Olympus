@@ -87,6 +87,30 @@ func TestPairingEventsExcludeMessageContentAndRefuseOverload(t *testing.T) {
 	}
 }
 
+func TestPairingAuthenticationWaitsThroughExpectedReconnect(t *testing.T) {
+	checks := 0
+	ready := waitForPairingAuthentication(context.Background(), func() bool {
+		checks++
+		// PairSuccess was emitted, then the socket deliberately disconnects,
+		// and only the third observation is the authenticated new socket.
+		return checks >= 3
+	}, time.Second)
+	if !ready || checks != 3 {
+		t.Fatal("normal pairing reconnect was mistaken for failure")
+	}
+}
+
+func TestPairingAuthenticationNeverAcceptsMissingProofOrCancellation(t *testing.T) {
+	if waitForPairingAuthentication(context.Background(), func() bool { return false }, 5*time.Millisecond) {
+		t.Fatal("deadline must not promote missing authentication")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForPairingAuthentication(ctx, func() bool { return true }, time.Second) {
+		t.Fatal("cancelled pairing must not be accepted")
+	}
+}
+
 type terminalBuffer struct {
 	bytes.Buffer
 	closed bool

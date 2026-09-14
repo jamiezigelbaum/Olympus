@@ -349,7 +349,11 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 		}
 	}
 
-	if !client.WaitForConnection(20*time.Second) || !client.IsLoggedIn() {
+	// WhatsApp intentionally disconnects with 515 after fresh pairing. The
+	// SDK's WaitForConnection returns false on that expected disconnect, before
+	// its automatic reconnect can authenticate. Wait through that transition,
+	// still requiring an authenticated live socket within the same deadline.
+	if !waitForPairingAuthentication(ctx, func() bool { return client.IsConnected() && client.IsLoggedIn() }, 20*time.Second) {
 		removePairOnlyQR(stateDir)
 		select {
 		case step := <-unsupported:
@@ -372,6 +376,26 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 		"capture_started": false,
 	})
 	return nil
+}
+
+func waitForPairingAuthentication(ctx context.Context, ready func() bool, timeout time.Duration) bool {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if deadline.Err() != nil {
+			return false
+		}
+		if ready() {
+			return true
+		}
+		select {
+		case <-deadline.Done():
+			return false
+		case <-tick.C:
+		}
+	}
 }
 
 // The upstream convenience QR channel closes on RotateADVSecret in the pinned
