@@ -62,9 +62,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   let disposed = false;
   let deferredSince = 0;
   let presented = options.presented !== false;
+  /**
+   * A start this controller performed is still waiting for the provider (or
+   * the server) to report the connection. Only used to decide whether coming
+   * back to the page deserves one authoritative read; every other guard on
+   * `refreshNow` still applies to it.
+   */
+  let awaitingAuthorizationReturn = false;
   const root = options.root;
-  const oauthSubmittedValues = new WeakMap<HTMLFormElement, Record<string, string>>();
+  const submittedFormValues = new WeakMap<HTMLFormElement, Record<string, string>>();
   const startedFromSheet = new WeakSet<HTMLFormElement>();
+  const pendingForms = new WeakSet<HTMLFormElement>();
+  let pendingFormCount = 0;
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -89,17 +98,21 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   function applyWriteCapability(): void {
-    root.querySelectorAll<HTMLElement>(
+    root.querySelectorAll<HTMLFormElement>(
       'form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind],'
-        + 'form[data-disconnect-kind],form[data-unpair-kind]',
+        + 'form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check]',
     ).forEach((form) => {
+      // A form whose request is still outstanding keeps its submit controls
+      // disabled, so a second click cannot issue a second transport call,
+      // without taking the caret out of the fields the owner is still typing.
+      const pending = pendingForms.has(form) || form.dataset.keyAccepted === 'true';
       form.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input:not([type="hidden"])')
         .forEach((control) => {
           if (control.dataset.olympusOriginallyDisabled === undefined) {
             control.dataset.olympusOriginallyDisabled = control.disabled ? 'true' : 'false';
           }
           const oauthUnavailable = form.hasAttribute('data-native-oauth-unavailable');
-          if (!canWrite || oauthUnavailable) {
+          if ((pending && isSubmitControl(control)) || !canWrite || oauthUnavailable) {
             control.disabled = true;
             control.setAttribute('aria-disabled', 'true');
           } else {
@@ -108,6 +121,69 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           }
         });
     });
+  }
+
+  /**
+   * Only the acts a form can submit are held for its own pending request —
+   * never the fields beside them, which the owner may still be typing in.
+   */
+  function isSubmitControl(control: HTMLButtonElement | HTMLInputElement): boolean {
+    const type = (control.getAttribute('type') || '').toLowerCase();
+    if (control instanceof HTMLButtonElement) return type === '' || type === 'submit';
+    return type === 'submit';
+  }
+
+  function setFormPending(form: HTMLFormElement, pending: boolean, message?: string): void {
+    if (pending) {
+      if (!pendingForms.has(form)) pendingFormCount++;
+      pendingForms.add(form);
+      form.setAttribute('aria-busy', 'true');
+      if (message !== undefined) say(form, message);
+    } else {
+      if (pendingForms.has(form)) pendingFormCount--;
+      pendingForms.delete(form);
+      form.removeAttribute('aria-busy');
+    }
+    applyWriteCapability();
+  }
+
+  /**
+   * What the owner watches while the request is outstanding, chosen per action
+   * so the pending state names the actual work instead of a generic wait.
+   */
+  function pendingMessage(action: OlympusDashboardControlParams['action']): string {
+    switch (action) {
+      case 'start_oauth': return 'Connecting…';
+      case 'connect_api_key': return 'Validating the key…';
+      case 'cancel_oauth': return 'Cancelling…';
+      case 'sync_now': return 'Starting sync…';
+      case 'set_embedding_priority': return 'Saving…';
+      default: return 'Working…';
+    }
+  }
+
+  /**
+   * Actionable replacement for the old "Done. Waiting for the next refresh."
+   * It says what just happened and what the owner should expect next; it never
+   * claims the connection is live, which only the server's card may report.
+   */
+  function successMessage(action: OlympusDashboardControlParams['action']): string {
+    switch (action) {
+      case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
+      case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
+      case 'cancel_oauth': return 'Connection attempt cancelled. Press Connect when you are ready to start a new one.';
+      case 'sync_now': return 'Sync started. This card updates when it finishes.';
+      case 'set_embedding_priority': return 'Embedding preference saved.';
+      case 'disconnect': return 'Disconnected. This card updates when Olympus confirms it.';
+      case 'unpair': return 'Unpaired on this computer.';
+      default: return 'Saved.';
+    }
+  }
+
+  function unreleasedMessage(action: OlympusDashboardControlParams['action']): string {
+    return action === 'connect_api_key'
+      ? 'Key accepted. Your newer entry is still in the form — press Connect to submit it.'
+      : 'Sent. Your newer entry is still in the form.';
   }
 
   function clearAuthorizationFallback(form: ParentNode): void {
@@ -186,16 +262,24 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     return [...keys].every((key) => actual[key] === expected[key]);
   }
 
-  function releaseSubmittedOAuthPanel(
+  /**
+   * Release the panel that carried a submit the transport has now answered.
+   * Only the submitted form is touched, and only while it still holds exactly
+   * what was submitted: anything typed since the request began is the owner's
+   * newer work and is left alone for an explicit resubmit.
+   */
+  function releaseSubmittedForm(
     form: HTMLFormElement,
     submittedValues: Record<string, string> | undefined,
   ): boolean {
     const sheet = form.closest<HTMLElement>('.sheet');
     const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
     if (!unchanged) return false;
-    // The submitted values are now owned by the backend. Reset before the
-    // panel is released so a password/client secret cannot become a reflected
-    // HTML value attribute on a later DOM serialization.
+    // The submitted values are now owned by the backend, so clearing this
+    // form's secret (and the rest of the values it submitted) is not data
+    // loss. Reset before the panel is released so a password/client secret
+    // cannot become a reflected HTML value attribute on a later DOM
+    // serialization. Other forms, and their unsaved input, are untouched.
     form.reset();
     const active = activeElement();
     if (sheet) {
@@ -216,6 +300,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   function controlParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
+    if (form.hasAttribute('data-model-check')) return { action: 'check_model_setup' };
     const body = formRecord(form);
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
@@ -321,6 +406,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       return;
     }
+    if (pendingForms.has(form) || form.dataset.keyAccepted === 'true') {
+      // One request per form in flight: the duplicate click is not work.
+      closeAuthorizationTab(authorizationTab);
+      return;
+    }
     if (params.action === 'disconnect' || params.action === 'unpair') {
       const fallback = params.action === 'unpair' ? 'Unpair this source?' : 'Disconnect this source?';
       if (!window.confirm(form.dataset.confirmation || fallback)) {
@@ -329,50 +419,78 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
     }
     if (params.action === 'start_oauth') clearAuthorizationFallback(form);
-    say(form, 'Starting…');
+    setFormPending(form, true, pendingMessage(params.action));
+    let result: OlympusDashboardControlResult;
     try {
-      const result = await options.transport.control(params);
-      if (result.status === 401 || result.status === 403) {
-        closeAuthorizationTab(authorizationTab);
-        if (options.authority === 'worker-session') {
-          csrfToken = '';
-          say(form, 'The control session expired — unlock controls in Setup, then try again.');
-        } else {
-          canWrite = false;
-          applyWriteCapability();
-          say(form, 'Your write access expired. Reconnect with operator.write access, then try again.');
-        }
-        return;
-      }
-      const authorizationUrl = result.body.authorization_url;
-      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
-        closeAuthorizationTab(authorizationTab);
-        say(form, errorMessage(result));
-        return;
-      }
-      if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
-        if (authorizationTab) {
-          authorizationTab.location.href = authorizationUrl;
-          say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus.');
-          if (releaseSubmittedOAuthPanel(form, submittedValues)) void refreshNow(false, true);
-        } else if (openAuthorizationExternally(authorizationUrl)) {
-          say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus.');
-          if (releaseSubmittedOAuthPanel(form, submittedValues)) void refreshNow(false, true);
-        } else {
-          say(form, 'Open the authorization page to continue.');
-          showAuthorizationFallback(form, authorizationUrl);
-        }
-        return;
-      }
-      closeAuthorizationTab(authorizationTab);
-      form.reset();
-      const statusMessage = result.body.status_message;
-      say(form, typeof statusMessage === 'string' ? statusMessage : 'Done. Waiting for the next refresh.');
-      await refreshNow(false);
+      result = await options.transport.control(params);
     } catch {
       closeAuthorizationTab(authorizationTab);
       say(form, 'Could not reach Olympus.');
+      return;
+    } finally {
+      // Only the request was pending; answering it is the moment the form is
+      // free again, and holding it disabled any longer is what kept the
+      // released control looking focused to the refresh guards.
+      setFormPending(form, false);
+      if (params.action !== 'start_oauth') submittedFormValues.delete(form);
     }
+    if (result.status === 401 || result.status === 403) {
+      closeAuthorizationTab(authorizationTab);
+      if (options.authority === 'worker-session') {
+        csrfToken = '';
+        say(form, 'The control session expired — unlock controls in Setup, then try again.');
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, 'Your write access expired. Reconnect with operator.write access, then try again.');
+      }
+      return;
+    }
+    const authorizationUrl = result.body.authorization_url;
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      closeAuthorizationTab(authorizationTab);
+      say(form, errorMessage(result));
+      return;
+    }
+    if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
+      // The provider has not answered yet. Only the server's card may ever
+      // report a live connection, so the page states what it is waiting for
+      // and reads again when the owner comes back.
+      awaitingAuthorizationReturn = true;
+      if (authorizationTab) {
+        authorizationTab.location.href = authorizationUrl;
+        say(form, 'Authorization opened in a new tab. Approve it there, then come back to Olympus — this card updates when the connection completes.');
+        if (releaseSubmittedForm(form, submittedValues)) void refreshNow(false, true);
+      } else if (openAuthorizationExternally(authorizationUrl)) {
+        say(form, 'Authorization opened in your default browser. Approve it there, then come back to Olympus — this card updates when the connection completes.');
+        if (releaseSubmittedForm(form, submittedValues)) void refreshNow(false, true);
+      } else {
+        say(form, 'Waiting for authorization. Open the page to continue — this card updates when the connection completes.');
+        showAuthorizationFallback(form, authorizationUrl);
+      }
+      return;
+    }
+    closeAuthorizationTab(authorizationTab);
+    const statusMessage = result.body.status_message;
+    const released = releaseSubmittedForm(form, submittedValues);
+    if (released && params.action === 'connect_api_key') {
+      form.dataset.keyAccepted = 'true';
+      form.querySelectorAll<HTMLInputElement>('input[name="api_key"]').forEach((input) => { input.value = ''; input.hidden = true; });
+      form.querySelectorAll<HTMLButtonElement>('button[type="submit"],button:not([type])').forEach((button) => {
+        button.textContent = params.source === 'readwise' ? 'Connected' : 'Key saved';
+      });
+      applyWriteCapability();
+    }
+    if (params.action === 'cancel_oauth') awaitingAuthorizationReturn = false;
+    say(form, typeof statusMessage === 'string'
+      ? statusMessage
+      : released
+        ? successMessage(params.action)
+        : unreleasedMessage(params.action));
+    // The submitted form released its focus and dirty state above, so this
+    // read is not deferred by the owner's own finished form. Unrelated unsaved
+    // input still defers it: `refreshNow` keeps those guards.
+    await refreshNow(false, released);
   }
 
   function copyText(node: Element): string {
@@ -420,7 +538,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function hasFocusedControl(): boolean {
     const active = activeElement();
-    return active !== null && root.contains(active);
+    if (active === null || !root.contains(active)) return false;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement) return !active.disabled;
+    return active instanceof HTMLElement && active.isContentEditable;
   }
 
   function replaceBody(result: OlympusDashboardReadResult, force: boolean): void {
@@ -434,6 +554,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       applyWriteCapability();
       return;
     }
+    const openSheets = queryAll<HTMLElement>('.sheet.on').map((sheet) => sheet.id);
     const open = new Set(queryAll<HTMLDetailsElement>('details[open]').map((node) =>
       node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || ''));
     const active = activeElement();
@@ -444,6 +565,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const key = node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || '';
       if (open.has(key)) node.open = true;
     });
+    for (const id of openSheets) {
+      const sheet = queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === id);
+      sheet?.classList.add('on');
+      queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
+    }
     findByFocusKey(focused)?.focus();
     signature = result.signature;
     pollIntervalMs = result.poll_interval_ms;
@@ -452,10 +578,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
-    if (disposed || inFlight || options.signal.aborted || (!force && !presented)) return;
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || (!force && !presented)) return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
-    if (!force && query('.sheet.on')) return;
+    if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
     // A typed secret or folder query is the only copy of the user's work and
     // is never replaced by polling, however old the tab is.
     if (!force && hasDirtyInput()) return;
@@ -497,11 +623,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind]',
+      '[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]',
     )) return;
     event.preventDefault();
-    const submittedValues = form.dataset.connectKind === 'oauth' ? formRecord(form) : undefined;
-    if (submittedValues) oauthSubmittedValues.set(form, submittedValues);
+    // Every control form records what it submitted: the answer may only
+    // replace input that has not changed since, whatever the action.
+    const submittedValues = formRecord(form);
+    submittedFormValues.set(form, submittedValues);
     const tab = form.dataset.connectKind === 'oauth' ? openAuthorizationTab() : null;
     void submitControl(form, tab, submittedValues);
   }
@@ -570,12 +698,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const fallback = target.closest<HTMLAnchorElement>('[data-authorization-fallback] a');
     if (fallback) {
       const form = fallback.closest<HTMLFormElement>('form[data-connect-kind="oauth"]');
-      const submittedValues = form ? oauthSubmittedValues.get(form) : undefined;
+      const submittedValues = form ? submittedFormValues.get(form) : undefined;
       if (form && submittedValues) {
         // Keep the fallback anchor available for the browser's default action;
         // release the panel only after that navigation has been dispatched.
         setTimeout(() => {
-          if (disposed || !releaseSubmittedOAuthPanel(form, submittedValues)) return;
+          if (disposed || !releaseSubmittedForm(form, submittedValues)) return;
           void refreshNow(false, true);
         }, 0);
       }
@@ -592,6 +720,21 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  // Coming back from the approval browser or tab is the moment the exchange
+  // may have just landed: one authoritative read, and only while this
+  // controller still owes the owner an answer about a start it performed.
+  const refreshOnReturn = (): void => {
+    if (disposed || options.signal.aborted || !awaitingAuthorizationReturn) return;
+    awaitingAuthorizationReturn = false;
+    void refreshNow(false, true);
+  };
+  const onVisibilityReturn = (): void => {
+    if (root.ownerDocument.visibilityState !== 'visible') return;
+    refreshOnReturn();
+  };
+  const view = root.ownerDocument.defaultView || window;
+  view.addEventListener('focus', refreshOnReturn);
+  root.ownerDocument.addEventListener('visibilitychange', onVisibilityReturn);
   applyWriteCapability();
   restartPoll();
 
@@ -599,6 +742,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (disposed) return;
     disposed = true;
     if (interval) clearInterval(interval);
+    view.removeEventListener('focus', refreshOnReturn);
+    root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
   };

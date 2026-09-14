@@ -141,8 +141,11 @@ define it.
 
 The agent checks prerequisites, installs the plugin, helps you describe your
 data as a sensitivity map, asks for your privacy posture, connects your keys
-without logging them, and verifies worker and plugin activation. That completes
-base installation. Then you can choose a source in the dashboard or leave
+without logging them, and verifies worker and plugin activation. Installation
+ends with a working dashboard link: complete Models at the top of Setup,
+then connect sources below. Use Home to see
+readiness and attention items, and Background to monitor ingestion. Return to
+your agent if you need help. Then you can choose a source or leave
 Olympus ready for later; no source is selected for you. Once your chosen source
 is ready, the agent checks a first answer and its citations.
 

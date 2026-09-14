@@ -1,3 +1,10 @@
+import { olympusPackageRoot } from '../../core/package-root.ts';
+import { MessagingCaptureSupervisor, defaultMessagingCaptureGrantPath, revokeMessagingCaptureGrant } from '../../core/messaging-capture.ts';
+import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
+import { createModelKeyReload } from '../../core/model-key-reload.ts';
+import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
+import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import {
@@ -1342,6 +1349,30 @@ export async function main(): Promise<void> {
     || accountFromDropboxCredentialHandle(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE);
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
+  const packageRoot = olympusPackageRoot();
+  const captures = {
+    telegram: new MessagingCaptureSupervisor({ source: 'telegram', registryPath: connectedHandleRegistryPath!, packageRoot }),
+    whatsapp: new MessagingCaptureSupervisor({ source: 'whatsapp', registryPath: connectedHandleRegistryPath!, packageRoot,
+      whatsappBridgePath: whatsappBridgePathForPackage(packageRoot, { env: process.env }) }),
+  };
+  let captureReconcileRunning = false;
+  let capturesClosed = false;
+  const reconcileCaptures = async () => {
+    if (capturesClosed || captureReconcileRunning) return;
+    captureReconcileRunning = true;
+    if (sovereigntyEngine.config.routes.secure_local?.mode === 'disabled' || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+      try { await Promise.all(Object.values(captures).map((capture) => capture.stop())); } finally { captureReconcileRunning = false; }
+      return;
+    }
+    try { await Promise.all(Object.values(captures).map((capture) => capture.reconcile())); }
+    catch { console.warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.'); }
+    finally { captureReconcileRunning = false; }
+  };
+  const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
+    revokeMessagingCaptureGrant(defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath!));
+    await captures[source].stop();
+  };
+
   const fileSourceScopeAuthority = connectedHandleRegistryPath
     ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath })
     : undefined;
@@ -1427,6 +1458,53 @@ export async function main(): Promise<void> {
   // Drive/Docs is INTERNAL only (there is no secure drive corpus), so the
   // cloud (Gemini) source-index provider rides directly — NO local-only gate.
   const googleDriveDocsEmbeddingProvider = sourceIndexEmbeddingProvider;
+  const requiredProfiles = requiredModelProfiles(sovereigntyEngine.config);
+  const safeModelCredential = (profile: typeof requiredProfiles[number]['profile'], env: Record<string, string | undefined>): string | undefined => {
+    if (!profile.secretRef) return undefined;
+    try { return resolveSecretRefValueSync(profile.secretRef, { env })?.trim() || undefined; }
+    catch { return undefined; }
+  };
+  // Only used inside this process to distinguish stored from applied keys.
+  const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
+  const modelCredentialState = (id: string, profile: typeof requiredProfiles[number]['profile']): ModelCredentialState => {
+    if (!profile.secretRef) return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
+    const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+    const current = safeModelCredential(profile, storedEnv);
+    if (!current) return 'missing';
+    if (current !== bootModelCredentials.get(id)
+      || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id))) return 'applying';
+    return 'ready';
+  };
+  let requestModelReload: () => boolean = () => false;
+  let modelReloadUnavailable = false;
+  const modelSetup = new ModelSetupService({
+    config: sovereigntyEngine.config,
+    credentialState: modelCredentialState,
+    localApiKey: (id) => bootModelCredentials.get(id),
+    expectedEmbeddingDimension: (id) => {
+      const secure = sovereigntyEngine.resolveEmbeddingProfile('secure_local');
+      if (secure?.id === id) return secureLocalPolicyEmbeddingProvider?.dimension;
+      const internal = sovereigntyEngine.resolveEmbeddingProfile('internal');
+      if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
+      return undefined;
+    },
+  });
+  const getModelSetup = () => {
+    const view = modelSetup.getStatus();
+    if (!modelReloadUnavailable) return view;
+    return { ...view, ready: false, cards: view.cards.map((card) => card.state === 'applying'
+      ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
+      : card) };
+  };
+  const connectModelKey = async (provider: 'gemini' | 'venice', apiKey: string): Promise<void> => {
+    if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
+    else await connectPublicApiKeySource({ source: 'venice', apiKey });
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    if (!credentials.includes('missing') && credentials.includes('applying')) {
+      modelReloadUnavailable = !requestModelReload();
+    }
+  };
+
   const fileExtractionPdfTextCommandEnv = process.env.OLYMPUS_FILE_EXTRACTION_PDF_TEXT_COMMAND?.trim();
   const fileExtractionPdfTextCommand = fileExtractionPdfTextCommandEnv === 'off'
     ? undefined
@@ -2876,6 +2954,10 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
+            modelSetup: getModelSetup,
+            checkModelSetup: () => modelSetup.checkLocalModels(),
+            connectModelKey,
+            stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
@@ -2937,6 +3019,9 @@ export async function main(): Promise<void> {
     fetch: withWorkerBearerAuth(worker.fetch, { authToken }),
   });
   sourceScheduler?.start();
+  await reconcileCaptures();
+  const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
+  captureTick.unref?.();
 
   // The worker owns a background tick that outlives any request, so the process
   // needs a way to put it down. Without this the only shutdown was the process
@@ -2945,11 +3030,19 @@ export async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    capturesClosed = true;
+    clearInterval(captureTick);
+    void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
     void server.stop();
   };
+  requestModelReload = createModelKeyReload({
+    managed: process.env.OLYMPUS_MANAGED_WORKER === '1',
+    shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    exit: (code) => process.exit(code),
+  });
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 

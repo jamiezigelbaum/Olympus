@@ -109,7 +109,7 @@ async function secretRefPrerequisite(
  */
 function envSecretRemedy(displayKey: string): string {
   if (displayKey === 'GEMINI_API_KEY') {
-    return 'olympus connect gemini --api-key-prompt';
+    return 'Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt';
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -139,7 +139,7 @@ function localServerPrerequisite(profileId: string, profile: SovereigntyModelPro
 
 function storeSecretRemedy(key: string): string {
   if (key === 'venice.api_key') {
-    return 'olympus connect venice --api-key-prompt';
+    return 'Open Models in Olympus Setup to connect Venice. Headless fallback: olympus connect venice --api-key-prompt';
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }

@@ -392,6 +392,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/connect/oauth/start',
     '/dashboard/connect/oauth/cancel',
     '/dashboard/connect/api-key',
+    '/dashboard/models/check',
     '/dashboard/sync-now',
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',

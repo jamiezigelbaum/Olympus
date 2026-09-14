@@ -93,6 +93,34 @@ async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Pro
 }
 
 describe('bounded dashboard Unpair', () => {
+  test.each([false, true])('capture exit must be confirmed before pairing artifacts are removed (stop fails: %s)', async (failStop) => {
+    const home = fixtureHome();
+    const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));
+    const registryPath = join(home, 'handles.json');
+    const handle = telegramHandle();
+    handle.tokenSecretRefs = [...(handle.tokenSecretRefs ?? []), 'store:telegram.personal.app.api_id', 'store:telegram.personal.app.api_hash'];
+    writeConnectedHandleRegistry(registryOf(handle), registryPath);
+    const secrets = memorySecretStore({ 'telegram.personal.session_path': sessionPath, 'telegram.personal.app.api_id': '12345', 'telegram.personal.app.api_hash': 'synthetic-app-secret' });
+    let stopped = false;
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore: secrets,
+      pairingSessionPathContext: { homeDir: home },
+      stopMessagingCapture: async (source) => {
+        expect(source).toBe('telegram');
+        expect(existsSync(sessionPath)).toBe(true);
+        expect(await secrets.get('telegram.personal.app.api_hash')).toBe('synthetic-app-secret');
+        if (failStop) throw new Error('still alive');
+        stopped = true;
+      },
+    } }));
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'telegram.messages', acknowledge: true }));
+    expect(response.status).toBe(failStop ? 409 : 200);
+    expect(stopped).toBe(!failStop);
+    expect(existsSync(sessionPath)).toBe(failStop);
+    expect(await secrets.get('telegram.personal.app.api_hash')).toBe(failStop ? 'synthetic-app-secret' : undefined);
+    expect(await response.text()).not.toContain('synthetic-app-secret');
+  });
+
   test('removes the local Telegram pairing session, parks the lane, and leaves the capture spool and indexed data alone', async () => {
     const home = fixtureHome();
     const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));
@@ -2482,6 +2510,7 @@ describe('pairing session paths', () => {
       '/home/fixture/.local/share/olympus/whatsapp-live/session.db-wal',
       '/home/fixture/.local/share/olympus/whatsapp-live/session.db-shm',
       '/home/fixture/.local/share/olympus/whatsapp-live/qr.txt',
+      '/home/fixture/.local/share/olympus/whatsapp-live/qr.png',
     ]);
     expect(telegramPairingSessionPaths(context)).toEqual([
       '/home/fixture/.local/share/olympus/telegram/telegram.personal.session',
@@ -2511,7 +2540,7 @@ describe('pairing session paths', () => {
     );
     expect(planned.ok).toBe(true);
     expect(planned.ok === true && planned.plan.targets).toEqual([]);
-    expect(planned.ok === true && planned.plan.absent.length).toBe(4);
+    expect(planned.ok === true && planned.plan.absent.length).toBe(5);
   });
 });
 

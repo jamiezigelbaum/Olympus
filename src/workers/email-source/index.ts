@@ -1,3 +1,4 @@
+import type { ModelSetupView } from '../../core/model-setup.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -404,6 +405,10 @@ export interface EmailSourceWorkerOptions {
     oauthFetch?: OAuthFetch;
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
+    modelSetup?: () => ModelSetupView;
+    checkModelSetup?: () => Promise<ModelSetupView>;
+    connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
+    stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
      * The sources `triggerSourceSync` actually serves.
@@ -677,6 +682,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // rebuild and apply after close() returned. A closed worker must do no
   // further scheduler work, so the flag is re-checked at every await boundary.
   let dashboardWorkerClosed = false;
+  const dashboardPostConnectRuns = new Map<DashboardConnectSource, Promise<void>>();
   if (options.sourceScheduler && options.sourceDashboard?.refreshSchedulerSources) {
     const intervalMs = options.sourceDashboard.registryAdoptionIntervalMs ?? 30_000;
     if (intervalMs > 0) {
@@ -911,6 +917,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             });
           }
           if (postBody?.action === 'approve_source_scope_and_start') {
+            assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope approval is not configured.');
             }
@@ -1046,6 +1053,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }),
             ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
             sovereigntyEngine: sourceDashboard.sovereigntyEngine,
+            ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
             ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
             ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
             connectedHandleRegistry: registry,
@@ -1327,6 +1335,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const record = await parseObjectBody(request);
           const source = parseDashboardOAuthSource(record.source);
+          assertDashboardModelsReady();
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
@@ -1484,6 +1493,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/check') {
+          if (!sourceDashboard?.checkModelSetup) {
+            throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support model setup checks.');
+          }
+          // Synthetic model checks are explicit operator work, never dashboard polling.
+          // Return promptly; the authoritative Models card receives their result.
+          void sourceDashboard.checkModelSetup().catch(() => undefined);
+          return json({ ok: true, status_message: 'Checking model connections…' });
+        }
+
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
@@ -1496,6 +1515,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const record = await parseObjectBody(request);
           const source = parseDashboardApiKeySource(record.source);
           if (source === 'readwise') {
+            assertDashboardModelsReady();
             assertDashboardAccountCardinality(
               readConnectedHandleRegistry(sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               source,
@@ -1503,6 +1523,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const apiKey = asOptionalString(record.api_key);
           if (!apiKey) throw new EmailSourceWorkerError(400, 'invalid_request', 'api_key is required.');
+          if (source === 'gemini' || (source === 'venice' && sourceDashboard.connectModelKey)) {
+            if (!sourceDashboard.connectModelKey) {
+              throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
+            }
+            try { await sourceDashboard.connectModelKey(source, apiKey); }
+            catch { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', 'The model key could not be validated or applied. Check the Models card and retry.'); }
+            const modelSetup = sourceDashboard.modelSetup?.();
+            return json({ ok: true, source, status_message: modelSetup?.ready
+              ? 'Model connection ready.'
+              : 'Key saved. Finish the remaining model requirements; Olympus applies the keys automatically.' });
+          }
           const connectApiKey = sourceDashboard.connectApiKey ?? connectPublicApiKeySource;
           let result: Awaited<ReturnType<typeof connectPublicApiKeySource>>;
           try {
@@ -1545,6 +1576,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json({
             ok: true,
             source,
+            status_message: source === 'readwise' ? 'Connected. Initial sync requested.' : 'Key connected.',
             handles: result.handles.filter((handle) => knownHandles.includes(handle)),
             policy: {
               raw_runtime_secrets_exposed: false,
@@ -1633,6 +1665,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // a later delete fails, the source is safely parked and retrying
                 // Disconnect can finish; no stale scheduled definition survives.
                 sourceScheduler.updateSources(nextSources);
+              }
+              if (sourceDashboard.stopMessagingCapture) {
+                for (const [id, source] of [['telegram.messages', 'telegram'], ['whatsapp.personal.messages', 'whatsapp']] as const) {
+                  if (!plan.sourceIds.has(id)) continue;
+                  try { await sourceDashboard.stopMessagingCapture(source); }
+                  catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Credentials were retained; retry Disconnect.'); }
+                }
               }
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
@@ -1841,6 +1880,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 registryPath,
               );
               for (const unpairedSource of selectedSourceIds) dashboardUnpairedSources.add(unpairedSource);
+              if (sourceDashboard.stopMessagingCapture) {
+                try { await sourceDashboard.stopMessagingCapture(sourceId === 'telegram.messages' ? 'telegram' : 'whatsapp'); }
+                catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.'); }
+              }
+
               const removedSessionPaths: string[] = [];
               const unremovedSessionPaths: string[] = [];
               for (const target of removalPlan.plan.targets) {
@@ -2561,6 +2605,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     },
   };
 
+  function assertDashboardModelsReady(): void {
+    if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
+      throw new EmailSourceWorkerError(409, 'model_setup_required', 'Finish model setup at the top of Setup before connecting sources or starting ingestion.');
+    }
+  }
+
   async function withDashboardGrantMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const previous = dashboardGrantMutationTail;
     let release!: () => void;
@@ -2593,6 +2643,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
     assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
+    if (dashboardWorkerClosed) throw new EmailSourceWorkerError(503, 'worker_stopping', 'The worker is restarting.');
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
       const schedulerStatus = sourceScheduler?.status();
@@ -2713,13 +2764,29 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   async function triggerDashboardPostConnectSync(request: DashboardSourceSyncRequest): Promise<void> {
-    if (!isDashboardSyncSource(request.source)) return;
-    if (!dashboardSourceSyncAvailable(request.source)) return;
-    try {
-      await runDashboardSourceSync(request);
-    } catch (error) {
-      console.warn(`Olympus post-connect first sync did not start for ${request.source}: ${scrubSourceWorkerLogMessage(error instanceof Error ? error.message : error)}`);
+    if (!isDashboardSyncSource(request.source) || dashboardWorkerClosed) return;
+    // A newly connected account was absent from the startup scheduler. Adopt
+    // it before deciding whether its initial sync is available.
+    try { await refreshDashboardSchedulerSources(); }
+    catch {
+      console.warn('Olympus connected the source; scheduler adoption will retry on its next tick.');
+      return;
     }
+    if (!dashboardSourceSyncAvailable(request.source) || dashboardPostConnectRuns.has(request.source)) return;
+    try {
+      assertDashboardModelsReady();
+      assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
+    } catch { return; } // File-source scope remains an explicit next step.
+    const work = Promise.resolve().then(async () => {
+      if (dashboardWorkerClosed) return;
+      if (sourceDashboard) assertDashboardSourceMayRead(request.source, sourceDashboard, dashboardDisconnectedSources);
+      await runDashboardSourceSync(request);
+    }).catch((error) => {
+      if (!dashboardWorkerClosed) console.warn(`Olympus initial sync needs attention for ${request.source}: ${scrubSourceWorkerLogMessage(error instanceof Error ? error.message : error)}`);
+    }).finally(() => { dashboardPostConnectRuns.delete(request.source); });
+    dashboardPostConnectRuns.set(request.source, work);
+    // The HTTP connection acknowledgment must not wait for a whole library
+    // import. Scheduler execution, budgets and failures stay authoritative.
   }
 
   /**
@@ -2733,6 +2800,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   function dashboardSourceSyncAvailable(source: DashboardConnectSource): boolean {
+    const schedulerId = dashboardSchedulerSourceId(source);
+    if (schedulerId && sourceScheduler?.status().sources.some((candidate) => candidate.source_id === schedulerId || candidate.corpus_id === schedulerId)) return true;
+
     if (source === 'gmail') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'gmail.email' || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true
@@ -4109,10 +4179,10 @@ function parseDashboardOAuthSource(value: unknown): DashboardOAuthSource {
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be google, gmail, google-drive, dropbox, or x.');
 }
 
-function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource {
+function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'gemini' {
   const source = asOptionalString(value);
-  if (source === 'venice' || source === 'readwise') return source;
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be venice or readwise.');
+  if (source === 'gemini' || source === 'venice' || source === 'readwise') return source;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gemini, venice, or readwise.');
 }
 
 function parseDashboardSyncSource(value: unknown): DashboardConnectSource {

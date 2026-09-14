@@ -38,6 +38,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"mime"
@@ -59,14 +60,18 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"rsc.io/qr"
 )
 
 const (
 	stateDirEnv     = "OLYMPUS_WHATSAPP_STATE_DIR"
+	allowedChatsEnv = "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"
+	pairTTYQREnv    = "OLYMPUS_WHATSAPP_PAIR_TTY_QR"
 	qrStdoutEnv     = "OLYMPUS_WHATSAPP_QR_STDOUT"
 	defaultStateRel = ".local/share/olympus/whatsapp-live"
 	spoolDirName    = "spool"
 	qrFileName      = "qr.txt"
+	qrPNGFileName   = "qr.png"
 	sessionDBName   = "session.db"
 
 	spoolQueueSize    = 4096
@@ -128,6 +133,12 @@ type spoolRecord struct {
 }
 
 func main() {
+	pairOnly := flag.Bool("pair-only", false, "pair or verify the linked device, then exit without capturing messages")
+	captureApproved := flag.Bool("capture-approved", false, "require and enforce an explicitly approved chat scope")
+	flag.Parse()
+	if *pairOnly && *captureApproved {
+		log.Fatal("olympus-whatsapp-bridge: incompatible_modes")
+	}
 	// The linked-device store and every derivative written by this process are
 	// secret-bearing local state. Keep safe modes even when the daemon is run
 	// manually instead of through the systemd unit (which also sets UMask=0077).
@@ -137,14 +148,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("olympus-whatsapp-bridge: %v", err)
 	}
-	spoolDir := filepath.Join(stateDir, spoolDirName)
-	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
-		log.Fatalf("olympus-whatsapp-bridge: creating spool dir %s: %v", spoolDir, err)
-	}
-
 	ctx := context.Background()
 	dbPath := filepath.Join(stateDir, sessionDBName)
-	container, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Stdout("Database", "WARN", true))
+	bridgeLog := waLog.Stdout("Database", "WARN", true)
+	clientLog := waLog.Stdout("Client", "INFO", true)
+	if *pairOnly {
+		// Pairing stdout is a small JSON protocol consumed by the TypeScript
+		// launcher. Provider logs can contain account identifiers, so keep them
+		// out of that channel and out of agent transcripts.
+		bridgeLog = waLog.Noop
+		clientLog = waLog.Noop
+	}
+	container, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", bridgeLog)
 	if err != nil {
 		log.Fatalf("olympus-whatsapp-bridge: opening session store %s: %v", dbPath, err)
 	}
@@ -153,13 +168,33 @@ func main() {
 		log.Fatalf("olympus-whatsapp-bridge: loading device from session store: %v", err)
 	}
 
-	client := whatsmeow.NewClient(device, waLog.Stdout("Client", "INFO", true))
+	client := whatsmeow.NewClient(device, clientLog)
+	if *pairOnly {
+		if err := runPairOnly(ctx, client, container, stateDir); err != nil {
+			// runPairOnly returns stable error codes only. Never print provider
+			// errors here: they can include the linked account identifier.
+			log.Fatalf("olympus-whatsapp-bridge: %s", err)
+		}
+		return
+	}
+
+	spoolDir := filepath.Join(stateDir, spoolDirName)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		log.Fatalf("olympus-whatsapp-bridge: creating spool dir %s: %v", spoolDir, err)
+	}
+	allowedChats, err := approvedCaptureChats(*captureApproved)
+	if err != nil {
+		log.Fatalf("olympus-whatsapp-bridge: %s", err)
+	}
 	writer := newSpoolWriter(spoolDir)
 	audioStore := newAudioMediaStore(stateDir, client)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
 	client.AddEventHandler(func(evt any) {
+		if message, ok := evt.(*events.Message); ok && !chatCaptureAllowed(message.Info.Chat.String(), allowedChats) {
+			return
+		}
 		handleEvent(ctx, client, audioStore, writer, fatalEvents, evt)
 	})
 
@@ -217,6 +252,112 @@ func main() {
 		writer.close()
 		log.Fatalf("olympus-whatsapp-bridge: %s", reason)
 	}
+}
+
+func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlstore.Container, stateDir string) error {
+	defer removePairOnlyQR(stateDir)
+	if client.Store.ID == nil {
+		qrCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		qrChan, err := client.GetQRChannel(qrCtx)
+		if err != nil {
+			return errors.New("qr_channel_failed")
+		}
+		if err := client.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			return errors.New("connect_failed")
+		}
+		paired := false
+		for item := range qrChan {
+			switch item.Event {
+			case whatsmeow.QRChannelEventCode:
+				path, err := emitPairOnlyQR(item.Code, stateDir)
+				if err != nil {
+					return errors.New("qr_artifact_failed")
+				}
+				emitPairingEvent(map[string]any{"event": "qr", "qr_png_path": path})
+			case whatsmeow.QRChannelSuccess.Event:
+				paired = true
+			case whatsmeow.QRChannelTimeout.Event:
+				removePairOnlyQR(stateDir)
+				return errors.New("pairing_timeout")
+			case whatsmeow.QRChannelEventError:
+				removePairOnlyQR(stateDir)
+				return errors.New("pairing_failed")
+			}
+		}
+		if !paired {
+			removePairOnlyQR(stateDir)
+			return errors.New("pairing_not_confirmed")
+		}
+	} else {
+		if err := client.Connect(); err != nil && !errors.Is(err, whatsmeow.ErrAlreadyConnected) {
+			return errors.New("connect_failed")
+		}
+	}
+
+	if !client.WaitForConnection(20*time.Second) || !client.IsLoggedIn() {
+		removePairOnlyQR(stateDir)
+		return errors.New("authenticated_connection_not_confirmed")
+	}
+	persisted, err := container.GetFirstDevice(ctx)
+	if err != nil || persisted == nil || !pairingReceiptReady(client.IsLoggedIn(), client.Store.ID, persisted.ID) {
+		removePairOnlyQR(stateDir)
+		return errors.New("session_not_persisted")
+	}
+	client.Disconnect()
+	removePairOnlyQR(stateDir)
+	emitPairingEvent(map[string]any{
+		"event":           "ready",
+		"status":          "ready",
+		"proof":           map[string]bool{"authenticated": true, "device_persisted": true},
+		"capture_started": false,
+	})
+	return nil
+}
+
+func pairingReceiptReady(authenticated bool, currentID, persistedID *types.JID) bool {
+	return authenticated && currentID != nil && persistedID != nil && currentID.String() == persistedID.String()
+}
+
+func emitPairingEvent(event map[string]any) {
+	payload, _ := json.Marshal(event)
+	fmt.Println(string(payload))
+}
+
+func approvedCaptureChats(required bool) (map[string]struct{}, error) {
+	if !required {
+		return nil, nil
+	}
+	value := strings.TrimSpace(os.Getenv(allowedChatsEnv))
+	if value == "*" {
+		return map[string]struct{}{"*": {}}, nil
+	}
+	allowed := make(map[string]struct{})
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			jid, err := types.ParseJID(candidate)
+			if err != nil || jid.IsEmpty() || jid.User == "" {
+				return nil, errors.New("invalid_approved_chat_scope")
+			}
+			allowed[jid.String()] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return nil, errors.New("approved_chat_scope_required")
+	}
+	return allowed, nil
+}
+
+func chatCaptureAllowed(chatJID string, allowed map[string]struct{}) bool {
+	if allowed == nil {
+		return true
+	}
+	if _, all := allowed["*"]; all {
+		return true
+	}
+	_, ok := allowed[chatJID]
+	return ok
 }
 
 func existingSessionConnectedLogLine() string {
@@ -910,6 +1051,74 @@ func (w *spoolWriter) rotate(date string) error {
 }
 
 // --- Pairing QR ---------------------------------------------------------------
+
+func writeQRPNG(code string, stateDir string) (string, error) {
+	encoded, err := qr.Encode(code, qr.L)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(stateDir, qrPNGFileName)
+	temporary := path + ".tmp"
+	file, err := os.OpenFile(temporary, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	removeTemporary := true
+	defer func() {
+		file.Close()
+		if removeTemporary {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if _, err := file.Write(encoded.PNG()); err != nil {
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return "", err
+	}
+	removeTemporary = false
+	if err := os.Chmod(path, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func emitPairOnlyQR(code string, stateDir string) (string, error) {
+	path, err := writeQRPNG(code, stateDir)
+	if err != nil {
+		return "", err
+	}
+	// A human running over SSH can scan the QR directly from their controlling
+	// terminal. This bypasses stdout entirely, which remains the safe JSON event
+	// channel consumed by agents; the QR payload can therefore never be copied
+	// into an agent transcript by the launcher.
+	terminal, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err == nil && pairTTYQREnabled() {
+		fmt.Fprintln(terminal, "Scan with WhatsApp: Settings > Linked Devices > Link a Device")
+		qrterminal.GenerateHalfBlock(code, qrterminal.L, terminal)
+	}
+	if err == nil && terminal != nil {
+		terminal.Close()
+	}
+	return path, nil
+}
+
+func pairTTYQREnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(pairTTYQREnv)))
+	return value == "" || value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func removePairOnlyQR(stateDir string) {
+	if err := os.Remove(filepath.Join(stateDir, qrPNGFileName)); err != nil && !os.IsNotExist(err) {
+		log.Print("olympus-whatsapp-bridge: could not remove pairing QR")
+	}
+}
 
 func emitQR(code string, stateDir string, showOnStdout bool) {
 	if showOnStdout {

@@ -39,6 +39,72 @@ func TestQRStdoutCanBeDisabledForServiceMode(t *testing.T) {
 	}
 }
 
+func TestPairingQRIsPrivatePNG(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeQRPNG("fixture-pairing-code", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("pairing artifact is not PNG: %x", data[:min(8, len(data))])
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("pairing QR mode = %o, want 0600", info.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(dir, qrFileName)); !os.IsNotExist(err) {
+		t.Fatalf("pair-only PNG writer unexpectedly created ASCII QR: %v", err)
+	}
+}
+
+func TestPairingReceiptRequiresAuthenticatedPersistedMatchingDevice(t *testing.T) {
+	current := types.JID{User: "current", Server: types.DefaultUserServer}
+	persisted := types.JID{User: "current", Server: types.DefaultUserServer}
+	other := types.JID{User: "other", Server: types.DefaultUserServer}
+	if !pairingReceiptReady(true, &current, &persisted) {
+		t.Fatal("matching authenticated current and persisted devices should be ready")
+	}
+	for name, ready := range map[string]bool{
+		"not authenticated": pairingReceiptReady(false, &current, &persisted),
+		"missing current":   pairingReceiptReady(true, nil, &persisted),
+		"missing persisted": pairingReceiptReady(true, &current, nil),
+		"different device":  pairingReceiptReady(true, &current, &other),
+	} {
+		if ready {
+			t.Fatalf("%s unexpectedly produced a ready receipt", name)
+		}
+	}
+}
+
+func TestApprovedCaptureChatsFailClosedAndFilter(t *testing.T) {
+	t.Setenv(allowedChatsEnv, "")
+	if _, err := approvedCaptureChats(true); err == nil || err.Error() != "approved_chat_scope_required" {
+		t.Fatalf("empty explicit approval error = %v", err)
+	}
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net, chat-2@g.us")
+	allowed, err := approvedCaptureChats(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chatCaptureAllowed("chat-1@s.whatsapp.net", allowed) {
+		t.Fatal("approved chat was rejected")
+	}
+	if chatCaptureAllowed("other@s.whatsapp.net", allowed) {
+		t.Fatal("unapproved chat was accepted")
+	}
+	t.Setenv(allowedChatsEnv, "not-a-jid")
+	if _, err := approvedCaptureChats(true); err == nil || err.Error() != "invalid_approved_chat_scope" {
+		t.Fatalf("invalid chat approval error = %v", err)
+	}
+}
+
 type fakeContacts map[types.JID]types.ContactInfo
 
 func (f fakeContacts) GetContact(_ context.Context, user types.JID) (types.ContactInfo, error) {

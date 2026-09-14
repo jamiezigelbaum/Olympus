@@ -1359,7 +1359,6 @@ describe('multi-source source dashboard', () => {
     });
     const worker = createEmailSourceWorker({
       sourceScheduler: scheduler,
-      readwiseConnectorStoreSync: readwiseStoreSyncFixture(syncRequests),
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
         connectApiKey: async (options) => ({
@@ -1395,6 +1394,9 @@ describe('multi-source source dashboard', () => {
     }));
 
     expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Initial sync requested');
+    // Connection acknowledgment does not await the complete import.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(syncRequests).toEqual(expect.arrayContaining([
       expect.objectContaining({ mode: 'pull' }),
       expect.objectContaining({ mode: 'reconcile' }),
@@ -1405,6 +1407,7 @@ describe('multi-source source dashboard', () => {
         corpus_id: READWISE_LIBRARY_CORPUS_ID,
       }),
     ]);
+    worker.close();
   });
 
   test('Gmail OAuth connect refreshes scheduler sources and syncs without restarting an empty worker', async () => {

@@ -161,9 +161,14 @@ user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
 worker rather than installing a second one.
 
-If setup reports unmet prerequisites, finish them before your first indexing or
-`source_answer` call. For manual key entry, run one command at a time on the Olympus host, completing
-its prompt before starting the next:
+If setup reports missing model keys, finish base activation and open Setup.
+The Models section accepts the required Gemini/Venice keys and applies them;
+source connections unlock when it is ready. Existing local models use the
+agent-assisted starting point and Check readiness. No local model software is
+installed or maintained by Olympus.
+
+Only for an explicitly chosen headless workflow, run one key command at a time
+on the Olympus host, completing its private prompt before the next:
 
 ```bash
 olympus connect gemini --api-key-prompt
@@ -366,7 +371,22 @@ If the line is not there because the log rotated since the last restart,
 the other two checks stand on their own — do not restart again just to
 produce it.
 
-## 5. Optionally connect a source
+## 5. Open your dashboard and optionally connect sources
+
+Installation ends with a working, clickable Olympus dashboard link from your
+agent. Connecting a source is optional; providing that link is not. The agent
+must resolve the address for your browser and verify dashboard access, rather
+than giving you a host-only localhost URL or another terminal command.
+
+Open **Setup**, finish the required **Models** cards at the top, then connect
+sources below and choose their scope. **Home** shows source
+readiness and anything needing attention. **Background** shows syncing,
+extraction, and embedding progress. Return to the same agent chat if you need
+help connecting a source or understanding its progress.
+
+For native OpenClaw access, the dashboard page is
+`/plugin?plugin=olympus&id=dashboard` on the Gateway origin you already use.
+The agent should include that full verified link in its final reply.
 
 Base installation is ready when the chosen model prerequisites, worker health,
 and plugin/tool activation above are verified. No source connection is needed
@@ -449,7 +469,7 @@ explicitly chosen advanced BYO fallback.
 ```bash
 olympus connect google --client-id <google-oauth-client-id>
 olympus connect dropbox --client-id <dropbox-oauth-client-id>
-olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready
+olympus connect telegram --pair
 olympus connect whatsapp --session-path ~/.local/share/olympus/whatsapp --session-ready
 printf '%s' "$READWISE_TOKEN" | olympus connect readwise --api-key-stdin
 ```

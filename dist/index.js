@@ -8596,7 +8596,7 @@ var init_public_source_capabilities = __esm(() => {
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
       contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Whatsmeow bridge", required_for: "QR pairing and live capture" }],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
       doctor_lane: {
@@ -10972,7 +10972,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return "olympus connect gemini --api-key-prompt";
+    return "Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -11000,7 +11000,7 @@ function localServerPrerequisite(profileId, profile) {
 }
 function storeSecretRemedy(key) {
   if (key === "venice.api_key") {
-    return "olympus connect venice --api-key-prompt";
+    return "Open Models in Olympus Setup to connect Venice. Headless fallback: olympus connect venice --api-key-prompt";
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
@@ -13231,11 +13231,15 @@ function parseDashboardControlParams(value) {
     const record = exactRecord(outer, ["action", "source"]);
     return { action, source: enumValue(record.source, OAUTH_CALLBACK_SOURCES, "source") };
   }
+  if (action === "check_model_setup") {
+    exactRecord(outer, ["action"]);
+    return { action };
+  }
   if (action === "connect_api_key") {
     const record = exactRecord(outer, ["action", "source", "api_key"]);
     return {
       action,
-      source: enumValue(record.source, ["venice", "readwise"], "source"),
+      source: enumValue(record.source, ["gemini", "venice", "readwise"], "source"),
       api_key: boundedString2(record.api_key, 8192, "api_key", false)
     };
   }
@@ -13472,6 +13476,8 @@ function dashboardControlWorkerRequest(params) {
       };
     case "cancel_oauth":
       return { path: "/dashboard/connect/oauth/cancel", body: { source: params.source } };
+    case "check_model_setup":
+      return { path: "/dashboard/models/check", body: {} };
     case "connect_api_key":
       return { path: "/dashboard/connect/api-key", body: { source: params.source, api_key: params.api_key } };
     case "sync_now":

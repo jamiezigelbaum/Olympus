@@ -1178,6 +1178,7 @@ export function standaloneDashboardControllerScript(
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
         if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
+        if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
         if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];

@@ -46,1563 +46,32 @@ var __export = (target, all) => {
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
-// src/core/operation-error.ts
-var OperationError;
-var init_operation_error = __esm(() => {
-  OperationError = class OperationError extends Error {
-    code;
-    suggestion;
-    constructor(code, message, suggestion) {
-      super(message);
-      this.name = "OperationError";
-      this.code = code;
-      this.suggestion = suggestion;
-    }
-    toJSON() {
-      return {
-        error: this.code,
-        message: this.message,
-        ...this.suggestion ? { suggestion: this.suggestion } : {}
-      };
-    }
-  };
-});
-
-// src/core/source-index/types.ts
-function buildSourceSensitivity(input) {
-  const trustDomain = input.trustDomain ?? defaultTrustDomainForTier(input.trustTier);
-  const localOnlyRequired = trustDomain === "secure_local" || isSecureTrustTier(input.trustTier);
-  const localOnly = localOnlyRequired ? true : input.localOnly ?? false;
-  const cloudEmbeddingEligible = input.cloudEmbeddingEligible === true && !localOnly && trustDomain !== "secure_local" && !isSecureTrustTier(input.trustTier);
-  return {
-    trustTier: input.trustTier,
-    trustDomain,
-    localOnly,
-    cloudEmbeddingEligible
-  };
-}
-function isSecureTrustTier(trustTier) {
-  return trustTier === "S4" || trustTier === "S4+" || trustTier === "S5";
-}
-function buildSourceIndexStorageProfile(input) {
-  if (input.trustDomain === "secure_local") {
-    if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
-      throw new Error("secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.");
-    }
-    const profile = {
-      trustDomain: input.trustDomain,
-      placement: input.placement ?? "local_private",
-      storageEngine: input.storageEngine ?? "sqlite",
-      lexicalBackend: input.lexicalBackend ?? "sqlite_fts5",
-      vectorBackend: input.vectorBackend ?? "exact_scan",
-      embeddingBackend: input.embeddingBackend ?? "local",
-      cloudQueryEligible: false
-    };
-    assertSecureLocalStorageProfile(profile);
-    return profile;
-  }
-  if (input.trustDomain === "internal") {
-    const storageEngine = input.storageEngine ?? "sqlite";
-    const profile = {
-      trustDomain: input.trustDomain,
-      placement: input.placement ?? defaultStoragePlacementForEngine(storageEngine),
-      storageEngine,
-      lexicalBackend: input.lexicalBackend ?? defaultLexicalBackendForEngine(storageEngine),
-      vectorBackend: input.vectorBackend ?? defaultVectorBackendForEngine(storageEngine),
-      embeddingBackend: input.embeddingBackend ?? (input.cloudEmbeddingApproved === true ? "cloud" : "local"),
-      cloudQueryEligible: input.cloudQueryApproved === true
-    };
-    assertStorageBackendMatchesEngine(profile);
-    assertCloudEmbeddingApproval(profile, input.cloudEmbeddingApproved === true);
-    return profile;
-  }
-  if (input.trustDomain === "public_safe") {
-    const storageEngine = input.storageEngine ?? "sqlite";
-    const profile = {
-      trustDomain: input.trustDomain,
-      placement: input.placement ?? defaultStoragePlacementForEngine(storageEngine),
-      storageEngine,
-      lexicalBackend: input.lexicalBackend ?? defaultLexicalBackendForEngine(storageEngine),
-      vectorBackend: input.vectorBackend ?? defaultVectorBackendForEngine(storageEngine),
-      embeddingBackend: input.embeddingBackend ?? (input.cloudEmbeddingApproved === true ? "cloud" : "local"),
-      cloudQueryEligible: input.cloudQueryApproved ?? true
-    };
-    assertStorageBackendMatchesEngine(profile);
-    assertCloudEmbeddingApproval(profile, input.cloudEmbeddingApproved === true);
-    return profile;
-  }
-  if (input.embeddingBackend === "cloud" && input.cloudEmbeddingApproved !== true) {
-    throw new Error("Extension trust domains require explicit cloud embedding approval.");
-  }
-  return {
-    trustDomain: input.trustDomain,
-    placement: input.placement ?? "local_private",
-    storageEngine: input.storageEngine ?? "sqlite",
-    lexicalBackend: input.lexicalBackend ?? "sqlite_fts5",
-    vectorBackend: input.vectorBackend ?? "exact_scan",
-    embeddingBackend: input.embeddingBackend ?? "local",
-    cloudQueryEligible: input.cloudQueryApproved === true
-  };
-}
-function defaultTrustDomainForTier(trustTier) {
-  if (isSecureTrustTier(trustTier))
-    return "secure_local";
-  if (trustTier === "S0")
-    return "public_safe";
-  return "internal";
-}
-function assertSecureLocalStorageProfile(profile) {
-  if (profile.placement !== "local_private") {
-    throw new Error("secure_local storage must stay local_private.");
-  }
-  if (profile.storageEngine !== "sqlite") {
-    throw new Error("secure_local storage must use the SQLite-family local store.");
-  }
-  if (profile.lexicalBackend !== "sqlite_fts5") {
-    throw new Error("secure_local lexical search must use the local SQLite FTS5 lane.");
-  }
-  if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
-    throw new Error("secure_local vector search must use a local SQLite-family vector lane.");
-  }
-  if (profile.cloudQueryEligible) {
-    throw new Error("secure_local corpora cannot be directly cloud-query eligible.");
-  }
-}
-function defaultStoragePlacementForEngine(storageEngine) {
-  if (storageEngine === "postgres")
-    return "cloud_managed";
-  return "local_private";
-}
-function defaultLexicalBackendForEngine(storageEngine) {
-  if (storageEngine === "postgres")
-    return "postgres_full_text";
-  return "sqlite_fts5";
-}
-function defaultVectorBackendForEngine(storageEngine) {
-  if (storageEngine === "postgres")
-    return "pgvector";
-  return "exact_scan";
-}
-function assertStorageBackendMatchesEngine(profile) {
-  if (profile.storageEngine === "sqlite") {
-    if (profile.lexicalBackend !== "sqlite_fts5") {
-      throw new Error("SQLite storage profiles must use sqlite_fts5 lexical search.");
-    }
-    if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
-      throw new Error("SQLite storage profiles must use a SQLite-family vector lane.");
-    }
-    return;
-  }
-  if (profile.lexicalBackend !== "postgres_full_text") {
-    throw new Error("Postgres storage profiles must use postgres_full_text lexical search.");
-  }
-  if (profile.vectorBackend !== "pgvector") {
-    throw new Error("Postgres storage profiles must use pgvector.");
-  }
-}
-function assertCloudEmbeddingApproval(profile, approved) {
-  if (profile.embeddingBackend === "cloud" && approved !== true) {
-    throw new Error("Cloud embeddings require explicit corpus policy approval.");
-  }
-}
-var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
-var init_types = __esm(() => {
-  SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
-  SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
-  SOURCE_TRUST_DOMAINS = ["public_safe", "internal", "secure_local"];
-});
-
-// src/core/source-index/corpus.ts
-function defineSourceIndexCorpus(input) {
-  const corpusId = input.corpusId.trim();
-  if (!corpusId) {
-    throw new Error("Source-index corpus definitions require a corpus id.");
-  }
-  const storageProfile = input.storageProfile ?? buildSourceIndexStorageProfile({
-    trustDomain: input.trustDomain,
-    ...input.storageProfileInput
-  });
-  if (storageProfile.trustDomain !== input.trustDomain) {
-    throw new Error("Source-index corpus storage profile trust domain must match the corpus trust domain.");
-  }
-  const defaultSensitivity = buildSourceSensitivity(input.defaultSensitivity ?? {
-    trustTier: defaultTrustTierForDomain(input.trustDomain),
-    trustDomain: input.trustDomain,
-    cloudEmbeddingEligible: storageProfile.embeddingBackend === "cloud"
-  });
-  if (defaultSensitivity.trustDomain !== input.trustDomain) {
-    throw new Error("Source-index corpus default sensitivity trust domain must match the corpus trust domain.");
-  }
-  const embeddingPolicy = input.embeddingPolicy ?? defaultEmbeddingPolicyForStorage(storageProfile);
-  assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile);
-  return {
-    corpusId,
-    family: input.family,
-    trustDomain: input.trustDomain,
-    activationMode: input.activationMode ?? "lexical_only",
-    storageProfile,
-    defaultSensitivity,
-    embeddingPolicy,
-    ...input.description ? { description: input.description } : {}
-  };
-}
-function buildSourceIndexCorpusRegistry(corpora) {
-  const byId = new Map;
-  for (const corpus of corpora) {
-    if (byId.has(corpus.corpusId)) {
-      throw new Error(`Duplicate source-index corpus id "${corpus.corpusId}".`);
-    }
-    byId.set(corpus.corpusId, corpus);
-  }
-  return {
-    get(corpusId) {
-      return byId.get(corpusId);
-    },
-    require(corpusId) {
-      const corpus = byId.get(corpusId);
-      if (!corpus) {
-        throw new Error(`Unknown source-index corpus "${corpusId}".`);
-      }
-      return corpus;
-    },
-    list() {
-      return Array.from(byId.values());
-    },
-    select(filters) {
-      return Array.from(byId.values()).filter((corpus) => corpusMatchesSelection(corpus, filters));
-    }
-  };
-}
-function corpusMatchesSelection(corpus, filters) {
-  if (!filters)
-    return true;
-  if (filters.corpusIds && !filters.corpusIds.includes(corpus.corpusId))
-    return false;
-  if (filters.families && !filters.families.includes(corpus.family))
-    return false;
-  if (filters.trustDomains && !filters.trustDomains.includes(corpus.trustDomain))
-    return false;
-  return true;
-}
-function defaultTrustTierForDomain(trustDomain) {
-  if (trustDomain === "secure_local")
-    return "S4";
-  if (trustDomain === "public_safe")
-    return "S0";
-  return "S3";
-}
-function defaultEmbeddingPolicyForStorage(storageProfile) {
-  if (storageProfile.embeddingBackend === "none")
-    return "disabled";
-  if (storageProfile.embeddingBackend === "local")
-    return "local_only";
-  if (storageProfile.trustDomain === "public_safe")
-    return "cloud_allowed";
-  return "cloud_allowed_by_policy";
-}
-function assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile) {
-  if (storageProfile.embeddingBackend === "cloud" && embeddingPolicy === "local_only") {
-    throw new Error("Cloud embedding storage cannot use a local-only corpus embedding policy.");
-  }
-  if (storageProfile.embeddingBackend === "local" && embeddingPolicy === "cloud_allowed") {
-    throw new Error("Local embedding storage cannot use an always-cloud corpus embedding policy.");
-  }
-}
-var SOURCE_INDEX_ACTIVATION_MODES;
-var init_corpus = __esm(() => {
-  init_types();
-  SOURCE_INDEX_ACTIVATION_MODES = ["lexical_only", "hybrid_shadow", "hybrid_primary"];
-});
-
-// src/core/public-surface.ts
-function isV04PublicOperation(surface, operationName) {
-  return PUBLIC_OPERATION_NAMES[surface].has(operationName);
-}
-function isV04PublicDashboardRoute(method, pathname) {
-  return V0_4_PUBLIC_DASHBOARD_ROUTES.some((route) => route.method === method && (route.prefix === true ? pathname.startsWith(route.path) : pathname === route.path));
-}
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
-var init_public_surface = __esm(() => {
-  V0_4_PUBLIC_NATIVE_TOOLS = [
-    "argus_ping",
-    "argus_list_models",
-    "argus_complete",
-    "source_answer",
-    "source_index_status",
-    "source_index_search",
-    "source_watch_create",
-    "source_watches",
-    "source_watch_cancel",
-    "olympus_doctor"
-  ];
-  V0_4_PUBLIC_MCP_TOOLS = [
-    "argus_ping",
-    "argus_list_models",
-    "argus_complete",
-    "source_answer",
-    "source_index_status",
-    "source_index_search",
-    "olympus_doctor"
-  ];
-  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
-  V0_4_PUBLIC_CONNECT_SOURCES = [
-    "google",
-    "gmail",
-    "google-drive",
-    "dropbox",
-    "telegram",
-    "whatsapp",
-    "venice",
-    "readwise",
-    "gemini"
-  ];
-  V0_4_PUBLIC_SOURCE_IDS = [
-    "gmail.email",
-    "google_drive.docs",
-    "dropbox.files",
-    "x.bookmarks",
-    "telegram.messages",
-    "whatsapp.personal.messages",
-    "readwise.library"
-  ];
-  V0_4_PUBLIC_CLI_COMMANDS = [
-    "setup",
-    "sovereignty init",
-    "sensitivity validate",
-    "worker install",
-    "worker status",
-    "worker start",
-    "worker stop",
-    "worker restart",
-    "worker foreground",
-    "worker upgrade",
-    "worker uninstall",
-    "worker run",
-    "connect google",
-    "connect gmail",
-    "connect google-drive",
-    "connect dropbox",
-    "connect telegram",
-    "connect whatsapp",
-    "connect venice",
-    "connect readwise",
-    "connect gemini",
-    "connect status",
-    "dashboard",
-    "source answer",
-    "source index status",
-    "source index search",
-    "data export",
-    "data verify",
-    "data delete",
-    "doctor",
-    "argus ping",
-    "argus list",
-    "argus complete",
-    "serve"
-  ];
-  V0_4_PUBLIC_CLI_GLOBALS = [
-    "--help",
-    "-h",
-    "--version",
-    "version",
-    "--tools-json"
-  ];
-  V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
-    "__oauth-detached-child",
-    "__worker-service-run"
-  ];
-  V0_4_PUBLIC_DASHBOARD_ROUTES = [
-    { method: "GET", path: "/dashboard" },
-    { method: "GET", path: "/dashboard.json" },
-    { method: "GET", path: "/dashboard/ui" },
-    { method: "GET", path: "/dashboard/auth-check" },
-    { method: "GET", path: "/dashboard/launch" },
-    { method: "POST", path: "/dashboard/control/launch" },
-    { method: "POST", path: "/dashboard/control/launch/redeem" },
-    { method: "POST", path: "/dashboard/control/session" },
-    { method: "GET", path: "/dashboard/dispositions" },
-    { method: "GET", path: "/dashboard/dispositions.json" },
-    { method: "POST", path: "/dashboard/dispositions" },
-    { method: "GET", path: "/oauth/callback/", prefix: true },
-    { method: "POST", path: "/dashboard/connect/oauth/start" },
-    { method: "POST", path: "/dashboard/connect/oauth/cancel" },
-    { method: "POST", path: "/dashboard/connect/api-key" },
-    { method: "POST", path: "/dashboard/sync-now" },
-    { method: "POST", path: "/dashboard/embedding-priority" },
-    { method: "POST", path: "/dashboard/disconnect" },
-    { method: "POST", path: "/dashboard/unpair" }
-  ];
-  PUBLIC_OPERATION_NAMES = {
-    native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
-    mcp: new Set(V0_4_PUBLIC_MCP_TOOLS),
-    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS)
-  };
-});
-
-// src/core/source-corpus-registry.ts
-function defaultSourceCorpusRegistryConfig() {
-  return {
-    schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
-    corpora: structuredClone(DEFAULT_SOURCE_CORPORA)
-  };
-}
-function createSourceCorpusRegistry(rawConfig) {
-  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
-  return sourceCorpusRegistryFromConfig(config);
-}
-function createPublicSourceCorpusRegistry(rawConfig) {
-  const config = narrowSourceCorpusRegistryConfigToPublic(rawConfig ?? defaultSourceCorpusRegistryConfig());
-  return sourceCorpusRegistryFromConfig(config);
-}
-function sourceCorpusRegistryFromConfig(config) {
-  const active = config.corpora.filter((corpus) => corpus.enabled !== false);
-  return {
-    list(capability) {
-      const selected = active.filter((corpus) => !capability || corpus.capabilities.includes(capability));
-      return capability ? orderCorporaForCapability(selected, capability) : selected;
-    },
-    ids(capability) {
-      return this.list(capability).map((corpus) => corpus.corpusId);
-    },
-    has(corpusId, capability) {
-      const canonicalCorpusId = canonicalSourceCorpusId(corpusId);
-      return this.list(capability).some((corpus) => corpus.corpusId === canonicalCorpusId);
-    },
-    require(corpusId, capability, paramName = "corpus_id") {
-      const canonicalCorpusId = canonicalSourceCorpusId(corpusId);
-      if (this.has(canonicalCorpusId, capability))
-        return canonicalCorpusId;
-      const allowed = this.ids(capability);
-      throw new OperationError("invalid_params", `${paramName} must be one of the configured ${capability} corpora: ${allowed.join(", ")}.`);
-    },
-    definitions(capability, fullDefinitions = []) {
-      const overrides = new Map;
-      for (const definition of fullDefinitions) {
-        if (overrides.has(definition.corpusId)) {
-          throw new Error(`Duplicate full source-index corpus definition "${definition.corpusId}".`);
-        }
-        overrides.set(definition.corpusId, definition);
-      }
-      return this.list(capability).map((corpus) => definitionForRegistryCorpus(corpus, overrides.get(corpus.corpusId)));
-    }
-  };
-}
-function canonicalSourceCorpusId(corpusId) {
-  if (corpusId === LEGACY_READWISE_LIBRARY_CORPUS_ID)
-    return READWISE_LIBRARY_CORPUS_ID;
-  if (corpusId === LEGACY_TELEGRAM_MESSAGES_CORPUS_ID)
-    return PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID;
-  return corpusId;
-}
-function definitionForRegistryCorpus(corpus, fullDefinition) {
-  if (!fullDefinition) {
-    return defineSourceIndexCorpus({
-      corpusId: corpus.corpusId,
-      family: corpus.family,
-      trustDomain: corpus.trustDomain,
-      ...corpus.activationMode ? { activationMode: corpus.activationMode } : {},
-      ...corpus.description ? { description: corpus.description } : {}
-    });
-  }
-  if (fullDefinition.family !== corpus.family || fullDefinition.trustDomain !== corpus.trustDomain) {
-    throw new Error(`Full source-index corpus definition "${corpus.corpusId}" does not match its registry family/trust domain.`);
-  }
-  if (corpus.activationMode && corpus.activationMode !== fullDefinition.activationMode) {
-    return { ...fullDefinition, activationMode: corpus.activationMode };
-  }
-  return fullDefinition;
-}
-function orderCorporaForCapability(corpora, capability) {
-  const order = DEFAULT_CAPABILITY_ORDER[capability] ?? [];
-  const byId = new Map(corpora.map((corpus) => [corpus.corpusId, corpus]));
-  const ordered = [];
-  for (const corpusId of order) {
-    const corpus = byId.get(corpusId);
-    if (corpus) {
-      ordered.push(corpus);
-      byId.delete(corpusId);
-    }
-  }
-  ordered.push(...corpora.filter((corpus) => byId.has(corpus.corpusId)));
-  return ordered;
-}
-function parseSourceCorpusRegistryConfig(rawConfig) {
-  const root = asRecord(rawConfig);
-  if (!root) {
-    throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
-  }
-  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
-    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1.");
-  }
-  if (!Array.isArray(root.corpora)) {
-    throw new OperationError("config_error", "sourceIndex corpus registry requires a corpora array.");
-  }
-  const corpora = root.corpora.map(parseSourceCorpusConfig);
-  const seen = new Set;
-  for (const corpus of corpora) {
-    if (seen.has(corpus.corpusId)) {
-      throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
-    }
-    seen.add(corpus.corpusId);
-  }
-  return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
-}
-function narrowSourceCorpusRegistryConfigToPublic(rawConfig) {
-  const config = parseSourceCorpusRegistryConfig(rawConfig);
-  return {
-    schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
-    corpora: config.corpora.flatMap((corpus) => {
-      const publicCorpus = narrowSourceCorpusToPublic(corpus).corpus;
-      return publicCorpus ? [publicCorpus] : [];
-    })
-  };
-}
-function narrowSourceCorpusToPublic(corpus) {
-  if (!PUBLIC_SOURCE_IDS.has(corpus.sourceId)) {
-    return {
-      violation: `Public sourceIndex corpus ${corpus.corpusId} sourceId must be one of: ${V0_4_PUBLIC_SOURCE_IDS.join(", ")}.`
-    };
-  }
-  const declaration = PUBLIC_CORPUS_DECLARATIONS.get(corpus.corpusId);
-  if (!declaration) {
-    return { violation: `Public sourceIndex corpusId is not declared by v0.4: ${corpus.corpusId}.` };
-  }
-  for (const field of ["sourceId", "provider", "family", "trustDomain"]) {
-    if (corpus[field] !== declaration[field]) {
-      return {
-        violation: `Public sourceIndex corpus ${corpus.corpusId} ${field} must be ${declaration[field]}.`
-      };
-    }
-  }
-  const declaredCapabilities = new Set(declaration.capabilities);
-  const widened = corpus.capabilities.filter((capability) => !declaredCapabilities.has(capability));
-  if (widened.length === 0)
-    return { corpus };
-  const narrowed = corpus.capabilities.filter((capability) => declaredCapabilities.has(capability));
-  return {
-    violation: `Public sourceIndex corpus ${corpus.corpusId} cannot add capabilities: ${widened.join(", ")}.`,
-    ...narrowed.length > 0 ? { corpus: { ...corpus, capabilities: narrowed } } : {}
-  };
-}
-function parseSourceCorpusConfig(value) {
-  const record = asRecord(value);
-  if (!record) {
-    throw new OperationError("config_error", "sourceIndex corpus entries must be objects.");
-  }
-  const corpusId = canonicalSourceCorpusId(requiredString(record.corpusId, "sourceIndex corpusId"));
-  const sourceId = requiredString(record.sourceId, `sourceIndex corpus ${corpusId} sourceId`);
-  const provider = requiredString(record.provider, `sourceIndex corpus ${corpusId} provider`);
-  const family = requiredEnum(record.family, SOURCE_FAMILIES, `sourceIndex corpus ${corpusId} family`);
-  const trustDomain = requiredEnum(record.trustDomain, SOURCE_TRUST_DOMAINS, `sourceIndex corpus ${corpusId} trustDomain`);
-  const activationMode = record.activationMode === undefined ? undefined : requiredEnum(record.activationMode, SOURCE_INDEX_ACTIVATION_MODES, `sourceIndex corpus ${corpusId} activationMode`);
-  if (!Array.isArray(record.capabilities)) {
-    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} capabilities must be an array.`);
-  }
-  const capabilities = [...new Set(record.capabilities.map((capability) => requiredEnum(capability, SOURCE_CORPUS_CAPABILITIES, `sourceIndex corpus ${corpusId} capability`)))];
-  if (capabilities.length === 0) {
-    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} must enable at least one capability.`);
-  }
-  if (record.enabled !== undefined && typeof record.enabled !== "boolean") {
-    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} enabled must be boolean when provided.`);
-  }
-  return {
-    corpusId,
-    sourceId,
-    provider,
-    family,
-    trustDomain,
-    ...activationMode ? { activationMode } : {},
-    ...record.enabled !== undefined ? { enabled: record.enabled } : {},
-    capabilities,
-    ...typeof record.description === "string" && record.description.trim() ? { description: record.description.trim() } : {}
-  };
-}
-function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function requiredString(value, label) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${label} must be a non-empty string.`);
-  }
-  return value.trim();
-}
-function requiredEnum(value, allowed, label) {
-  if (typeof value === "string" && allowed.includes(value))
-    return value;
-  throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
-}
-var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
-var init_source_corpus_registry = __esm(() => {
-  init_operation_error();
-  init_corpus();
-  init_types();
-  init_public_surface();
-  SOURCE_CORPUS_CAPABILITIES = [
-    "answer",
-    "status",
-    "sync",
-    "search",
-    "promotion_candidates"
-  ];
-  DEFAULT_SOURCE_CORPORA = [
-    {
-      corpusId: "secure_local.email.private",
-      sourceId: "gmail.email",
-      provider: "gmail",
-      family: "email",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: "internal.email",
-      sourceId: "gmail.email",
-      provider: "gmail",
-      family: "email",
-      trustDomain: "internal",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: "internal.drive.docs",
-      sourceId: "google_drive.docs",
-      provider: "google_drive",
-      family: "file",
-      trustDomain: "internal",
-      activationMode: "hybrid_primary",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: "secure_local.drive.docs",
-      sourceId: "google_drive.docs",
-      provider: "google_drive",
-      family: "file",
-      trustDomain: "secure_local",
-      activationMode: "lexical_only",
-      capabilities: ["answer", "status", "sync", "search"],
-      description: "Secure-local Google Drive/Docs items raised by per-item sensitivity classification."
-    },
-    {
-      corpusId: "internal.telegram.messages",
-      sourceId: "telegram.messages",
-      provider: "telegram",
-      family: "chat",
-      trustDomain: "internal",
-      activationMode: "hybrid_primary",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: READWISE_LIBRARY_CORPUS_ID,
-      sourceId: "readwise.library",
-      provider: "readwise",
-      family: "readwise",
-      trustDomain: "internal",
-      activationMode: "lexical_only",
-      capabilities: ["answer", "status", "sync"],
-      description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
-    },
-    {
-      corpusId: "internal.x.bookmarks",
-      sourceId: "x.bookmarks",
-      provider: "x",
-      family: "x",
-      trustDomain: "internal",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: "secure_local.dropbox.files",
-      sourceId: "dropbox.files",
-      provider: "dropbox",
-      family: "file",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["answer", "status", "sync", "search", "promotion_candidates"]
-    },
-    {
-      corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      sourceId: "telegram.messages",
-      provider: "telegram",
-      family: "chat",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_primary",
-      capabilities: ["answer", "status", "sync", "search"]
-    },
-    {
-      corpusId: "secure_local.whatsapp.messages",
-      sourceId: "whatsapp.personal.messages",
-      provider: "whatsapp",
-      family: "chat",
-      trustDomain: "secure_local",
-      activationMode: "hybrid_shadow",
-      capabilities: ["status", "sync", "search", "answer"],
-      description: "WhatsApp live capture (thin whatsmeow bridge -> shared scheduler -> connector store), including locally transcribed voice notes."
-    }
-  ];
-  DEFAULT_CAPABILITY_ORDER = {
-    answer: [
-      "secure_local.email.private",
-      "internal.email",
-      "internal.drive.docs",
-      "secure_local.drive.docs",
-      "internal.telegram.messages",
-      READWISE_LIBRARY_CORPUS_ID,
-      "internal.x.bookmarks",
-      "secure_local.dropbox.files",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      "secure_local.whatsapp.messages"
-    ],
-    status: [
-      "secure_local.email.private",
-      "internal.email",
-      "internal.drive.docs",
-      "secure_local.drive.docs",
-      "internal.telegram.messages",
-      READWISE_LIBRARY_CORPUS_ID,
-      "internal.x.bookmarks",
-      "secure_local.dropbox.files",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      "secure_local.whatsapp.messages"
-    ],
-    sync: [
-      "internal.email",
-      "secure_local.email.private",
-      "internal.drive.docs",
-      "secure_local.drive.docs",
-      READWISE_LIBRARY_CORPUS_ID,
-      "internal.x.bookmarks",
-      "secure_local.dropbox.files",
-      "internal.telegram.messages",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
-    ],
-    search: [
-      "internal.email",
-      "secure_local.email.private",
-      "internal.drive.docs",
-      "secure_local.drive.docs",
-      "secure_local.dropbox.files",
-      "internal.x.bookmarks",
-      "internal.telegram.messages",
-      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
-    ],
-    promotion_candidates: ["secure_local.dropbox.files"]
-  };
-  PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
-  PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
-});
-
-// src/core/source-ingestion-policy.ts
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-function defaultDropboxIngestionPolicyPath() {
-  return join(homedir(), ".olympus", "sources", "dropbox.personal.ingestion.json");
-}
-function defaultDropboxIngestionPolicy() {
-  return {
-    schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
-    source: "dropbox.personal",
-    corpusId: "secure_local.dropbox.files",
-    roots: [{
-      path: DEFAULT_DROPBOX_ROOT,
-      approved_scope_key: `dropbox.personal:${DEFAULT_DROPBOX_ROOT}`,
-      default_action: "full_extract"
-    }],
-    rules: [
-      {
-        match: {
-          mime_type_prefixes: ["image/", "video/"],
-          extensions: [...DEFAULT_DEFERRED_MEDIA_EXTENSIONS]
-        },
-        action: "metadata_only",
-        reason: "media_default_metadata_only"
-      },
-      {
-        match: {
-          extensions: [...DEFAULT_DEFERRED_BOOK_EXTENSIONS],
-          path_contains: [...DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS]
-        },
-        action: "metadata_only",
-        reason: "book_library_metadata_only"
-      },
-      {
-        match: {
-          path_prefixes: ["/Archive"]
-        },
-        action: "metadata_only",
-        reason: "archive_metadata_only"
-      }
-    ],
-    sync: {
-      cadence: "continuous",
-      max_entries_per_pass: 25000,
-      max_pages_per_pass: 1000
-    },
-    content: {
-      default_extractor_kind: "local_text",
-      default_extractor_version: "2026-05-22",
-      plan_limit: 25,
-      batch_size: 2
-    }
-  };
-}
-function loadDropboxIngestionPolicy(options = {}) {
-  const validateDropboxPolicy = (policy, label) => {
-    if (policy.source !== "dropbox.personal") {
-      throw new OperationError("config_error", `${label}.source must be dropbox.personal for this Dropbox policy loader.`);
-    }
-    if (policy.corpusId !== "secure_local.dropbox.files") {
-      throw new OperationError("config_error", `${label}.corpusId must be secure_local.dropbox.files.`);
-    }
-    return policy;
-  };
-  if (options.inlinePolicy !== undefined) {
-    return validateDropboxPolicy(parseSourceIngestionPolicy(options.inlinePolicy, "inline Dropbox ingestion policy"), "inline Dropbox ingestion policy");
-  }
-  const env = options.env ?? process.env;
-  const path = options.policyPath?.trim() || env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim() || env.OLYMPUS_SOURCE_INGESTION_POLICY_PATH?.trim() || defaultDropboxIngestionPolicyPath();
-  if (existsSync(path)) {
-    return validateDropboxPolicy(parseSourceIngestionPolicy(JSON.parse(readFileSync(path, "utf8")), path), path);
-  }
-  return defaultDropboxIngestionPolicy();
-}
-function parseSourceIngestionPolicy(rawPolicy, label = "source ingestion policy") {
-  const root = asRecord2(rawPolicy);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  if (root.schemaVersion !== SOURCE_INGESTION_POLICY_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label} schemaVersion must be 1.`);
-  }
-  const source = requiredString2(root.source, `${label}.source`);
-  const corpusId = requiredString2(root.corpusId, `${label}.corpusId`);
-  const roots = Array.isArray(root.roots) ? root.roots.map((value) => parseRoot(value, label)) : [];
-  if (roots.length === 0)
-    throw new OperationError("config_error", `${label}.roots must include at least one root.`);
-  const rules = Array.isArray(root.rules) ? root.rules.map((value) => parseRule(value, label)) : [];
-  const syncRecord = asRecord2(root.sync);
-  const contentRecord = asRecord2(root.content);
-  const policy = {
-    schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
-    source,
-    corpusId,
-    roots,
-    rules,
-    sync: {
-      cadence: enumString(syncRecord?.cadence, ["manual", "continuous"], `${label}.sync.cadence`),
-      max_entries_per_pass: positiveInteger(syncRecord?.max_entries_per_pass, `${label}.sync.max_entries_per_pass`),
-      max_pages_per_pass: positiveInteger(syncRecord?.max_pages_per_pass, `${label}.sync.max_pages_per_pass`)
-    },
-    content: {
-      default_extractor_kind: requiredString2(contentRecord?.default_extractor_kind, `${label}.content.default_extractor_kind`),
-      default_extractor_version: requiredString2(contentRecord?.default_extractor_version, `${label}.content.default_extractor_version`),
-      plan_limit: positiveInteger(contentRecord?.plan_limit, `${label}.content.plan_limit`),
-      batch_size: positiveInteger(contentRecord?.batch_size, `${label}.content.batch_size`)
-    }
-  };
-  return policy;
-}
-function dropboxPolicyApprovedScopeKeys(policy) {
-  return policy.roots.filter((root) => root.default_action !== "on_demand").map((root) => root.approved_scope_key);
-}
-function dropboxPolicyFullExtractionScopeKeys(policy) {
-  return policy.roots.filter((root) => root.default_action === "full_extract").map((root) => root.approved_scope_key);
-}
-function parseRoot(value, label) {
-  const root = asRecord2(value);
-  if (!root)
-    throw new OperationError("config_error", `${label}.roots entries must be objects.`);
-  const path = normalizePath(requiredString2(root.path, `${label}.roots.path`));
-  const approvedScopeKey = requiredString2(root.approved_scope_key, `${label}.roots.approved_scope_key`);
-  if (!approvedScopeKeyContainsPath(approvedScopeKey, path)) {
-    throw new OperationError("config_error", `${label}.roots approved_scope_key must contain its root path.`);
-  }
-  return {
-    path,
-    approved_scope_key: approvedScopeKey,
-    default_action: enumString(root.default_action, ["full_extract", "metadata_only", "on_demand"], `${label}.roots.default_action`)
-  };
-}
-function approvedScopeKeyContainsPath(approvedScopeKey, path) {
-  const [, scopePathValue] = approvedScopeKey.split(/:(.*)/s);
-  const scopePath = normalizePath(scopePathValue || approvedScopeKey);
-  return path === scopePath || path.startsWith(`${scopePath}/`);
-}
-function parseRule(value, label) {
-  const rule = asRecord2(value);
-  const match = asRecord2(rule?.match);
-  if (!rule || !match)
-    throw new OperationError("config_error", `${label}.rules entries require match objects.`);
-  const parsed = {
-    match: {},
-    action: enumString(rule.action, ["full_extract", "metadata_only", "on_demand"], `${label}.rules.action`),
-    reason: requiredString2(rule.reason, `${label}.rules.reason`)
-  };
-  const extensions = stringList(match.extensions).map((extension) => extension.replace(/^\./, "").toLowerCase());
-  const mimeTypePrefixes = stringList(match.mime_type_prefixes).map((prefix) => prefix.toLowerCase());
-  const pathContains = stringList(match.path_contains).map((segment) => segment.toLowerCase());
-  const pathPrefixes = stringList(match.path_prefixes).map(normalizePath);
-  if (extensions.length > 0)
-    parsed.match.extensions = extensions;
-  if (mimeTypePrefixes.length > 0)
-    parsed.match.mime_type_prefixes = mimeTypePrefixes;
-  if (pathContains.length > 0)
-    parsed.match.path_contains = pathContains;
-  if (pathPrefixes.length > 0)
-    parsed.match.path_prefixes = pathPrefixes;
-  if (Object.keys(parsed.match).length === 0) {
-    throw new OperationError("config_error", `${label}.rules entries must match at least one field.`);
-  }
-  return parsed;
-}
-function asRecord2(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function requiredString2(value, label) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${label} must be a non-empty string.`);
-  }
-  return value.trim();
-}
-function stringList(value) {
-  return Array.isArray(value) ? [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))] : [];
-}
-function enumString(value, allowed, label) {
-  if (typeof value === "string" && allowed.includes(value))
-    return value;
-  throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
-}
-function positiveInteger(value, label) {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0)
-    return value;
-  throw new OperationError("config_error", `${label} must be a positive integer.`);
-}
-function normalizePath(path) {
-  const trimmed = path.trim();
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_MEDIA_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS;
-var init_source_ingestion_policy = __esm(() => {
-  init_operation_error();
-  DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
-    "3gp",
-    "avi",
-    "bmp",
-    "gif",
-    "heic",
-    "heif",
-    "jpeg",
-    "jpg",
-    "m4v",
-    "mov",
-    "mp4",
-    "mpeg",
-    "mpg",
-    "png",
-    "tif",
-    "tiff",
-    "webm",
-    "webp"
-  ];
-  DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
-    "azw",
-    "azw3",
-    "azw4",
-    "cba",
-    "cb7",
-    "cbr",
-    "cbt",
-    "cbz",
-    "djv",
-    "djvu",
-    "epub",
-    "fb2",
-    "ibooks",
-    "lit",
-    "mobi",
-    "opf"
-  ];
-  DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS = [
-    "audiobooks",
-    "book library",
-    "books",
-    "calibre library",
-    "e-books",
-    "ebooks",
-    "kindle"
-  ];
-});
-
-// src/core/source-ingestion-exclusions.ts
-import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-function sourceExclusionOutcomeIsUnevaluable(outcome) {
-  switch (outcome) {
-    case "excluded_path_unevaluable":
-    case "excluded_ancestry_unevaluable":
-    case "excluded_media_unevaluable":
-    case "metadata_only_unevaluable":
-      return true;
-    case "admitted":
-    case "excluded_path_prefix":
-    case "excluded_folder_id":
-    case "excluded_media":
-    case "metadata_only_path_prefix":
-    case "metadata_only_folder_id":
-    case "metadata_only_media":
-      return false;
-  }
-}
-function normalizeSourceExclusionPath(value) {
-  if (value.includes("\x00"))
-    return;
-  const unified = value.normalize("NFC").trim().split("\\").join("/");
-  const segments = unified.split("/").filter((segment) => segment.length > 0);
-  if (segments.length === 0)
-    return;
-  if (segments.some((segment) => segment === "." || segment === ".."))
-    return;
-  return `/${segments.join("/")}`.toLowerCase();
-}
-function pathIsUnderPrefix(path, prefix) {
-  if (prefix === "/")
-    return true;
-  return path === prefix || path.startsWith(`${prefix}/`);
-}
-function sourceExclusionFileExtension(value) {
-  const segments = value.split("\\").join("/").split("/");
-  const last = segments[segments.length - 1]?.trim() ?? "";
-  const dot = last.lastIndexOf(".");
-  if (dot <= 0 || dot === last.length - 1)
-    return;
-  return last.slice(dot).toLowerCase();
-}
-function normalizeMediaExtension(value) {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed)
-    return;
-  const withDot = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
-  return withDot.length > 1 ? withDot : undefined;
-}
-function mediaTypeMatches(media, facts) {
-  if (media.extensions.length > 0 && facts.extension !== undefined) {
-    if (media.extensions.includes(facts.extension))
-      return true;
-  }
-  if (media.mime_prefixes.length > 0 && facts.mimeType !== undefined) {
-    if (media.mime_prefixes.some((prefix) => facts.mimeType.startsWith(prefix)))
-      return true;
-  }
-  return false;
-}
-function mediaTypeUnevaluable(facts) {
-  if (facts.extension !== undefined)
-    return false;
-  return facts.mimeType === undefined || facts.mimeType === "application/octet-stream";
-}
-function mediaNeedsSize(media) {
-  return media.min_bytes !== undefined || media.max_bytes !== undefined;
-}
-function mediaSizeMatches(media, sizeBytes) {
-  if (media.min_bytes !== undefined && sizeBytes < media.min_bytes)
-    return false;
-  if (media.max_bytes !== undefined && sizeBytes > media.max_bytes)
-    return false;
-  return true;
-}
-function mediaCriterionLabel(media) {
-  const parts = [];
-  if (media.extensions.length > 0)
-    parts.push(media.extensions.join(" "));
-  if (media.mime_prefixes.length > 0)
-    parts.push(media.mime_prefixes.join(" "));
-  if (media.min_bytes !== undefined)
-    parts.push(`>=${media.min_bytes}B`);
-  if (media.max_bytes !== undefined)
-    parts.push(`<=${media.max_bytes}B`);
-  const label = `media:${parts.join(" ")}`;
-  return label.length <= 200 ? label : `${label.slice(0, 197)}...`;
-}
-function sourceExclusionPathFromMetadata(metadata) {
-  if (!metadata)
-    return;
-  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS) {
-    const value = metadata[key];
-    if (typeof value === "string" && value.trim().length > 0)
-      return value;
-  }
-  return;
-}
-function sourceExclusionAncestryFromMetadata(metadata) {
-  if (!metadata)
-    return;
-  for (const key of SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS) {
-    const value = metadata[key];
-    if (!Array.isArray(value))
-      continue;
-    if (value.some((entry) => typeof entry !== "string"))
-      return;
-    return value.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
-  }
-  return;
-}
-function sourceExclusionSizeFromMetadata(metadata) {
-  if (!metadata)
-    return;
-  for (const key of SOURCE_EXCLUSION_SIZE_METADATA_KEYS) {
-    const value = metadata[key];
-    if (typeof value !== "number")
-      continue;
-    if (!Number.isFinite(value) || value < 0)
-      return;
-    return Math.floor(value);
-  }
-  return;
-}
-function boundedStringFromMetadata(metadata, keys) {
-  if (!metadata)
-    return;
-  for (const key of keys) {
-    const value = metadata[key];
-    if (typeof value === "string" && value.trim().length > 0)
-      return value.trim();
-  }
-  return;
-}
-function sourceExclusionFactsFromMetadata(metadata) {
-  const path = sourceExclusionPathFromMetadata(metadata);
-  const name = boundedStringFromMetadata(metadata, SOURCE_EXCLUSION_NAME_METADATA_KEYS);
-  const mimeType = boundedStringFromMetadata(metadata, SOURCE_EXCLUSION_MIME_METADATA_KEYS);
-  const sizeBytes = sourceExclusionSizeFromMetadata(metadata);
-  const ancestry = sourceExclusionAncestryFromMetadata(metadata);
-  return {
-    ...path !== undefined ? { path } : {},
-    ...name !== undefined ? { name } : {},
-    ...mimeType !== undefined ? { mimeType } : {},
-    ...sizeBytes !== undefined ? { sizeBytes } : {},
-    folderAncestorIds: ancestry
-  };
-}
-function createSourceExclusionMatcher(exclusions, source, options = {}) {
-  const enforceable = options.enforceable ? new Set(options.enforceable) : undefined;
-  const usePath = !enforceable || enforceable.has("path_prefix");
-  const useFolder = !enforceable || enforceable.has("folder_id");
-  const useMedia = !enforceable || enforceable.has("media");
-  const criteria = [];
-  const unenforceableRuleIds = [];
-  for (const rule of exclusions?.rules ?? []) {
-    if (!sourceExclusionRuleAppliesToSource(rule, source))
-      continue;
-    if (usePath) {
-      for (const prefix of rule.path_prefixes) {
-        criteria.push({ ruleId: rule.id, reason: rule.reason, mode: rule.mode, kind: "path_prefix", prefix });
-      }
-    }
-    if (useFolder) {
-      for (const folder of rule.folder_ids) {
-        criteria.push({
-          ruleId: rule.id,
-          reason: rule.reason,
-          mode: rule.mode,
-          kind: "folder_id",
-          prefix: `folder:${folder.name} (${folder.id})`,
-          folderId: folder.id,
-          folderName: folder.name
-        });
-      }
-    }
-    if (useMedia && rule.media) {
-      criteria.push({
-        ruleId: rule.id,
-        reason: rule.reason,
-        mode: rule.mode,
-        kind: "media",
-        prefix: mediaCriterionLabel(rule.media),
-        media: rule.media
-      });
-    }
-    const enforced = rule.path_prefixes.length > 0 && usePath || rule.folder_ids.length > 0 && useFolder || rule.media !== undefined && useMedia;
-    if (enforced)
-      continue;
-    if (rule.sources.length > 0 && !rule.sources.includes("*")) {
-      throw new OperationError("config_error", `Exclusion rule ${rule.id} names source ${source ?? "(none)"}, which cannot enforce ` + `${rule.folder_ids.length > 0 ? "folder ids" : "path prefixes"}. ` + `This source enforces: ${[...enforceable ?? []].join(", ") || "(nothing)"}. ` + "Give the rule a criterion this source supports, or drop the source from its list.");
-    }
-    unenforceableRuleIds.push(rule.id);
-  }
-  return createSourceExclusionMatcherFromPrefixes(criteria, unenforceableRuleIds);
-}
-function createSourceExclusionMatcherFromPrefixes(prefixes, unenforceableRuleIds = []) {
-  const compiled = prefixes.map((entry) => {
-    if (entry.kind === "folder_id" || entry.kind === "media") {
-      return { ...entry };
-    }
-    const normalized = normalizeSourceExclusionPath(entry.prefix);
-    if (normalized === undefined) {
-      throw new OperationError("config_error", `Exclusion rule ${entry.ruleId} carries a path prefix that cannot be normalized.`);
-    }
-    return { ...entry, prefix: normalized };
-  });
-  const pathCriteria = compiled.filter((entry) => entry.kind === "path_prefix");
-  const folderCriteria = compiled.filter((entry) => entry.kind === "folder_id");
-  const mediaCriteria = compiled.filter((entry) => entry.kind === "media");
-  const pathActive = pathCriteria.length > 0;
-  const identityActive = folderCriteria.length > 0;
-  const mediaActive = mediaCriteria.length > 0;
-  const active = pathActive || identityActive || mediaActive;
-  const matched = (entry, outcome) => ({
-    excluded: entry.mode === "exclude",
-    disposition: entry.mode,
-    outcome,
-    ruleId: entry.ruleId,
-    reason: entry.reason,
-    prefix: entry.prefix
-  });
-  const unevaluableFor = (mode, excludeOutcome, reason) => mode === "exclude" ? { excluded: true, disposition: "exclude", outcome: excludeOutcome, reason } : { excluded: false, disposition: "metadata_only", outcome: "metadata_only_unevaluable", reason };
-  const evaluateModeCriteria = (mode, normalizedPath, mediaFacts, ancestry) => {
-    if (normalizedPath !== undefined) {
-      for (const entry of pathCriteria) {
-        if (entry.mode !== mode)
-          continue;
-        if (!pathIsUnderPrefix(normalizedPath, entry.prefix))
-          continue;
-        return matched(entry, mode === "exclude" ? "excluded_path_prefix" : "metadata_only_path_prefix");
-      }
-    }
-    const folderForMode = folderCriteria.filter((entry) => entry.mode === mode);
-    if (folderForMode.length > 0) {
-      if (ancestry === undefined) {
-        return unevaluableFor(mode, "excluded_ancestry_unevaluable", "ancestry_unevaluable");
-      }
-      const reachable = new Set(ancestry);
-      for (const entry of folderForMode) {
-        if (!entry.folderId || !reachable.has(entry.folderId))
-          continue;
-        return matched(entry, mode === "exclude" ? "excluded_folder_id" : "metadata_only_folder_id");
-      }
-    }
-    for (const entry of mediaCriteria) {
-      if (entry.mode !== mode || !entry.media)
-        continue;
-      const typeMatches = mediaTypeMatches(entry.media, mediaFacts);
-      const sizeMatches = mediaNeedsSize(entry.media) && mediaFacts.sizeBytes !== undefined && mediaSizeMatches(entry.media, mediaFacts.sizeBytes);
-      if (!typeMatches && !(sizeMatches && mediaTypeUnevaluable(mediaFacts)))
-        continue;
-      if (!mediaNeedsSize(entry.media)) {
-        return matched(entry, mode === "exclude" ? "excluded_media" : "metadata_only_media");
-      }
-      if (mediaFacts.sizeBytes === undefined) {
-        return unevaluableFor(mode, "excluded_media_unevaluable", "media_size_unevaluable");
-      }
-      if (!sizeMatches)
-        continue;
-      return matched(entry, mode === "exclude" ? "excluded_media" : "metadata_only_media");
-    }
-    return;
-  };
-  const evaluateItem = (facts) => {
-    if (!active)
-      return ADMITTED;
-    const normalizedPath = typeof facts.path === "string" ? normalizeSourceExclusionPath(facts.path) : undefined;
-    if (pathActive && normalizedPath === undefined)
-      return UNEVALUABLE;
-    const mediaFacts = {};
-    if (mediaActive) {
-      const nameish = typeof facts.path === "string" && facts.path.trim() ? facts.path : typeof facts.name === "string" ? facts.name : undefined;
-      const extension = nameish === undefined ? undefined : sourceExclusionFileExtension(nameish);
-      if (extension !== undefined)
-        mediaFacts.extension = extension;
-      if (typeof facts.mimeType === "string" && facts.mimeType.trim()) {
-        mediaFacts.mimeType = facts.mimeType.trim().toLowerCase();
-      }
-      if (typeof facts.sizeBytes === "number" && Number.isFinite(facts.sizeBytes) && facts.sizeBytes >= 0) {
-        mediaFacts.sizeBytes = Math.floor(facts.sizeBytes);
-      }
-    }
-    for (const mode of SOURCE_INGESTION_DISPOSITION_ORDER) {
-      const decision = evaluateModeCriteria(mode, normalizedPath, mediaFacts, facts.folderAncestorIds);
-      if (decision)
-        return decision;
-    }
-    return ADMITTED;
-  };
-  const evaluatePath = (path) => evaluateItem({ path });
-  const evaluateMetadata = (metadata) => evaluateItem(sourceExclusionFactsFromMetadata(metadata));
-  return {
-    active,
-    pathActive,
-    identityActive,
-    mediaActive,
-    unenforceableRuleIds: Object.freeze([...new Set(unenforceableRuleIds)]),
-    criteria: Object.freeze(compiled.map((entry) => Object.freeze({ ...entry }))),
-    evaluatePath,
-    evaluateMetadata,
-    evaluateItem
-  };
-}
-function sourceExclusionRuleAppliesToSource(rule, source) {
-  if (rule.sources.length === 0)
-    return true;
-  if (source === undefined)
-    return false;
-  const wanted = source.trim().toLowerCase();
-  if (rule.sources.includes(`!${wanted}`))
-    return false;
-  return rule.sources.includes("*") || rule.sources.includes(wanted);
-}
-function parseSourceIngestionExclusions(rawExclusions, label = "source ingestion exclusions") {
-  const root = asRecord3(rawExclusions);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  if (root.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be 1.`);
-  }
-  if (root.rules !== undefined && !Array.isArray(root.rules)) {
-    throw new OperationError("config_error", `${label}.rules must be an array.`);
-  }
-  const rawRules = root.rules ?? [];
-  const seenIds = new Set;
-  const rules = rawRules.map((value, index) => {
-    const rule = parseRule2(value, `${label}.rules[${index}]`);
-    if (seenIds.has(rule.id)) {
-      throw new OperationError("config_error", `${label}.rules ids must be unique; ${rule.id} repeats.`);
-    }
-    seenIds.add(rule.id);
-    return rule;
-  });
-  return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules };
-}
-function parseRule2(value, label) {
-  const record = asRecord3(value);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const id = requiredToken(record.id, `${label}.id`);
-  const sources = parseSources(record.sources, `${label}.sources`);
-  const path_prefixes = [...new Set(stringList2(record.path_prefixes).map((prefix) => {
-    const normalized = normalizeSourceExclusionPath(prefix);
-    if (normalized === undefined) {
-      throw new OperationError("config_error", `${label}.path_prefixes contains a path that cannot be normalized.`);
-    }
-    return normalized;
-  }))];
-  const folder_ids = parseFolderIds(record.folder_ids, `${label}.folder_ids`);
-  const media = parseMedia(record.media, `${label}.media`);
-  const mode = parseRuleMode(record.mode, `${label}.mode`);
-  if (path_prefixes.length === 0 && folder_ids.length === 0 && media === undefined) {
-    throw new OperationError("config_error", `${label} must name at least one folder, by path_prefixes or by folder_ids, or carry a media criterion.`);
-  }
-  if (media !== undefined && (path_prefixes.length > 0 || folder_ids.length > 0)) {
-    throw new OperationError("config_error", `${label} may not combine a media criterion with path_prefixes or folder_ids. ` + "Write the media rule and the folder rule as two rules, so which items each covers is unambiguous.");
-  }
-  if (folder_ids.length > 0 && !sources.some((entry) => entry !== "*" && !entry.startsWith("!"))) {
-    throw new OperationError("config_error", `${label}.folder_ids requires ${label}.sources: a folder id belongs to one provider and cannot apply to every source.`);
-  }
-  return {
-    id,
-    mode,
-    sources,
-    path_prefixes,
-    folder_ids,
-    ...media !== undefined ? { media } : {},
-    reason: typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : mode === "metadata_only" ? "metadata_only_by_configuration" : "excluded_by_configuration"
-  };
-}
-function parseRuleMode(value, label) {
-  if (value === undefined || value === null)
-    return "exclude";
-  if (typeof value !== "string") {
-    throw new OperationError("config_error", `${label} must be a string.`);
-  }
-  const mode = value.trim().toLowerCase();
-  const known = SOURCE_INGESTION_RULE_MODES.find((candidate) => candidate === mode);
-  if (!known) {
-    throw new OperationError("config_error", `${label} must be one of ${SOURCE_INGESTION_RULE_MODES.join(", ")}; got ${JSON.stringify(value)}.`);
-  }
-  return known;
-}
-function parseMedia(value, label) {
-  if (value === undefined || value === null)
-    return;
-  const record = asRecord3(value);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const extensions = [...new Set(stringList2(record.extensions).map((entry) => normalizeMediaExtension(entry)).filter((entry) => entry !== undefined))];
-  const mime_prefixes = [...new Set(stringList2(record.mime_prefixes).map((entry) => entry.toLowerCase()))];
-  if (extensions.length === 0 && mime_prefixes.length === 0) {
-    throw new OperationError("config_error", `${label} must name at least one extension or mime prefix. A size-only media rule cannot be ` + "answered for items whose provider publishes no size, so it would exclude them all.");
-  }
-  const min_bytes = parseByteCount(record.min_bytes, `${label}.min_bytes`);
-  const max_bytes = parseByteCount(record.max_bytes, `${label}.max_bytes`);
-  if (min_bytes !== undefined && max_bytes !== undefined && min_bytes > max_bytes) {
-    throw new OperationError("config_error", `${label}.min_bytes must not exceed ${label}.max_bytes.`);
-  }
-  return {
-    extensions,
-    mime_prefixes,
-    ...min_bytes !== undefined ? { min_bytes } : {},
-    ...max_bytes !== undefined ? { max_bytes } : {}
-  };
-}
-function parseByteCount(value, label) {
-  if (value === undefined || value === null)
-    return;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
-    throw new OperationError("config_error", `${label} must be a non-negative whole number of bytes.`);
-  }
-  return value;
-}
-function parseFolderIds(value, label) {
-  if (value === undefined)
-    return [];
-  if (!Array.isArray(value))
-    throw new OperationError("config_error", `${label} must be an array.`);
-  const folders = [];
-  const seen = new Set;
-  value.forEach((entry, index) => {
-    const record = asRecord3(entry);
-    if (!record)
-      throw new OperationError("config_error", `${label}[${index}] must be an object with id and name.`);
-    const id = requiredBoundedString(record.id, `${label}[${index}].id`, 256);
-    const name = requiredBoundedString(record.name, `${label}[${index}].name`, 512);
-    if (seen.has(id))
-      return;
-    seen.add(id);
-    folders.push({ id, name });
-  });
-  return folders;
-}
-function defaultSourceIngestionExclusionsPath() {
-  return join2(homedir2(), ".olympus", "sources", "ingestion-exclusions.json");
-}
-function loadSourceIngestionExclusions(options = {}) {
-  if (options.inlineExclusions !== undefined) {
-    return parseSourceIngestionExclusions(options.inlineExclusions, "inline source ingestion exclusions");
-  }
-  const env = options.env ?? process.env;
-  const path = options.exclusionsPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
-  if (!existsSync2(path))
-    return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [] };
-  return parseSourceIngestionExclusions(JSON.parse(readFileSync2(path, "utf8")), path);
-}
-function asRecord3(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function requiredToken(value, label) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${label} must be a non-empty string.`);
-  }
-  const token = value.trim();
-  if (token.length > 64) {
-    throw new OperationError("config_error", `${label} must be at most 64 characters.`);
-  }
-  for (const character of token) {
-    const safe = character >= "a" && character <= "z" || character >= "A" && character <= "Z" || character >= "0" && character <= "9" || character === "-" || character === "_" || character === ".";
-    if (!safe) {
-      throw new OperationError("config_error", `${label} may only use letters, digits, dot, dash, and underscore.`);
-    }
-  }
-  return token;
-}
-function requiredBoundedString(value, label, maxLength) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${label} must be a non-empty string.`);
-  }
-  const text = value.trim();
-  if (text.length > maxLength) {
-    throw new OperationError("config_error", `${label} must be at most ${maxLength} characters.`);
-  }
-  if (text.includes("\x00")) {
-    throw new OperationError("config_error", `${label} must not contain a NUL.`);
-  }
-  return text;
-}
-function stringList2(value) {
-  return Array.isArray(value) ? [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))] : [];
-}
-function parseSources(value, label) {
-  if (value === undefined)
-    return [];
-  if (!Array.isArray(value)) {
-    throw new OperationError("config_error", `${label} must be an array.`);
-  }
-  const sources = [];
-  for (let index = 0;index < value.length; index += 1) {
-    const entry = value[index];
-    if (typeof entry !== "string" || !entry.trim()) {
-      throw new OperationError("config_error", `${label}[${index}] must be a non-empty string.`);
-    }
-    const source = entry.trim().toLowerCase();
-    if (source.length > 256 || source.includes("\x00")) {
-      throw new OperationError("config_error", `${label}[${index}] is not a valid source token.`);
-    }
-    if (!sources.includes(source))
-      sources.push(source);
-  }
-  return sources;
-}
-var SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION = 1, SOURCE_INGESTION_EXCLUSIONS_PATH_ENV = "OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH", SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, SOURCE_EXCLUSION_PATH_METADATA_KEYS, SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS, SOURCE_EXCLUSION_SIZE_METADATA_KEYS, SOURCE_EXCLUSION_MIME_METADATA_KEYS, SOURCE_EXCLUSION_NAME_METADATA_KEYS, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
-var init_source_ingestion_exclusions = __esm(() => {
-  init_operation_error();
-  SOURCE_INGESTION_DISPOSITION_RANK = {
-    admit: 0,
-    metadata_only: 1,
-    exclude: 2
-  };
-  SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only"];
-  SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => SOURCE_INGESTION_DISPOSITION_RANK[right] - SOURCE_INGESTION_DISPOSITION_RANK[left]);
-  SOURCE_EXCLUSION_PATH_METADATA_KEYS = [
-    "pathLower",
-    "path_lower",
-    "pathDisplay",
-    "path_display",
-    "path",
-    "locatorPath"
-  ];
-  SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS = [
-    "folderAncestorIds",
-    "folder_ancestor_ids"
-  ];
-  SOURCE_EXCLUSION_SIZE_METADATA_KEYS = [
-    "sizeBytes",
-    "size_bytes",
-    "size",
-    "bytes"
-  ];
-  SOURCE_EXCLUSION_MIME_METADATA_KEYS = [
-    "mimeType",
-    "mime_type",
-    "mediaType",
-    "media_type"
-  ];
-  SOURCE_EXCLUSION_NAME_METADATA_KEYS = [
-    "name",
-    "fileName",
-    "file_name"
-  ];
-  ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
-  });
-  UNEVALUABLE = Object.freeze({
-    excluded: true,
-    disposition: "exclude",
-    outcome: "excluded_path_unevaluable",
-    reason: "path_unevaluable"
-  });
-  ANCESTRY_UNEVALUABLE = Object.freeze({
-    excluded: true,
-    disposition: "exclude",
-    outcome: "excluded_ancestry_unevaluable",
-    reason: "ancestry_unevaluable"
-  });
-});
+// src/core/package-root.ts
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+function olympusPackageRoot() {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0;depth < 6; depth++) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
+        return directory;
+    } catch {}
+    const parent = dirname(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  throw new Error("The Olympus package root could not be resolved.");
+}
+var init_package_root = () => {};
 
 // src/core/atomic-file.ts
 import { randomUUID } from "node:crypto";
 import {
   closeSync as closeSync2,
-  existsSync as existsSync3,
+  existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -1612,7 +81,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { open, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname as dirname2, isAbsolute, relative, resolve, sep } from "node:path";
 async function writePrivateFileAtomic(path, text) {
   const temp = temporaryPathFor(path);
   try {
@@ -1630,7 +99,7 @@ async function writePrivateFileAtomic(path, text) {
     });
     throw error;
   }
-  await syncDirectory(dirname(path));
+  await syncDirectory(dirname2(path));
 }
 function writePrivateFileAtomicSync(path, text) {
   const temp = temporaryPathFor(path);
@@ -1649,7 +118,7 @@ function writePrivateFileAtomicSync(path, text) {
     } catch {}
     throw error;
   }
-  syncDirectorySync(dirname(path));
+  syncDirectorySync(dirname2(path));
 }
 function removeFileDurablySync(path) {
   try {
@@ -1659,7 +128,7 @@ function removeFileDurablySync(path) {
       return false;
     throw error;
   }
-  syncDirectorySync(dirname(path));
+  syncDirectorySync(dirname2(path));
   return true;
 }
 function ensurePrivateDirectoryTreeSync(root, target) {
@@ -1672,24 +141,24 @@ function ensurePrivateDirectoryTreeSync(root, target) {
   let current = normalizedRoot;
   for (const component of suffix.split(sep)) {
     current = resolve(current, component);
-    if (existsSync3(current)) {
+    if (existsSync(current)) {
       assertDirectoryComponent(current);
       continue;
     }
     mkdirSync(current, { mode: 448 });
-    syncDirectorySync(dirname(current));
+    syncDirectorySync(dirname2(current));
     syncDirectorySync(current);
   }
 }
 function ensurePrivateRootDirectorySync(root) {
   const normalizedRoot = resolveTrustedRoot(root);
-  if (existsSync3(normalizedRoot)) {
+  if (existsSync(normalizedRoot)) {
     assertDirectoryComponent(normalizedRoot, "managed custody root");
     return;
   }
-  let ancestor = dirname(normalizedRoot);
-  while (!existsSync3(ancestor)) {
-    const parent = dirname(ancestor);
+  let ancestor = dirname2(normalizedRoot);
+  while (!existsSync(ancestor)) {
+    const parent = dirname2(ancestor);
     if (parent === ancestor)
       break;
     ancestor = parent;
@@ -1701,14 +170,14 @@ function assertManagedPathParentsSync(root, path, label) {
   const normalizedRoot = resolveTrustedRoot(root);
   const normalizedPath = resolveWithinRoot(normalizedRoot, path);
   assertDirectoryComponent(normalizedRoot, label);
-  const parent = dirname(normalizedPath);
+  const parent = dirname2(normalizedPath);
   const suffix = relative(normalizedRoot, parent);
   if (!suffix)
     return;
   let current = normalizedRoot;
   for (const component of suffix.split(sep)) {
     current = resolve(current, component);
-    if (!existsSync3(current))
+    if (!existsSync(current))
       return;
     assertDirectoryComponent(current, label);
   }
@@ -1777,6 +246,21 @@ function isUnsupportedDirectorySyncError(error) {
 }
 var init_atomic_file = () => {};
 
+// src/core/messaging-runtime.ts
+import { existsSync as existsSync2 } from "node:fs";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+function telegramPythonExecutable(options = {}) {
+  if (options.pythonExecutable)
+    return options.pythonExecutable;
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir();
+  const isolated = join2(env.XDG_CACHE_HOME ?? join2(home, ".cache"), "olympus", "telegram-python", "bin", "python");
+  return existsSync2(isolated) ? isolated : Bun.which("python3") ?? undefined;
+}
+var TELEGRAM_DEPENDENCY_HINT = 'Use a private virtual environment: python3 -m venv ~/.cache/olympus/telegram-python, then ~/.cache/olympus/telegram-python/bin/python -m pip install "Telethon==1.45.0". Re-run olympus connect telegram --pair.';
+var init_messaging_runtime = () => {};
+
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -1785,14 +269,14 @@ import {
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync2,
   openSync as openSync3,
-  readFileSync as readFileSync3,
+  readFileSync as readFileSync2,
   statSync,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "node:fs";
 import { mkdir, open as open2, readFile, stat, unlink, utimes } from "node:fs/promises";
 import { createRequire as createRequire2 } from "node:module";
-import { dirname as dirname2 } from "node:path";
+import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const normalized = normalizeOptions(options);
   const owner = await acquireFileLease(targetPath, normalized);
@@ -1922,7 +406,7 @@ class SyncFileLeaseOwner {
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  await mkdir(dirname2(lockPath), { recursive: true, mode: 448 });
+  await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
     let descriptor;
@@ -1948,7 +432,7 @@ async function acquireFileLease(targetPath, options) {
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  mkdirSync2(dirname2(lockPath), { recursive: true, mode: 448 });
+  mkdirSync2(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const token = randomUUID2();
     try {
@@ -2151,7 +635,7 @@ async function readLeaseRecord(path) {
 }
 function readLeaseRecordSync(path) {
   try {
-    return parseLeaseRecord(readFileSync3(path, "utf8"));
+    return parseLeaseRecord(readFileSync2(path, "utf8"));
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT"))
       return;
@@ -2236,8 +720,8 @@ function processInstanceIdentity(pid) {
 }
 function linuxProcessInstanceIdentity(pid) {
   try {
-    const bootId = validatedBootId("linux", readFileSync3("/proc/sys/kernel/random/boot_id", "utf8").trim());
-    const statText = readFileSync3(`/proc/${pid}/stat`, "utf8");
+    const bootId = validatedBootId("linux", readFileSync2("/proc/sys/kernel/random/boot_id", "utf8").trim());
+    const statText = readFileSync2(`/proc/${pid}/stat`, "utf8");
     const commandEnd = statText.lastIndexOf(")");
     if (commandEnd < 0 || !statText.startsWith(`${pid} (`))
       return;
@@ -2432,13 +916,13 @@ function commitGuardPathFor(lockPath) {
   return `${lockPath}.commit`;
 }
 function normalizeOptions(options) {
-  const acquireTimeoutMs = positiveInteger2(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs);
-  const pollIntervalMs = positiveInteger2(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs);
-  const staleAfterMs = positiveInteger2(options.staleAfterMs, DEFAULT_OPTIONS.staleAfterMs);
-  const heartbeatIntervalMs = positiveInteger2(options.heartbeatIntervalMs, Math.min(DEFAULT_OPTIONS.heartbeatIntervalMs, Math.max(1, Math.floor(staleAfterMs / 3))));
+  const acquireTimeoutMs = positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs);
+  const pollIntervalMs = positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs);
+  const staleAfterMs = positiveInteger(options.staleAfterMs, DEFAULT_OPTIONS.staleAfterMs);
+  const heartbeatIntervalMs = positiveInteger(options.heartbeatIntervalMs, Math.min(DEFAULT_OPTIONS.heartbeatIntervalMs, Math.max(1, Math.floor(staleAfterMs / 3))));
   return { acquireTimeoutMs, pollIntervalMs, staleAfterMs, heartbeatIntervalMs };
 }
-function positiveInteger2(value, fallback) {
+function positiveInteger(value, fallback) {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
 }
 function sleep(ms) {
@@ -2484,11 +968,11 @@ var init_file_lease = __esm(() => {
 // src/core/secret-store.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync4 } from "node:fs";
-import { homedir as homedir3, platform } from "node:os";
-import { dirname as dirname3, join as join3 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir2, platform } from "node:os";
+import { dirname as dirname4, join as join3 } from "node:path";
 function defaultOlympusConfigDir() {
-  return join3(homedir3(), ".config", "olympus");
+  return join3(homedir2(), ".config", "olympus");
 }
 function defaultEncryptedSecretsPath() {
   return join3(defaultOlympusConfigDir(), "secrets.enc");
@@ -2585,9 +1069,9 @@ class EncryptedFileSecretStore {
     return Object.keys(this.readStore().secrets).sort();
   }
   readStore() {
-    if (!existsSync4(this.encryptedFilePath))
+    if (!existsSync3(this.encryptedFilePath))
       return { version: STORE_VERSION, secrets: {} };
-    const encrypted = JSON.parse(readFileSync4(this.encryptedFilePath, "utf8"));
+    const encrypted = JSON.parse(readFileSync3(this.encryptedFilePath, "utf8"));
     if (encrypted.version !== STORE_VERSION || encrypted.algorithm !== "aes-256-gcm") {
       throw new Error("Olympus secret store format is unsupported.");
     }
@@ -2631,7 +1115,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync3(dirname3(this.encryptedFilePath), { recursive: true });
+      mkdirSync3(dirname4(this.encryptedFilePath), { recursive: true });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -2656,11 +1140,11 @@ class EncryptedFileSecretStore {
     return this.localRandomKey();
   }
   localRandomKey() {
-    mkdirSync3(dirname3(this.keyFilePath), { recursive: true });
-    if (!existsSync4(this.keyFilePath)) {
+    mkdirSync3(dirname4(this.keyFilePath), { recursive: true });
+    if (!existsSync3(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
-    const key = Buffer.from(readFileSync4(this.keyFilePath, "utf8").trim(), "base64");
+    const key = Buffer.from(readFileSync3(this.keyFilePath, "utf8").trim(), "base64");
     if (key.length !== 32)
       throw new Error("Olympus secret store key is invalid.");
     return key;
@@ -2827,755 +1311,832 @@ var init_secret_store = __esm(() => {
   init_file_lease();
 });
 
-// src/core/config.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
+// src/core/operation-error.ts
+var OperationError;
+var init_operation_error = __esm(() => {
+  OperationError = class OperationError extends Error {
+    code;
+    suggestion;
+    constructor(code, message, suggestion) {
+      super(message);
+      this.name = "OperationError";
+      this.code = code;
+      this.suggestion = suggestion;
+    }
+    toJSON() {
+      return {
+        error: this.code,
+        message: this.message,
+        ...this.suggestion ? { suggestion: this.suggestion } : {}
+      };
+    }
+  };
+});
+
+// src/core/worker-auth.ts
+import { createHmac } from "node:crypto";
+import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
 import { join as join4 } from "node:path";
-function defaultConfig() {
-  return structuredClone(DEFAULT_CONFIG);
+function workerAuthTokenFromConfig(config, options = {}) {
+  return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
-function loadConfig(env = process.env) {
-  const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join4(homedir4(), ".olympus", "config.json");
-  if (existsSync5(configPath)) {
-    const raw = JSON.parse(readFileSync5(configPath, "utf8"));
-    mergeConfig(config, raw);
-  }
-  applyEnvironmentOverrides(config, env);
-  validateConfig(config);
-  return config;
+function withWorkerAuthHeader(init, authToken) {
+  const token = optionalToken(authToken);
+  if (!token)
+    return init;
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return {
+    ...init,
+    headers
+  };
 }
-function configWithEnvironmentOverrides(config, env) {
-  const next = structuredClone(config);
-  applyEnvironmentOverrides(next, env);
-  validateConfig(next);
-  return next;
-}
-function applyEnvironmentOverrides(config, env) {
-  if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
-    config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
-  }
-  if (env.OLYMPUS_WORKER_AUTH_TOKEN?.trim()) {
-    config.worker.authToken = env.OLYMPUS_WORKER_AUTH_TOKEN.trim();
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_ENABLED !== undefined) {
-    config.worker.scheduler.enabled = parseBoolean(env.OLYMPUS_WORKER_SCHEDULER_ENABLED, "OLYMPUS_WORKER_SCHEDULER_ENABLED");
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS !== undefined) {
-    config.worker.scheduler.sourceIds = parseSchedulerSourceIds(env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS);
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS) {
-    config.worker.scheduler.tickSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS, "OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS");
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS) {
-    config.worker.scheduler.syncIntervalSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS, "OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS");
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS) {
-    config.worker.scheduler.freshnessThresholdHours = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS, "OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS");
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS) {
-    config.worker.scheduler.errorBackoffSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS, "OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS");
-  }
-  if (env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES) {
-    config.worker.scheduler.maxTransientRetries = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES, "OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES");
-  }
-  if (env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()) {
-    config.sovereignty = {
-      ...config.sovereignty ?? {},
-      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
-    };
-  }
-  if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
-    config.sovereignty = {
-      ...config.sovereignty ?? {},
-      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
-    };
-  }
-  if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
-    config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
-  }
-  if (env.OLYMPUS_ARGUS_TRANSPORT) {
-    config.argus.transport = parseTransport(env.OLYMPUS_ARGUS_TRANSPORT);
-  }
-  let fastLaneEnvChanged = false;
-  if (env.OLYMPUS_ARGUS_FAST_BASE_URL) {
-    config.argus.lanes.fast.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_FAST_BASE_URL);
-    fastLaneEnvChanged = true;
-  }
-  if (env.OLYMPUS_ARGUS_DEEP_BASE_URL) {
-    config.argus.lanes.deep.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_DEEP_BASE_URL);
-  }
-  if (env.OLYMPUS_ARGUS_FAST_MODEL) {
-    config.argus.lanes.fast.model = env.OLYMPUS_ARGUS_FAST_MODEL;
-    fastLaneEnvChanged = true;
-  }
-  if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
-    config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
-  }
-  if (fastLaneEnvChanged) {
-    mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
-  }
-  applyModelProfileEnv(config, "default_chat", env, "OLYMPUS_ARGUS_DEFAULT_CHAT");
-  applyModelProfileEnv(config, "source_answer", env, "OLYMPUS_ARGUS_SOURCE_ANSWER");
-  applyModelProfileEnv(config, "classification_fast", env, "OLYMPUS_ARGUS_CLASSIFICATION_FAST");
-  applyModelProfileEnv(config, "embedding_secure_local", env, "OLYMPUS_ARGUS_EMBEDDING_SECURE_LOCAL");
-  applyModelProfileEnv(config, "vlm_document", env, "OLYMPUS_ARGUS_VLM_DOCUMENT");
-  applyModelProfileEnv(config, "vlm_fast", env, "OLYMPUS_ARGUS_VLM_FAST");
-  applyModelProfileEnv(config, "vlm_qwen36_27b", env, "OLYMPUS_ARGUS_VLM_QWEN36_27B");
-  applyModelProfileEnv(config, "vlm_qwen36_35b", env, "OLYMPUS_ARGUS_VLM_QWEN36_35B");
-  if (env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS) {
-    config.argus.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_EMAIL_ENABLED) {
-    config.email.enabled = parseBoolean(env.OLYMPUS_EMAIL_ENABLED, "OLYMPUS_EMAIL_ENABLED");
-  }
-  if (env.OLYMPUS_EMAIL_BASE_URL) {
-    config.email.baseUrl = normalizeSourceWorkerBaseUrl(env.OLYMPUS_EMAIL_BASE_URL);
-  }
-  if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
-    config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV) {
-    config.email.localPacketsDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV, "OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV");
-  }
-  if (env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV) {
-    config.email.indexAdminDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV, "OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV");
-  }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
-  }
-  if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
-    config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
-  }
-  if (env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED) {
-    config.sourceIndex.answerDevEnabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED");
-  }
-  if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync5(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
-  }
-  if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
-    config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
-  }
-  if (env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim()) {
-    config.sourceIndex.ingestionPolicies.dropboxPersonal = {
-      ...config.sourceIndex.ingestionPolicies.dropboxPersonal ?? {},
-      policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
-    };
-  }
-}
-function resolveLane(config, lane) {
-  return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
-}
-function isSourceIndexReadSurfaceEnabled(config) {
-  return config.sourceIndex.enabled || config.sourceIndex.answerDevEnabled;
-}
-function resolveModelProfile(config, profile) {
-  return profile === undefined || profile === null || profile === "" ? config.argus.defaultProfile : parseModelProfile(String(profile));
-}
-function parseModelProfile(value) {
-  if (ARGUS_MODEL_PROFILES.includes(value)) {
-    return value;
-  }
-  throw new OperationError("invalid_params", `Unsupported Argus model profile: ${value}`, `Use one of: ${ARGUS_MODEL_PROFILES.join(", ")}.`);
-}
-function parseLane(value) {
-  if (value === "fast" || value === "deep")
-    return value;
-  throw new OperationError("invalid_params", `Unsupported Argus lane: ${value}`, 'Use lane "fast" for interactive work or "deep" for slower sensitive/document work.');
-}
-function parseTransport(value) {
-  if (value === "direct")
-    return value;
-  throw new OperationError("invalid_params", `Unsupported Argus transport: ${value}`, 'Use transport "direct" with a local or runtime-managed Argus endpoint.');
-}
-function mergeConfig(target, source) {
-  if (source.sovereignty) {
-    target.sovereignty = { ...target.sovereignty ?? {}, ...source.sovereignty };
-  }
-  if (source.worker) {
-    target.worker = {
-      ...target.worker,
-      ...source.worker,
-      scheduler: {
-        ...target.worker.scheduler,
-        ...source.worker.scheduler ?? {}
-      }
-    };
-  }
-  if (source.identity) {
-    target.identity = { ...target.identity, ...source.identity };
-  }
-  if (source.argus) {
-    if (source.argus.defaultLane)
-      target.argus.defaultLane = source.argus.defaultLane;
-    if (source.argus.defaultProfile)
-      target.argus.defaultProfile = source.argus.defaultProfile;
-    if (source.argus.transport)
-      target.argus.transport = source.argus.transport;
-    if (source.argus.requestTimeoutSeconds) {
-      target.argus.requestTimeoutSeconds = source.argus.requestTimeoutSeconds;
-    }
-    if (source.argus.lanes?.fast) {
-      target.argus.lanes.fast = { ...target.argus.lanes.fast, ...source.argus.lanes.fast };
-      mirrorFastLaneToProfiles(target, ["default_chat", "source_answer"]);
-    }
-    if (source.argus.lanes?.deep) {
-      target.argus.lanes.deep = { ...target.argus.lanes.deep, ...source.argus.lanes.deep };
-    }
-    if (source.argus.modelProfiles) {
-      for (const profile of ARGUS_MODEL_PROFILES) {
-        const sourceProfile = source.argus.modelProfiles[profile];
-        if (sourceProfile) {
-          target.argus.modelProfiles[profile] = {
-            ...target.argus.modelProfiles[profile],
-            ...sourceProfile
-          };
-        }
-      }
-    }
-  }
-  if (source.email) {
-    target.email = { ...target.email, ...source.email };
-    if (typeof target.email.baseUrl === "string") {
-      target.email.baseUrl = normalizeSourceWorkerBaseUrl(target.email.baseUrl);
-    }
-  }
-  if (source.sourceIndex) {
-    target.sourceIndex = {
-      ...target.sourceIndex,
-      ...source.sourceIndex,
-      corpusRegistry: source.sourceIndex.corpusRegistry ?? target.sourceIndex.corpusRegistry,
-      ...source.sourceIndex.ingestionExclusions ? { ingestionExclusions: source.sourceIndex.ingestionExclusions } : {},
-      ...source.sourceIndex.ingestionExclusionsPath ? { ingestionExclusionsPath: source.sourceIndex.ingestionExclusionsPath } : {},
-      ingestionPolicies: {
-        ...target.sourceIndex.ingestionPolicies,
-        ...source.sourceIndex.ingestionPolicies ?? {}
-      }
-    };
-  }
-}
-function mirrorFastLaneToProfiles(config, profiles) {
-  for (const profile of profiles) {
-    config.argus.modelProfiles[profile] = {
-      ...config.argus.modelProfiles[profile],
-      baseUrl: config.argus.lanes.fast.baseUrl,
-      model: config.argus.lanes.fast.model
-    };
-  }
-}
-function applyModelProfileEnv(config, profile, env, prefix) {
-  const baseUrl = env[`${prefix}_BASE_URL`];
-  const model = env[`${prefix}_MODEL`];
-  const secretRef = env[`${prefix}_SECRET_REF`];
-  if (baseUrl)
-    config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
-  if (model)
-    config.argus.modelProfiles[profile].model = model;
-  if (secretRef?.trim())
-    config.argus.modelProfiles[profile].secretRef = secretRef.trim();
-}
-function validateConfig(config) {
-  if (config.sovereignty?.configPath !== undefined) {
-    if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
-      throw new OperationError("config_error", "sovereignty.configPath must be a non-empty string.");
-    }
-    config.sovereignty.configPath = config.sovereignty.configPath.trim();
-  }
-  if (config.worker.authToken !== undefined) {
-    if (typeof config.worker.authToken !== "string") {
-      throw new OperationError("config_error", "worker.authToken must be a string.");
-    }
-    const trimmed = config.worker.authToken.trim();
-    if (trimmed) {
-      config.worker.authToken = trimmed;
-    } else {
-      delete config.worker.authToken;
-    }
-  }
-  assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
-  config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
-  assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
-  assertPositiveNumber(config.worker.scheduler.syncIntervalSeconds, "worker.scheduler.syncIntervalSeconds");
-  assertPositiveNumber(config.worker.scheduler.freshnessThresholdHours, "worker.scheduler.freshnessThresholdHours");
-  assertPositiveNumber(config.worker.scheduler.errorBackoffSeconds, "worker.scheduler.errorBackoffSeconds");
-  assertPositiveInteger(config.worker.scheduler.maxTransientRetries, "worker.scheduler.maxTransientRetries");
-  if (typeof config.identity.ownerName !== "string" || !config.identity.ownerName.trim()) {
-    throw new OperationError("config_error", "identity.ownerName must be a non-empty string.");
-  }
-  config.identity.ownerName = config.identity.ownerName.trim();
-  if (typeof config.identity.assistantName !== "string" || !config.identity.assistantName.trim()) {
-    throw new OperationError("config_error", "identity.assistantName must be a non-empty string.");
-  }
-  config.identity.assistantName = config.identity.assistantName.trim();
-  parseLane(config.argus.defaultLane);
-  parseModelProfile(config.argus.defaultProfile);
-  parseTransport(config.argus.transport);
-  if (typeof config.argus.requestTimeoutSeconds !== "number" || !Number.isFinite(config.argus.requestTimeoutSeconds) || config.argus.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "argus.requestTimeoutSeconds must be greater than zero.");
-  }
-  for (const lane of ["fast", "deep"]) {
-    const laneConfig = config.argus.lanes[lane];
-    if (typeof laneConfig.baseUrl !== "string" || !laneConfig.baseUrl.startsWith("http://") && !laneConfig.baseUrl.startsWith("https://")) {
-      throw new OperationError("config_error", `${lane} baseUrl must be an HTTP(S) URL.`);
-    }
-    laneConfig.baseUrl = trimTrailingSlash(laneConfig.baseUrl);
-    if (typeof laneConfig.model !== "string" || !laneConfig.model.trim()) {
-      throw new OperationError("config_error", `${lane} model must be configured.`);
-    }
-    validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
-  }
-  for (const profile of ARGUS_MODEL_PROFILES) {
-    const profileConfig = config.argus.modelProfiles[profile];
-    if (typeof profileConfig.baseUrl !== "string" || !profileConfig.baseUrl.startsWith("http://") && !profileConfig.baseUrl.startsWith("https://")) {
-      throw new OperationError("config_error", `${profile} baseUrl must be an HTTP(S) URL.`);
-    }
-    profileConfig.baseUrl = trimTrailingSlash(profileConfig.baseUrl);
-    if (typeof profileConfig.model !== "string" || !profileConfig.model.trim()) {
-      throw new OperationError("config_error", `${profile} model must be configured.`);
-    }
-    validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
-  }
-  assertBoolean(config.email.enabled, "email.enabled");
-  assertBoolean(config.email.localPacketsDevEnabled, "email.localPacketsDevEnabled");
-  assertBoolean(config.email.indexAdminDevEnabled, "email.indexAdminDevEnabled");
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, "email.requireLocalActiveModelForPrivateTools");
-  assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
-  assertBoolean(config.sourceIndex.answerDevEnabled, "sourceIndex.answerDevEnabled");
-  config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
-  if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
-    const policyPath = config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath.trim();
-    if (!policyPath) {
-      throw new OperationError("config_error", "sourceIndex.ingestionPolicies.dropboxPersonal.policyPath must be a non-empty string.");
-    }
-    config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath = policyPath;
-  }
-  if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policy !== undefined) {
-    config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(config.sourceIndex.ingestionPolicies.dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
-  }
-  if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
-  }
-  config.email.baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
-  if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
-  }
-}
-function parseSchedulerSourceIds(value) {
-  const values = typeof value === "string" ? value.split(",") : value;
-  const selected = values.map((entry) => typeof entry === "string" ? entry.trim() : "");
-  if (selected.some((entry) => !V0_4_PUBLIC_SOURCE_IDS.includes(entry))) {
-    throw new OperationError("config_error", `worker.scheduler.sourceIds entries must be one of: ${V0_4_PUBLIC_SOURCE_IDS.join(", ")}.`);
-  }
-  return [...new Set(selected)];
-}
-function assertBoolean(value, name) {
-  if (typeof value !== "boolean") {
-    throw new OperationError("config_error", `${name} must be a boolean.`);
-  }
-}
-function assertPositiveNumber(value, name) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    throw new OperationError("config_error", `${name} must be greater than zero.`);
-  }
-}
-function assertPositiveInteger(value, name) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new OperationError("config_error", `${name} must be a positive integer.`);
-  }
-}
-function validateSecretRef(value, name) {
-  if (value === undefined)
+function dashboardQueryTokenFromWorkerAuthToken(authToken) {
+  const token = optionalToken(authToken);
+  if (!token)
     return;
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${name} must be a non-empty string.`);
-  }
-  if (!normalizeSecretRef(value)) {
-    throw new OperationError("config_error", `${name} must use env:NAME or store:key.`);
-  }
+  return `dash_${createHmac("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
 }
-function trimTrailingSlash(value) {
-  return value.replace(/\/+$/, "");
+function workerAuthTokenFromSetupEnv(options = {}) {
+  return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
 }
-function normalizeSourceWorkerBaseUrl(value) {
-  const trimmed = trimTrailingSlash(value.trim());
+function applyWorkerSetupEnv(options = {}) {
+  const targetEnv = options.env ?? process.env;
+  const path = workerSetupEnvPath(options);
+  const setupEnv = readWorkerSetupEnv({ ...options, workerEnvPath: path });
+  if (!setupEnv)
+    return { loaded: false, path, keys: [] };
+  const keys = [];
+  for (const [key, value] of Object.entries(setupEnv)) {
+    if (targetEnv[key]?.trim())
+      continue;
+    targetEnv[key] = value;
+    keys.push(key);
+  }
+  return { loaded: true, path, keys };
+}
+function readWorkerSetupEnv(options = {}) {
+  const path = workerSetupEnvPath(options);
   try {
-    const url = new URL(trimmed);
-    if ((url.protocol === "http:" || url.protocol === "https:") && (url.pathname === "" || url.pathname === "/")) {
-      url.pathname = "/v1";
-      return trimTrailingSlash(url.toString());
-    }
+    const stat2 = statSync2(path);
+    if (!stat2.isFile() || (stat2.mode & 63) !== 0)
+      return;
+    return parseWorkerSetupEnv(readFileSync4(path, "utf8"));
   } catch {
-    return trimmed;
+    return;
+  }
+}
+function environmentWithWorkerSetupEnv(options = {}) {
+  const env = options.env ?? process.env;
+  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
+    return env;
+  const setupEnv = readWorkerSetupEnv(options);
+  if (!setupEnv)
+    return env;
+  const merged = { ...setupEnv };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value.trim() !== "")
+      merged[key] = value;
+    else if (!(key in setupEnv))
+      merged[key] = value;
+  }
+  return merged;
+}
+function workerSetupEnvPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.workerEnvPath ?? join4(options.homeDir ?? optionalToken(env.HOME) ?? homedir3(), ".config", "olympus", "worker.env");
+}
+function isWorkerAuthTokenPlaceholder(value) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
+}
+function normalizeWorkerAuthToken(value) {
+  const trimmed = value?.trim();
+  if (isWorkerAuthTokenPlaceholder(trimmed))
+    return;
+  return trimmed ? trimmed : undefined;
+}
+function optionalToken(value) {
+  return normalizeWorkerAuthToken(value);
+}
+function parseWorkerSetupEnv(text) {
+  const env = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#"))
+      continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
+    if (!match)
+      continue;
+    env[match[1]] = unquoteEnvValue(match[2] ?? "");
+  }
+  return env;
+}
+function unquoteEnvValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
   }
   return trimmed;
 }
-function parsePositiveNumber(value, name) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) {
-    throw new OperationError("invalid_params", `${name} must be greater than zero.`);
-  }
-  return number;
-}
-function parseBoolean(value, name) {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "true" || normalized === "1" || normalized === "yes")
-    return true;
-  if (normalized === "false" || normalized === "0" || normalized === "no")
-    return false;
-  throw new OperationError("invalid_params", `${name} must be true or false.`);
-}
-function parseOptionalBooleanEnv(value, name, options = {}) {
-  if (value === undefined || value.trim().length === 0)
-    return options.defaultValue ?? false;
-  try {
-    return parseBoolean(value, name);
-  } catch (error) {
-    if (options.invalid === "warn-false") {
-      const warning = `${name} has invalid boolean value; treating it as disabled.`;
-      if (options.warn)
-        options.warn(warning);
-      else
-        console.warn(warning);
-      return false;
-    }
-    throw error;
-  }
-}
-var DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
-var init_config = __esm(() => {
-  init_operation_error();
-  init_source_corpus_registry();
-  init_source_ingestion_policy();
-  init_source_ingestion_exclusions();
-  init_secret_store();
-  init_public_surface();
-  DEFAULT_CONFIG = {
-    worker: {
-      scheduler: {
-        enabled: false,
-        sourceIds: [],
-        tickSeconds: 60,
-        syncIntervalSeconds: 1800,
-        freshnessThresholdHours: 26,
-        errorBackoffSeconds: 60,
-        maxTransientRetries: 3
-      }
-    },
-    identity: {
-      ownerName: "the owner",
-      assistantName: "the calling assistant"
-    },
-    argus: {
-      defaultLane: "fast",
-      defaultProfile: "default_chat",
-      transport: "direct",
-      requestTimeoutSeconds: 180,
-      lanes: {
-        fast: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/default-chat"
-        },
-        deep: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/default-chat"
-        }
-      },
-      modelProfiles: {
-        default_chat: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/default-chat",
-          purpose: "chat"
-        },
-        source_answer: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/source-answer",
-          purpose: "text_reasoning"
-        },
-        classification_fast: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/default-chat",
-          purpose: "classification"
-        },
-        embedding_secure_local: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "secure-local-qwen3-embed",
-          purpose: "embedding"
-        },
-        vlm_document: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/vision-quality",
-          purpose: "vision"
-        },
-        vlm_fast: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/vision-fast",
-          purpose: "vision"
-        },
-        vlm_qwen36_27b: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/vision-deep",
-          purpose: "vision"
-        },
-        vlm_qwen36_35b: {
-          baseUrl: "http://127.0.0.1:28090/v1",
-          model: "delphi/vision-quality",
-          purpose: "vision"
-        }
-      }
-    },
-    email: {
-      enabled: true,
-      baseUrl: "http://127.0.0.1:8010/v1",
-      requestTimeoutSeconds: 180,
-      localPacketsDevEnabled: false,
-      indexAdminDevEnabled: false,
-      requireLocalActiveModelForPrivateTools: false
-    },
-    sourceIndex: {
-      enabled: true,
-      answerDevEnabled: false,
-      corpusRegistry: defaultSourceCorpusRegistryConfig(),
-      ingestionPolicies: {}
-    }
-  };
-  ARGUS_MODEL_PROFILES = [
-    "default_chat",
-    "source_answer",
-    "classification_fast",
-    "embedding_secure_local",
-    "vlm_document",
-    "vlm_fast",
-    "vlm_qwen36_27b",
-    "vlm_qwen36_35b"
-  ];
-});
+var init_worker_auth = () => {};
 
-// src/core/dashboard-launch.ts
-import { createHash, randomBytes as randomBytes2 } from "node:crypto";
-
-class DashboardLaunchTickets {
-  tickets = new Map;
-  now;
-  maxTickets;
-  constructor(options = {}) {
-    this.now = options.now ?? Date.now;
-    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
-    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
-      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
-    }
+// src/core/worker-service.ts
+import { chmodSync, closeSync as closeSync4, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync4, openSync as openSync4, readFileSync as readFileSync5, readSync, statSync as statSync3 } from "node:fs";
+import { homedir as homedir4, platform as osPlatform } from "node:os";
+import { basename, dirname as dirname5, isAbsolute as isAbsolute2, join as join5, relative as relative2, sep as sep2 } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+function installWorkerService(options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir4(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const envPath = options.envPath ?? paths.envPath;
+  validateManagedPath(envPath, "worker environment");
+  const unit = platform2 === "darwin" ? renderLaunchdWorkerUnit({ ...options, envPath, paths }) : renderSystemdWorkerUnit({ ...options, envPath, paths });
+  let wroteUnit = false;
+  let wroteEnv = false;
+  if (!options.dryRun) {
+    ensurePrivateRootDirectorySync(homeDir);
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    assertManagedParentSafety(homeDir, paths.logPath, "worker log");
+    if (pathIsWithin(homeDir, envPath))
+      assertManagedParentSafety(homeDir, envPath, "worker environment");
+    ensurePrivateDirectoryTreeSync(homeDir, dirname5(paths.unitPath));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname5(paths.logPath));
+    if (pathIsWithin(homeDir, envPath))
+      ensurePrivateDirectoryTreeSync(homeDir, dirname5(envPath));
+    else
+      mkdirSync4(dirname5(envPath), { recursive: true });
+    wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, "worker unit");
+    wroteEnv = reconcileWorkerEnv(envPath, options);
   }
-  mint(origin) {
-    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
-    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
-    const ticket = randomBytes2(32).toString("base64url");
-    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
-    while (this.tickets.size > this.maxTickets) {
-      const oldest = this.tickets.keys().next();
-      if (oldest.done)
-        break;
-      this.tickets.delete(oldest.value);
-    }
-    return ticket;
-  }
-  consume(ticket, origin) {
-    if (!isWellFormedDashboardLaunchTicket(ticket))
-      return { status: "unknown" };
-    const record = this.tickets.get(ticket);
-    if (!record)
-      return { status: "unknown" };
-    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
-      return { status: "origin_mismatch" };
-    }
-    this.tickets.delete(ticket);
-    if (record.expiresAtMs <= this.now())
-      return { status: "expired" };
-    return { status: "ok", ticket };
-  }
-  get size() {
-    return this.tickets.size;
-  }
-  prune(nowMs) {
-    for (const [ticket, record] of this.tickets) {
-      if (record.expiresAtMs <= nowMs)
-        this.tickets.delete(ticket);
-    }
-  }
-}
-function dashboardLaunchOriginTag(origin) {
-  return createHash("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
-}
-function isWellFormedDashboardLaunchTicket(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
-}
-function dashboardLaunchPageHeaders() {
-  const script = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
-  const scriptHash = createHash("sha256").update(script).digest("base64");
   return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
-    "X-Frame-Options": "DENY",
-    "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+    ok: true,
+    platform: platform2,
+    unit_path: paths.unitPath,
+    env_path: envPath,
+    log_path: paths.logPath,
+    error_log_path: paths.errorLogPath,
+    wrote_unit: wroteUnit,
+    wrote_env: wroteEnv,
+    unit,
+    commands: {
+      install: workerServiceCommand(platform2, "install", paths.unitPath),
+      status: workerServiceCommand(platform2, "status", paths.unitPath),
+      start: workerServiceCommand(platform2, "start", paths.unitPath),
+      stop: workerServiceCommand(platform2, "stop", paths.unitPath),
+      restart: workerServiceCommand(platform2, "restart", paths.unitPath),
+      uninstall: platform2 === "darwin" ? workerServiceCommand(platform2, "stop", paths.unitPath) : ["systemctl", "--user", "disable", "--now", "olympus-worker.service"]
+    }
   };
 }
-var DASHBOARD_LAUNCH_PAGE_PATH = "/dashboard/launch", DASHBOARD_LAUNCH_MINT_PATH = "/dashboard/control/launch", DASHBOARD_LAUNCH_REDEEM_PATH = "/dashboard/control/launch/redeem", DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
-var init_dashboard_launch = __esm(() => {
-  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var status = document.getElementById('status');
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          return new URLSearchParams(hash).get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          if (response.ok) {
-            window.location.replace('/dashboard');
-            return;
-          }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
-});
-
-// src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
+function runWorkerServiceAction(action, options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir4(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const exec = options.exec ?? defaultWorkerServiceExec;
+  if (platform2 === "darwin" && action === "install") {
+    return runDarwinWorkerServiceInstall(paths, exec);
+  }
+  if (platform2 === "linux" && action === "install") {
+    return runLinuxWorkerServiceInstall(paths, exec);
+  }
+  if (platform2 === "darwin" && (action === "start" || action === "restart")) {
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    return runDarwinWorkerServiceActivation(action, paths, exec);
+  }
+  if (platform2 === "darwin" && action === "stop") {
+    return runDarwinWorkerServiceStop(paths, exec);
+  }
+  if (action === "uninstall") {
+    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
+    return platform2 === "darwin" ? runDarwinWorkerServiceUninstall(paths, exec) : runLinuxWorkerServiceUninstall(paths, exec);
+  }
+  const command = workerServiceCommand(platform2, action, paths.unitPath);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError(action, result);
+  }
+  return {
+    ok: true,
+    command,
+    stdout: result.stdout,
+    stderr: result.stderr
+  };
+}
+function workerServiceFailureLogLine(options = {}) {
+  let paths;
+  try {
+    paths = workerServicePaths(normalizePlatform(options.platform ?? osPlatform()), validatedAbsolutePath(options.homeDir ?? homedir4(), "home directory"));
+  } catch {
+    return;
+  }
+  return lastLogLine(paths.errorLogPath) ?? lastLogLine(paths.logPath);
+}
+function lastLogLine(path) {
+  let text;
+  try {
+    const size = statSync3(path).size;
+    if (size === 0)
+      return;
+    const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = openSync4(path, "r");
+    try {
+      readSync(handle, buffer, 0, length, size - length);
+    } finally {
+      closeSync4(handle);
     }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+    text = buffer.toString("utf8");
+  } catch {
+    return;
   }
+  const lines = text.split(/\r?\n/).map((line2) => line2.trim()).filter(Boolean);
+  const line = lines.at(-1);
+  if (!line)
+    return;
+  return redactWorkerLogLine(line).slice(0, WORKER_LOG_LINE_MAX_CHARS);
 }
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+function redactWorkerLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function inspectWorkerService(options = {}) {
+  const platform2 = normalizePlatform(options.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir4(), "home directory");
+  const paths = workerServicePaths(platform2, homeDir);
+  const envPath = options.envPath ?? paths.envPath;
+  const command = workerServiceCommand(platform2, "status", paths.unitPath);
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  const unitPresent = isManagedRegularFile(paths.unitPath);
+  const unitPathPresent = existsSync4(paths.unitPath);
+  const envPathPresent = existsSync4(envPath);
+  const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
+  const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
+  const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform2, result, unitPresent);
+  return {
+    platform: platform2,
+    state,
+    unit_present: unitPresent,
+    env_present: isManagedRegularFile(envPath),
+    command,
+    exit_code: result.status,
+    detail: nonRegularDetail ?? boundedServiceDetail(result)
+  };
+}
+function runDarwinWorkerServiceInstall(paths, exec) {
+  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
+  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const installCommand = workerServiceCommand("darwin", "install", paths.unitPath);
+  const status = runWorkerServiceCommand(statusCommand, exec);
+  const outputs = [];
+  if (status.status === 0) {
+    outputs.push(status);
+    const stopped = runWorkerServiceCommand(stopCommand, exec);
+    outputs.push(stopped);
+    if (stopped.status !== 0) {
+      throwWorkerServiceActionError("install", stopped, "failed to unload the existing macOS worker service before reinstalling");
+    }
   }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
+  const installed = runWorkerServiceCommand(installCommand, exec);
+  outputs.push(installed);
+  if (installed.status !== 0) {
+    throwWorkerServiceActionError("install", installed);
+  }
+  return {
+    ok: true,
+    command: installCommand,
+    stdout: outputs.map((result) => result.stdout).join(""),
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runLinuxWorkerServiceInstall(paths, exec) {
+  const installCommand = workerServiceCommand("linux", "install", paths.unitPath);
+  const reloaded = reloadLinuxWorkerServiceManager({ exec });
+  const installed = runWorkerServiceCommand(installCommand, exec);
+  if (installed.status !== 0) {
+    throwWorkerServiceActionError("install", installed);
+  }
+  return {
+    ok: true,
+    command: installCommand,
+    stdout: `${reloaded.stdout}${installed.stdout}`,
+    stderr: `${reloaded.stderr}${installed.stderr}`
+  };
+}
+function reloadLinuxWorkerServiceManager(options = {}) {
+  const command = ["systemctl", "--user", "daemon-reload"];
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError("install", result, "failed to reload the user systemd manager after changing the worker unit");
+  }
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function resetFailedLinuxWorkerService(options = {}) {
+  const command = ["systemctl", "--user", "reset-failed", "olympus-worker.service"];
+  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
+  if (result.status !== 0) {
+    throwWorkerServiceActionError("stop", result, "failed to clear the latched systemd failure for the managed worker unit");
+  }
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceActivation(action, paths, exec) {
+  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
+  const unloaded = status.status === 3 || status.status === 113;
+  if (!unloaded && status.status !== 0)
+    throwWorkerServiceActionError(action, status);
+  if (unloaded && !isManagedRegularFile(paths.unitPath)) {
+    throwWorkerServiceActionError(action, status, "the managed macOS worker unit is not installed");
+  }
+  const command = unloaded ? workerServiceCommand("darwin", "install", paths.unitPath) : workerServiceCommand("darwin", action, paths.unitPath);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0)
+    throwWorkerServiceActionError(action, result);
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceStop(paths, exec) {
+  const command = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
+  if (status.status === 3 || status.status === 113) {
+    return { ok: true, command, stdout: "", stderr: status.stderr };
+  }
+  if (status.status !== 0)
+    throwWorkerServiceActionError("stop", status);
+  const result = runWorkerServiceCommand(command, exec);
+  if (result.status !== 0)
+    throwWorkerServiceActionError("stop", result);
+  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
+}
+function runDarwinWorkerServiceUninstall(paths, exec) {
+  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
+  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
+  const status = runWorkerServiceCommand(statusCommand, exec);
+  const outputs = [status];
+  if (status.status === 0) {
+    const stopped = runWorkerServiceCommand(stopCommand, exec);
+    outputs.push(stopped);
+    if (stopped.status !== 0)
+      throwWorkerServiceActionError("uninstall", stopped);
+  } else if (status.status !== 3 && status.status !== 113 && isManagedRegularFile(paths.unitPath)) {
+    throwWorkerServiceActionError("uninstall", status, "could not determine whether the macOS worker service was loaded");
+  }
+  const removed = removeManagedFile(paths.unitPath, "worker unit");
+  return {
+    ok: true,
+    command: stopCommand,
+    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
+` : `worker unit already absent
+`}`,
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runLinuxWorkerServiceUninstall(paths, exec) {
+  const disableCommand = ["systemctl", "--user", "disable", "--now", "olympus-worker.service"];
+  const reloadCommand = ["systemctl", "--user", "daemon-reload"];
+  const outputs = [];
+  const unitPresent = isManagedRegularFile(paths.unitPath);
+  const status = runWorkerServiceCommand(workerServiceCommand("linux", "status", paths.unitPath), exec);
+  if (unitPresent || classifyWorkerServiceState("linux", status, unitPresent) === "active") {
+    const disabled = runWorkerServiceCommand(disableCommand, exec);
+    outputs.push(disabled);
+    if (disabled.status !== 0)
+      throwWorkerServiceActionError("uninstall", disabled);
+  }
+  const removed = removeManagedFile(paths.unitPath, "worker unit");
+  const reloaded = runWorkerServiceCommand(reloadCommand, exec);
+  outputs.push(reloaded);
+  if (reloaded.status !== 0)
+    throwWorkerServiceActionError("uninstall", reloaded);
+  return {
+    ok: true,
+    command: disableCommand,
+    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
+` : `worker unit already absent
+`}`,
+    stderr: outputs.map((result) => result.stderr).join("")
+  };
+}
+function runWorkerServiceCommand(command, exec) {
+  const [cmd, ...args] = command;
+  return exec(cmd, args);
+}
+function throwWorkerServiceActionError(action, result, detail) {
+  throw new OperationError("config_error", `olympus worker ${action} failed with exit code ${result.status ?? "unknown"}.`, detail ?? (result.stderr.trim() || result.stdout.trim() || undefined));
+}
+function classifyWorkerServiceState(platform2, result, unitPresent) {
+  const output = `${result.stdout}
+${result.stderr}`.trim().toLowerCase();
+  if (platform2 === "linux") {
+    const status = result.stdout.trim().toLowerCase();
+    if (result.status === 0 && status === "active")
+      return "active";
+    if (status === "inactive")
+      return unitPresent ? "inactive" : "missing";
+    if (status === "failed")
+      return "failed";
+    if (!unitPresent && (result.status === 3 || result.status === 4))
+      return "missing";
+    return "unknown";
+  }
+  if (result.status === 0) {
+    if (/\bstate\s*=\s*running\b/.test(output))
+      return "active";
+    const lastExit = output.match(/\blast exit code\s*=\s*(-?\d+)\b/);
+    if (lastExit && Number(lastExit[1]) !== 0)
+      return "failed";
+    return "inactive";
+  }
+  if ((result.status === 3 || result.status === 113) && !unitPresent)
+    return "missing";
+  if (result.status === 3 || result.status === 113)
+    return "inactive";
+  return "unknown";
+}
+function boundedServiceDetail(result) {
+  const text = (result.stderr.trim() || result.stdout.trim() || `exit ${result.status ?? "unknown"}`).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  return text.slice(0, 240);
+}
+function defaultWorkerServiceExec(command, args) {
+  const result = spawnSync3(command, args, { encoding: "utf8" });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? (result.error ? `${command}: ${result.error.message}` : "")
+  };
+}
+function workerServicePaths(platform2, homeDir) {
+  homeDir = validatedAbsolutePath(homeDir, "home directory");
+  if (platform2 === "darwin") {
+    const logDir = join5(homeDir, "Library", "Logs", "Olympus");
     return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
+      label: "com.openclaw.olympus.worker",
+      unitPath: join5(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join5(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join5(logDir, "worker.log"),
+      errorLogPath: join5(logDir, "worker.err")
     };
   }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  db.transaction(() => {
-    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
-      migration.up(db);
-      writeSqliteSchemaVersion(db, storeId, migration.version);
-      applied.push({ version: migration.version, name: migration.name });
-    }
-  })();
+  const stateDir = join5(homeDir, ".local", "state", "olympus", "worker");
   return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
+    label: "olympus-worker",
+    unitPath: join5(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
+    envPath: join5(homeDir, ".config", "olympus", "worker.env"),
+    logPath: join5(stateDir, "worker.log"),
+    errorLogPath: join5(stateDir, "worker.err")
   };
 }
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+function renderLaunchdWorkerUnit(input) {
+  const command = workerServiceExecCommand(input);
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${input.paths.label}</string>
+  <key>WorkingDirectory</key>
+  <string>${escapeXml(workingDirectory)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>${escapeXml(launchdEnvSourcingExec(input.envPath, command))}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>OLYMPUS_MANAGED_WORKER</key><string>1</string></dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(input.paths.logPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(input.paths.errorLogPath)}</string>
+</dict>
+</plist>
+`;
 }
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
+function renderSystemdWorkerUnit(input) {
+  const command = workerServiceExecCommand(input);
+  const workingDirectory = input.workingDirectory ?? process.cwd();
+  return `[Unit]
+Description=Olympus source worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${workingDirectory}
+EnvironmentFile=-${input.envPath}
+Environment=OLYMPUS_MANAGED_WORKER=1
+ExecStart=${command.map(systemdExecArg).join(" ")}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:${input.paths.logPath}
+StandardError=append:${input.paths.errorLogPath}
+
+[Install]
+WantedBy=default.target
+`;
 }
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
+function workerServiceCommand(platform2, action, unitPath) {
+  if (platform2 === "darwin") {
+    const uid = process.getuid?.() ?? 501;
+    const guiTarget = `gui/${uid}`;
+    const target = `${guiTarget}/com.openclaw.olympus.worker`;
+    if (action === "install")
+      return ["launchctl", "bootstrap", guiTarget, unitPath];
+    if (action === "status")
+      return ["launchctl", "print", target];
+    if (action === "start")
+      return ["launchctl", "kickstart", target];
+    if (action === "restart")
+      return ["launchctl", "kickstart", "-k", target];
+    return ["launchctl", "bootout", target];
   }
-  return ordered;
+  if (action === "install")
+    return ["systemctl", "--user", "enable", "--now", "olympus-worker.service"];
+  if (action === "status")
+    return ["systemctl", "--user", "is-active", "olympus-worker.service"];
+  return ["systemctl", "--user", action, "olympus-worker.service"];
 }
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var init_sqlite_migrations = __esm(() => {
+function defaultWorkerEnv(options) {
+  const trimmedAuthToken = options.authToken?.trim();
+  const authToken = isWorkerAuthTokenPlaceholder(trimmedAuthToken) ? undefined : trimmedAuthToken;
+  const bunBin = resolveBunBin(options);
+  return [
+    "# Olympus source worker environment.",
+    `PATH=${defaultWorkerPath(bunBin)}`,
+    `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
+    `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? "true" : "false"}`,
+    "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true",
+    authToken ? `OLYMPUS_WORKER_AUTH_TOKEN=${authToken}` : "# OLYMPUS_WORKER_AUTH_TOKEN=replace-with-generated-token",
+    ""
+  ].join(`
+`);
+}
+function launchdEnvSourcingExec(envPath, command) {
+  const source = `set -a; [ -f ${shellQuote(envPath)} ] && . ${shellQuote(envPath)}; set +a;`;
+  return `${source} exec ${command.map(shellQuote).join(" ")}`;
+}
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+function workerServiceExecCommand(options) {
+  const bunBin = resolveBunBin(options);
+  return [bunBin, defaultOlympusCliJs(options), "__worker-service-run"];
+}
+function nextWorkerEnvAuthToken(text, authToken) {
+  const token = authToken?.trim();
+  if (!token || isWorkerAuthTokenPlaceholder(token))
+    return text;
+  const existing = text.match(/^OLYMPUS_WORKER_AUTH_TOKEN=(.+)$/m)?.[1];
+  if (existing && !isWorkerAuthTokenPlaceholder(existing))
+    return text;
+  return /^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m.test(text) ? text.replace(/^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m, `OLYMPUS_WORKER_AUTH_TOKEN=${token}`) : `${text.replace(/\n?$/, `
+`)}OLYMPUS_WORKER_AUTH_TOKEN=${token}
+`;
+}
+function nextWorkerEnvPath(text, options) {
+  const bunBin = resolveBunBin(options);
+  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
+  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`) : `${text.replace(/\n?$/, `
+`)}PATH=${desiredPath}
+`;
+}
+function reconcileWorkerEnv(envPath, options) {
+  mkdirSync4(dirname5(envPath), { recursive: true });
+  if (!existsSync4(envPath)) {
+    writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
+    return true;
+  }
+  assertManagedRegularFile(envPath, "worker environment");
+  const current = readFileSync5(envPath, "utf8");
+  let next = nextWorkerEnvAuthToken(current, options.authToken);
+  next = nextWorkerEnvPath(next, options);
+  if (!/^OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=/m.test(next)) {
+    next = `${next.replace(/\n?$/, `
+`)}OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
+`;
+  }
+  const mode = statSync3(envPath).mode & 511;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    return true;
+  }
+  if (mode !== 384) {
+    chmodSync(envPath, 384);
+    return true;
+  }
+  return false;
+}
+function writeManagedWorkerEnvSecret(input) {
+  if (!MANAGED_WORKER_ENV_SECRET_KEYS.includes(input.key)) {
+    throw new OperationError("invalid_params", `${input.key} is not a managed worker environment key.`);
+  }
+  const value = input.value.trim();
+  if (!value) {
+    throw new OperationError("invalid_params", `${input.key} must not be empty.`);
+  }
+  if (/\p{Cc}/u.test(value)) {
+    throw new OperationError("invalid_params", `${input.key} must not contain control characters.`);
+  }
+  if (value.includes("'")) {
+    throw new OperationError("invalid_params", `${input.key} value must not contain a single quote.`, "A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.");
+  }
+  const platform2 = normalizePlatform(input.platform ?? osPlatform());
+  const homeDir = validatedAbsolutePath(input.homeDir ?? homedir4(), "home directory");
+  const envPath = input.envPath ?? workerServicePaths(platform2, homeDir).envPath;
+  validateManagedPath(envPath, "worker environment");
+  if (!existsSync4(envPath)) {
+    throw new OperationError("config_error", `No Olympus worker environment exists at ${envPath}.`, "Run olympus setup --preset <preset> --yes first; it creates the worker environment this key is stored in.");
+  }
+  assertManagedRegularFile(envPath, "worker environment");
+  const current = readFileSync5(envPath, "utf8");
+  const assignment = `${input.key}=${shellSingleQuote(value)}`;
+  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
+  const lines = current.split(`
+`);
+  let replaced = false;
+  const kept = [];
+  for (const line of lines) {
+    if (!pattern.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    if (replaced)
+      continue;
+    kept.push(assignment);
+    replaced = true;
+  }
+  const next = replaced ? kept.join(`
+`) : `${current.replace(/\n?$/, `
+`)}${assignment}
+`;
+  let wrote = false;
+  if (next !== current) {
+    writePrivateFileAtomicSync(envPath, next);
+    wrote = true;
+  }
+  if ((statSync3(envPath).mode & 511) !== 384) {
+    chmodSync(envPath, 384);
+    wrote = true;
+  }
+  return { ok: true, path: envPath, key: input.key, wrote };
+}
+function shellSingleQuote(value) {
+  return `'${value}'`;
+}
+function normalizePlatform(value) {
+  if (value === "darwin" || value === "linux")
+    return value;
+  throw new OperationError("invalid_params", "olympus worker install supports macOS launchd and Linux user-systemd.");
+}
+function resolveBunBin(options) {
+  if (options.bunBin)
+    return validateBunBin(validatedAbsolutePath(options.bunBin, "Bun executable"));
+  const runtimePath = process.execPath;
+  if (runtimePath && isAbsolute2(runtimePath) && isBunExecutableName(runtimePath)) {
+    return validateBunBin(runtimePath);
+  }
+  const bunWhich = typeof Bun !== "undefined" ? Bun.which("bun") : null;
+  if (!bunWhich || !isAbsolute2(bunWhich)) {
+    throw new OperationError("config_error", "Could not resolve an absolute Bun executable path for the worker service.");
+  }
+  return validateBunBin(bunWhich);
+}
+function validateBunBin(bunBin) {
+  if (!isBunExecutableName(bunBin)) {
+    throw new OperationError("config_error", `Could not validate the resolved Bun executable path: ${bunBin}`);
+  }
+  try {
+    if (!statSync3(bunBin).isFile()) {
+      throw new OperationError("config_error", `Resolved Bun path is not a file: ${bunBin}`);
+    }
+  } catch (error) {
+    if (error instanceof OperationError)
+      throw error;
+    throw new OperationError("config_error", `Resolved Bun executable does not exist: ${bunBin}`);
+  }
+  return bunBin;
+}
+function isBunExecutableName(path) {
+  const base = basename(path).toLowerCase();
+  return base === "bun" || base === "bun.exe";
+}
+function validatedAbsolutePath(value, label) {
+  const trimmed = value.trim();
+  if (trimmed && isAbsolute2(trimmed) && !/[\0\r\n]/.test(trimmed))
+    return trimmed;
+  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
+}
+function defaultOlympusCliJs(options) {
+  if (options.workingDirectory) {
+    return join5(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
+  }
+  const invoked = process.argv[1]?.trim();
+  if (invoked && !invoked.startsWith("-") && basename(invoked) === "cli.js") {
+    return isAbsolute2(invoked) ? invoked : join5(process.cwd(), invoked);
+  }
+  return join5(process.cwd(), "dist", "cli.js");
+}
+function defaultWorkerPath(bunBin, existingPath) {
+  const entries = [
+    dirname5(bunBin),
+    ...existingPath ? existingPath.split(":") : [],
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ].map((entry) => entry.trim()).filter(Boolean);
+  return Array.from(new Set(entries)).join(":");
+}
+function systemdExecArg(value) {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value))
+    return value;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+}
+function escapeXml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function validateManagedPath(path, label) {
+  validatedAbsolutePath(path, label);
+}
+function pathIsWithin(root, path) {
+  const suffix = relative2(root, path);
+  return suffix === "" || !isAbsolute2(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep2}`);
+}
+function assertManagedParentSafety(homeDir, path, label) {
+  try {
+    assertManagedPathParentsSync(homeDir, path, label);
+  } catch (error) {
+    throw new OperationError("config_error", `Refusing unsafe managed ${label} parent path: ${path}`, error instanceof Error ? error.message : undefined);
+  }
+}
+function managedParentSafetyDetail(homeDir, unitPath, envPath) {
+  try {
+    assertManagedPathParentsSync(homeDir, unitPath, "worker unit");
+    if (pathIsWithin(homeDir, envPath)) {
+      assertManagedPathParentsSync(homeDir, envPath, "worker environment");
+    }
+    return;
+  } catch {
+    return "managed worker path has an unsafe parent directory component";
+  }
+}
+function isManagedRegularFile(path) {
+  try {
+    return lstatSync2(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function assertManagedRegularFile(path, label) {
+  let stats;
+  try {
+    stats = lstatSync2(path);
+  } catch {
+    throw new OperationError("config_error", `Could not inspect the managed ${label} path: ${path}`);
+  }
+  if (!stats.isFile()) {
+    throw new OperationError("config_error", `Refusing a non-regular managed ${label} path: ${path}`);
+  }
+}
+function writeManagedFileAtomicIfChanged(path, text, label) {
+  validateManagedPath(path, label);
+  if (existsSync4(path)) {
+    assertManagedRegularFile(path, label);
+    if (readFileSync5(path, "utf8") === text) {
+      if ((statSync3(path).mode & 511) !== 384) {
+        chmodSync(path, 384);
+        return true;
+      }
+      return false;
+    }
+  }
+  writePrivateFileAtomicSync(path, text);
+  return true;
+}
+function removeManagedFile(path, label) {
+  validateManagedPath(path, label);
+  if (!existsSync4(path))
+    return false;
+  assertManagedRegularFile(path, label);
+  return removeFileDurablySync(path);
+}
+var WORKER_LOG_TAIL_BYTES, WORKER_LOG_LINE_MAX_CHARS = 300, MANAGED_WORKER_ENV_SECRET_KEYS;
+var init_worker_service = __esm(() => {
+  init_atomic_file();
   init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
+  MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"];
 });
 
 // src/core/http-timeout.ts
@@ -3723,7 +2284,7 @@ var init_http_timeout = __esm(() => {
 });
 
 // src/core/oauth-relay.ts
-import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+import { createHmac as createHmac2, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
 function oauthRelayUrl(env = process.env) {
   const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
   if (!override)
@@ -3758,10 +2319,10 @@ function googlePublisherExchangeRefreshUrl(env = process.env) {
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 function createOAuthRelayNonce() {
-  return randomBytes3(32).toString("base64url");
+  return randomBytes2(32).toString("base64url");
 }
 function createOAuthRelayStateKey() {
-  return randomBytes3(32).toString("base64url");
+  return randomBytes2(32).toString("base64url");
 }
 function createOAuthRelayStateKeys() {
   return { current: createOAuthRelayStateKey() };
@@ -3876,7 +2437,7 @@ function verifyOAuthRelayState(state, expectation) {
   };
 }
 function relaySignature(segment, key) {
-  return createHmac("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
+  return createHmac2("sha256", Buffer.from(key, "base64url")).update(segment, "ascii").digest("base64url");
 }
 function constantTimeEquals(left, right) {
   const a = Buffer.from(left, "utf8");
@@ -3926,386 +2487,10 @@ var init_publisher_oauth_client = __esm(() => {
   ];
 });
 
-// src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync6 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { dirname as dirname4, join as join5 } from "node:path";
-function defaultHandleRegistryPath() {
-  return join5(homedir5(), ".config", "olympus", "handles.json");
-}
-function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
-  const path = connectedHandleGrantEpochPath(registryPath);
-  if (!existsSync6(path))
-    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync6(path, "utf8"));
-  } catch {
-    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
-  }
-  const record = parsed;
-  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
-    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
-  }
-  return record.epoch;
-}
-async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
-  try {
-    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
-      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
-      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
-        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
-      }
-      if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID3() }, null, 2)}
-`);
-      }
-      return await mutation();
-    }));
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
-      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
-    }
-    throw error;
-  }
-}
-function assertOneConnectedAccountPerProvider(registry, proposed = []) {
-  const handles = [...registry.handles, ...proposed];
-  const byProvider = new Map;
-  for (const handle of handles) {
-    const ids = byProvider.get(handle.provider) ?? new Set;
-    ids.add(handle.handle);
-    byProvider.set(handle.provider, ids);
-  }
-  if ([...byProvider.values()].some((ids) => ids.size > 1)) {
-    throw new ConnectedHandleAccountCardinalityError;
-  }
-}
-function connectedHandleGrantEpochPath(registryPath) {
-  return `${registryPath}.grant-epoch.json`;
-}
-function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
-  return readConnectedHandleRegistryForWrite(path).registry;
-}
-function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync6(path)) {
-    return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
-  }
-  const parsed = JSON.parse(readFileSync6(path, "utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Olympus handle registry must be a JSON object.");
-  }
-  const record = parsed;
-  if (record.version !== 1 || !Array.isArray(record.handles)) {
-    throw new Error("Olympus handle registry has an unsupported format.");
-  }
-  const handles = [];
-  const dropped = [];
-  const preservedUnknownHandles = [];
-  for (const [index, value] of record.handles.entries()) {
-    const normalized = normalizeConnectedHandle(value);
-    if (normalized.ok) {
-      handles.push(normalized.handle);
-      continue;
-    }
-    const drop = { index, reason: normalized.reason };
-    dropped.push(drop);
-    preservedUnknownHandles.push(value);
-  }
-  warnConnectedHandleDrops(path, dropped);
-  const registry = { version: 1, handles };
-  if (dropped.length > 0)
-    registry.dropped = dropped;
-  return { registry, preservedUnknownHandles };
-}
-function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync4(dirname4(path), { recursive: true });
-  writePrivateFileAtomicSync(path, JSON.stringify({
-    version: 1,
-    handles: [
-      ...preservedUnknownHandles,
-      ...registry.handles.map(redactConnectedHandleForDisk).sort((a, b) => a.handle.localeCompare(b.handle))
-    ]
-  }, null, 2));
-}
-function upsertConnectedHandle(handle, path = defaultHandleRegistryPath()) {
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    const next = registry.handles.filter((candidate) => candidate.handle !== handle.handle);
-    next.push(handle);
-    const updated = {
-      version: 1,
-      handles: next,
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    };
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns(updated, path, preservedUnknownHandles));
-    return updated;
-  });
-}
-function removeConnectedHandles(handleIds, path = defaultHandleRegistryPath()) {
-  const selected = new Set(handleIds);
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    const removed = registry.handles.filter((handle) => selected.has(handle.handle));
-    if (removed.length === 0)
-      return { registry, removed: [] };
-    const updated = {
-      version: 1,
-      handles: registry.handles.filter((handle) => !selected.has(handle.handle)),
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    };
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns(updated, path, preservedUnknownHandles));
-    return { registry: updated, removed };
-  });
-}
-function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync6(path))
-    return false;
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    let changed = false;
-    const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId)
-        return handle;
-      changed = true;
-      return {
-        ...handle,
-        backendState: {
-          kind: handle.backendState?.kind ?? "oauth2_refresh",
-          ...handle.backendState,
-          status: "reauth_required",
-          updatedAt: now.toISOString()
-        }
-      };
-    });
-    if (!changed)
-      return false;
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
-      version: 1,
-      handles,
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    }, path, preservedUnknownHandles));
-    return true;
-  });
-}
-function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync6(path))
-    return false;
-  return withFileLeaseSync(path, (lease) => {
-    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
-    let changed = false;
-    const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId || !handle.oauth2Refresh)
-        return handle;
-      if (handle.oauth2Refresh.exchangeVia === exchangeVia)
-        return handle;
-      changed = true;
-      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
-    });
-    if (!changed)
-      return false;
-    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
-      version: 1,
-      handles,
-      ...registry.dropped ? { dropped: registry.dropped } : {}
-    }, path, preservedUnknownHandles));
-    return true;
-  });
-}
-function deriveEnvCredentialHandlesFromRegistry(registry) {
-  return registry.handles.map((handle) => {
-    const definition = {
-      handle: handle.handle,
-      provider: handle.provider,
-      allowedCapabilities: [...handle.allowedCapabilities],
-      scopes: [...handle.scopes],
-      tokenEnvNames: [],
-      expiresInSeconds: 3600
-    };
-    if (handle.sessionKind)
-      definition.sessionKind = handle.sessionKind;
-    if (handle.accountRole)
-      definition.accountRole = handle.accountRole;
-    if (handle.trustDomain)
-      definition.trustDomain = handle.trustDomain;
-    if (handle.tokenSecretRefs)
-      definition.tokenSecretRefs = [...handle.tokenSecretRefs];
-    if (handle.oauth2Refresh) {
-      definition.oauth2Refresh = {
-        tokenUrl: handle.oauth2Refresh.tokenUrl,
-        clientIdEnvNames: [],
-        clientSecretEnvNames: [],
-        refreshTokenEnvNames: [],
-        clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
-        ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
-        refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
-        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
-        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
-      };
-    }
-    if (handle.backendState) {
-      definition.backendState = handle.backendState;
-    }
-    return definition;
-  });
-}
-function handleRegistryPathFromEnv(env, useDefault) {
-  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
-  if (configured)
-    return configured;
-  return useDefault ? defaultHandleRegistryPath() : undefined;
-}
-function normalizeConnectedHandle(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return { ok: false, reason: "entry_not_object" };
-  const record = value;
-  const handle = optionalSafeLabel(record.handle);
-  const providerLabel = optionalSafeLabel(record.provider);
-  const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
-  if (!handle)
-    return { ok: false, reason: "invalid_handle" };
-  if (!providerLabel)
-    return { ok: false, reason: "invalid_provider" };
-  if (!isCredentialProvider(providerLabel))
-    return { ok: false, reason: "unknown_provider" };
-  const provider = providerLabel;
-  if (!connectedAt)
-    return { ok: false, reason: "invalid_connected_at" };
-  const allowedCapabilities = stringArray(record.allowedCapabilities);
-  const scopes = stringArray(record.scopes);
-  if (allowedCapabilities.length === 0)
-    return { ok: false, reason: "missing_allowed_capabilities" };
-  const tokenSecretRefsResult = normalizeTokenSecretRefs(record.tokenSecretRefs);
-  if (!tokenSecretRefsResult.ok)
-    return { ok: false, reason: tokenSecretRefsResult.reason };
-  const oauth2Result = normalizeOAuth2(record.oauth2Refresh);
-  if (!oauth2Result.ok)
-    return { ok: false, reason: oauth2Result.reason };
-  const normalized = {
-    handle,
-    provider,
-    allowedCapabilities,
-    scopes,
-    connectedAt,
-    ...optionalLabelObject(record, "sessionKind"),
-    ...optionalLabelObject(record, "accountRole"),
-    ...optionalLabelObject(record, "trustDomain"),
-    ...optionalLabelObject(record, "providerAccountId")
-  };
-  const tokenSecretRefs = tokenSecretRefsResult.tokenSecretRefs;
-  if (tokenSecretRefs.length > 0)
-    normalized.tokenSecretRefs = tokenSecretRefs;
-  const oauth2 = oauth2Result.oauth2Refresh;
-  if (oauth2)
-    normalized.oauth2Refresh = oauth2;
-  if (record.backendState && typeof record.backendState === "object" && !Array.isArray(record.backendState)) {
-    normalized.backendState = record.backendState;
-  }
-  return { ok: true, handle: normalized };
-}
-function normalizeTokenSecretRefs(value) {
-  if (value === undefined)
-    return { ok: true, tokenSecretRefs: [] };
-  if (!Array.isArray(value))
-    return { ok: false, reason: "invalid_token_secret_refs" };
-  const tokenSecretRefs = stringArray(value);
-  if (tokenSecretRefs.length !== value.length || tokenSecretRefs.some((ref) => !isStoreRef(ref))) {
-    return { ok: false, reason: "invalid_token_secret_refs" };
-  }
-  return { ok: true, tokenSecretRefs };
-}
-function normalizeOAuth2(value) {
-  if (value === undefined)
-    return { ok: true };
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return { ok: false, reason: "invalid_oauth2_refresh" };
-  const record = value;
-  const tokenUrl = typeof record.tokenUrl === "string" && /^https?:\/\//.test(record.tokenUrl) ? record.tokenUrl : undefined;
-  const clientIdSecretRef = typeof record.clientIdSecretRef === "string" && isStoreRef(record.clientIdSecretRef) ? record.clientIdSecretRef : undefined;
-  const refreshTokenSecretRef = typeof record.refreshTokenSecretRef === "string" && isStoreRef(record.refreshTokenSecretRef) ? record.refreshTokenSecretRef : undefined;
-  if (!tokenUrl || !clientIdSecretRef || !refreshTokenSecretRef) {
-    return { ok: false, reason: "invalid_oauth2_refresh" };
-  }
-  const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
-  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
-  return {
-    ok: true,
-    oauth2Refresh: {
-      tokenUrl,
-      clientIdSecretRef,
-      ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
-      refreshTokenSecretRef,
-      scopes: stringArray(record.scopes),
-      ...exchangeVia ? { exchangeVia } : {}
-    }
-  };
-}
-function warnConnectedHandleDrops(path, dropped) {
-  for (const drop of dropped) {
-    console.warn(`Ignoring malformed Olympus connected handle registry entry at ${path}#handles[${drop.index}]: ${drop.reason}`);
-  }
-}
-function redactConnectedHandleForDisk(handle) {
-  return {
-    ...handle,
-    scopes: [...handle.scopes],
-    allowedCapabilities: [...handle.allowedCapabilities],
-    ...handle.tokenSecretRefs ? { tokenSecretRefs: [...handle.tokenSecretRefs] } : {},
-    ...handle.oauth2Refresh ? {
-      oauth2Refresh: {
-        ...handle.oauth2Refresh,
-        scopes: [...handle.oauth2Refresh.scopes ?? []]
-      }
-    } : {}
-  };
-}
-function optionalLabelObject(record, key) {
-  const value = optionalSafeLabel(record[key]);
-  return value ? { [key]: value } : {};
-}
-function optionalSafeLabel(value) {
-  if (typeof value !== "string")
-    return;
-  const trimmed = value.trim();
-  return /^[a-zA-Z0-9._:-]{1,160}$/.test(trimmed) ? trimmed : undefined;
-}
-function stringArray(value) {
-  if (!Array.isArray(value))
-    return [];
-  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
-}
-function isStoreRef(value) {
-  if (!value.startsWith("store:"))
-    return false;
-  return isSafeSecretKey(value.slice("store:".length));
-}
-var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError, ConnectedHandleAccountCardinalityError;
-var init_connected_handles = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_secret_store();
-  init_credential_broker();
-  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
-    code;
-    retryable = true;
-    constructor(code, message) {
-      super(message);
-      this.code = code;
-    }
-  };
-  ConnectedHandleAccountCardinalityError = class ConnectedHandleAccountCardinalityError extends Error {
-    code = "credential_account_cardinality";
-    constructor() {
-      super("Olympus v0.4 supports one connected account per provider. Disconnect the existing account first.");
-    }
-  };
-});
-
 // src/workers/credential-broker/index.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname5 } from "node:path";
+import { dirname as dirname6 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -4330,7 +2515,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash2("sha256").update(handle).digest("hex");
+    const digest = createHash("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -4357,7 +2542,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname5(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -4369,7 +2554,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname5(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -5645,6 +3830,4922 @@ var init_credential_broker = __esm(() => {
   REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the refresh token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 });
 
+// src/workers/credential-broker/connected-handles.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname7, join as join6 } from "node:path";
+function defaultHandleRegistryPath() {
+  return join6(homedir5(), ".config", "olympus", "handles.json");
+}
+function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
+  const path = connectedHandleGrantEpochPath(registryPath);
+  if (!existsSync5(path))
+    return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync6(path, "utf8"));
+  } catch {
+    throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
+  }
+  const record = parsed;
+  if (!record || typeof record !== "object" || Array.isArray(record) || record.version !== 1 || typeof record.epoch !== "string" || !/^[a-f0-9-]{36}$/.test(record.epoch)) {
+    throw new Error("Olympus credential-grant generation has an unsupported format. Refusing connection changes.");
+  }
+  return record.epoch;
+}
+async function withConnectedHandleGrantCustody(registryPath, options, mutation) {
+  try {
+    return await withFileLease(`${registryPath}.grant-custody`, (lease) => lease.commit(async () => {
+      const currentEpoch = readConnectedHandleGrantEpoch(registryPath);
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== currentEpoch) {
+        throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
+      }
+      if (options.advanceEpoch === true) {
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID3() }, null, 2)}
+`);
+      }
+      return await mutation();
+    }));
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError || error instanceof FileLeaseLostError) {
+      throw new ConnectedHandleGrantMutationError("credential_grant_busy", "Another connection change is in progress. Retry shortly.");
+    }
+    throw error;
+  }
+}
+function assertOneConnectedAccountPerProvider(registry, proposed = []) {
+  const handles = [...registry.handles, ...proposed];
+  const byProvider = new Map;
+  for (const handle of handles) {
+    const ids = byProvider.get(handle.provider) ?? new Set;
+    ids.add(handle.handle);
+    byProvider.set(handle.provider, ids);
+  }
+  if ([...byProvider.values()].some((ids) => ids.size > 1)) {
+    throw new ConnectedHandleAccountCardinalityError;
+  }
+}
+function connectedHandleGrantEpochPath(registryPath) {
+  return `${registryPath}.grant-epoch.json`;
+}
+function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
+  return readConnectedHandleRegistryForWrite(path).registry;
+}
+function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
+  if (!existsSync5(path)) {
+    return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
+  }
+  const parsed = JSON.parse(readFileSync6(path, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Olympus handle registry must be a JSON object.");
+  }
+  const record = parsed;
+  if (record.version !== 1 || !Array.isArray(record.handles)) {
+    throw new Error("Olympus handle registry has an unsupported format.");
+  }
+  const handles = [];
+  const dropped = [];
+  const preservedUnknownHandles = [];
+  for (const [index, value] of record.handles.entries()) {
+    const normalized = normalizeConnectedHandle(value);
+    if (normalized.ok) {
+      handles.push(normalized.handle);
+      continue;
+    }
+    const drop = { index, reason: normalized.reason };
+    dropped.push(drop);
+    preservedUnknownHandles.push(value);
+  }
+  warnConnectedHandleDrops(path, dropped);
+  const registry = { version: 1, handles };
+  if (dropped.length > 0)
+    registry.dropped = dropped;
+  return { registry, preservedUnknownHandles };
+}
+function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
+  mkdirSync5(dirname7(path), { recursive: true });
+  writePrivateFileAtomicSync(path, JSON.stringify({
+    version: 1,
+    handles: [
+      ...preservedUnknownHandles,
+      ...registry.handles.map(redactConnectedHandleForDisk).sort((a, b) => a.handle.localeCompare(b.handle))
+    ]
+  }, null, 2));
+}
+function upsertConnectedHandle(handle, path = defaultHandleRegistryPath()) {
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    const next = registry.handles.filter((candidate) => candidate.handle !== handle.handle);
+    next.push(handle);
+    const updated = {
+      version: 1,
+      handles: next,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    };
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns(updated, path, preservedUnknownHandles));
+    return updated;
+  });
+}
+function removeConnectedHandles(handleIds, path = defaultHandleRegistryPath()) {
+  const selected = new Set(handleIds);
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    const removed = registry.handles.filter((handle) => selected.has(handle.handle));
+    if (removed.length === 0)
+      return { registry, removed: [] };
+    const updated = {
+      version: 1,
+      handles: registry.handles.filter((handle) => !selected.has(handle.handle)),
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    };
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns(updated, path, preservedUnknownHandles));
+    return { registry: updated, removed };
+  });
+}
+function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
+  if (!existsSync5(path))
+    return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId)
+        return handle;
+      changed = true;
+      return {
+        ...handle,
+        backendState: {
+          kind: handle.backendState?.kind ?? "oauth2_refresh",
+          ...handle.backendState,
+          status: "reauth_required",
+          updatedAt: now.toISOString()
+        }
+      };
+    });
+    if (!changed)
+      return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
+  if (!existsSync5(path))
+    return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId || !handle.oauth2Refresh)
+        return handle;
+      if (handle.oauth2Refresh.exchangeVia === exchangeVia)
+        return handle;
+      changed = true;
+      return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };
+    });
+    if (!changed)
+      return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...registry.dropped ? { dropped: registry.dropped } : {}
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+function deriveEnvCredentialHandlesFromRegistry(registry) {
+  return registry.handles.map((handle) => {
+    const definition = {
+      handle: handle.handle,
+      provider: handle.provider,
+      allowedCapabilities: [...handle.allowedCapabilities],
+      scopes: [...handle.scopes],
+      tokenEnvNames: [],
+      expiresInSeconds: 3600
+    };
+    if (handle.sessionKind)
+      definition.sessionKind = handle.sessionKind;
+    if (handle.accountRole)
+      definition.accountRole = handle.accountRole;
+    if (handle.trustDomain)
+      definition.trustDomain = handle.trustDomain;
+    if (handle.tokenSecretRefs)
+      definition.tokenSecretRefs = [...handle.tokenSecretRefs];
+    if (handle.oauth2Refresh) {
+      definition.oauth2Refresh = {
+        tokenUrl: handle.oauth2Refresh.tokenUrl,
+        clientIdEnvNames: [],
+        clientSecretEnvNames: [],
+        refreshTokenEnvNames: [],
+        clientIdSecretRef: handle.oauth2Refresh.clientIdSecretRef,
+        ...handle.oauth2Refresh.clientSecretSecretRef ? { clientSecretSecretRef: handle.oauth2Refresh.clientSecretSecretRef } : {},
+        refreshTokenSecretRef: handle.oauth2Refresh.refreshTokenSecretRef,
+        scopes: [...handle.oauth2Refresh.scopes ?? handle.scopes],
+        ...handle.oauth2Refresh.exchangeVia ? { exchangeVia: handle.oauth2Refresh.exchangeVia } : {}
+      };
+    }
+    if (handle.backendState) {
+      definition.backendState = handle.backendState;
+    }
+    return definition;
+  });
+}
+function handleRegistryPathFromEnv(env, useDefault) {
+  const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
+  if (configured)
+    return configured;
+  return useDefault ? defaultHandleRegistryPath() : undefined;
+}
+function normalizeConnectedHandle(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return { ok: false, reason: "entry_not_object" };
+  const record = value;
+  const handle = optionalSafeLabel(record.handle);
+  const providerLabel = optionalSafeLabel(record.provider);
+  const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
+  if (!handle)
+    return { ok: false, reason: "invalid_handle" };
+  if (!providerLabel)
+    return { ok: false, reason: "invalid_provider" };
+  if (!isCredentialProvider(providerLabel))
+    return { ok: false, reason: "unknown_provider" };
+  const provider = providerLabel;
+  if (!connectedAt)
+    return { ok: false, reason: "invalid_connected_at" };
+  const allowedCapabilities = stringArray(record.allowedCapabilities);
+  const scopes = stringArray(record.scopes);
+  if (allowedCapabilities.length === 0)
+    return { ok: false, reason: "missing_allowed_capabilities" };
+  const tokenSecretRefsResult = normalizeTokenSecretRefs(record.tokenSecretRefs);
+  if (!tokenSecretRefsResult.ok)
+    return { ok: false, reason: tokenSecretRefsResult.reason };
+  const oauth2Result = normalizeOAuth2(record.oauth2Refresh);
+  if (!oauth2Result.ok)
+    return { ok: false, reason: oauth2Result.reason };
+  const normalized = {
+    handle,
+    provider,
+    allowedCapabilities,
+    scopes,
+    connectedAt,
+    ...optionalLabelObject(record, "sessionKind"),
+    ...optionalLabelObject(record, "accountRole"),
+    ...optionalLabelObject(record, "trustDomain"),
+    ...optionalLabelObject(record, "providerAccountId")
+  };
+  const tokenSecretRefs = tokenSecretRefsResult.tokenSecretRefs;
+  if (tokenSecretRefs.length > 0)
+    normalized.tokenSecretRefs = tokenSecretRefs;
+  const oauth2 = oauth2Result.oauth2Refresh;
+  if (oauth2)
+    normalized.oauth2Refresh = oauth2;
+  if (record.backendState && typeof record.backendState === "object" && !Array.isArray(record.backendState)) {
+    normalized.backendState = record.backendState;
+  }
+  return { ok: true, handle: normalized };
+}
+function normalizeTokenSecretRefs(value) {
+  if (value === undefined)
+    return { ok: true, tokenSecretRefs: [] };
+  if (!Array.isArray(value))
+    return { ok: false, reason: "invalid_token_secret_refs" };
+  const tokenSecretRefs = stringArray(value);
+  if (tokenSecretRefs.length !== value.length || tokenSecretRefs.some((ref) => !isStoreRef(ref))) {
+    return { ok: false, reason: "invalid_token_secret_refs" };
+  }
+  return { ok: true, tokenSecretRefs };
+}
+function normalizeOAuth2(value) {
+  if (value === undefined)
+    return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return { ok: false, reason: "invalid_oauth2_refresh" };
+  const record = value;
+  const tokenUrl = typeof record.tokenUrl === "string" && /^https?:\/\//.test(record.tokenUrl) ? record.tokenUrl : undefined;
+  const clientIdSecretRef = typeof record.clientIdSecretRef === "string" && isStoreRef(record.clientIdSecretRef) ? record.clientIdSecretRef : undefined;
+  const refreshTokenSecretRef = typeof record.refreshTokenSecretRef === "string" && isStoreRef(record.refreshTokenSecretRef) ? record.refreshTokenSecretRef : undefined;
+  if (!tokenUrl || !clientIdSecretRef || !refreshTokenSecretRef) {
+    return { ok: false, reason: "invalid_oauth2_refresh" };
+  }
+  const clientSecretSecretRef = typeof record.clientSecretSecretRef === "string" && isStoreRef(record.clientSecretSecretRef) ? record.clientSecretSecretRef : undefined;
+  const exchangeVia = record.exchangeVia === "publisher_endpoint" ? "publisher_endpoint" : undefined;
+  return {
+    ok: true,
+    oauth2Refresh: {
+      tokenUrl,
+      clientIdSecretRef,
+      ...clientSecretSecretRef ? { clientSecretSecretRef } : {},
+      refreshTokenSecretRef,
+      scopes: stringArray(record.scopes),
+      ...exchangeVia ? { exchangeVia } : {}
+    }
+  };
+}
+function warnConnectedHandleDrops(path, dropped) {
+  for (const drop of dropped) {
+    console.warn(`Ignoring malformed Olympus connected handle registry entry at ${path}#handles[${drop.index}]: ${drop.reason}`);
+  }
+}
+function redactConnectedHandleForDisk(handle) {
+  return {
+    ...handle,
+    scopes: [...handle.scopes],
+    allowedCapabilities: [...handle.allowedCapabilities],
+    ...handle.tokenSecretRefs ? { tokenSecretRefs: [...handle.tokenSecretRefs] } : {},
+    ...handle.oauth2Refresh ? {
+      oauth2Refresh: {
+        ...handle.oauth2Refresh,
+        scopes: [...handle.oauth2Refresh.scopes ?? []]
+      }
+    } : {}
+  };
+}
+function optionalLabelObject(record, key) {
+  const value = optionalSafeLabel(record[key]);
+  return value ? { [key]: value } : {};
+}
+function optionalSafeLabel(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return /^[a-zA-Z0-9._:-]{1,160}$/.test(trimmed) ? trimmed : undefined;
+}
+function stringArray(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
+}
+function isStoreRef(value) {
+  if (!value.startsWith("store:"))
+    return false;
+  return isSafeSecretKey(value.slice("store:".length));
+}
+var INITIAL_CONNECTED_HANDLE_GRANT_EPOCH = "initial", ConnectedHandleGrantMutationError, ConnectedHandleAccountCardinalityError;
+var init_connected_handles = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_secret_store();
+  init_credential_broker();
+  ConnectedHandleGrantMutationError = class ConnectedHandleGrantMutationError extends Error {
+    code;
+    retryable = true;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
+  ConnectedHandleAccountCardinalityError = class ConnectedHandleAccountCardinalityError extends Error {
+    code = "credential_account_cardinality";
+    constructor() {
+      super("Olympus v0.4 supports one connected account per provider. Disconnect the existing account first.");
+    }
+  };
+});
+
+// src/workers/credential-broker/unpaired-sources.ts
+import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync3, openSync as openSync5, readFileSync as readFileSync7 } from "node:fs";
+function unpairedSourcesPath(registryPath) {
+  return `${registryPath}.unpaired`;
+}
+function inspectRecordNode(path) {
+  let stat2;
+  try {
+    stat2 = lstatSync3(path);
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR")
+      return { kind: "missing" };
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  }
+  if (stat2.isSymbolicLink())
+    return { kind: "unreadable", reason: "record path is a symbolic link" };
+  if (!stat2.isFile())
+    return { kind: "unreadable", reason: "record path is not a regular file" };
+  return { kind: "file", stat: stat2 };
+}
+function readRecordText(path) {
+  const node = inspectRecordNode(path);
+  if (node.kind !== "file")
+    return node;
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  let fd;
+  try {
+    fd = openSync5(path, flags);
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR")
+      return { kind: "missing" };
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  }
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
+      return { kind: "unreadable", reason: "record path changed between inspection and opening" };
+    }
+    return { kind: "ok", text: readFileSync7(fd, "utf8") };
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  } finally {
+    try {
+      closeSync5(fd);
+    } catch {}
+  }
+}
+function assertUnpairedRecordWritable(registryPath) {
+  const path = unpairedSourcesPath(registryPath);
+  const node = inspectRecordNode(path);
+  if (node.kind === "missing" || node.kind === "file")
+    return;
+  throw new Error(`Unpaired-source record path cannot be written (${node.reason}): ${path}`);
+}
+function readUnpairedSources(registryPath) {
+  const path = unpairedSourcesPath(registryPath);
+  const read = readRecordText(path);
+  if (read.kind === "missing")
+    return { status: "missing" };
+  if (read.kind === "unreadable")
+    return { status: "unreadable", path, reason: read.reason };
+  let parsed;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch (error) {
+    return { status: "unreadable", path, reason: error.message };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "unreadable", path, reason: "record must be a JSON object" };
+  }
+  const record = parsed;
+  if (record.version !== 1) {
+    return { status: "unreadable", path, reason: `unsupported record version: ${String(record.version)}` };
+  }
+  if (!Array.isArray(record.sources)) {
+    return { status: "unreadable", path, reason: "record.sources must be an array" };
+  }
+  const records = new Map;
+  for (const [index, entry] of record.sources.entries()) {
+    const normalized = normalizeRecord(entry);
+    if (normalized === "invalid") {
+      return { status: "unreadable", path, reason: `record.sources[${index}] is not a recognized entry` };
+    }
+    records.set(normalized.source_id, normalized);
+  }
+  return {
+    status: "ok",
+    records: [...records.values()].sort((a, b) => a.source_id.localeCompare(b.source_id))
+  };
+}
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim() !== "");
+}
+function normalizeRecord(entry) {
+  if (typeof entry === "string") {
+    return entry.trim() === "" ? "invalid" : { source_id: entry.trim(), state: "unpaired" };
+  }
+  if (!entry || typeof entry !== "object" || Array.isArray(entry))
+    return "invalid";
+  const value = entry;
+  for (const key of Object.keys(value))
+    if (!UNPAIRED_RECORD_KEYS.has(key))
+      return "invalid";
+  if (typeof value.source_id !== "string" || value.source_id.trim() === "")
+    return "invalid";
+  if (value.state !== undefined && (typeof value.state !== "string" || !UNPAIRED_RECORD_STATES.has(value.state))) {
+    return "invalid";
+  }
+  if (value.unremoved_paths !== undefined && !isStringArray(value.unremoved_paths))
+    return "invalid";
+  if (value.failed_steps !== undefined && !isStringArray(value.failed_steps))
+    return "invalid";
+  const paths = value.unremoved_paths ?? [];
+  const steps = value.failed_steps ?? [];
+  return {
+    source_id: value.source_id.trim(),
+    state: value.state ?? "unpaired",
+    ...paths.length > 0 ? { unremoved_paths: [...new Set(paths)].sort() } : {},
+    ...steps.length > 0 ? { failed_steps: [...new Set(steps)].sort() } : {}
+  };
+}
+function writeUnpairedSources(records, registryPath) {
+  const sources = [...records].sort((a, b) => a.source_id.localeCompare(b.source_id)).map((record) => ({
+    source_id: record.source_id,
+    state: record.state,
+    ...record.unremoved_paths?.length ? { unremoved_paths: [...record.unremoved_paths].sort() } : {},
+    ...record.failed_steps?.length ? { failed_steps: [...record.failed_steps].sort() } : {}
+  }));
+  writePrivateFileAtomicSync(unpairedSourcesPath(registryPath), `${JSON.stringify({ version: 1, sources }, null, 2)}
+`);
+}
+function recordUnpairedSources(updates, registryPath) {
+  const existing = readUnpairedSources(registryPath);
+  if (existing.status === "unreadable") {
+    throw new UnpairedSourcesUnreadableError(existing.path, existing.reason);
+  }
+  const merged = new Map((existing.status === "ok" ? existing.records : []).map((record) => [record.source_id, record]));
+  for (const update of updates) {
+    merged.set(update.source_id, mergeUnpairedSourceUpdate(merged.get(update.source_id), update));
+  }
+  const next = [...merged.values()];
+  writeUnpairedSources(next, registryPath);
+  return next;
+}
+function mergeUnpairedSourceUpdate(existing, update) {
+  const dischargedPaths = new Set(update.discharged?.paths ?? []);
+  const dischargedSteps = new Set(update.discharged?.steps ?? []);
+  const paths = [...new Set([
+    ...existing?.unremoved_paths ?? [],
+    ...update.unremoved_paths ?? []
+  ])].filter((path) => !dischargedPaths.has(path)).sort();
+  const steps = [...new Set([
+    ...existing?.failed_steps ?? [],
+    ...update.failed_steps ?? []
+  ])].filter((step) => !dischargedSteps.has(step)).sort();
+  const outstanding = paths.length > 0 || steps.length > 0;
+  const state = !outstanding ? "unpaired" : update.state === "unpaired" ? "unpair_incomplete" : update.state;
+  return {
+    source_id: update.source_id,
+    state,
+    ...paths.length > 0 ? { unremoved_paths: paths } : {},
+    ...steps.length > 0 ? { failed_steps: steps } : {}
+  };
+}
+function clearUnpairedSource(sourceId, registryPath) {
+  const current = readUnpairedSources(registryPath);
+  if (current.status === "unreadable") {
+    throw new UnpairedSourcesUnreadableError(current.path, current.reason);
+  }
+  if (current.status === "missing")
+    return;
+  if (!current.records.some((record) => record.source_id === sourceId))
+    return;
+  writeUnpairedSources(current.records.filter((record) => record.source_id !== sourceId), registryPath);
+}
+function artifactPresence(path) {
+  try {
+    lstatSync3(path);
+    return "present";
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    return code === "ENOENT" || code === "ENOTDIR" ? "gone" : "unknown";
+  }
+}
+function reconcileUnpairedSource(record, presence = artifactPresence) {
+  if (record.state === "unpaired")
+    return record;
+  const outstanding = (record.unremoved_paths ?? []).filter((path) => presence(path) !== "gone");
+  const failedSteps = record.failed_steps ?? [];
+  if (outstanding.length === 0 && failedSteps.length === 0) {
+    return { source_id: record.source_id, state: "unpaired" };
+  }
+  return {
+    source_id: record.source_id,
+    state: "unpair_incomplete",
+    ...outstanding.length > 0 ? { unremoved_paths: outstanding.sort() } : {},
+    ...failedSteps.length > 0 ? { failed_steps: [...failedSteps].sort() } : {}
+  };
+}
+function readReconciledUnpairedSources(registryPath, presence = artifactPresence) {
+  const read = readUnpairedSources(registryPath);
+  if (read.status !== "ok")
+    return read;
+  return {
+    status: "ok",
+    records: read.records.map((record) => reconcileUnpairedSource(record, presence))
+  };
+}
+function assertUnpairedSourcesReadable(registryPath) {
+  const read = readUnpairedSources(registryPath);
+  if (read.status === "unreadable")
+    throw new UnpairedSourcesUnreadableError(read.path, read.reason);
+}
+function unpairedLaneProviders(registryPath) {
+  const read = readUnpairedSources(registryPath);
+  if (read.status === "missing")
+    return new Set;
+  if (read.status === "unreadable")
+    return new Set(Object.values(UNPAIRED_SOURCE_PROVIDERS));
+  const providers = new Set;
+  for (const record of read.records) {
+    const provider = UNPAIRED_SOURCE_PROVIDERS[record.source_id];
+    if (provider)
+      providers.add(provider);
+  }
+  return providers;
+}
+function withoutUnpairedLaneHandles(handles, registryPath) {
+  const unpaired = unpairedLaneProviders(registryPath);
+  if (unpaired.size === 0)
+    return [...handles];
+  return handles.filter((handle) => !unpaired.has(handle.provider));
+}
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES, UnpairedSourcesUnreadableError, UNPAIRED_SOURCE_PROVIDERS;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+  UnpairedSourcesUnreadableError = class UnpairedSourcesUnreadableError extends Error {
+    path;
+    constructor(path, reason) {
+      super(`Olympus unpaired-source record is unreadable (${reason}): ${path}`);
+      this.path = path;
+    }
+  };
+  UNPAIRED_SOURCE_PROVIDERS = {
+    "telegram.messages": "telegram",
+    "whatsapp.personal.messages": "whatsapp_personal"
+  };
+});
+
+// src/core/connect.ts
+import { Buffer as Buffer2 } from "node:buffer";
+import { spawn } from "node:child_process";
+import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { createServer } from "node:http";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname8, join as join7 } from "node:path";
+import { stdin as processStdin } from "node:process";
+async function connectOAuthSource(options) {
+  const pending = await startOAuthSourceConnection(options);
+  return pending.completion;
+}
+async function connectOAuthSourceDetached(options) {
+  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
+  const grantEpoch = options.grantEpoch ?? readConnectedHandleGrantEpoch(registryPath);
+  const accountRole = safeAccountRole(options.accountRole ?? "personal");
+  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
+  const startedAtDate = options.now?.() ?? new Date;
+  const startedAt = startedAtDate.toISOString();
+  const expiresAt = new Date(startedAtDate.getTime() + authorizationTimeoutMs).toISOString();
+  const stateDir = options.stateDir ?? defaultDetachedOAuthStateDir();
+  const logDir = options.logDir ?? defaultDetachedOAuthLogDir();
+  mkdirSync6(stateDir, { recursive: true, mode: 448 });
+  mkdirSync6(logDir, { recursive: true, mode: 448 });
+  const statePath = detachedOAuthStatePath({ stateDir, source: options.source, accountRole });
+  cleanupTerminalDetachedOAuthState(statePath);
+  const logPath = join7(logDir, `${options.source}.${accountRole}.${startedAt.replaceAll(/[:.]/g, "-")}.log`);
+  const requestPath = `${statePath}.request.${process.pid}.${Date.now()}.json`;
+  writePrivateJson(requestPath, {
+    source: options.source,
+    clientId: options.clientId,
+    ...options.clientSecret ? { clientSecret: options.clientSecret } : {},
+    ...options.accountRole ? { accountRole: options.accountRole } : {},
+    ...options.authUrl ? { authUrl: options.authUrl } : {},
+    ...options.tokenUrl ? { tokenUrl: options.tokenUrl } : {},
+    ...options.redirectPort !== undefined ? { redirectPort: options.redirectPort } : {},
+    ...options.openBrowser !== undefined ? { openBrowser: options.openBrowser } : {},
+    registryPath,
+    grantEpoch,
+    ...options.secretStoreBackend ? { secretStoreBackend: options.secretStoreBackend } : {},
+    ...options.secretStorePath ? { secretStorePath: options.secretStorePath } : {},
+    ...options.secretStoreKeyPath ? { secretStoreKeyPath: options.secretStoreKeyPath } : {},
+    authorizationTimeoutMs,
+    ...options.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: options.tokenExchangeTimeoutMs } : {},
+    statePath,
+    logPath
+  });
+  const argv = options.childArgv ?? [process.execPath, process.argv[1] ?? "src/cli.ts"];
+  const child = Bun.spawn({
+    cmd: [...argv, "__oauth-detached-child", requestPath],
+    cwd: options.childCwd ?? process.cwd(),
+    stdin: "ignore",
+    stdout: Bun.file(logPath),
+    stderr: Bun.file(logPath),
+    detached: true,
+    env: { ...process.env, OLYMPUS_OAUTH_DETACHED_CHILD: "1" }
+  });
+  child.unref();
+  const pending = await waitForDetachedPendingState({
+    statePath,
+    source: options.source,
+    accountRole,
+    pid: child.pid,
+    logPath,
+    timeoutMs: options.parentWaitMs ?? DETACHED_PARENT_WAIT_MS
+  });
+  if (pending.status !== "pending" || !pending.authorizationUrl || !pending.port || !pending.pid) {
+    rmSync2(requestPath, { force: true });
+    throw new Error(`Detached OAuth child for ${pending.source}/${pending.accountRole} did not publish a pending authorization URL. See log: ${logPath}`);
+  }
+  return {
+    ok: true,
+    source: pending.source,
+    accountRole: pending.accountRole,
+    status: pending.status,
+    authorizationUrl: pending.authorizationUrl,
+    port: pending.port,
+    pid: pending.pid,
+    statePath,
+    logPath,
+    startedAt: pending.startedAt,
+    expiresAt: pending.expiresAt
+  };
+}
+async function runDetachedOAuthChildFromRequestFile(requestPath) {
+  const request = readDetachedOAuthRequestFile(requestPath);
+  rmSync2(requestPath, { force: true });
+  const secretStore = createDefaultSecretStore({
+    env: {
+      ...process.env,
+      ...request.secretStoreBackend ? { OLYMPUS_SECRET_STORE_BACKEND: request.secretStoreBackend } : {}
+    },
+    paths: {
+      ...request.secretStorePath ? { encryptedFilePath: request.secretStorePath } : {},
+      ...request.secretStoreKeyPath ? { keyFilePath: request.secretStoreKeyPath } : {}
+    }
+  });
+  await runDetachedOAuthLifecycle({
+    source: request.source,
+    clientId: request.clientId,
+    ...request.clientSecret ? { clientSecret: request.clientSecret } : {},
+    ...request.accountRole ? { accountRole: request.accountRole } : {},
+    ...request.authUrl ? { authUrl: request.authUrl } : {},
+    ...request.tokenUrl ? { tokenUrl: request.tokenUrl } : {},
+    ...request.redirectPort !== undefined ? { redirectPort: request.redirectPort } : {},
+    ...request.openBrowser !== undefined ? { openBrowser: request.openBrowser } : {},
+    ...request.registryPath ? { registryPath: request.registryPath } : {},
+    ...request.grantEpoch ? { grantEpoch: request.grantEpoch } : {},
+    secretStore,
+    ...request.authorizationTimeoutMs !== undefined ? { authorizationTimeoutMs: request.authorizationTimeoutMs } : {},
+    ...request.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: request.tokenExchangeTimeoutMs } : {},
+    statePath: request.statePath,
+    logPath: request.logPath
+  });
+}
+async function runDetachedOAuthLifecycle(options) {
+  const accountRole = safeAccountRole(options.accountRole ?? "personal");
+  const now = options.now ?? (() => new Date);
+  const startedAtDate = now();
+  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
+  const baseState = {
+    source: options.source,
+    accountRole,
+    startedAt: startedAtDate.toISOString(),
+    expiresAt: new Date(startedAtDate.getTime() + authorizationTimeoutMs).toISOString(),
+    pid: options.pid ?? process.pid,
+    logPath: options.logPath
+  };
+  try {
+    const pending = await startOAuthSourceConnection({
+      ...options,
+      accountRole,
+      authorizationTimeoutMs,
+      onAuthorizationUrl: async (authorizationUrl) => {
+        const redirectUri = new URL(authorizationUrl).searchParams.get("redirect_uri") ?? "";
+        const port = redirectUri ? Number(new URL(redirectUri).port) : undefined;
+        writeDetachedOAuthState(options.statePath, {
+          ...baseState,
+          status: "pending",
+          authorizationUrl,
+          ...redirectUri ? { redirectUri } : {},
+          ...typeof port === "number" && Number.isFinite(port) ? { port } : {}
+        });
+        await options.onAuthorizationUrl?.(authorizationUrl);
+      }
+    });
+    const result = await pending.completion;
+    const connected = {
+      ...baseState,
+      status: "connected",
+      handles: result.handles,
+      ...result.handles[0] ? { handleId: result.handles[0] } : {},
+      ...result.registryPath ? { registryPath: result.registryPath } : {}
+    };
+    writeDetachedOAuthState(options.statePath, connected);
+    return connected;
+  } catch (error) {
+    const reason = errorDetail(error);
+    const retry = retryableErrorDisposition(error, now());
+    const failed = {
+      ...baseState,
+      status: isOAuthAuthorizationTimeout(reason) ? "expired" : "failed",
+      reason,
+      ...retry ? {
+        errorCode: retry.code,
+        retryable: true,
+        retryAt: retry.retryAt
+      } : {}
+    };
+    writeDetachedOAuthState(options.statePath, failed);
+    return failed;
+  }
+}
+async function startOAuthSourceConnection(options) {
+  const pkce = createOAuthPkceState();
+  const callback = await createLoopbackCallbackServer({
+    state: pkce.state,
+    ...options.redirectPort !== undefined ? { port: options.redirectPort } : {}
+  });
+  const redirectUri = `http://127.0.0.1:${callback.port}/oauth/callback`;
+  const prepared = prepareOAuthSourceConnection(options, redirectUri, pkce);
+  try {
+    await options.onAuthorizationUrl?.(prepared.authorizationUrl);
+    if (options.openBrowser !== false)
+      openBrowser(prepared.authorizationUrl);
+  } catch (error) {
+    callback.server.close();
+    throw error;
+  }
+  const completion = finishOAuthSourceConnection({
+    prepared,
+    callback
+  });
+  return {
+    ok: true,
+    source: options.source,
+    authorizationUrl: prepared.authorizationUrl,
+    redirectUri,
+    completion,
+    cancel: () => callback.server.close()
+  };
+}
+async function startExternalOAuthSourceConnection(options) {
+  const pkce = createOAuthPkceState();
+  const prepared = prepareOAuthSourceConnection(options, options.redirectUri, options.state === undefined ? pkce : { ...pkce, state: assertExternalOAuthState(options.state) });
+  await options.onAuthorizationUrl?.(prepared.authorizationUrl);
+  return {
+    ok: true,
+    source: options.source,
+    authorizationUrl: prepared.authorizationUrl,
+    redirectUri: prepared.redirectUri,
+    state: prepared.state,
+    startedAt: prepared.startedAt.toISOString(),
+    expiresAt: new Date(prepared.startedAt.getTime() + prepared.authorizationTimeoutMs).toISOString(),
+    completeCallback: async (callback) => {
+      if (callback.state !== prepared.state)
+        throw new Error("OAuth state mismatch.");
+      return completeOAuthSourceConnection(prepared, callback.code);
+    },
+    cancel() {}
+  };
+}
+function assertExternalOAuthState(state) {
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state) || state.length > 2048) {
+    throw new Error("OAuth state must be two base64url segments of at most 2048 characters.");
+  }
+  return state;
+}
+async function finishOAuthSourceConnection(options) {
+  try {
+    const code = await waitForAuthorizationCode(options.callback.waitForCode, options.prepared.authorizationTimeoutMs);
+    return completeOAuthSourceConnection(options.prepared, code);
+  } finally {
+    options.callback.server.close();
+  }
+}
+function createOAuthPkceState() {
+  const verifier = base64Url(randomBytes3(32));
+  return {
+    verifier,
+    challenge: base64Url(createHash2("sha256").update(verifier).digest()),
+    state: base64Url(randomBytes3(24))
+  };
+}
+function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
+  const definition = oauthSourceDefinition(options.source);
+  const accountRole = safeAccountRole(options.accountRole ?? "personal");
+  const secretStore = options.secretStore ?? createDefaultSecretStore();
+  const oauth2StateStore = options.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(process.env);
+  const now = options.now ?? (() => new Date);
+  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
+  const grantEpoch = options.grantEpoch ?? readConnectedHandleGrantEpoch(registryPath);
+  const clientId = options.clientId.trim();
+  const clientSecret = options.source === "dropbox" ? undefined : options.clientSecret?.trim();
+  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
+  const tokenExchangeTimeoutMs = normalizeOAuthTimeoutMs(options.tokenExchangeTimeoutMs, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, "OAuth token exchange timeout");
+  if (!clientId)
+    throw new Error("OAuth client ID is required.");
+  const authorizationUrl = buildAuthorizationUrl({
+    source: options.source,
+    authUrl: options.authUrl ?? definition.authUrl,
+    clientId,
+    redirectUri,
+    scopes: definition.scopes,
+    state: pkce.state,
+    challenge: pkce.challenge
+  });
+  return {
+    options,
+    definition,
+    accountRole,
+    secretStore,
+    ...oauth2StateStore ? { oauth2StateStore } : {},
+    now,
+    registryPath,
+    grantEpoch,
+    clientId,
+    ...clientSecret ? { clientSecret } : {},
+    redirectUri,
+    verifier: pkce.verifier,
+    state: pkce.state,
+    authorizationUrl,
+    authorizationTimeoutMs,
+    tokenExchangeTimeoutMs,
+    startedAt: now()
+  };
+}
+async function completeOAuthSourceConnection(prepared, code) {
+  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
+  const clientSecret = usesGooglePublisherExchange ? undefined : await resolveOAuthClientSecret(prepared);
+  const token = await exchangeAuthorizationCode({
+    source: prepared.options.source,
+    tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+    clientId: prepared.clientId,
+    ...clientSecret ? { clientSecret } : {},
+    code,
+    redirectUri: prepared.redirectUri,
+    verifier: prepared.verifier,
+    fetchImpl: prepared.options.fetch ?? fetch,
+    timeoutMs: prepared.tokenExchangeTimeoutMs,
+    state: prepared.state
+  });
+  if (!token.refreshToken)
+    throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
+  const refreshToken = token.refreshToken;
+  let xUserId;
+  if (prepared.options.source === "x") {
+    xUserId = await fetchXUserId({
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs
+    });
+  }
+  return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
+    const proposedHandles = prepared.definition.handles.map((definition) => ({
+      handle: definition.handle(prepared.accountRole),
+      provider: definition.provider
+    }));
+    assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
+    const secretRefs = [];
+    const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
+    const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
+    await prepared.secretStore.set(clientIdKey, prepared.clientId);
+    await prepared.secretStore.set(refreshKey, refreshToken);
+    secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
+    if (prepared.options.clientIdSource !== undefined) {
+      const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
+      await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
+      secretRefs.push(`store:${clientIdSourceKey}`);
+    }
+    let clientSecretRef;
+    if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
+      const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
+      await prepared.secretStore.set(clientSecretKey, clientSecret);
+      clientSecretRef = `store:${clientSecretKey}`;
+      secretRefs.push(clientSecretRef);
+    }
+    const handles = [];
+    const connectedAt = prepared.now();
+    const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
+    for (const handleDefinition of prepared.definition.handles) {
+      const handle = handleDefinition.handle(prepared.accountRole);
+      handles.push(handle);
+      await prepared.oauth2StateStore?.save(handle, {
+        refreshToken,
+        scopes: handleDefinition.scopes,
+        status: "available",
+        updatedAt: connectedAt.toISOString(),
+        ...xUserId ? { providerAccountId: xUserId } : {}
+      });
+      upsertConnectedHandle({
+        handle,
+        provider: handleDefinition.provider,
+        accountRole: prepared.accountRole,
+        ...handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {},
+        allowedCapabilities: [handleDefinition.capability],
+        scopes: handleDefinition.scopes,
+        ...registryOwnsOAuth ? {
+          oauth2Refresh: {
+            tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+            clientIdSecretRef: `store:${clientIdKey}`,
+            ...clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {},
+            refreshTokenSecretRef: `store:${refreshKey}`,
+            scopes: handleDefinition.scopes,
+            ...usesGooglePublisherExchange ? { exchangeVia: "publisher_endpoint" } : {}
+          }
+        } : {},
+        connectedAt: connectedAt.toISOString(),
+        ...xUserId ? { providerAccountId: xUserId } : {}
+      }, prepared.registryPath);
+    }
+    return {
+      ok: true,
+      source: prepared.options.source,
+      handles,
+      registryPath: prepared.registryPath,
+      oauth2StateWrite: prepared.oauth2StateStore ? "updated" : "not_configured",
+      secretRefs: secretRefs.sort()
+    };
+  });
+}
+async function resolveOAuthClientSecret(prepared) {
+  if (prepared.clientSecret)
+    return prepared.clientSecret;
+  if (!isGoogleOAuthSource(prepared.options.source))
+    return;
+  const keys = new Set([prepared.options.source, "google", "gmail", "google-drive"]);
+  for (const key of keys) {
+    const stored = (await prepared.secretStore.get(`${key}.${prepared.accountRole}.oauth.client_secret`))?.trim();
+    if (stored)
+      return stored;
+  }
+  return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim() || undefined;
+}
+function assertOneConnectedAccountForProposedProviders(registryPath, proposed) {
+  const providers = new Set(proposed.map((handle) => handle.provider));
+  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider));
+  assertOneConnectedAccountPerProvider({ version: 1, handles }, proposed);
+}
+function normalizeOAuthTimeoutMs(value, defaultValue, label) {
+  if (value === undefined)
+    return defaultValue;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label} must be a positive finite number of milliseconds.`);
+  }
+  return Math.floor(value);
+}
+async function waitForAuthorizationCode(waitForCode, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      waitForCode,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`OAuth authorization timed out after ${formatDurationMs(timeoutMs)}. Re-run connect when you are ready to finish browser authorization.`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout)
+      clearTimeout(timeout);
+  }
+}
+function formatDurationMs(value) {
+  if (value < 1000)
+    return `${value} ms`;
+  const seconds = Math.ceil(value / 1000);
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+async function connectPublicApiKeySource(options) {
+  const accountRole = safeAccountRole(options.accountRole ?? "personal");
+  const key = options.apiKey.trim();
+  if (!key)
+    throw new Error("API key is required.");
+  const secretStore = options.secretStore ?? createDefaultSecretStore();
+  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
+  const now = options.now ?? (() => new Date);
+  if (options.source === "venice") {
+    await validatePublicApiKeySource({
+      source: "venice",
+      apiKey: key,
+      fetchImpl: options.fetch ?? fetch,
+      ...options.veniceModelsUrl ? { veniceModelsUrl: options.veniceModelsUrl } : {},
+      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
+    });
+    await secretStore.set("venice.api_key", key);
+    return {
+      ok: true,
+      source: "venice",
+      handles: [],
+      registryPath,
+      secretRefs: ["store:venice.api_key"],
+      next: "Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Private answers use that configured pool; E2EE model ids remain gated pending local key handling."
+    };
+  }
+  await validatePublicApiKeySource({
+    source: "readwise",
+    apiKey: key,
+    fetchImpl: options.fetch ?? fetch,
+    ...options.readwiseAuthUrl ? { readwiseAuthUrl: options.readwiseAuthUrl } : {},
+    timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
+  });
+  const grantEpoch = readConnectedHandleGrantEpoch(registryPath);
+  return withConnectedHandleGrantCustody(registryPath, { expectedEpoch: grantEpoch }, async () => {
+    const handle = `readwise.${accountRole}`;
+    assertOneConnectedAccountForProposedProviders(registryPath, [{ handle, provider: "readwise" }]);
+    const secretKey = `readwise.${accountRole}.token`;
+    await secretStore.set(secretKey, key);
+    upsertConnectedHandle({
+      handle,
+      provider: "readwise",
+      accountRole,
+      trustDomain: "internal",
+      allowedCapabilities: ["readwise.sync"],
+      scopes: ["readwise.export:read", "readwise.reader:read"],
+      tokenSecretRefs: [`store:${secretKey}`],
+      connectedAt: now().toISOString()
+    }, registryPath);
+    return { ok: true, source: "readwise", handles: [handle], registryPath, secretRefs: [`store:${secretKey}`] };
+  });
+}
+async function connectGeminiApiKey(options) {
+  const key = options.apiKey.trim();
+  if (!key)
+    throw new Error("API key is required.");
+  if (options.validate !== false) {
+    await validateGeminiApiKey({
+      apiKey: key,
+      fetchImpl: options.fetch ?? fetch,
+      ...options.geminiModelsUrl ? { geminiModelsUrl: options.geminiModelsUrl } : {},
+      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
+    });
+  }
+  const stored = writeManagedWorkerEnvSecret({
+    key: "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+    value: key,
+    ...options.platform ? { platform: options.platform } : {},
+    ...options.homeDir ? { homeDir: options.homeDir } : {},
+    ...options.envPath ? { envPath: options.envPath } : {}
+  });
+  return {
+    ok: true,
+    source: "gemini",
+    handles: [],
+    secretRefs: [`env:${stored.key}`],
+    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`
+  };
+}
+async function validateGeminiApiKey(options) {
+  const url = options.geminiModelsUrl ?? process.env.OLYMPUS_CONNECT_GEMINI_MODELS_URL ?? "https://generativelanguage.googleapis.com/v1beta/models";
+  let response;
+  try {
+    response = await fetchWithTimeout(options.fetchImpl, url, {
+      method: "GET",
+      headers: { "x-goog-api-key": options.apiKey, Accept: "application/json" }
+    }, options.timeoutMs);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.");
+    }
+    throw new Error("Could not validate the Gemini API key. No credentials were stored; try again when the Gemini API is reachable.");
+  }
+  if (!response.ok) {
+    throw new Error("Gemini rejected the API key. Paste a current Gemini API key from https://aistudio.google.com/apikey and try again.");
+  }
+}
+async function validatePublicApiKeySource(options) {
+  if (options.source === "readwise") {
+    const url2 = options.readwiseAuthUrl ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL ?? "https://readwise.io/api/v2/auth/";
+    let response2;
+    try {
+      response2 = await fetchWithTimeout(options.fetchImpl, url2, {
+        method: "GET",
+        headers: { Authorization: `Token ${options.apiKey}`, Accept: "application/json" }
+      }, options.timeoutMs);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error("Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.");
+      }
+      throw new Error("Could not validate the Readwise token. No credentials were stored; try again when Readwise is reachable.");
+    }
+    if (response2.status !== 204) {
+      throw new Error("Readwise rejected the API token. Paste a current Readwise access token and try again.");
+    }
+    return;
+  }
+  const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/models";
+  let response;
+  try {
+    response = await fetchWithTimeout(options.fetchImpl, url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" }
+    }, options.timeoutMs);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.");
+    }
+    throw new Error("Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.");
+  }
+  if (!response.ok) {
+    throw new Error("Venice rejected the API key. Paste a current Venice API key and try again.");
+  }
+}
+async function fetchXUserId(options) {
+  const userUrl = new URL("/2/users/me", options.tokenUrl).toString();
+  let response;
+  try {
+    response = await fetchWithTimeout(options.fetchImpl, userUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${options.accessToken}`,
+        Accept: "application/json"
+      }
+    }, options.timeoutMs);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("X user lookup timed out. No credentials were stored; re-run connect when X is reachable.");
+    }
+    throw new Error("Could not read your X user id. No credentials were stored; re-run connect when X is reachable.");
+  }
+  if (!response.ok) {
+    throw new Error("X did not confirm the connected user id. No credentials were stored; re-run connect and ensure users.read is approved.");
+  }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("X user lookup returned invalid JSON. No credentials were stored; re-run connect when X is reachable.");
+  }
+  const data = payload.data;
+  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
+  if (typeof id !== "string" || !/^\d+$/.test(id.trim())) {
+    throw new Error("X user lookup did not return a numeric user id. No credentials were stored; re-run connect when X is reachable.");
+  }
+  return id.trim();
+}
+async function connectGuidedSession(options) {
+  const accountRole = safeAccountRole(options.accountRole ?? (options.source === "telegram" ? "personal" : "personal_local"));
+  const additionalRefs = [...new Set(options.additionalTokenSecretRefs ?? [])];
+  const allowedAppRefs = ["store:telegram.personal.app.api_id", "store:telegram.personal.app.api_hash"];
+  if (additionalRefs.some((ref) => options.source !== "telegram" || !allowedAppRefs.includes(ref))) {
+    throw new Error("Only the Telegram application credential references may accompany a paired session.");
+  }
+  const sessionPath = options.sessionPath.trim();
+  if (!sessionPath)
+    throw new Error("Session path is required.");
+  const secretStore = options.secretStore ?? createDefaultSecretStore();
+  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
+  const grantEpoch = readConnectedHandleGrantEpoch(registryPath);
+  const now = options.now ?? (() => new Date);
+  const key = `${options.source}.${accountRole}.session_path`;
+  const handle = options.source === "telegram" ? "telegram.personal" : "whatsapp.personal_local";
+  const provider = options.source === "telegram" ? "telegram" : "whatsapp_personal";
+  const clearLatch = options.clearUnpairedSource ?? clearUnpairedSource;
+  const unpairedSourceId = options.source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
+  assertUnpairedSourcesReadable(registryPath);
+  return withConnectedHandleGrantCustody(registryPath, { expectedEpoch: grantEpoch }, async () => {
+    assertOneConnectedAccountForProposedProviders(registryPath, [{ handle, provider }]);
+    assertUnpairedSourcesReadable(registryPath);
+    const priorHandle = readConnectedHandleRegistry(registryPath).handles.find((candidate) => candidate.handle === handle);
+    const priorSessionPath = await secretStore.get(key);
+    const priorUnpaired = readUnpairedSources(registryPath);
+    try {
+      await secretStore.set(key, sessionPath);
+      const connectedAt = now().toISOString();
+      const registryHandle = options.source === "telegram" ? {
+        handle,
+        provider: "telegram",
+        sessionKind: "mtproto_session",
+        accountRole,
+        trustDomain: "secure_local",
+        allowedCapabilities: ["telegram.messages.sync"],
+        scopes: [],
+        tokenSecretRefs: [`store:${key}`, ...additionalRefs],
+        backendState: {
+          kind: "mtproto_session",
+          status: options.sessionReady ? "available" : "reauth_required",
+          mtprotoProfileId: "telegram_personal",
+          runtimeEndpointId: "telegram_local_telethon_reader",
+          library: "telethon",
+          backendLabel: "local_private:telegram_telethon_reader"
+        },
+        connectedAt
+      } : {
+        handle,
+        provider: "whatsapp_personal",
+        sessionKind: "local_app_database",
+        accountRole,
+        trustDomain: "secure_local",
+        allowedCapabilities: ["whatsapp.personal.messages.sync"],
+        scopes: [],
+        tokenSecretRefs: [`store:${key}`, ...additionalRefs],
+        backendState: {
+          kind: "local_app_database",
+          status: options.sessionReady ? "available" : "reauth_required",
+          databaseSourceId: "whatsapp_personal_local",
+          readerWorker: "whatsapp_local_reader",
+          databaseRole: "messages_readonly",
+          scopeLabel: "personal_messages",
+          backendLabel: "local_private:whatsapp_local_app_reader"
+        },
+        connectedAt
+      };
+      upsertConnectedHandle(registryHandle, registryPath);
+      if (registryHandle.backendState?.status !== "reauth_required") {
+        clearLatch(unpairedSourceId, registryPath);
+      }
+      return {
+        ok: true,
+        source: options.source,
+        handles: [handle],
+        registryPath,
+        secretRefs: [`store:${key}`, ...additionalRefs],
+        next: options.source === "telegram" ? "Run the Telethon login helper for this session path if status is reauth_required." : "Run the whatsmeow QR pairing helper for this session path if status is reauth_required."
+      };
+    } catch (publishError) {
+      await rollbackGuidedSessionPublish({
+        registryPath,
+        secretStore,
+        key,
+        handle,
+        priorHandle,
+        priorSessionPath,
+        priorUnpaired,
+        unpairedSourceId,
+        cause: publishError
+      });
+      throw publishError;
+    }
+  });
+}
+async function rollbackGuidedSessionPublish(input) {
+  const failedSteps = [];
+  const errors = [];
+  const attempt = async (step, work) => {
+    try {
+      await work();
+    } catch (error) {
+      failedSteps.push(step);
+      errors.push(`${step}: ${error.message}`);
+    }
+  };
+  await attempt("connect_rollback_handle", () => {
+    if (input.priorHandle)
+      upsertConnectedHandle(input.priorHandle, input.registryPath);
+    else
+      removeConnectedHandles([input.handle], input.registryPath);
+  });
+  await attempt("connect_rollback_secret", async () => {
+    if (input.priorSessionPath === undefined)
+      await input.secretStore.delete(input.key);
+    else
+      await input.secretStore.set(input.key, input.priorSessionPath);
+  });
+  await attempt("connect_rollback_latch", () => {
+    restorePriorUnpairedRecord(input.priorUnpaired, input.registryPath);
+  });
+  if (failedSteps.length === 0)
+    return;
+  const prior = input.priorUnpaired.status === "ok" ? input.priorUnpaired.records.find((record) => record.source_id === input.unpairedSourceId) : undefined;
+  try {
+    recordUnpairedSources([{
+      source_id: input.unpairedSourceId,
+      state: "unpair_incomplete",
+      ...prior?.unremoved_paths ? { unremoved_paths: prior.unremoved_paths } : {},
+      failed_steps: [...prior?.failed_steps ?? [], ...failedSteps]
+    }], input.registryPath);
+  } catch {}
+  throw new Error(`Connect could not finish and could not undo itself: ${input.cause.message}. ` + `Rollback also failed: ${errors.join("; ")}. ` + `Remove the ${input.handle} handle with the CLI and retry.`);
+}
+function restorePriorUnpairedRecord(prior, registryPath) {
+  if (prior.status === "ok") {
+    writeUnpairedSources(prior.records, registryPath);
+    return;
+  }
+  if (prior.status === "missing")
+    rmSync2(unpairedSourcesPath(registryPath), { force: true });
+}
+async function readApiKeyFromStdin(stdin = processStdin) {
+  const chunks = [];
+  for await (const chunk of stdin) {
+    chunks.push(Buffer2.isBuffer(chunk) ? chunk : Buffer2.from(chunk));
+  }
+  return Buffer2.concat(chunks).toString("utf8").trim();
+}
+function oauthAuthorizeOrigin(source) {
+  return new URL(oauthSourceDefinition(source).authUrl).origin;
+}
+function oauthSourceDefinition(source) {
+  if (source === "dropbox") {
+    return {
+      authUrl: "https://www.dropbox.com/oauth2/authorize",
+      tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+      scopes: ["files.metadata.read", "files.content.read", "sharing.read"],
+      handles: [{
+        handle: (role) => role === "personal" ? "dropbox.personal" : `dropbox.${role}`,
+        provider: "dropbox",
+        capability: "dropbox.files.sync",
+        trustDomain: "secure_local",
+        scopes: ["files.metadata.read", "files.content.read", "sharing.read"]
+      }]
+    };
+  }
+  if (source === "x") {
+    return {
+      authUrl: "https://x.com/i/oauth2/authorize",
+      tokenUrl: "https://api.x.com/2/oauth2/token",
+      scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"],
+      handles: [{
+        handle: (role) => role === "personal" ? "x.bookmarks.personal" : `x.bookmarks.${role}`,
+        provider: "x",
+        capability: "x.bookmarks.sync",
+        trustDomain: "internal",
+        scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
+      }]
+    };
+  }
+  const gmail = {
+    handle: (role) => role === "personal" ? "gmail.personal" : `gmail.${role}`,
+    provider: "gmail",
+    capability: "gmail.email.sync",
+    trustDomain: "secure_local",
+    scopes: ["https://www.googleapis.com/auth/gmail.readonly"]
+  };
+  const drive = {
+    handle: (role) => role === "personal" ? "google_drive.personal" : `google_drive.${role}`,
+    provider: "google_drive",
+    capability: "google_drive.docs.sync",
+    trustDomain: "internal",
+    scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+  };
+  return {
+    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl: "https://oauth2.googleapis.com/token",
+    scopes: source === "gmail" ? gmail.scopes : source === "google-drive" ? drive.scopes : [...gmail.scopes, ...drive.scopes],
+    handles: source === "gmail" ? [gmail] : source === "google-drive" ? [drive] : [gmail, drive]
+  };
+}
+function buildAuthorizationUrl(options) {
+  const url = new URL(options.authUrl);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", options.clientId);
+  url.searchParams.set("redirect_uri", options.redirectUri);
+  url.searchParams.set("scope", options.scopes.join(" "));
+  url.searchParams.set("state", options.state);
+  url.searchParams.set("code_challenge", options.challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  if (isGoogleOAuthSource(options.source)) {
+    url.searchParams.set("access_type", "offline");
+    url.searchParams.set("prompt", "consent");
+  }
+  if (options.source === "dropbox") {
+    url.searchParams.set("token_access_type", "offline");
+  }
+  return url.toString();
+}
+async function createLoopbackCallbackServer(options) {
+  let resolveCode;
+  let rejectCode;
+  const waitForCode = new Promise((resolve2, reject) => {
+    resolveCode = resolve2;
+    rejectCode = reject;
+  });
+  const server = createServer((request, response) => {
+    try {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
+      if (url.pathname !== "/oauth/callback") {
+        response.writeHead(404).end("Not found");
+        return;
+      }
+      if (url.searchParams.get("state") !== options.state) {
+        response.writeHead(400).end("OAuth state mismatch.");
+        rejectCode(new Error("OAuth state mismatch."));
+        return;
+      }
+      const code = url.searchParams.get("code")?.trim();
+      if (!code) {
+        response.writeHead(400).end("OAuth code missing.");
+        rejectCode(new Error("OAuth code missing."));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "text/plain" }).end("Olympus connection complete. You can close this browser tab.");
+      resolveCode(code);
+    } catch {
+      response.writeHead(400).end("OAuth callback failed.");
+      rejectCode(new Error("OAuth callback failed."));
+    }
+  });
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(options.port ?? 0, "127.0.0.1", () => resolve2());
+  });
+  const address = server.address();
+  if (!address || typeof address === "string")
+    throw new Error("OAuth loopback server did not bind.");
+  return { port: address.port, server, waitForCode };
+}
+async function exchangeAuthorizationCode(options) {
+  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(options.source, options.clientId);
+  const url = usesGooglePublisherExchange ? googlePublisherExchangeUrl() : options.tokenUrl;
+  const init = usesGooglePublisherExchange ? {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code: options.code,
+      code_verifier: options.verifier,
+      redirect_uri: options.redirectUri,
+      ...options.state ? { state: options.state } : {}
+    })
+  } : directTokenExchangeRequest(options);
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl, url, init, {
+      timeoutMs: options.timeoutMs,
+      limitBytes: OAUTH_TOKEN_RESPONSE_LIMIT_BYTES
+    }));
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
+    }
+    if (isBoundedResponseTooLargeError(error)) {
+      throw new Error("OAuth token exchange returned an oversized response. No credentials were stored; re-run connect when the provider is reachable.");
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    const errorCode = safeOAuthErrorCode(oauthErrorCodeFromBody(text));
+    throw new Error(`OAuth token exchange failed with status ${response.status}${errorCode ? ` (${errorCode})` : ""}.`);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error("OAuth token exchange returned invalid JSON.");
+  }
+  const accessToken = typeof payload.access_token === "string" ? payload.access_token.trim() : "";
+  if (!accessToken)
+    throw new Error("OAuth token exchange did not return an access token.");
+  return {
+    accessToken,
+    ...typeof payload.refresh_token === "string" && payload.refresh_token.trim() ? { refreshToken: payload.refresh_token.trim() } : {},
+    ...typeof payload.expires_in === "number" ? { expiresInSeconds: payload.expires_in } : {},
+    scopes: typeof payload.scope === "string" ? payload.scope.split(/\s+/).filter(Boolean) : []
+  };
+}
+function directTokenExchangeRequest(options) {
+  const body = new URLSearchParams;
+  body.set("grant_type", "authorization_code");
+  body.set("code", options.code);
+  body.set("redirect_uri", options.redirectUri);
+  body.set("code_verifier", options.verifier);
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/x-www-form-urlencoded"
+  };
+  if (options.source === "x" && options.clientSecret) {
+    headers.Authorization = `Basic ${Buffer2.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
+  } else {
+    body.set("client_id", options.clientId);
+    if (isGoogleOAuthSource(options.source) && options.clientSecret)
+      body.set("client_secret", options.clientSecret);
+  }
+  return { method: "POST", headers, body };
+}
+function isGoogleOAuthSource(source) {
+  return source === "google" || source === "gmail" || source === "google-drive";
+}
+function isGooglePublisherExchangeClient(source, clientId) {
+  return isGoogleOAuthSource(source) && isGooglePublisherWebClientId(clientId);
+}
+function shouldStoreOAuthClientSecret(source) {
+  return isGoogleOAuthSource(source) || source === "x";
+}
+function safeOAuthErrorCode(value) {
+  const code = value?.trim().toLowerCase();
+  return code && KNOWN_OAUTH_ERROR_CODES.has(code) ? code : undefined;
+}
+function oauthErrorCodeFromBody(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed.error === "string" ? parsed.error : undefined;
+  } catch {
+    return;
+  }
+}
+function defaultDetachedOAuthStateDir() {
+  return join7(homedir6(), ".olympus", "pending-oauth");
+}
+function defaultDetachedOAuthLogDir() {
+  return join7(homedir6(), ".olympus", "logs");
+}
+function detachedOAuthStatePath(options) {
+  return join7(options.stateDir ?? defaultDetachedOAuthStateDir(), `${safeStatePathSegment(options.source)}.${safeStatePathSegment(safeAccountRole(options.accountRole ?? "personal"))}.json`);
+}
+function writeDetachedOAuthState(path, state) {
+  mkdirSync6(dirname8(path), { recursive: true, mode: 448 });
+  writePrivateJson(path, sanitizeDetachedOAuthState(state));
+}
+function readDetachedOAuthState(path) {
+  try {
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync8(path, "utf8")));
+  } catch {
+    return;
+  }
+}
+function listDetachedOAuthStates(options = {}) {
+  const stateDir = options.stateDir ?? defaultDetachedOAuthStateDir();
+  const entries = (() => {
+    try {
+      return Array.from(new Bun.Glob("*.json").scanSync({ cwd: stateDir, absolute: true }));
+    } catch {
+      return [];
+    }
+  })();
+  return entries.map((path) => readDetachedOAuthState(path)).filter((state) => !!state).filter((state) => !options.source || state.source === options.source).map((state) => withDiedStatus(state, options.pidAlive ?? isPidAlive));
+}
+function withDiedStatus(state, pidAlive) {
+  if (state.status !== "pending" || !state.pid)
+    return state;
+  if (pidAlive(state.pid))
+    return state;
+  return {
+    ...state,
+    status: "died",
+    reason: `Detached OAuth child process ${state.pid} is no longer running.`
+  };
+}
+function cleanupTerminalDetachedOAuthState(statePath) {
+  const state = readDetachedOAuthState(statePath);
+  if (!state)
+    return;
+  if (state.status === "connected" || state.status === "failed" || state.status === "expired" || state.status === "died") {
+    rmSync2(statePath, { force: true });
+  }
+}
+async function waitForDetachedPendingState(options) {
+  const deadline = Date.now() + options.timeoutMs;
+  while (Date.now() <= deadline) {
+    const state = readDetachedOAuthState(options.statePath);
+    if (state?.status === "pending" && state.authorizationUrl)
+      return state;
+    if (state && state.status !== "pending")
+      return state;
+    await new Promise((resolve2) => setTimeout(resolve2, 25));
+  }
+  return {
+    source: options.source,
+    accountRole: options.accountRole,
+    status: "failed",
+    startedAt: new Date().toISOString(),
+    expiresAt: new Date().toISOString(),
+    pid: options.pid,
+    logPath: options.logPath,
+    reason: "Detached OAuth child did not publish a pending state before the parent wait deadline."
+  };
+}
+function readDetachedOAuthRequestFile(path) {
+  const parsed = JSON.parse(readFileSync8(path, "utf8"));
+  if (!parsed.source || !isOAuthSource(parsed.source))
+    throw new Error("Detached OAuth request has an invalid source.");
+  if (!parsed.clientId?.trim())
+    throw new Error("Detached OAuth request is missing clientId.");
+  if (!parsed.statePath?.trim())
+    throw new Error("Detached OAuth request is missing statePath.");
+  if (!parsed.logPath?.trim())
+    throw new Error("Detached OAuth request is missing logPath.");
+  if (parsed.grantEpoch !== "initial" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.grantEpoch ?? "")) {
+    throw new Error("Detached OAuth request is missing a valid credential-grant generation.");
+  }
+  return {
+    source: parsed.source,
+    clientId: parsed.clientId,
+    ...parsed.clientSecret ? { clientSecret: parsed.clientSecret } : {},
+    ...parsed.accountRole ? { accountRole: parsed.accountRole } : {},
+    ...parsed.authUrl ? { authUrl: parsed.authUrl } : {},
+    ...parsed.tokenUrl ? { tokenUrl: parsed.tokenUrl } : {},
+    ...parsed.redirectPort !== undefined ? { redirectPort: parsed.redirectPort } : {},
+    ...parsed.openBrowser !== undefined ? { openBrowser: parsed.openBrowser } : {},
+    ...parsed.registryPath ? { registryPath: parsed.registryPath } : {},
+    ...parsed.grantEpoch ? { grantEpoch: parsed.grantEpoch } : {},
+    ...parsed.secretStoreBackend ? { secretStoreBackend: parsed.secretStoreBackend } : {},
+    ...parsed.secretStorePath ? { secretStorePath: parsed.secretStorePath } : {},
+    ...parsed.secretStoreKeyPath ? { secretStoreKeyPath: parsed.secretStoreKeyPath } : {},
+    ...parsed.authorizationTimeoutMs !== undefined ? { authorizationTimeoutMs: parsed.authorizationTimeoutMs } : {},
+    ...parsed.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: parsed.tokenExchangeTimeoutMs } : {},
+    statePath: parsed.statePath,
+    logPath: parsed.logPath
+  };
+}
+function sanitizeDetachedOAuthState(input) {
+  const state = {
+    source: input.source,
+    accountRole: input.accountRole,
+    status: input.status,
+    startedAt: input.startedAt,
+    expiresAt: input.expiresAt,
+    ...input.authorizationUrl ? { authorizationUrl: input.authorizationUrl } : {},
+    ...input.redirectUri ? { redirectUri: input.redirectUri } : {},
+    ...typeof input.port === "number" ? { port: input.port } : {},
+    ...typeof input.pid === "number" ? { pid: input.pid } : {},
+    ...input.logPath ? { logPath: input.logPath } : {},
+    ...input.handles ? { handles: [...input.handles] } : {},
+    ...input.handleId ? { handleId: input.handleId } : {},
+    ...input.registryPath ? { registryPath: input.registryPath } : {},
+    ...input.reason ? { reason: input.reason } : {},
+    ...input.errorCode && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(input.errorCode) ? { errorCode: input.errorCode } : {},
+    ...input.retryable === true ? { retryable: true } : {},
+    ...input.retryAt && Number.isFinite(Date.parse(input.retryAt)) ? { retryAt: input.retryAt } : {}
+  };
+  return state;
+}
+function writePrivateJson(path, value) {
+  mkdirSync6(dirname8(path), { recursive: true, mode: 448 });
+  writeFileSync3(path, `${JSON.stringify(value, null, 2)}
+`, { mode: 384 });
+}
+function safeStatePathSegment(value) {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isOAuthAuthorizationTimeout(reason) {
+  return reason.includes("OAuth authorization timed out");
+}
+function isOAuthSource(source) {
+  return source === "google" || source === "gmail" || source === "google-drive" || source === "dropbox" || source === "x";
+}
+function openBrowser(url) {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawn(command, args, { stdio: "ignore", detached: true });
+  child.once("error", (error) => {
+    console.warn(`[olympus] WARNING: could not open the authorization URL automatically: ${error.message}`);
+    console.warn(`[olympus] Open this authorization URL manually: ${url}`);
+  });
+  child.unref();
+}
+function safeAccountRole(value) {
+  const trimmed = value.trim();
+  if (!isSafeSecretKey(trimmed))
+    throw new Error("Account role must be a safe label.");
+  return trimmed;
+}
+function base64Url(bytes) {
+  return bytes.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+function errorDetail(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function retryableErrorDisposition(error, now) {
+  if (!error || typeof error !== "object")
+    return;
+  const candidate = error;
+  if (typeof candidate.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate.code) || candidate.retryable !== true || typeof candidate.retryAfterMs !== "number" || !Number.isSafeInteger(candidate.retryAfterMs) || candidate.retryAfterMs <= 0)
+    return;
+  return {
+    code: candidate.code,
+    retryAt: new Date(now.getTime() + candidate.retryAfterMs).toISOString()
+  };
+}
+var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
+var init_connect = __esm(() => {
+  init_secret_store();
+  init_worker_service();
+  init_http_timeout();
+  init_oauth_relay();
+  init_publisher_oauth_client();
+  init_connected_handles();
+  init_unpaired_sources();
+  init_credential_broker();
+  DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
+  DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+  OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  KNOWN_OAUTH_ERROR_CODES = new Set([
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "access_denied",
+    "server_error",
+    "temporarily_unavailable",
+    "slow_down",
+    "expired_token",
+    "redirect_uri_mismatch"
+  ]);
+});
+
+// src/core/pairing-session-paths.ts
+import { lstatSync as lstatSync4, realpathSync, rmSync as rmSync3 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { basename as basename2, dirname as dirname9, join as join8, relative as relative3, resolve as resolve2, sep as sep3 } from "node:path";
+function resolveHomeDir(context) {
+  return context.homeDir?.trim() || homedir7();
+}
+function olympusDataRoots(context = {}) {
+  const home = resolveHomeDir(context);
+  return [
+    join8(home, ".olympus"),
+    join8(home, ".config", "olympus"),
+    join8(home, ".local", "share", "olympus"),
+    join8(home, ".local", "share", "openclaw", "olympus"),
+    join8(home, ".local", "state", "olympus"),
+    join8(home, ".cache", "olympus"),
+    join8(home, "Library", "Logs", "Olympus")
+  ];
+}
+function whatsappStateDir(context = {}) {
+  const env = context.env ?? {};
+  const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
+  return configured ? whatsappStateDirFromValue(configured) : join8(env.XDG_DATA_HOME?.trim() || join8(resolveHomeDir(context), ".local", "share"), "olympus", "whatsapp-live");
+}
+function whatsappPairingSessionPaths(context = {}) {
+  const stateDir = whatsappStateDir(context);
+  const sessionDb = join8(stateDir, "session.db");
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join8(stateDir, "qr.txt"), join8(stateDir, "qr.png")];
+}
+function telegramSessionBase(value) {
+  const trimmed = value.trim();
+  return trimmed.endsWith(".session") ? trimmed.slice(0, -".session".length) : trimmed;
+}
+function whatsappStateDirFromValue(value) {
+  const trimmed = value.trim();
+  return basename2(trimmed) === "session.db" ? dirname9(trimmed) : trimmed;
+}
+function telegramSessionBasePath(context = {}) {
+  const env = context.env ?? {};
+  const home = context.homeDir?.trim() || env.HOME?.trim() || homedir7();
+  const dataHome = env.XDG_DATA_HOME?.trim() || join8(home, ".local", "share");
+  const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
+  return configured ? telegramSessionBase(configured) : join8(dataHome, "olympus", "telegram", "telegram.personal");
+}
+function telegramPairingSessionPaths(context = {}) {
+  const base = telegramSessionBasePath(context);
+  return [`${base}.session`, `${base}.session-journal`];
+}
+function pairingSessionPathsFromStoredValue(source, storedValue) {
+  const value = storedValue.trim();
+  if (value === "")
+    return [];
+  if (source === "telegram") {
+    const base = telegramSessionBase(value);
+    return [`${base}.session`, `${base}.session-journal`];
+  }
+  const stateDir = whatsappStateDirFromValue(value);
+  const sessionDb = join8(stateDir, "session.db");
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join8(stateDir, "qr.txt"), join8(stateDir, "qr.png")];
+}
+function pairingSessionPathOverridden(source, context = {}) {
+  const env = context.env ?? {};
+  const value = source === "telegram" ? env.OLYMPUS_TELEGRAM_SESSION_PATH : env.OLYMPUS_WHATSAPP_STATE_DIR;
+  return (value?.trim() ?? "") !== "";
+}
+function planPairingSessionRemoval(paths, context = {}) {
+  const roots = olympusDataRoots(context).map((root) => resolve2(root));
+  const canonicalRoots = canonicalOlympusDataRoots(roots);
+  const targets = [];
+  const absent = [];
+  for (const path of paths) {
+    const validated = validatePairingPath(path, roots, canonicalRoots);
+    if ("refusal" in validated)
+      return { ok: false, refusal: validated.refusal };
+    if (validated.target === undefined) {
+      absent.push(resolve2(path));
+      continue;
+    }
+    targets.push(validated.target);
+  }
+  return { ok: true, plan: { targets, absent } };
+}
+function canonicalOlympusDataRoots(roots) {
+  const canonical = [];
+  for (const root of roots) {
+    try {
+      const real = realpathSync(root);
+      if (lstatSync4(real).isDirectory())
+        canonical.push(real);
+    } catch {}
+  }
+  return [...new Set(canonical)];
+}
+function isInsideCanonicalRoot(path, canonicalRoots) {
+  return canonicalRoots.some((root) => path === root || path.startsWith(`${root}${sep3}`));
+}
+function validatePairingPath(path, roots, canonicalRoots) {
+  const absolute = resolve2(path);
+  const root = roots.find((candidate) => absolute === candidate || absolute.startsWith(`${candidate}${sep3}`));
+  if (root === undefined || absolute === root) {
+    return { refusal: { reason: "outside_root", path: absolute, component: absolute } };
+  }
+  const rootInspection = inspectPath(root);
+  if (rootInspection.kind === "error") {
+    return { refusal: { reason: "inspection_failed", path: absolute, component: root } };
+  }
+  if (rootInspection.kind === "absent")
+    return { target: undefined };
+  const components = relative3(root, absolute).split(sep3).filter((part) => part !== "");
+  let current = root;
+  for (const [index, component] of components.entries()) {
+    current = join8(current, component);
+    const inspection = inspectPath(current);
+    if (inspection.kind === "error") {
+      return { refusal: { reason: "inspection_failed", path: absolute, component: current } };
+    }
+    if (inspection.kind === "absent")
+      return { target: undefined };
+    const stat2 = inspection.stat;
+    if (stat2.isSymbolicLink()) {
+      return { refusal: { reason: "symlink_component", path: absolute, component: current } };
+    }
+    const leaf = index === components.length - 1;
+    if (leaf && !stat2.isFile()) {
+      return { refusal: { reason: "not_a_regular_file", path: absolute, component: current } };
+    }
+    if (!leaf && !stat2.isDirectory())
+      return { target: undefined };
+  }
+  let parentRealPath;
+  try {
+    parentRealPath = realpathSync(dirname9(absolute));
+  } catch {
+    return { refusal: { reason: "inspection_failed", path: absolute, component: dirname9(absolute) } };
+  }
+  if (!isInsideCanonicalRoot(parentRealPath, canonicalRoots)) {
+    return { refusal: { reason: "outside_root", path: absolute, component: parentRealPath } };
+  }
+  return { target: { path: absolute, parentRealPath } };
+}
+function removePlannedPairingSessionFile(target) {
+  const inspection = inspectPath(target.path);
+  if (inspection.kind === "error") {
+    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: target.path }, `Pairing artifact could not be inspected before removal (${inspection.code}): ${target.path}`);
+  }
+  if (inspection.kind === "absent")
+    return "already_gone";
+  const stat2 = inspection.stat;
+  if (stat2.isSymbolicLink() || !stat2.isFile()) {
+    throw new PairingSessionPathError({ reason: "not_a_regular_file", path: target.path, component: target.path }, `Pairing artifact changed to a non-regular file before removal: ${target.path}`);
+  }
+  let parentRealPath;
+  try {
+    parentRealPath = realpathSync(dirname9(target.path));
+  } catch (error) {
+    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: dirname9(target.path) }, `Pairing artifact's parent directory could not be resolved before removal: ${error.message}`);
+  }
+  if (parentRealPath !== target.parentRealPath) {
+    throw new PairingSessionPathError({ reason: "symlink_component", path: target.path, component: dirname9(target.path) }, `Pairing artifact's parent directory changed between validation and removal: ${target.path}`);
+  }
+  rmSync3(target.path, { force: true });
+  return "removed";
+}
+function inspectPath(path) {
+  try {
+    return { kind: "stat", stat: lstatSync4(path) };
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR")
+      return { kind: "absent" };
+    return { kind: "error", code };
+  }
+}
+var PairingSessionPathError;
+var init_pairing_session_paths = __esm(() => {
+  PairingSessionPathError = class PairingSessionPathError extends Error {
+    refusal;
+    constructor(refusal, message) {
+      super(message);
+      this.refusal = refusal;
+    }
+  };
+});
+
+// src/core/messaging-pairing.ts
+import { chmodSync as chmodSync2, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync9, renameSync as renameSync2, rmSync as rmSync4 } from "node:fs";
+import { spawn as spawnChild } from "node:child_process";
+import { createHash as createHash3 } from "node:crypto";
+import { homedir as homedir8 } from "node:os";
+import { dirname as dirname10, join as join9, resolve as resolve3 } from "node:path";
+async function pairMessagingSource(options) {
+  const env = { ...process.env, ...options.env ?? {} };
+  const packageRoot = resolve3(options.packageRoot ?? join9(import.meta.dir, "..", ".."));
+  const runner = options.runCommand ?? runPairingCommand;
+  const secretStore = options.secretStore ?? createDefaultSecretStore();
+  const pathContext = {
+    env,
+    ...options.homeDir ? { homeDir: options.homeDir } : {}
+  };
+  const sessionPath = options.source === "telegram" ? telegramSessionBasePath(pathContext) : whatsappStateDir(pathContext);
+  const helper = await resolveHelper(options, packageRoot);
+  const stdoutEvents = [];
+  let qrPngPath;
+  const commandEnv = {
+    ...env,
+    ...options.source === "telegram" ? { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath } : {
+      OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+      OLYMPUS_WHATSAPP_QR_STDOUT: "false",
+      OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
+    }
+  };
+  const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join9(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
+  const result = await runner({
+    executable: command[0],
+    args: command.slice(1),
+    env: commandEnv,
+    ...options.signal ? { signal: options.signal } : {},
+    onStdoutLine: async (line) => {
+      const event = safeJsonObject(line);
+      if (!event)
+        return;
+      stdoutEvents.push(event);
+      if (options.source === "whatsapp" && event.event === "qr" && typeof event.qr_png_path === "string") {
+        qrPngPath = event.qr_png_path;
+        await options.onWhatsAppQr?.(qrPngPath);
+      }
+    }
+  });
+  for (const line of result.stdoutLines) {
+    const event = safeJsonObject(line);
+    if (!event)
+      continue;
+    if (!stdoutEvents.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event))) {
+      stdoutEvents.push(event);
+    }
+    if (options.source === "whatsapp" && event.event === "qr" && typeof event.qr_png_path === "string") {
+      qrPngPath = event.qr_png_path;
+    }
+  }
+  if (result.exitCode !== 0) {
+    throw pairingFailure(options.source, safeErrorCode(result.stderr), packageRoot);
+  }
+  const receipt = parseReadyReceipt(stdoutEvents, options.source);
+  if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve3(receipt.session_path) !== resolve3(sessionPath))) {
+    throw new Error("Telegram pairing proved a different session path than the one Olympus requested.");
+  }
+  const chats = options.source === "telegram" ? parseTelegramDialogs(receipt.dialogs) : [];
+  const accountProof = proofForReceipt(options.source, receipt);
+  const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
+    source: options.source,
+    accountProof,
+    chats
+  });
+  if (!approval) {
+    return {
+      ok: true,
+      source: options.source,
+      status: "scope_selection_required",
+      sessionPath,
+      accountProof,
+      chats,
+      ...qrPngPath ? { qrPngPath } : {},
+      captureStarted: false,
+      registered: false
+    };
+  }
+  const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats);
+  const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
+  const register = options.registerSession ?? connectGuidedSession;
+  let connected;
+  try {
+    connected = await register({
+      source: options.source,
+      sessionPath,
+      ...options.accountRole ? { accountRole: options.accountRole } : {},
+      ...options.registryPath ? { registryPath: options.registryPath } : {},
+      secretStore,
+      sessionReady: true,
+      ...options.source === "telegram" ? {
+        additionalTokenSecretRefs: [
+          `store:${TELEGRAM_API_ID_SECRET_KEY}`,
+          `store:${TELEGRAM_API_HASH_SECRET_KEY}`
+        ]
+      } : {}
+    });
+  } catch (error) {
+    await rollbackCredentials();
+    throw error;
+  }
+  return {
+    ...connected,
+    status: "connected",
+    sessionPath,
+    accountProof,
+    chats,
+    ...qrPngPath ? { qrPngPath } : {},
+    captureStarted: false,
+    registered: true,
+    producer
+  };
+}
+async function resolveHelper(options, packageRoot) {
+  if (options.source === "telegram") {
+    const script = options.telegramHelperPath ?? join9(packageRoot, "scripts", "telegram-pair.py");
+    if (!existsSync7(script))
+      throw new Error("The packaged Telegram pairing helper is missing. Reinstall Olympus and retry.");
+    const python = telegramPythonExecutable(options);
+    if (!python) {
+      throw new Error(`Python 3 is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
+    }
+    return python;
+  }
+  if (options.whatsappBridgePath) {
+    if (!existsSync7(options.whatsappBridgePath))
+      throw new Error("The configured WhatsApp pairing bridge does not exist.");
+    return options.whatsappBridgePath;
+  }
+  const sourceDir = join9(packageRoot, "tools", "whatsapp-bridge");
+  const output = whatsappBridgePathForPackage(packageRoot, options);
+  const cacheHome = options.env?.XDG_CACHE_HOME ?? join9(options.homeDir ?? options.env?.HOME ?? homedir8(), ".cache");
+  ensurePrivateRootDirectorySync(cacheHome);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname10(output));
+  for (const directory of [cacheHome, join9(cacheHome, "olympus"), dirname10(output)]) {
+    const stat2 = lstatSync5(directory);
+    if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0) {
+      throw new Error("The Olympus bridge cache must be owned by this user and not writable by other users.");
+    }
+  }
+  if (existsSync7(output)) {
+    const stat2 = lstatSync5(output);
+    if (!stat2.isFile() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0 || (stat2.mode & 64) === 0) {
+      throw new Error("The cached WhatsApp bridge is not a trusted owner-controlled executable.");
+    }
+    return output;
+  }
+  const which = options.which ?? ((command) => Bun.which(command));
+  const go = which("go");
+  const compiler = which("cc") ?? which("clang") ?? which("gcc");
+  if (!go || !compiler) {
+    throw new Error("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.");
+  }
+  mkdirSync7(join9(output, ".."), { recursive: true, mode: 448 });
+  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
+  if (!built || !existsSync7(output)) {
+    throw new Error("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.");
+  }
+  chmodSync2(output, 448);
+  return output;
+}
+function whatsappBridgePathForPackage(packageRoot, context = {}) {
+  const home = context.homeDir ?? context.env?.HOME ?? homedir8();
+  const cacheHome = context.env?.XDG_CACHE_HOME ?? join9(home, ".cache");
+  const fingerprint = whatsappBridgeFingerprint(join9(packageRoot, "tools", "whatsapp-bridge"));
+  return join9(cacheHome, "olympus", "bin", `olympus-whatsapp-bridge-${fingerprint}`);
+}
+function whatsappBridgeFingerprint(sourceDir) {
+  const hash = createHash3("sha256");
+  for (const name of ["main.go", "go.mod", "go.sum"]) {
+    const path = join9(sourceDir, name);
+    if (!existsSync7(path))
+      throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
+    hash.update(name).update("\x00").update(readFileSync9(path)).update("\x00");
+  }
+  return hash.digest("hex").slice(0, 16);
+}
+async function buildWhatsAppBridge(input) {
+  const temporary = `${input.outputPath}.tmp.${process.pid}`;
+  rmSync4(temporary, { force: true });
+  const child = Bun.spawn([input.go, "build", "-trimpath", "-o", temporary, "."], {
+    cwd: input.sourceDir,
+    env: { ...process.env, CGO_ENABLED: "1" },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore"
+  });
+  let timeout;
+  const result = await Promise.race([
+    child.exited,
+    new Promise((resolve4) => {
+      timeout = setTimeout(() => resolve4("timeout"), 2 * 60 * 1000);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  if (result === "timeout") {
+    child.kill("SIGTERM");
+    if (!await observeBunExit(child.exited, 2000)) {
+      child.kill("SIGKILL");
+      if (!await observeBunExit(child.exited, 2000)) {
+        throw new Error("WhatsApp bridge build did not exit after SIGKILL; build custody is retained.");
+      }
+    }
+    rmSync4(temporary, { force: true });
+    return false;
+  }
+  if (result !== 0 || !existsSync7(temporary)) {
+    rmSync4(temporary, { force: true });
+    return false;
+  }
+  chmodSync2(temporary, 448);
+  renameSync2(temporary, input.outputPath);
+  return true;
+}
+async function observeBunExit(exited, timeoutMs) {
+  let timeout;
+  const observed = await Promise.race([
+    exited.then(() => true),
+    new Promise((resolve4) => {
+      timeout = setTimeout(() => resolve4(false), timeoutMs);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  return observed;
+}
+function producerLaunch(source, approval, helperExecutable, packageRoot, sessionPath, chats) {
+  if (approval.source !== source || approval.explicitApproval !== true) {
+    throw new Error("Capture scope approval must name the paired source and be explicit.");
+  }
+  if (source === "telegram") {
+    const scopes = uniqueNonEmpty(approval.source === "telegram" ? approval.chatScopes : []);
+    if (scopes.length === 0)
+      throw new Error("Choose at least one Telegram chat before capture can start.");
+    const listed = new Set(chats.map((chat) => chat.chatScope));
+    if (scopes.some((scope) => !listed.has(scope))) {
+      throw new Error("Telegram capture approval contains a chat that was not in the verified account listing.");
+    }
+    return {
+      source,
+      executable: helperExecutable,
+      args: [join9(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"],
+      env: {
+        OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath,
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(","),
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(","),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES: scopes.join(","),
+        OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES: scopes.join(","),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]",
+        OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON: "[]"
+      },
+      secretEnvironment: [
+        { env: "OLYMPUS_TELEGRAM_API_ID", secretKey: TELEGRAM_API_ID_SECRET_KEY },
+        { env: "OLYMPUS_TELEGRAM_API_HASH", secretKey: TELEGRAM_API_HASH_SECRET_KEY }
+      ],
+      captureStarted: false
+    };
+  }
+  const chatJids = uniqueNonEmpty(approval.source === "whatsapp" ? approval.chatJids ?? [] : []);
+  const wholeAccount = approval.source === "whatsapp" && approval.wholeAccount === true;
+  if (wholeAccount === chatJids.length > 0) {
+    throw new Error("Approve either the whole linked WhatsApp account or at least one exact chat, but not both.");
+  }
+  if (chatJids.some((jid) => !/^[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(jid))) {
+    throw new Error("WhatsApp capture approval contains an invalid chat identifier.");
+  }
+  return {
+    source,
+    executable: helperExecutable,
+    args: ["--capture-approved"],
+    env: {
+      OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+      OLYMPUS_WHATSAPP_QR_STDOUT: "false",
+      OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: wholeAccount ? "*" : chatJids.join(",")
+    },
+    secretEnvironment: [],
+    captureStarted: false
+  };
+}
+function parseReadyReceipt(events, source) {
+  const event = [...events].reverse().find((candidate) => candidate.event === "ready");
+  if (!event || event.status !== "ready" || event.capture_started !== false || !isRecord(event.proof)) {
+    throw new Error(`${sourceLabel(source)} pairing did not return a verified ready receipt.`);
+  }
+  const proof = event.proof;
+  const proved = source === "telegram" ? proof.authorized === true && proof.session_persisted === true && proof.credentials_transferred === true && typeof proof.account_ref === "string" : proof.authenticated === true && proof.device_persisted === true;
+  if (!proved)
+    throw new Error(`${sourceLabel(source)} pairing readiness proof was incomplete.`);
+  return event;
+}
+function parseTelegramDialogs(value) {
+  if (!Array.isArray(value))
+    return [];
+  const chats = [];
+  for (const item of value) {
+    if (!isRecord(item))
+      continue;
+    if (typeof item.chat_scope !== "string" || !item.chat_scope.startsWith("telegram.personal:chat:"))
+      continue;
+    if (!["dm", "bot", "group", "channel"].includes(String(item.kind)))
+      continue;
+    chats.push({
+      chatScope: item.chat_scope,
+      kind: item.kind,
+      title: typeof item.title === "string" ? item.title : ""
+    });
+  }
+  return chats;
+}
+function proofForReceipt(source, receipt) {
+  return source === "telegram" ? `telegram:${String(receipt.proof.account_ref)}` : "whatsapp:authenticated-linked-device";
+}
+function pairingFailure(source, code, packageRoot) {
+  if (code === "pairing_cancelled")
+    return new Error(`${sourceLabel(source)} pairing was cancelled before readiness was proved.`);
+  if (code === "pairing_timeout")
+    return new Error(`${sourceLabel(source)} pairing timed out before readiness was proved. Re-run pairing to continue.`);
+  if (source === "telegram" && code === "telethon_not_installed") {
+    return new Error(`Telethon is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
+  }
+  if (source === "telegram" && code === "controlling_terminal_required") {
+    return new Error("Telegram pairing needs the private controlling terminal so credentials and login codes never enter argv, logs, or chat.");
+  }
+  const helper = source === "telegram" ? join9(packageRoot, "scripts", "telegram-pair.py") : join9(packageRoot, "bin", "olympus-whatsapp-bridge");
+  return new Error(`${sourceLabel(source)} pairing failed safely (${code ?? "helper_failed"}). Retry with the packaged helper: ${helper}`);
+}
+function safeErrorCode(stderr) {
+  for (const line of stderr.split(/\r?\n/).reverse()) {
+    const parsed = safeJsonObject(line);
+    if (parsed && typeof parsed.error === "string" && /^[a-z0-9_]+$/.test(parsed.error))
+      return parsed.error;
+    const match = /olympus-whatsapp-bridge:\s*([a-z0-9_]+)\s*$/.exec(line);
+    if (match)
+      return match[1];
+  }
+  return;
+}
+function safeJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function uniqueNonEmpty(values) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+function sourceLabel(source) {
+  return source === "telegram" ? "Telegram" : "WhatsApp";
+}
+async function runPairingCommand(request) {
+  const child = spawnChild(request.executable, request.args, {
+    env: request.env,
+    stdio: ["inherit", "pipe", "pipe", "pipe"]
+  });
+  const stdoutLines = [];
+  let forcedError;
+  const timeout = setTimeout(() => {
+    forcedError = "pairing_timeout";
+    child.kill("SIGTERM");
+  }, 10 * 60 * 1000);
+  const cancel = () => {
+    forcedError = "pairing_cancelled";
+    child.kill("SIGTERM");
+  };
+  if (request.signal?.aborted)
+    cancel();
+  else
+    request.signal?.addEventListener("abort", cancel, { once: true });
+  if (!child.stdout || !child.stderr || !child.stdio[3])
+    throw new Error("Pairing helper pipes were not created.");
+  const stdoutTask = readNodeLines(child.stdout, async (line) => {
+    stdoutLines.push(line);
+    await request.onStdoutLine?.(line);
+  });
+  const stderrTask = readBoundedNodeStream(child.stderr, 16 * 1024);
+  const privateTask = readBoundedNodeStream(child.stdio[3], 4 * 1024);
+  const exitTask = new Promise((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolveExit(code ?? 1));
+  });
+  const [exitCode, stderr, privatePayload] = await Promise.all([exitTask, stderrTask, privateTask, stdoutTask]).then(([code, errorText, privateText]) => [code, errorText, privateText]);
+  clearTimeout(timeout);
+  request.signal?.removeEventListener("abort", cancel);
+  return {
+    exitCode: forcedError ? 2 : exitCode,
+    stdoutLines,
+    stderr: forcedError ? JSON.stringify({ error: forcedError }) : stderr,
+    ...privatePayload ? { privatePayload } : {}
+  };
+}
+async function readNodeLines(stream, onLine) {
+  let buffered = "";
+  for await (const chunk of stream) {
+    buffered += Buffer.from(chunk).toString("utf8");
+    const lines = buffered.split(/\r?\n/);
+    buffered = lines.pop() ?? "";
+    for (const line of lines)
+      await onLine(line);
+  }
+  if (buffered)
+    await onLine(buffered);
+}
+async function readBoundedNodeStream(stream, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.length;
+    if (size > limit)
+      throw new Error("Pairing helper output exceeded its private bound.");
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+async function persistTelegramCredentials(secretStore, payload) {
+  const parsed = payload ? safeJsonObject(payload) : undefined;
+  const apiId = parsed?.api_id;
+  const apiHash = parsed?.api_hash;
+  if (!Number.isInteger(apiId) || Number(apiId) <= 0 || typeof apiHash !== "string" || !apiHash) {
+    throw new Error("Telegram pairing did not transfer its app credentials through the private channel.");
+  }
+  const priorId = await secretStore.get(TELEGRAM_API_ID_SECRET_KEY);
+  const priorHash = await secretStore.get(TELEGRAM_API_HASH_SECRET_KEY);
+  try {
+    await secretStore.set(TELEGRAM_API_ID_SECRET_KEY, String(apiId));
+    await secretStore.set(TELEGRAM_API_HASH_SECRET_KEY, apiHash);
+  } catch (error) {
+    if (priorId === undefined)
+      await secretStore.delete(TELEGRAM_API_ID_SECRET_KEY);
+    else
+      await secretStore.set(TELEGRAM_API_ID_SECRET_KEY, priorId);
+    if (priorHash === undefined)
+      await secretStore.delete(TELEGRAM_API_HASH_SECRET_KEY);
+    else
+      await secretStore.set(TELEGRAM_API_HASH_SECRET_KEY, priorHash);
+    throw error;
+  }
+  return async () => {
+    if (priorId === undefined)
+      await secretStore.delete(TELEGRAM_API_ID_SECRET_KEY);
+    else
+      await secretStore.set(TELEGRAM_API_ID_SECRET_KEY, priorId);
+    if (priorHash === undefined)
+      await secretStore.delete(TELEGRAM_API_HASH_SECRET_KEY);
+    else
+      await secretStore.set(TELEGRAM_API_HASH_SECRET_KEY, priorHash);
+  };
+}
+var TELEGRAM_API_ID_SECRET_KEY = "telegram.personal.app.api_id", TELEGRAM_API_HASH_SECRET_KEY = "telegram.personal.app.api_hash";
+var init_messaging_pairing = __esm(() => {
+  init_atomic_file();
+  init_messaging_runtime();
+  init_secret_store();
+  init_connect();
+  init_pairing_session_paths();
+});
+
+// src/core/messaging-capture.ts
+import { closeSync as closeSync6, constants as constants2, existsSync as existsSync8, fstatSync as fstatSync2, openSync as openSync6, readFileSync as readFileSync10, rmSync as rmSync5 } from "node:fs";
+import { homedir as homedir9 } from "node:os";
+import { dirname as dirname11, join as join10 } from "node:path";
+function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
+  return join10(dirname11(registryPath), `messaging-capture.${source}.json`);
+}
+function saveMessagingCaptureGrant(input) {
+  const handle = input.pairing.handles[0];
+  if (!handle)
+    throw new Error("A connected messaging handle is required before capture can be granted.");
+  const grant = {
+    version: 1,
+    source: input.pairing.source,
+    handle,
+    sessionPath: input.pairing.sessionPath,
+    producer: {
+      source: input.pairing.producer.source,
+      env: input.pairing.producer.env,
+      secretEnvironment: input.pairing.producer.secretEnvironment
+    },
+    grantedAt: (input.now ?? new Date).toISOString()
+  };
+  writePrivateFileAtomicSync(input.path, `${JSON.stringify(grant, null, 2)}
+`);
+  return grant;
+}
+function revokeMessagingCaptureGrant(path) {
+  rmSync5(path, { force: true });
+}
+
+class MessagingCaptureSupervisor {
+  options;
+  child;
+  fingerprint;
+  generation = 0;
+  constructor(options) {
+    this.options = options;
+  }
+  async reconcile() {
+    const generation = ++this.generation;
+    const registryPath = this.options.registryPath ?? defaultHandleRegistryPath();
+    const grantPath = this.options.grantPath ?? defaultMessagingCaptureGrantPath(this.options.source, registryPath);
+    const grantRead = readGrant(grantPath);
+    if (grantRead.kind !== "valid") {
+      await this.stop();
+      return { state: grantRead.kind === "missing" ? "stopped" : "blocked", reason: grantRead.kind === "missing" ? "grant_missing" : "grant_invalid" };
+    }
+    const grant = grantRead.grant;
+    if (grant.source !== this.options.source) {
+      await this.stop();
+      return { state: "blocked", reason: "grant_invalid" };
+    }
+    const handle = readConnectedHandleRegistry(registryPath).handles.find((candidate) => candidate.handle === grant.handle);
+    if (!handleAllowsCapture(handle, grant.source)) {
+      await this.stop();
+      return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
+    }
+    if (!sessionExists(grant)) {
+      await this.stop();
+      return { source: grant.source, state: "blocked", reason: "session_missing" };
+    }
+    const childEnv = {};
+    for (const [key, value] of Object.entries({ ...process.env, ...this.options.baseEnv ?? {}, ...grant.producer.env })) {
+      if (value !== undefined)
+        childEnv[key] = value;
+    }
+    const secrets = this.options.secretStore ?? createDefaultSecretStore();
+    for (const mapping of grant.producer.secretEnvironment) {
+      const value = await secrets.get(mapping.secretKey);
+      if (!value) {
+        await this.stop();
+        return { source: grant.source, state: "blocked", reason: "secret_missing" };
+      }
+      childEnv[mapping.env] = value;
+    }
+    if (generation !== this.generation)
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
+    const nextFingerprint = JSON.stringify(grant);
+    if (this.child && this.fingerprint === nextFingerprint)
+      return { source: grant.source, state: "running" };
+    await this.stop();
+    if (generation !== this.generation - 1)
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
+    const spawn2 = this.options.spawn ?? spawnCapture;
+    const launch = resolveCurrentLaunch(this.options, grant.source);
+    const child = spawn2({ executable: launch.executable, args: launch.args, env: childEnv });
+    this.child = child;
+    this.fingerprint = nextFingerprint;
+    child.exited.then(() => {
+      if (this.child === child) {
+        this.child = undefined;
+        this.fingerprint = undefined;
+      }
+    }, () => {
+      if (this.child === child) {
+        this.child = undefined;
+        this.fingerprint = undefined;
+      }
+    });
+    return { source: grant.source, state: "running" };
+  }
+  async stop() {
+    this.generation += 1;
+    const child = this.child;
+    if (!child)
+      return;
+    child.kill("SIGTERM");
+    const timeoutMs = this.options.stopTimeoutMs ?? 5000;
+    if (!await observeChildExit(child, timeoutMs)) {
+      child.kill("SIGKILL");
+      if (!await observeChildExit(child, timeoutMs)) {
+        throw new Error("Messaging capture did not exit after SIGKILL; session custody is retained.");
+      }
+    }
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+    }
+  }
+}
+async function observeChildExit(child, timeoutMs) {
+  let timeout;
+  const observed = await Promise.race([
+    child.exited.then(() => true, () => true),
+    new Promise((resolve4) => {
+      timeout = setTimeout(() => resolve4(false), timeoutMs);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  return observed;
+}
+function readGrant(path) {
+  if (!existsSync8(path))
+    return { kind: "missing" };
+  let descriptor;
+  try {
+    descriptor = openSync6(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+    const info = fstatSync2(descriptor);
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
+      return { kind: "invalid" };
+    }
+    const value = JSON.parse(readFileSync10(descriptor, "utf8"));
+    if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle || !value.sessionPath)
+      return { kind: "invalid" };
+    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
+      return { kind: "invalid" };
+    return { kind: "valid", grant: value };
+  } catch {
+    return { kind: "invalid" };
+  } finally {
+    if (descriptor !== undefined)
+      closeSync6(descriptor);
+  }
+}
+function resolveCurrentLaunch(options, source) {
+  if (source === "telegram") {
+    const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
+    if (!executable)
+      throw new Error("Python 3 is required to start Telegram capture.");
+    const packageRoot = options.packageRoot ?? join10(import.meta.dir, "..", "..");
+    return { executable, args: [join10(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
+  }
+  return {
+    executable: options.whatsappBridgePath ?? join10(homedir9(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
+    args: ["--capture-approved"]
+  };
+}
+function handleAllowsCapture(handle, source) {
+  if (!handle || handle.backendState?.status === "reauth_required")
+    return false;
+  return source === "telegram" ? handle.provider === "telegram" && handle.allowedCapabilities.includes("telegram.messages.sync") : handle.provider === "whatsapp_personal" && handle.allowedCapabilities.includes("whatsapp.personal.messages.sync");
+}
+function sessionExists(grant) {
+  return grant.source === "telegram" ? existsSync8(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync8(join10(grant.sessionPath, "session.db"));
+}
+function spawnCapture(input) {
+  const child = Bun.spawn([input.executable, ...input.args], {
+    env: input.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore"
+  });
+  return { exited: child.exited, kill: (signal) => child.kill(signal) };
+}
+var init_messaging_capture = __esm(() => {
+  init_messaging_runtime();
+  init_atomic_file();
+  init_secret_store();
+  init_connected_handles();
+});
+
+// src/core/source-index/types.ts
+function buildSourceSensitivity(input) {
+  const trustDomain = input.trustDomain ?? defaultTrustDomainForTier(input.trustTier);
+  const localOnlyRequired = trustDomain === "secure_local" || isSecureTrustTier(input.trustTier);
+  const localOnly = localOnlyRequired ? true : input.localOnly ?? false;
+  const cloudEmbeddingEligible = input.cloudEmbeddingEligible === true && !localOnly && trustDomain !== "secure_local" && !isSecureTrustTier(input.trustTier);
+  return {
+    trustTier: input.trustTier,
+    trustDomain,
+    localOnly,
+    cloudEmbeddingEligible
+  };
+}
+function isSecureTrustTier(trustTier) {
+  return trustTier === "S4" || trustTier === "S4+" || trustTier === "S5";
+}
+function buildSourceIndexStorageProfile(input) {
+  if (input.trustDomain === "secure_local") {
+    if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
+      throw new Error("secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.");
+    }
+    const profile = {
+      trustDomain: input.trustDomain,
+      placement: input.placement ?? "local_private",
+      storageEngine: input.storageEngine ?? "sqlite",
+      lexicalBackend: input.lexicalBackend ?? "sqlite_fts5",
+      vectorBackend: input.vectorBackend ?? "exact_scan",
+      embeddingBackend: input.embeddingBackend ?? "local",
+      cloudQueryEligible: false
+    };
+    assertSecureLocalStorageProfile(profile);
+    return profile;
+  }
+  if (input.trustDomain === "internal") {
+    const storageEngine = input.storageEngine ?? "sqlite";
+    const profile = {
+      trustDomain: input.trustDomain,
+      placement: input.placement ?? defaultStoragePlacementForEngine(storageEngine),
+      storageEngine,
+      lexicalBackend: input.lexicalBackend ?? defaultLexicalBackendForEngine(storageEngine),
+      vectorBackend: input.vectorBackend ?? defaultVectorBackendForEngine(storageEngine),
+      embeddingBackend: input.embeddingBackend ?? (input.cloudEmbeddingApproved === true ? "cloud" : "local"),
+      cloudQueryEligible: input.cloudQueryApproved === true
+    };
+    assertStorageBackendMatchesEngine(profile);
+    assertCloudEmbeddingApproval(profile, input.cloudEmbeddingApproved === true);
+    return profile;
+  }
+  if (input.trustDomain === "public_safe") {
+    const storageEngine = input.storageEngine ?? "sqlite";
+    const profile = {
+      trustDomain: input.trustDomain,
+      placement: input.placement ?? defaultStoragePlacementForEngine(storageEngine),
+      storageEngine,
+      lexicalBackend: input.lexicalBackend ?? defaultLexicalBackendForEngine(storageEngine),
+      vectorBackend: input.vectorBackend ?? defaultVectorBackendForEngine(storageEngine),
+      embeddingBackend: input.embeddingBackend ?? (input.cloudEmbeddingApproved === true ? "cloud" : "local"),
+      cloudQueryEligible: input.cloudQueryApproved ?? true
+    };
+    assertStorageBackendMatchesEngine(profile);
+    assertCloudEmbeddingApproval(profile, input.cloudEmbeddingApproved === true);
+    return profile;
+  }
+  if (input.embeddingBackend === "cloud" && input.cloudEmbeddingApproved !== true) {
+    throw new Error("Extension trust domains require explicit cloud embedding approval.");
+  }
+  return {
+    trustDomain: input.trustDomain,
+    placement: input.placement ?? "local_private",
+    storageEngine: input.storageEngine ?? "sqlite",
+    lexicalBackend: input.lexicalBackend ?? "sqlite_fts5",
+    vectorBackend: input.vectorBackend ?? "exact_scan",
+    embeddingBackend: input.embeddingBackend ?? "local",
+    cloudQueryEligible: input.cloudQueryApproved === true
+  };
+}
+function defaultTrustDomainForTier(trustTier) {
+  if (isSecureTrustTier(trustTier))
+    return "secure_local";
+  if (trustTier === "S0")
+    return "public_safe";
+  return "internal";
+}
+function assertSecureLocalStorageProfile(profile) {
+  if (profile.placement !== "local_private") {
+    throw new Error("secure_local storage must stay local_private.");
+  }
+  if (profile.storageEngine !== "sqlite") {
+    throw new Error("secure_local storage must use the SQLite-family local store.");
+  }
+  if (profile.lexicalBackend !== "sqlite_fts5") {
+    throw new Error("secure_local lexical search must use the local SQLite FTS5 lane.");
+  }
+  if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
+    throw new Error("secure_local vector search must use a local SQLite-family vector lane.");
+  }
+  if (profile.cloudQueryEligible) {
+    throw new Error("secure_local corpora cannot be directly cloud-query eligible.");
+  }
+}
+function defaultStoragePlacementForEngine(storageEngine) {
+  if (storageEngine === "postgres")
+    return "cloud_managed";
+  return "local_private";
+}
+function defaultLexicalBackendForEngine(storageEngine) {
+  if (storageEngine === "postgres")
+    return "postgres_full_text";
+  return "sqlite_fts5";
+}
+function defaultVectorBackendForEngine(storageEngine) {
+  if (storageEngine === "postgres")
+    return "pgvector";
+  return "exact_scan";
+}
+function assertStorageBackendMatchesEngine(profile) {
+  if (profile.storageEngine === "sqlite") {
+    if (profile.lexicalBackend !== "sqlite_fts5") {
+      throw new Error("SQLite storage profiles must use sqlite_fts5 lexical search.");
+    }
+    if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
+      throw new Error("SQLite storage profiles must use a SQLite-family vector lane.");
+    }
+    return;
+  }
+  if (profile.lexicalBackend !== "postgres_full_text") {
+    throw new Error("Postgres storage profiles must use postgres_full_text lexical search.");
+  }
+  if (profile.vectorBackend !== "pgvector") {
+    throw new Error("Postgres storage profiles must use pgvector.");
+  }
+}
+function assertCloudEmbeddingApproval(profile, approved) {
+  if (profile.embeddingBackend === "cloud" && approved !== true) {
+    throw new Error("Cloud embeddings require explicit corpus policy approval.");
+  }
+}
+var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
+var init_types = __esm(() => {
+  SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
+  SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
+  SOURCE_TRUST_DOMAINS = ["public_safe", "internal", "secure_local"];
+});
+
+// src/core/source-index/corpus.ts
+function defineSourceIndexCorpus(input) {
+  const corpusId = input.corpusId.trim();
+  if (!corpusId) {
+    throw new Error("Source-index corpus definitions require a corpus id.");
+  }
+  const storageProfile = input.storageProfile ?? buildSourceIndexStorageProfile({
+    trustDomain: input.trustDomain,
+    ...input.storageProfileInput
+  });
+  if (storageProfile.trustDomain !== input.trustDomain) {
+    throw new Error("Source-index corpus storage profile trust domain must match the corpus trust domain.");
+  }
+  const defaultSensitivity = buildSourceSensitivity(input.defaultSensitivity ?? {
+    trustTier: defaultTrustTierForDomain(input.trustDomain),
+    trustDomain: input.trustDomain,
+    cloudEmbeddingEligible: storageProfile.embeddingBackend === "cloud"
+  });
+  if (defaultSensitivity.trustDomain !== input.trustDomain) {
+    throw new Error("Source-index corpus default sensitivity trust domain must match the corpus trust domain.");
+  }
+  const embeddingPolicy = input.embeddingPolicy ?? defaultEmbeddingPolicyForStorage(storageProfile);
+  assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile);
+  return {
+    corpusId,
+    family: input.family,
+    trustDomain: input.trustDomain,
+    activationMode: input.activationMode ?? "lexical_only",
+    storageProfile,
+    defaultSensitivity,
+    embeddingPolicy,
+    ...input.description ? { description: input.description } : {}
+  };
+}
+function buildSourceIndexCorpusRegistry(corpora) {
+  const byId = new Map;
+  for (const corpus of corpora) {
+    if (byId.has(corpus.corpusId)) {
+      throw new Error(`Duplicate source-index corpus id "${corpus.corpusId}".`);
+    }
+    byId.set(corpus.corpusId, corpus);
+  }
+  return {
+    get(corpusId) {
+      return byId.get(corpusId);
+    },
+    require(corpusId) {
+      const corpus = byId.get(corpusId);
+      if (!corpus) {
+        throw new Error(`Unknown source-index corpus "${corpusId}".`);
+      }
+      return corpus;
+    },
+    list() {
+      return Array.from(byId.values());
+    },
+    select(filters) {
+      return Array.from(byId.values()).filter((corpus) => corpusMatchesSelection(corpus, filters));
+    }
+  };
+}
+function corpusMatchesSelection(corpus, filters) {
+  if (!filters)
+    return true;
+  if (filters.corpusIds && !filters.corpusIds.includes(corpus.corpusId))
+    return false;
+  if (filters.families && !filters.families.includes(corpus.family))
+    return false;
+  if (filters.trustDomains && !filters.trustDomains.includes(corpus.trustDomain))
+    return false;
+  return true;
+}
+function defaultTrustTierForDomain(trustDomain) {
+  if (trustDomain === "secure_local")
+    return "S4";
+  if (trustDomain === "public_safe")
+    return "S0";
+  return "S3";
+}
+function defaultEmbeddingPolicyForStorage(storageProfile) {
+  if (storageProfile.embeddingBackend === "none")
+    return "disabled";
+  if (storageProfile.embeddingBackend === "local")
+    return "local_only";
+  if (storageProfile.trustDomain === "public_safe")
+    return "cloud_allowed";
+  return "cloud_allowed_by_policy";
+}
+function assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile) {
+  if (storageProfile.embeddingBackend === "cloud" && embeddingPolicy === "local_only") {
+    throw new Error("Cloud embedding storage cannot use a local-only corpus embedding policy.");
+  }
+  if (storageProfile.embeddingBackend === "local" && embeddingPolicy === "cloud_allowed") {
+    throw new Error("Local embedding storage cannot use an always-cloud corpus embedding policy.");
+  }
+}
+var SOURCE_INDEX_ACTIVATION_MODES;
+var init_corpus = __esm(() => {
+  init_types();
+  SOURCE_INDEX_ACTIVATION_MODES = ["lexical_only", "hybrid_shadow", "hybrid_primary"];
+});
+
+// src/core/public-surface.ts
+function isV04PublicOperation(surface, operationName) {
+  return PUBLIC_OPERATION_NAMES[surface].has(operationName);
+}
+function isV04PublicDashboardRoute(method, pathname) {
+  return V0_4_PUBLIC_DASHBOARD_ROUTES.some((route) => route.method === method && (route.prefix === true ? pathname.startsWith(route.path) : pathname === route.path));
+}
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
+var init_public_surface = __esm(() => {
+  V0_4_PUBLIC_NATIVE_TOOLS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "source_watch_create",
+    "source_watches",
+    "source_watch_cancel",
+    "olympus_doctor"
+  ];
+  V0_4_PUBLIC_MCP_TOOLS = [
+    "argus_ping",
+    "argus_list_models",
+    "argus_complete",
+    "source_answer",
+    "source_index_status",
+    "source_index_search",
+    "olympus_doctor"
+  ];
+  V0_4_PUBLIC_CLI_OPERATIONS = V0_4_PUBLIC_MCP_TOOLS;
+  V0_4_PUBLIC_CONNECT_SOURCES = [
+    "google",
+    "gmail",
+    "google-drive",
+    "dropbox",
+    "telegram",
+    "whatsapp",
+    "venice",
+    "readwise",
+    "gemini"
+  ];
+  V0_4_PUBLIC_SOURCE_IDS = [
+    "gmail.email",
+    "google_drive.docs",
+    "dropbox.files",
+    "x.bookmarks",
+    "telegram.messages",
+    "whatsapp.personal.messages",
+    "readwise.library"
+  ];
+  V0_4_PUBLIC_CLI_COMMANDS = [
+    "setup",
+    "sovereignty init",
+    "sensitivity validate",
+    "worker install",
+    "worker status",
+    "worker start",
+    "worker stop",
+    "worker restart",
+    "worker foreground",
+    "worker upgrade",
+    "worker uninstall",
+    "worker run",
+    "connect google",
+    "connect gmail",
+    "connect google-drive",
+    "connect dropbox",
+    "connect telegram",
+    "connect whatsapp",
+    "connect venice",
+    "connect readwise",
+    "connect gemini",
+    "connect status",
+    "dashboard",
+    "source answer",
+    "source index status",
+    "source index search",
+    "data export",
+    "data verify",
+    "data delete",
+    "doctor",
+    "argus ping",
+    "argus list",
+    "argus complete",
+    "serve"
+  ];
+  V0_4_PUBLIC_CLI_GLOBALS = [
+    "--help",
+    "-h",
+    "--version",
+    "version",
+    "--tools-json"
+  ];
+  V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
+    "__oauth-detached-child",
+    "__worker-service-run"
+  ];
+  V0_4_PUBLIC_DASHBOARD_ROUTES = [
+    { method: "GET", path: "/dashboard" },
+    { method: "GET", path: "/dashboard.json" },
+    { method: "GET", path: "/dashboard/ui" },
+    { method: "GET", path: "/dashboard/auth-check" },
+    { method: "GET", path: "/dashboard/launch" },
+    { method: "POST", path: "/dashboard/control/launch" },
+    { method: "POST", path: "/dashboard/control/launch/redeem" },
+    { method: "POST", path: "/dashboard/control/session" },
+    { method: "GET", path: "/dashboard/dispositions" },
+    { method: "GET", path: "/dashboard/dispositions.json" },
+    { method: "POST", path: "/dashboard/dispositions" },
+    { method: "GET", path: "/oauth/callback/", prefix: true },
+    { method: "POST", path: "/dashboard/connect/oauth/start" },
+    { method: "POST", path: "/dashboard/connect/oauth/cancel" },
+    { method: "POST", path: "/dashboard/connect/api-key" },
+    { method: "POST", path: "/dashboard/models/check" },
+    { method: "POST", path: "/dashboard/sync-now" },
+    { method: "POST", path: "/dashboard/embedding-priority" },
+    { method: "POST", path: "/dashboard/disconnect" },
+    { method: "POST", path: "/dashboard/unpair" }
+  ];
+  PUBLIC_OPERATION_NAMES = {
+    native: new Set(V0_4_PUBLIC_NATIVE_TOOLS),
+    mcp: new Set(V0_4_PUBLIC_MCP_TOOLS),
+    cli: new Set(V0_4_PUBLIC_CLI_OPERATIONS)
+  };
+});
+
+// src/core/source-corpus-registry.ts
+function defaultSourceCorpusRegistryConfig() {
+  return {
+    schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
+    corpora: structuredClone(DEFAULT_SOURCE_CORPORA)
+  };
+}
+function createSourceCorpusRegistry(rawConfig) {
+  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  return sourceCorpusRegistryFromConfig(config);
+}
+function createPublicSourceCorpusRegistry(rawConfig) {
+  const config = narrowSourceCorpusRegistryConfigToPublic(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  return sourceCorpusRegistryFromConfig(config);
+}
+function sourceCorpusRegistryFromConfig(config) {
+  const active = config.corpora.filter((corpus) => corpus.enabled !== false);
+  return {
+    list(capability) {
+      const selected = active.filter((corpus) => !capability || corpus.capabilities.includes(capability));
+      return capability ? orderCorporaForCapability(selected, capability) : selected;
+    },
+    ids(capability) {
+      return this.list(capability).map((corpus) => corpus.corpusId);
+    },
+    has(corpusId, capability) {
+      const canonicalCorpusId = canonicalSourceCorpusId(corpusId);
+      return this.list(capability).some((corpus) => corpus.corpusId === canonicalCorpusId);
+    },
+    require(corpusId, capability, paramName = "corpus_id") {
+      const canonicalCorpusId = canonicalSourceCorpusId(corpusId);
+      if (this.has(canonicalCorpusId, capability))
+        return canonicalCorpusId;
+      const allowed = this.ids(capability);
+      throw new OperationError("invalid_params", `${paramName} must be one of the configured ${capability} corpora: ${allowed.join(", ")}.`);
+    },
+    definitions(capability, fullDefinitions = []) {
+      const overrides = new Map;
+      for (const definition of fullDefinitions) {
+        if (overrides.has(definition.corpusId)) {
+          throw new Error(`Duplicate full source-index corpus definition "${definition.corpusId}".`);
+        }
+        overrides.set(definition.corpusId, definition);
+      }
+      return this.list(capability).map((corpus) => definitionForRegistryCorpus(corpus, overrides.get(corpus.corpusId)));
+    }
+  };
+}
+function canonicalSourceCorpusId(corpusId) {
+  if (corpusId === LEGACY_READWISE_LIBRARY_CORPUS_ID)
+    return READWISE_LIBRARY_CORPUS_ID;
+  if (corpusId === LEGACY_TELEGRAM_MESSAGES_CORPUS_ID)
+    return PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID;
+  return corpusId;
+}
+function definitionForRegistryCorpus(corpus, fullDefinition) {
+  if (!fullDefinition) {
+    return defineSourceIndexCorpus({
+      corpusId: corpus.corpusId,
+      family: corpus.family,
+      trustDomain: corpus.trustDomain,
+      ...corpus.activationMode ? { activationMode: corpus.activationMode } : {},
+      ...corpus.description ? { description: corpus.description } : {}
+    });
+  }
+  if (fullDefinition.family !== corpus.family || fullDefinition.trustDomain !== corpus.trustDomain) {
+    throw new Error(`Full source-index corpus definition "${corpus.corpusId}" does not match its registry family/trust domain.`);
+  }
+  if (corpus.activationMode && corpus.activationMode !== fullDefinition.activationMode) {
+    return { ...fullDefinition, activationMode: corpus.activationMode };
+  }
+  return fullDefinition;
+}
+function orderCorporaForCapability(corpora, capability) {
+  const order = DEFAULT_CAPABILITY_ORDER[capability] ?? [];
+  const byId = new Map(corpora.map((corpus) => [corpus.corpusId, corpus]));
+  const ordered = [];
+  for (const corpusId of order) {
+    const corpus = byId.get(corpusId);
+    if (corpus) {
+      ordered.push(corpus);
+      byId.delete(corpusId);
+    }
+  }
+  ordered.push(...corpora.filter((corpus) => byId.has(corpus.corpusId)));
+  return ordered;
+}
+function parseSourceCorpusRegistryConfig(rawConfig) {
+  const root = asRecord(rawConfig);
+  if (!root) {
+    throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
+  }
+  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1.");
+  }
+  if (!Array.isArray(root.corpora)) {
+    throw new OperationError("config_error", "sourceIndex corpus registry requires a corpora array.");
+  }
+  const corpora = root.corpora.map(parseSourceCorpusConfig);
+  const seen = new Set;
+  for (const corpus of corpora) {
+    if (seen.has(corpus.corpusId)) {
+      throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
+    }
+    seen.add(corpus.corpusId);
+  }
+  return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
+}
+function narrowSourceCorpusRegistryConfigToPublic(rawConfig) {
+  const config = parseSourceCorpusRegistryConfig(rawConfig);
+  return {
+    schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
+    corpora: config.corpora.flatMap((corpus) => {
+      const publicCorpus = narrowSourceCorpusToPublic(corpus).corpus;
+      return publicCorpus ? [publicCorpus] : [];
+    })
+  };
+}
+function narrowSourceCorpusToPublic(corpus) {
+  if (!PUBLIC_SOURCE_IDS.has(corpus.sourceId)) {
+    return {
+      violation: `Public sourceIndex corpus ${corpus.corpusId} sourceId must be one of: ${V0_4_PUBLIC_SOURCE_IDS.join(", ")}.`
+    };
+  }
+  const declaration = PUBLIC_CORPUS_DECLARATIONS.get(corpus.corpusId);
+  if (!declaration) {
+    return { violation: `Public sourceIndex corpusId is not declared by v0.4: ${corpus.corpusId}.` };
+  }
+  for (const field of ["sourceId", "provider", "family", "trustDomain"]) {
+    if (corpus[field] !== declaration[field]) {
+      return {
+        violation: `Public sourceIndex corpus ${corpus.corpusId} ${field} must be ${declaration[field]}.`
+      };
+    }
+  }
+  const declaredCapabilities = new Set(declaration.capabilities);
+  const widened = corpus.capabilities.filter((capability) => !declaredCapabilities.has(capability));
+  if (widened.length === 0)
+    return { corpus };
+  const narrowed = corpus.capabilities.filter((capability) => declaredCapabilities.has(capability));
+  return {
+    violation: `Public sourceIndex corpus ${corpus.corpusId} cannot add capabilities: ${widened.join(", ")}.`,
+    ...narrowed.length > 0 ? { corpus: { ...corpus, capabilities: narrowed } } : {}
+  };
+}
+function parseSourceCorpusConfig(value) {
+  const record = asRecord(value);
+  if (!record) {
+    throw new OperationError("config_error", "sourceIndex corpus entries must be objects.");
+  }
+  const corpusId = canonicalSourceCorpusId(requiredString(record.corpusId, "sourceIndex corpusId"));
+  const sourceId = requiredString(record.sourceId, `sourceIndex corpus ${corpusId} sourceId`);
+  const provider = requiredString(record.provider, `sourceIndex corpus ${corpusId} provider`);
+  const family = requiredEnum(record.family, SOURCE_FAMILIES, `sourceIndex corpus ${corpusId} family`);
+  const trustDomain = requiredEnum(record.trustDomain, SOURCE_TRUST_DOMAINS, `sourceIndex corpus ${corpusId} trustDomain`);
+  const activationMode = record.activationMode === undefined ? undefined : requiredEnum(record.activationMode, SOURCE_INDEX_ACTIVATION_MODES, `sourceIndex corpus ${corpusId} activationMode`);
+  if (!Array.isArray(record.capabilities)) {
+    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} capabilities must be an array.`);
+  }
+  const capabilities = [...new Set(record.capabilities.map((capability) => requiredEnum(capability, SOURCE_CORPUS_CAPABILITIES, `sourceIndex corpus ${corpusId} capability`)))];
+  if (capabilities.length === 0) {
+    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} must enable at least one capability.`);
+  }
+  if (record.enabled !== undefined && typeof record.enabled !== "boolean") {
+    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} enabled must be boolean when provided.`);
+  }
+  return {
+    corpusId,
+    sourceId,
+    provider,
+    family,
+    trustDomain,
+    ...activationMode ? { activationMode } : {},
+    ...record.enabled !== undefined ? { enabled: record.enabled } : {},
+    capabilities,
+    ...typeof record.description === "string" && record.description.trim() ? { description: record.description.trim() } : {}
+  };
+}
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function requiredString(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+function requiredEnum(value, allowed, label) {
+  if (typeof value === "string" && allowed.includes(value))
+    return value;
+  throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
+}
+var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
+var init_source_corpus_registry = __esm(() => {
+  init_operation_error();
+  init_corpus();
+  init_types();
+  init_public_surface();
+  SOURCE_CORPUS_CAPABILITIES = [
+    "answer",
+    "status",
+    "sync",
+    "search",
+    "promotion_candidates"
+  ];
+  DEFAULT_SOURCE_CORPORA = [
+    {
+      corpusId: "secure_local.email.private",
+      sourceId: "gmail.email",
+      provider: "gmail",
+      family: "email",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "internal.email",
+      sourceId: "gmail.email",
+      provider: "gmail",
+      family: "email",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "internal.drive.docs",
+      sourceId: "google_drive.docs",
+      provider: "google_drive",
+      family: "file",
+      trustDomain: "internal",
+      activationMode: "hybrid_primary",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "secure_local.drive.docs",
+      sourceId: "google_drive.docs",
+      provider: "google_drive",
+      family: "file",
+      trustDomain: "secure_local",
+      activationMode: "lexical_only",
+      capabilities: ["answer", "status", "sync", "search"],
+      description: "Secure-local Google Drive/Docs items raised by per-item sensitivity classification."
+    },
+    {
+      corpusId: "internal.telegram.messages",
+      sourceId: "telegram.messages",
+      provider: "telegram",
+      family: "chat",
+      trustDomain: "internal",
+      activationMode: "hybrid_primary",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: READWISE_LIBRARY_CORPUS_ID,
+      sourceId: "readwise.library",
+      provider: "readwise",
+      family: "readwise",
+      trustDomain: "internal",
+      activationMode: "lexical_only",
+      capabilities: ["answer", "status", "sync"],
+      description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
+    },
+    {
+      corpusId: "internal.x.bookmarks",
+      sourceId: "x.bookmarks",
+      provider: "x",
+      family: "x",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "secure_local.dropbox.files",
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      family: "file",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "sync", "search", "promotion_candidates"]
+    },
+    {
+      corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      sourceId: "telegram.messages",
+      provider: "telegram",
+      family: "chat",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_primary",
+      capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "secure_local.whatsapp.messages",
+      sourceId: "whatsapp.personal.messages",
+      provider: "whatsapp",
+      family: "chat",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["status", "sync", "search", "answer"],
+      description: "WhatsApp live capture (thin whatsmeow bridge -> shared scheduler -> connector store), including locally transcribed voice notes."
+    }
+  ];
+  DEFAULT_CAPABILITY_ORDER = {
+    answer: [
+      "secure_local.email.private",
+      "internal.email",
+      "internal.drive.docs",
+      "secure_local.drive.docs",
+      "internal.telegram.messages",
+      READWISE_LIBRARY_CORPUS_ID,
+      "internal.x.bookmarks",
+      "secure_local.dropbox.files",
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      "secure_local.whatsapp.messages"
+    ],
+    status: [
+      "secure_local.email.private",
+      "internal.email",
+      "internal.drive.docs",
+      "secure_local.drive.docs",
+      "internal.telegram.messages",
+      READWISE_LIBRARY_CORPUS_ID,
+      "internal.x.bookmarks",
+      "secure_local.dropbox.files",
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      "secure_local.whatsapp.messages"
+    ],
+    sync: [
+      "internal.email",
+      "secure_local.email.private",
+      "internal.drive.docs",
+      "secure_local.drive.docs",
+      READWISE_LIBRARY_CORPUS_ID,
+      "internal.x.bookmarks",
+      "secure_local.dropbox.files",
+      "internal.telegram.messages",
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
+    ],
+    search: [
+      "internal.email",
+      "secure_local.email.private",
+      "internal.drive.docs",
+      "secure_local.drive.docs",
+      "secure_local.dropbox.files",
+      "internal.x.bookmarks",
+      "internal.telegram.messages",
+      PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
+    ],
+    promotion_candidates: ["secure_local.dropbox.files"]
+  };
+  PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
+  PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
+});
+
+// src/core/source-ingestion-policy.ts
+import { existsSync as existsSync9, readFileSync as readFileSync11 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { join as join11 } from "node:path";
+function defaultDropboxIngestionPolicyPath() {
+  return join11(homedir10(), ".olympus", "sources", "dropbox.personal.ingestion.json");
+}
+function defaultDropboxIngestionPolicy() {
+  return {
+    schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
+    source: "dropbox.personal",
+    corpusId: "secure_local.dropbox.files",
+    roots: [{
+      path: DEFAULT_DROPBOX_ROOT,
+      approved_scope_key: `dropbox.personal:${DEFAULT_DROPBOX_ROOT}`,
+      default_action: "full_extract"
+    }],
+    rules: [
+      {
+        match: {
+          mime_type_prefixes: ["image/", "video/"],
+          extensions: [...DEFAULT_DEFERRED_MEDIA_EXTENSIONS]
+        },
+        action: "metadata_only",
+        reason: "media_default_metadata_only"
+      },
+      {
+        match: {
+          extensions: [...DEFAULT_DEFERRED_BOOK_EXTENSIONS],
+          path_contains: [...DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS]
+        },
+        action: "metadata_only",
+        reason: "book_library_metadata_only"
+      },
+      {
+        match: {
+          path_prefixes: ["/Archive"]
+        },
+        action: "metadata_only",
+        reason: "archive_metadata_only"
+      }
+    ],
+    sync: {
+      cadence: "continuous",
+      max_entries_per_pass: 25000,
+      max_pages_per_pass: 1000
+    },
+    content: {
+      default_extractor_kind: "local_text",
+      default_extractor_version: "2026-05-22",
+      plan_limit: 25,
+      batch_size: 2
+    }
+  };
+}
+function loadDropboxIngestionPolicy(options = {}) {
+  const validateDropboxPolicy = (policy, label) => {
+    if (policy.source !== "dropbox.personal") {
+      throw new OperationError("config_error", `${label}.source must be dropbox.personal for this Dropbox policy loader.`);
+    }
+    if (policy.corpusId !== "secure_local.dropbox.files") {
+      throw new OperationError("config_error", `${label}.corpusId must be secure_local.dropbox.files.`);
+    }
+    return policy;
+  };
+  if (options.inlinePolicy !== undefined) {
+    return validateDropboxPolicy(parseSourceIngestionPolicy(options.inlinePolicy, "inline Dropbox ingestion policy"), "inline Dropbox ingestion policy");
+  }
+  const env = options.env ?? process.env;
+  const path = options.policyPath?.trim() || env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim() || env.OLYMPUS_SOURCE_INGESTION_POLICY_PATH?.trim() || defaultDropboxIngestionPolicyPath();
+  if (existsSync9(path)) {
+    return validateDropboxPolicy(parseSourceIngestionPolicy(JSON.parse(readFileSync11(path, "utf8")), path), path);
+  }
+  return defaultDropboxIngestionPolicy();
+}
+function parseSourceIngestionPolicy(rawPolicy, label = "source ingestion policy") {
+  const root = asRecord2(rawPolicy);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  if (root.schemaVersion !== SOURCE_INGESTION_POLICY_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label} schemaVersion must be 1.`);
+  }
+  const source = requiredString2(root.source, `${label}.source`);
+  const corpusId = requiredString2(root.corpusId, `${label}.corpusId`);
+  const roots = Array.isArray(root.roots) ? root.roots.map((value) => parseRoot(value, label)) : [];
+  if (roots.length === 0)
+    throw new OperationError("config_error", `${label}.roots must include at least one root.`);
+  const rules = Array.isArray(root.rules) ? root.rules.map((value) => parseRule(value, label)) : [];
+  const syncRecord = asRecord2(root.sync);
+  const contentRecord = asRecord2(root.content);
+  const policy = {
+    schemaVersion: SOURCE_INGESTION_POLICY_SCHEMA_VERSION,
+    source,
+    corpusId,
+    roots,
+    rules,
+    sync: {
+      cadence: enumString(syncRecord?.cadence, ["manual", "continuous"], `${label}.sync.cadence`),
+      max_entries_per_pass: positiveInteger2(syncRecord?.max_entries_per_pass, `${label}.sync.max_entries_per_pass`),
+      max_pages_per_pass: positiveInteger2(syncRecord?.max_pages_per_pass, `${label}.sync.max_pages_per_pass`)
+    },
+    content: {
+      default_extractor_kind: requiredString2(contentRecord?.default_extractor_kind, `${label}.content.default_extractor_kind`),
+      default_extractor_version: requiredString2(contentRecord?.default_extractor_version, `${label}.content.default_extractor_version`),
+      plan_limit: positiveInteger2(contentRecord?.plan_limit, `${label}.content.plan_limit`),
+      batch_size: positiveInteger2(contentRecord?.batch_size, `${label}.content.batch_size`)
+    }
+  };
+  return policy;
+}
+function dropboxPolicyApprovedScopeKeys(policy) {
+  return policy.roots.filter((root) => root.default_action !== "on_demand").map((root) => root.approved_scope_key);
+}
+function dropboxPolicyFullExtractionScopeKeys(policy) {
+  return policy.roots.filter((root) => root.default_action === "full_extract").map((root) => root.approved_scope_key);
+}
+function parseRoot(value, label) {
+  const root = asRecord2(value);
+  if (!root)
+    throw new OperationError("config_error", `${label}.roots entries must be objects.`);
+  const path = normalizePath(requiredString2(root.path, `${label}.roots.path`));
+  const approvedScopeKey = requiredString2(root.approved_scope_key, `${label}.roots.approved_scope_key`);
+  if (!approvedScopeKeyContainsPath(approvedScopeKey, path)) {
+    throw new OperationError("config_error", `${label}.roots approved_scope_key must contain its root path.`);
+  }
+  return {
+    path,
+    approved_scope_key: approvedScopeKey,
+    default_action: enumString(root.default_action, ["full_extract", "metadata_only", "on_demand"], `${label}.roots.default_action`)
+  };
+}
+function approvedScopeKeyContainsPath(approvedScopeKey, path) {
+  const [, scopePathValue] = approvedScopeKey.split(/:(.*)/s);
+  const scopePath = normalizePath(scopePathValue || approvedScopeKey);
+  return path === scopePath || path.startsWith(`${scopePath}/`);
+}
+function parseRule(value, label) {
+  const rule = asRecord2(value);
+  const match = asRecord2(rule?.match);
+  if (!rule || !match)
+    throw new OperationError("config_error", `${label}.rules entries require match objects.`);
+  const parsed = {
+    match: {},
+    action: enumString(rule.action, ["full_extract", "metadata_only", "on_demand"], `${label}.rules.action`),
+    reason: requiredString2(rule.reason, `${label}.rules.reason`)
+  };
+  const extensions = stringList(match.extensions).map((extension) => extension.replace(/^\./, "").toLowerCase());
+  const mimeTypePrefixes = stringList(match.mime_type_prefixes).map((prefix) => prefix.toLowerCase());
+  const pathContains = stringList(match.path_contains).map((segment) => segment.toLowerCase());
+  const pathPrefixes = stringList(match.path_prefixes).map(normalizePath);
+  if (extensions.length > 0)
+    parsed.match.extensions = extensions;
+  if (mimeTypePrefixes.length > 0)
+    parsed.match.mime_type_prefixes = mimeTypePrefixes;
+  if (pathContains.length > 0)
+    parsed.match.path_contains = pathContains;
+  if (pathPrefixes.length > 0)
+    parsed.match.path_prefixes = pathPrefixes;
+  if (Object.keys(parsed.match).length === 0) {
+    throw new OperationError("config_error", `${label}.rules entries must match at least one field.`);
+  }
+  return parsed;
+}
+function asRecord2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function requiredString2(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+function stringList(value) {
+  return Array.isArray(value) ? [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))] : [];
+}
+function enumString(value, allowed, label) {
+  if (typeof value === "string" && allowed.includes(value))
+    return value;
+  throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
+}
+function positiveInteger2(value, label) {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0)
+    return value;
+  throw new OperationError("config_error", `${label} must be a positive integer.`);
+}
+function normalizePath(path) {
+  const trimmed = path.trim();
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+var SOURCE_INGESTION_POLICY_SCHEMA_VERSION = 1, DEFAULT_DROPBOX_ROOT = "/", DEFAULT_DEFERRED_MEDIA_EXTENSIONS, DEFAULT_DEFERRED_BOOK_EXTENSIONS, DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS;
+var init_source_ingestion_policy = __esm(() => {
+  init_operation_error();
+  DEFAULT_DEFERRED_MEDIA_EXTENSIONS = [
+    "3gp",
+    "avi",
+    "bmp",
+    "gif",
+    "heic",
+    "heif",
+    "jpeg",
+    "jpg",
+    "m4v",
+    "mov",
+    "mp4",
+    "mpeg",
+    "mpg",
+    "png",
+    "tif",
+    "tiff",
+    "webm",
+    "webp"
+  ];
+  DEFAULT_DEFERRED_BOOK_EXTENSIONS = [
+    "azw",
+    "azw3",
+    "azw4",
+    "cba",
+    "cb7",
+    "cbr",
+    "cbt",
+    "cbz",
+    "djv",
+    "djvu",
+    "epub",
+    "fb2",
+    "ibooks",
+    "lit",
+    "mobi",
+    "opf"
+  ];
+  DEFAULT_DEFERRED_BOOK_PATH_SEGMENTS = [
+    "audiobooks",
+    "book library",
+    "books",
+    "calibre library",
+    "e-books",
+    "ebooks",
+    "kindle"
+  ];
+});
+
+// src/core/source-ingestion-exclusions.ts
+import { existsSync as existsSync10, readFileSync as readFileSync12 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join12 } from "node:path";
+function sourceExclusionOutcomeIsUnevaluable(outcome) {
+  switch (outcome) {
+    case "excluded_path_unevaluable":
+    case "excluded_ancestry_unevaluable":
+    case "excluded_media_unevaluable":
+    case "metadata_only_unevaluable":
+      return true;
+    case "admitted":
+    case "excluded_path_prefix":
+    case "excluded_folder_id":
+    case "excluded_media":
+    case "metadata_only_path_prefix":
+    case "metadata_only_folder_id":
+    case "metadata_only_media":
+      return false;
+  }
+}
+function normalizeSourceExclusionPath(value) {
+  if (value.includes("\x00"))
+    return;
+  const unified = value.normalize("NFC").trim().split("\\").join("/");
+  const segments = unified.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0)
+    return;
+  if (segments.some((segment) => segment === "." || segment === ".."))
+    return;
+  return `/${segments.join("/")}`.toLowerCase();
+}
+function pathIsUnderPrefix(path, prefix) {
+  if (prefix === "/")
+    return true;
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+function sourceExclusionFileExtension(value) {
+  const segments = value.split("\\").join("/").split("/");
+  const last = segments[segments.length - 1]?.trim() ?? "";
+  const dot = last.lastIndexOf(".");
+  if (dot <= 0 || dot === last.length - 1)
+    return;
+  return last.slice(dot).toLowerCase();
+}
+function normalizeMediaExtension(value) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed)
+    return;
+  const withDot = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+  return withDot.length > 1 ? withDot : undefined;
+}
+function mediaTypeMatches(media, facts) {
+  if (media.extensions.length > 0 && facts.extension !== undefined) {
+    if (media.extensions.includes(facts.extension))
+      return true;
+  }
+  if (media.mime_prefixes.length > 0 && facts.mimeType !== undefined) {
+    if (media.mime_prefixes.some((prefix) => facts.mimeType.startsWith(prefix)))
+      return true;
+  }
+  return false;
+}
+function mediaTypeUnevaluable(facts) {
+  if (facts.extension !== undefined)
+    return false;
+  return facts.mimeType === undefined || facts.mimeType === "application/octet-stream";
+}
+function mediaNeedsSize(media) {
+  return media.min_bytes !== undefined || media.max_bytes !== undefined;
+}
+function mediaSizeMatches(media, sizeBytes) {
+  if (media.min_bytes !== undefined && sizeBytes < media.min_bytes)
+    return false;
+  if (media.max_bytes !== undefined && sizeBytes > media.max_bytes)
+    return false;
+  return true;
+}
+function mediaCriterionLabel(media) {
+  const parts = [];
+  if (media.extensions.length > 0)
+    parts.push(media.extensions.join(" "));
+  if (media.mime_prefixes.length > 0)
+    parts.push(media.mime_prefixes.join(" "));
+  if (media.min_bytes !== undefined)
+    parts.push(`>=${media.min_bytes}B`);
+  if (media.max_bytes !== undefined)
+    parts.push(`<=${media.max_bytes}B`);
+  const label = `media:${parts.join(" ")}`;
+  return label.length <= 200 ? label : `${label.slice(0, 197)}...`;
+}
+function sourceExclusionPathFromMetadata(metadata) {
+  if (!metadata)
+    return;
+  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim().length > 0)
+      return value;
+  }
+  return;
+}
+function sourceExclusionAncestryFromMetadata(metadata) {
+  if (!metadata)
+    return;
+  for (const key of SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS) {
+    const value = metadata[key];
+    if (!Array.isArray(value))
+      continue;
+    if (value.some((entry) => typeof entry !== "string"))
+      return;
+    return value.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  }
+  return;
+}
+function sourceExclusionSizeFromMetadata(metadata) {
+  if (!metadata)
+    return;
+  for (const key of SOURCE_EXCLUSION_SIZE_METADATA_KEYS) {
+    const value = metadata[key];
+    if (typeof value !== "number")
+      continue;
+    if (!Number.isFinite(value) || value < 0)
+      return;
+    return Math.floor(value);
+  }
+  return;
+}
+function boundedStringFromMetadata(metadata, keys) {
+  if (!metadata)
+    return;
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim().length > 0)
+      return value.trim();
+  }
+  return;
+}
+function sourceExclusionFactsFromMetadata(metadata) {
+  const path = sourceExclusionPathFromMetadata(metadata);
+  const name = boundedStringFromMetadata(metadata, SOURCE_EXCLUSION_NAME_METADATA_KEYS);
+  const mimeType = boundedStringFromMetadata(metadata, SOURCE_EXCLUSION_MIME_METADATA_KEYS);
+  const sizeBytes = sourceExclusionSizeFromMetadata(metadata);
+  const ancestry = sourceExclusionAncestryFromMetadata(metadata);
+  return {
+    ...path !== undefined ? { path } : {},
+    ...name !== undefined ? { name } : {},
+    ...mimeType !== undefined ? { mimeType } : {},
+    ...sizeBytes !== undefined ? { sizeBytes } : {},
+    folderAncestorIds: ancestry
+  };
+}
+function createSourceExclusionMatcher(exclusions, source, options = {}) {
+  const enforceable = options.enforceable ? new Set(options.enforceable) : undefined;
+  const usePath = !enforceable || enforceable.has("path_prefix");
+  const useFolder = !enforceable || enforceable.has("folder_id");
+  const useMedia = !enforceable || enforceable.has("media");
+  const criteria = [];
+  const unenforceableRuleIds = [];
+  for (const rule of exclusions?.rules ?? []) {
+    if (!sourceExclusionRuleAppliesToSource(rule, source))
+      continue;
+    if (usePath) {
+      for (const prefix of rule.path_prefixes) {
+        criteria.push({ ruleId: rule.id, reason: rule.reason, mode: rule.mode, kind: "path_prefix", prefix });
+      }
+    }
+    if (useFolder) {
+      for (const folder of rule.folder_ids) {
+        criteria.push({
+          ruleId: rule.id,
+          reason: rule.reason,
+          mode: rule.mode,
+          kind: "folder_id",
+          prefix: `folder:${folder.name} (${folder.id})`,
+          folderId: folder.id,
+          folderName: folder.name
+        });
+      }
+    }
+    if (useMedia && rule.media) {
+      criteria.push({
+        ruleId: rule.id,
+        reason: rule.reason,
+        mode: rule.mode,
+        kind: "media",
+        prefix: mediaCriterionLabel(rule.media),
+        media: rule.media
+      });
+    }
+    const enforced = rule.path_prefixes.length > 0 && usePath || rule.folder_ids.length > 0 && useFolder || rule.media !== undefined && useMedia;
+    if (enforced)
+      continue;
+    if (rule.sources.length > 0 && !rule.sources.includes("*")) {
+      throw new OperationError("config_error", `Exclusion rule ${rule.id} names source ${source ?? "(none)"}, which cannot enforce ` + `${rule.folder_ids.length > 0 ? "folder ids" : "path prefixes"}. ` + `This source enforces: ${[...enforceable ?? []].join(", ") || "(nothing)"}. ` + "Give the rule a criterion this source supports, or drop the source from its list.");
+    }
+    unenforceableRuleIds.push(rule.id);
+  }
+  return createSourceExclusionMatcherFromPrefixes(criteria, unenforceableRuleIds);
+}
+function createSourceExclusionMatcherFromPrefixes(prefixes, unenforceableRuleIds = []) {
+  const compiled = prefixes.map((entry) => {
+    if (entry.kind === "folder_id" || entry.kind === "media") {
+      return { ...entry };
+    }
+    const normalized = normalizeSourceExclusionPath(entry.prefix);
+    if (normalized === undefined) {
+      throw new OperationError("config_error", `Exclusion rule ${entry.ruleId} carries a path prefix that cannot be normalized.`);
+    }
+    return { ...entry, prefix: normalized };
+  });
+  const pathCriteria = compiled.filter((entry) => entry.kind === "path_prefix");
+  const folderCriteria = compiled.filter((entry) => entry.kind === "folder_id");
+  const mediaCriteria = compiled.filter((entry) => entry.kind === "media");
+  const pathActive = pathCriteria.length > 0;
+  const identityActive = folderCriteria.length > 0;
+  const mediaActive = mediaCriteria.length > 0;
+  const active = pathActive || identityActive || mediaActive;
+  const matched = (entry, outcome) => ({
+    excluded: entry.mode === "exclude",
+    disposition: entry.mode,
+    outcome,
+    ruleId: entry.ruleId,
+    reason: entry.reason,
+    prefix: entry.prefix
+  });
+  const unevaluableFor = (mode, excludeOutcome, reason) => mode === "exclude" ? { excluded: true, disposition: "exclude", outcome: excludeOutcome, reason } : { excluded: false, disposition: "metadata_only", outcome: "metadata_only_unevaluable", reason };
+  const evaluateModeCriteria = (mode, normalizedPath, mediaFacts, ancestry) => {
+    if (normalizedPath !== undefined) {
+      for (const entry of pathCriteria) {
+        if (entry.mode !== mode)
+          continue;
+        if (!pathIsUnderPrefix(normalizedPath, entry.prefix))
+          continue;
+        return matched(entry, mode === "exclude" ? "excluded_path_prefix" : "metadata_only_path_prefix");
+      }
+    }
+    const folderForMode = folderCriteria.filter((entry) => entry.mode === mode);
+    if (folderForMode.length > 0) {
+      if (ancestry === undefined) {
+        return unevaluableFor(mode, "excluded_ancestry_unevaluable", "ancestry_unevaluable");
+      }
+      const reachable = new Set(ancestry);
+      for (const entry of folderForMode) {
+        if (!entry.folderId || !reachable.has(entry.folderId))
+          continue;
+        return matched(entry, mode === "exclude" ? "excluded_folder_id" : "metadata_only_folder_id");
+      }
+    }
+    for (const entry of mediaCriteria) {
+      if (entry.mode !== mode || !entry.media)
+        continue;
+      const typeMatches = mediaTypeMatches(entry.media, mediaFacts);
+      const sizeMatches = mediaNeedsSize(entry.media) && mediaFacts.sizeBytes !== undefined && mediaSizeMatches(entry.media, mediaFacts.sizeBytes);
+      if (!typeMatches && !(sizeMatches && mediaTypeUnevaluable(mediaFacts)))
+        continue;
+      if (!mediaNeedsSize(entry.media)) {
+        return matched(entry, mode === "exclude" ? "excluded_media" : "metadata_only_media");
+      }
+      if (mediaFacts.sizeBytes === undefined) {
+        return unevaluableFor(mode, "excluded_media_unevaluable", "media_size_unevaluable");
+      }
+      if (!sizeMatches)
+        continue;
+      return matched(entry, mode === "exclude" ? "excluded_media" : "metadata_only_media");
+    }
+    return;
+  };
+  const evaluateItem = (facts) => {
+    if (!active)
+      return ADMITTED;
+    const normalizedPath = typeof facts.path === "string" ? normalizeSourceExclusionPath(facts.path) : undefined;
+    if (pathActive && normalizedPath === undefined)
+      return UNEVALUABLE;
+    const mediaFacts = {};
+    if (mediaActive) {
+      const nameish = typeof facts.path === "string" && facts.path.trim() ? facts.path : typeof facts.name === "string" ? facts.name : undefined;
+      const extension = nameish === undefined ? undefined : sourceExclusionFileExtension(nameish);
+      if (extension !== undefined)
+        mediaFacts.extension = extension;
+      if (typeof facts.mimeType === "string" && facts.mimeType.trim()) {
+        mediaFacts.mimeType = facts.mimeType.trim().toLowerCase();
+      }
+      if (typeof facts.sizeBytes === "number" && Number.isFinite(facts.sizeBytes) && facts.sizeBytes >= 0) {
+        mediaFacts.sizeBytes = Math.floor(facts.sizeBytes);
+      }
+    }
+    for (const mode of SOURCE_INGESTION_DISPOSITION_ORDER) {
+      const decision = evaluateModeCriteria(mode, normalizedPath, mediaFacts, facts.folderAncestorIds);
+      if (decision)
+        return decision;
+    }
+    return ADMITTED;
+  };
+  const evaluatePath = (path) => evaluateItem({ path });
+  const evaluateMetadata = (metadata) => evaluateItem(sourceExclusionFactsFromMetadata(metadata));
+  return {
+    active,
+    pathActive,
+    identityActive,
+    mediaActive,
+    unenforceableRuleIds: Object.freeze([...new Set(unenforceableRuleIds)]),
+    criteria: Object.freeze(compiled.map((entry) => Object.freeze({ ...entry }))),
+    evaluatePath,
+    evaluateMetadata,
+    evaluateItem
+  };
+}
+function sourceExclusionRuleAppliesToSource(rule, source) {
+  if (rule.sources.length === 0)
+    return true;
+  if (source === undefined)
+    return false;
+  const wanted = source.trim().toLowerCase();
+  if (rule.sources.includes(`!${wanted}`))
+    return false;
+  return rule.sources.includes("*") || rule.sources.includes(wanted);
+}
+function parseSourceIngestionExclusions(rawExclusions, label = "source ingestion exclusions") {
+  const root = asRecord3(rawExclusions);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  if (root.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be 1.`);
+  }
+  if (root.rules !== undefined && !Array.isArray(root.rules)) {
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  }
+  const rawRules = root.rules ?? [];
+  const seenIds = new Set;
+  const rules = rawRules.map((value, index) => {
+    const rule = parseRule2(value, `${label}.rules[${index}]`);
+    if (seenIds.has(rule.id)) {
+      throw new OperationError("config_error", `${label}.rules ids must be unique; ${rule.id} repeats.`);
+    }
+    seenIds.add(rule.id);
+    return rule;
+  });
+  return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules };
+}
+function parseRule2(value, label) {
+  const record = asRecord3(value);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const id = requiredToken(record.id, `${label}.id`);
+  const sources = parseSources(record.sources, `${label}.sources`);
+  const path_prefixes = [...new Set(stringList2(record.path_prefixes).map((prefix) => {
+    const normalized = normalizeSourceExclusionPath(prefix);
+    if (normalized === undefined) {
+      throw new OperationError("config_error", `${label}.path_prefixes contains a path that cannot be normalized.`);
+    }
+    return normalized;
+  }))];
+  const folder_ids = parseFolderIds(record.folder_ids, `${label}.folder_ids`);
+  const media = parseMedia(record.media, `${label}.media`);
+  const mode = parseRuleMode(record.mode, `${label}.mode`);
+  if (path_prefixes.length === 0 && folder_ids.length === 0 && media === undefined) {
+    throw new OperationError("config_error", `${label} must name at least one folder, by path_prefixes or by folder_ids, or carry a media criterion.`);
+  }
+  if (media !== undefined && (path_prefixes.length > 0 || folder_ids.length > 0)) {
+    throw new OperationError("config_error", `${label} may not combine a media criterion with path_prefixes or folder_ids. ` + "Write the media rule and the folder rule as two rules, so which items each covers is unambiguous.");
+  }
+  if (folder_ids.length > 0 && !sources.some((entry) => entry !== "*" && !entry.startsWith("!"))) {
+    throw new OperationError("config_error", `${label}.folder_ids requires ${label}.sources: a folder id belongs to one provider and cannot apply to every source.`);
+  }
+  return {
+    id,
+    mode,
+    sources,
+    path_prefixes,
+    folder_ids,
+    ...media !== undefined ? { media } : {},
+    reason: typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : mode === "metadata_only" ? "metadata_only_by_configuration" : "excluded_by_configuration"
+  };
+}
+function parseRuleMode(value, label) {
+  if (value === undefined || value === null)
+    return "exclude";
+  if (typeof value !== "string") {
+    throw new OperationError("config_error", `${label} must be a string.`);
+  }
+  const mode = value.trim().toLowerCase();
+  const known = SOURCE_INGESTION_RULE_MODES.find((candidate) => candidate === mode);
+  if (!known) {
+    throw new OperationError("config_error", `${label} must be one of ${SOURCE_INGESTION_RULE_MODES.join(", ")}; got ${JSON.stringify(value)}.`);
+  }
+  return known;
+}
+function parseMedia(value, label) {
+  if (value === undefined || value === null)
+    return;
+  const record = asRecord3(value);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const extensions = [...new Set(stringList2(record.extensions).map((entry) => normalizeMediaExtension(entry)).filter((entry) => entry !== undefined))];
+  const mime_prefixes = [...new Set(stringList2(record.mime_prefixes).map((entry) => entry.toLowerCase()))];
+  if (extensions.length === 0 && mime_prefixes.length === 0) {
+    throw new OperationError("config_error", `${label} must name at least one extension or mime prefix. A size-only media rule cannot be ` + "answered for items whose provider publishes no size, so it would exclude them all.");
+  }
+  const min_bytes = parseByteCount(record.min_bytes, `${label}.min_bytes`);
+  const max_bytes = parseByteCount(record.max_bytes, `${label}.max_bytes`);
+  if (min_bytes !== undefined && max_bytes !== undefined && min_bytes > max_bytes) {
+    throw new OperationError("config_error", `${label}.min_bytes must not exceed ${label}.max_bytes.`);
+  }
+  return {
+    extensions,
+    mime_prefixes,
+    ...min_bytes !== undefined ? { min_bytes } : {},
+    ...max_bytes !== undefined ? { max_bytes } : {}
+  };
+}
+function parseByteCount(value, label) {
+  if (value === undefined || value === null)
+    return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    throw new OperationError("config_error", `${label} must be a non-negative whole number of bytes.`);
+  }
+  return value;
+}
+function parseFolderIds(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value))
+    throw new OperationError("config_error", `${label} must be an array.`);
+  const folders = [];
+  const seen = new Set;
+  value.forEach((entry, index) => {
+    const record = asRecord3(entry);
+    if (!record)
+      throw new OperationError("config_error", `${label}[${index}] must be an object with id and name.`);
+    const id = requiredBoundedString(record.id, `${label}[${index}].id`, 256);
+    const name = requiredBoundedString(record.name, `${label}[${index}].name`, 512);
+    if (seen.has(id))
+      return;
+    seen.add(id);
+    folders.push({ id, name });
+  });
+  return folders;
+}
+function defaultSourceIngestionExclusionsPath() {
+  return join12(homedir11(), ".olympus", "sources", "ingestion-exclusions.json");
+}
+function loadSourceIngestionExclusions(options = {}) {
+  if (options.inlineExclusions !== undefined) {
+    return parseSourceIngestionExclusions(options.inlineExclusions, "inline source ingestion exclusions");
+  }
+  const env = options.env ?? process.env;
+  const path = options.exclusionsPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
+  if (!existsSync10(path))
+    return { schemaVersion: SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION, rules: [] };
+  return parseSourceIngestionExclusions(JSON.parse(readFileSync12(path, "utf8")), path);
+}
+function asRecord3(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+function requiredToken(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  const token = value.trim();
+  if (token.length > 64) {
+    throw new OperationError("config_error", `${label} must be at most 64 characters.`);
+  }
+  for (const character of token) {
+    const safe = character >= "a" && character <= "z" || character >= "A" && character <= "Z" || character >= "0" && character <= "9" || character === "-" || character === "_" || character === ".";
+    if (!safe) {
+      throw new OperationError("config_error", `${label} may only use letters, digits, dot, dash, and underscore.`);
+    }
+  }
+  return token;
+}
+function requiredBoundedString(value, label, maxLength) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${label} must be a non-empty string.`);
+  }
+  const text = value.trim();
+  if (text.length > maxLength) {
+    throw new OperationError("config_error", `${label} must be at most ${maxLength} characters.`);
+  }
+  if (text.includes("\x00")) {
+    throw new OperationError("config_error", `${label} must not contain a NUL.`);
+  }
+  return text;
+}
+function stringList2(value) {
+  return Array.isArray(value) ? [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))] : [];
+}
+function parseSources(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value)) {
+    throw new OperationError("config_error", `${label} must be an array.`);
+  }
+  const sources = [];
+  for (let index = 0;index < value.length; index += 1) {
+    const entry = value[index];
+    if (typeof entry !== "string" || !entry.trim()) {
+      throw new OperationError("config_error", `${label}[${index}] must be a non-empty string.`);
+    }
+    const source = entry.trim().toLowerCase();
+    if (source.length > 256 || source.includes("\x00")) {
+      throw new OperationError("config_error", `${label}[${index}] is not a valid source token.`);
+    }
+    if (!sources.includes(source))
+      sources.push(source);
+  }
+  return sources;
+}
+var SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION = 1, SOURCE_INGESTION_EXCLUSIONS_PATH_ENV = "OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH", SOURCE_INGESTION_DISPOSITION_RANK, SOURCE_INGESTION_RULE_MODES, SOURCE_INGESTION_DISPOSITION_ORDER, SOURCE_EXCLUSION_PATH_METADATA_KEYS, SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS, SOURCE_EXCLUSION_SIZE_METADATA_KEYS, SOURCE_EXCLUSION_MIME_METADATA_KEYS, SOURCE_EXCLUSION_NAME_METADATA_KEYS, ADMITTED, UNEVALUABLE, ANCESTRY_UNEVALUABLE;
+var init_source_ingestion_exclusions = __esm(() => {
+  init_operation_error();
+  SOURCE_INGESTION_DISPOSITION_RANK = {
+    admit: 0,
+    metadata_only: 1,
+    exclude: 2
+  };
+  SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only"];
+  SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => SOURCE_INGESTION_DISPOSITION_RANK[right] - SOURCE_INGESTION_DISPOSITION_RANK[left]);
+  SOURCE_EXCLUSION_PATH_METADATA_KEYS = [
+    "pathLower",
+    "path_lower",
+    "pathDisplay",
+    "path_display",
+    "path",
+    "locatorPath"
+  ];
+  SOURCE_EXCLUSION_ANCESTRY_METADATA_KEYS = [
+    "folderAncestorIds",
+    "folder_ancestor_ids"
+  ];
+  SOURCE_EXCLUSION_SIZE_METADATA_KEYS = [
+    "sizeBytes",
+    "size_bytes",
+    "size",
+    "bytes"
+  ];
+  SOURCE_EXCLUSION_MIME_METADATA_KEYS = [
+    "mimeType",
+    "mime_type",
+    "mediaType",
+    "media_type"
+  ];
+  SOURCE_EXCLUSION_NAME_METADATA_KEYS = [
+    "name",
+    "fileName",
+    "file_name"
+  ];
+  ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
+  UNEVALUABLE = Object.freeze({
+    excluded: true,
+    disposition: "exclude",
+    outcome: "excluded_path_unevaluable",
+    reason: "path_unevaluable"
+  });
+  ANCESTRY_UNEVALUABLE = Object.freeze({
+    excluded: true,
+    disposition: "exclude",
+    outcome: "excluded_ancestry_unevaluable",
+    reason: "ancestry_unevaluable"
+  });
+});
+
+// src/core/config.ts
+import { existsSync as existsSync11, readFileSync as readFileSync13 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { join as join13 } from "node:path";
+function defaultConfig() {
+  return structuredClone(DEFAULT_CONFIG);
+}
+function loadConfig(env = process.env) {
+  const config = defaultConfig();
+  const configPath = env.OLYMPUS_CONFIG ?? join13(homedir12(), ".olympus", "config.json");
+  if (existsSync11(configPath)) {
+    const raw = JSON.parse(readFileSync13(configPath, "utf8"));
+    mergeConfig(config, raw);
+  }
+  applyEnvironmentOverrides(config, env);
+  validateConfig(config);
+  return config;
+}
+function configWithEnvironmentOverrides(config, env) {
+  const next = structuredClone(config);
+  applyEnvironmentOverrides(next, env);
+  validateConfig(next);
+  return next;
+}
+function applyEnvironmentOverrides(config, env) {
+  if (env.OLYMPUS_ARGUS_DEFAULT_LANE) {
+    config.argus.defaultLane = parseLane(env.OLYMPUS_ARGUS_DEFAULT_LANE);
+  }
+  if (env.OLYMPUS_WORKER_AUTH_TOKEN?.trim()) {
+    config.worker.authToken = env.OLYMPUS_WORKER_AUTH_TOKEN.trim();
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_ENABLED !== undefined) {
+    config.worker.scheduler.enabled = parseBoolean(env.OLYMPUS_WORKER_SCHEDULER_ENABLED, "OLYMPUS_WORKER_SCHEDULER_ENABLED");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS !== undefined) {
+    config.worker.scheduler.sourceIds = parseSchedulerSourceIds(env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS);
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS) {
+    config.worker.scheduler.tickSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS, "OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS) {
+    config.worker.scheduler.syncIntervalSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS, "OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS) {
+    config.worker.scheduler.freshnessThresholdHours = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS, "OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS) {
+    config.worker.scheduler.errorBackoffSeconds = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS, "OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS");
+  }
+  if (env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES) {
+    config.worker.scheduler.maxTransientRetries = parsePositiveNumber(env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES, "OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES");
+  }
+  if (env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim()) {
+    config.sovereignty = {
+      ...config.sovereignty ?? {},
+      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
+    };
+  }
+  if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
+    config.sovereignty = {
+      ...config.sovereignty ?? {},
+      configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
+    };
+  }
+  if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
+    config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
+  }
+  if (env.OLYMPUS_ARGUS_TRANSPORT) {
+    config.argus.transport = parseTransport(env.OLYMPUS_ARGUS_TRANSPORT);
+  }
+  let fastLaneEnvChanged = false;
+  if (env.OLYMPUS_ARGUS_FAST_BASE_URL) {
+    config.argus.lanes.fast.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_FAST_BASE_URL);
+    fastLaneEnvChanged = true;
+  }
+  if (env.OLYMPUS_ARGUS_DEEP_BASE_URL) {
+    config.argus.lanes.deep.baseUrl = trimTrailingSlash(env.OLYMPUS_ARGUS_DEEP_BASE_URL);
+  }
+  if (env.OLYMPUS_ARGUS_FAST_MODEL) {
+    config.argus.lanes.fast.model = env.OLYMPUS_ARGUS_FAST_MODEL;
+    fastLaneEnvChanged = true;
+  }
+  if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
+    config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
+  }
+  if (fastLaneEnvChanged) {
+    mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
+  }
+  applyModelProfileEnv(config, "default_chat", env, "OLYMPUS_ARGUS_DEFAULT_CHAT");
+  applyModelProfileEnv(config, "source_answer", env, "OLYMPUS_ARGUS_SOURCE_ANSWER");
+  applyModelProfileEnv(config, "classification_fast", env, "OLYMPUS_ARGUS_CLASSIFICATION_FAST");
+  applyModelProfileEnv(config, "embedding_secure_local", env, "OLYMPUS_ARGUS_EMBEDDING_SECURE_LOCAL");
+  applyModelProfileEnv(config, "vlm_document", env, "OLYMPUS_ARGUS_VLM_DOCUMENT");
+  applyModelProfileEnv(config, "vlm_fast", env, "OLYMPUS_ARGUS_VLM_FAST");
+  applyModelProfileEnv(config, "vlm_qwen36_27b", env, "OLYMPUS_ARGUS_VLM_QWEN36_27B");
+  applyModelProfileEnv(config, "vlm_qwen36_35b", env, "OLYMPUS_ARGUS_VLM_QWEN36_35B");
+  if (env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS) {
+    config.argus.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_ARGUS_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_EMAIL_ENABLED) {
+    config.email.enabled = parseBoolean(env.OLYMPUS_EMAIL_ENABLED, "OLYMPUS_EMAIL_ENABLED");
+  }
+  if (env.OLYMPUS_EMAIL_BASE_URL) {
+    config.email.baseUrl = normalizeSourceWorkerBaseUrl(env.OLYMPUS_EMAIL_BASE_URL);
+  }
+  if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
+    config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
+  }
+  if (env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV) {
+    config.email.localPacketsDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV, "OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV");
+  }
+  if (env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV) {
+    config.email.indexAdminDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV, "OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV");
+  }
+  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
+    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
+    config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED) {
+    config.sourceIndex.answerDevEnabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED");
+  }
+  if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync13(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+  }
+  if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
+    config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
+  }
+  if (env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH?.trim()) {
+    config.sourceIndex.ingestionPolicies.dropboxPersonal = {
+      ...config.sourceIndex.ingestionPolicies.dropboxPersonal ?? {},
+      policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
+    };
+  }
+}
+function resolveLane(config, lane) {
+  return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
+}
+function isSourceIndexReadSurfaceEnabled(config) {
+  return config.sourceIndex.enabled || config.sourceIndex.answerDevEnabled;
+}
+function resolveModelProfile(config, profile) {
+  return profile === undefined || profile === null || profile === "" ? config.argus.defaultProfile : parseModelProfile(String(profile));
+}
+function parseModelProfile(value) {
+  if (ARGUS_MODEL_PROFILES.includes(value)) {
+    return value;
+  }
+  throw new OperationError("invalid_params", `Unsupported Argus model profile: ${value}`, `Use one of: ${ARGUS_MODEL_PROFILES.join(", ")}.`);
+}
+function parseLane(value) {
+  if (value === "fast" || value === "deep")
+    return value;
+  throw new OperationError("invalid_params", `Unsupported Argus lane: ${value}`, 'Use lane "fast" for interactive work or "deep" for slower sensitive/document work.');
+}
+function parseTransport(value) {
+  if (value === "direct")
+    return value;
+  throw new OperationError("invalid_params", `Unsupported Argus transport: ${value}`, 'Use transport "direct" with a local or runtime-managed Argus endpoint.');
+}
+function mergeConfig(target, source) {
+  if (source.sovereignty) {
+    target.sovereignty = { ...target.sovereignty ?? {}, ...source.sovereignty };
+  }
+  if (source.worker) {
+    target.worker = {
+      ...target.worker,
+      ...source.worker,
+      scheduler: {
+        ...target.worker.scheduler,
+        ...source.worker.scheduler ?? {}
+      }
+    };
+  }
+  if (source.identity) {
+    target.identity = { ...target.identity, ...source.identity };
+  }
+  if (source.argus) {
+    if (source.argus.defaultLane)
+      target.argus.defaultLane = source.argus.defaultLane;
+    if (source.argus.defaultProfile)
+      target.argus.defaultProfile = source.argus.defaultProfile;
+    if (source.argus.transport)
+      target.argus.transport = source.argus.transport;
+    if (source.argus.requestTimeoutSeconds) {
+      target.argus.requestTimeoutSeconds = source.argus.requestTimeoutSeconds;
+    }
+    if (source.argus.lanes?.fast) {
+      target.argus.lanes.fast = { ...target.argus.lanes.fast, ...source.argus.lanes.fast };
+      mirrorFastLaneToProfiles(target, ["default_chat", "source_answer"]);
+    }
+    if (source.argus.lanes?.deep) {
+      target.argus.lanes.deep = { ...target.argus.lanes.deep, ...source.argus.lanes.deep };
+    }
+    if (source.argus.modelProfiles) {
+      for (const profile of ARGUS_MODEL_PROFILES) {
+        const sourceProfile = source.argus.modelProfiles[profile];
+        if (sourceProfile) {
+          target.argus.modelProfiles[profile] = {
+            ...target.argus.modelProfiles[profile],
+            ...sourceProfile
+          };
+        }
+      }
+    }
+  }
+  if (source.email) {
+    target.email = { ...target.email, ...source.email };
+    if (typeof target.email.baseUrl === "string") {
+      target.email.baseUrl = normalizeSourceWorkerBaseUrl(target.email.baseUrl);
+    }
+  }
+  if (source.sourceIndex) {
+    target.sourceIndex = {
+      ...target.sourceIndex,
+      ...source.sourceIndex,
+      corpusRegistry: source.sourceIndex.corpusRegistry ?? target.sourceIndex.corpusRegistry,
+      ...source.sourceIndex.ingestionExclusions ? { ingestionExclusions: source.sourceIndex.ingestionExclusions } : {},
+      ...source.sourceIndex.ingestionExclusionsPath ? { ingestionExclusionsPath: source.sourceIndex.ingestionExclusionsPath } : {},
+      ingestionPolicies: {
+        ...target.sourceIndex.ingestionPolicies,
+        ...source.sourceIndex.ingestionPolicies ?? {}
+      }
+    };
+  }
+}
+function mirrorFastLaneToProfiles(config, profiles) {
+  for (const profile of profiles) {
+    config.argus.modelProfiles[profile] = {
+      ...config.argus.modelProfiles[profile],
+      baseUrl: config.argus.lanes.fast.baseUrl,
+      model: config.argus.lanes.fast.model
+    };
+  }
+}
+function applyModelProfileEnv(config, profile, env, prefix) {
+  const baseUrl = env[`${prefix}_BASE_URL`];
+  const model = env[`${prefix}_MODEL`];
+  const secretRef = env[`${prefix}_SECRET_REF`];
+  if (baseUrl)
+    config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
+  if (model)
+    config.argus.modelProfiles[profile].model = model;
+  if (secretRef?.trim())
+    config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+}
+function validateConfig(config) {
+  if (config.sovereignty?.configPath !== undefined) {
+    if (typeof config.sovereignty.configPath !== "string" || !config.sovereignty.configPath.trim()) {
+      throw new OperationError("config_error", "sovereignty.configPath must be a non-empty string.");
+    }
+    config.sovereignty.configPath = config.sovereignty.configPath.trim();
+  }
+  if (config.worker.authToken !== undefined) {
+    if (typeof config.worker.authToken !== "string") {
+      throw new OperationError("config_error", "worker.authToken must be a string.");
+    }
+    const trimmed = config.worker.authToken.trim();
+    if (trimmed) {
+      config.worker.authToken = trimmed;
+    } else {
+      delete config.worker.authToken;
+    }
+  }
+  assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
+  config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
+  assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
+  assertPositiveNumber(config.worker.scheduler.syncIntervalSeconds, "worker.scheduler.syncIntervalSeconds");
+  assertPositiveNumber(config.worker.scheduler.freshnessThresholdHours, "worker.scheduler.freshnessThresholdHours");
+  assertPositiveNumber(config.worker.scheduler.errorBackoffSeconds, "worker.scheduler.errorBackoffSeconds");
+  assertPositiveInteger(config.worker.scheduler.maxTransientRetries, "worker.scheduler.maxTransientRetries");
+  if (typeof config.identity.ownerName !== "string" || !config.identity.ownerName.trim()) {
+    throw new OperationError("config_error", "identity.ownerName must be a non-empty string.");
+  }
+  config.identity.ownerName = config.identity.ownerName.trim();
+  if (typeof config.identity.assistantName !== "string" || !config.identity.assistantName.trim()) {
+    throw new OperationError("config_error", "identity.assistantName must be a non-empty string.");
+  }
+  config.identity.assistantName = config.identity.assistantName.trim();
+  parseLane(config.argus.defaultLane);
+  parseModelProfile(config.argus.defaultProfile);
+  parseTransport(config.argus.transport);
+  if (typeof config.argus.requestTimeoutSeconds !== "number" || !Number.isFinite(config.argus.requestTimeoutSeconds) || config.argus.requestTimeoutSeconds <= 0) {
+    throw new OperationError("config_error", "argus.requestTimeoutSeconds must be greater than zero.");
+  }
+  for (const lane of ["fast", "deep"]) {
+    const laneConfig = config.argus.lanes[lane];
+    if (typeof laneConfig.baseUrl !== "string" || !laneConfig.baseUrl.startsWith("http://") && !laneConfig.baseUrl.startsWith("https://")) {
+      throw new OperationError("config_error", `${lane} baseUrl must be an HTTP(S) URL.`);
+    }
+    laneConfig.baseUrl = trimTrailingSlash(laneConfig.baseUrl);
+    if (typeof laneConfig.model !== "string" || !laneConfig.model.trim()) {
+      throw new OperationError("config_error", `${lane} model must be configured.`);
+    }
+    validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
+  }
+  for (const profile of ARGUS_MODEL_PROFILES) {
+    const profileConfig = config.argus.modelProfiles[profile];
+    if (typeof profileConfig.baseUrl !== "string" || !profileConfig.baseUrl.startsWith("http://") && !profileConfig.baseUrl.startsWith("https://")) {
+      throw new OperationError("config_error", `${profile} baseUrl must be an HTTP(S) URL.`);
+    }
+    profileConfig.baseUrl = trimTrailingSlash(profileConfig.baseUrl);
+    if (typeof profileConfig.model !== "string" || !profileConfig.model.trim()) {
+      throw new OperationError("config_error", `${profile} model must be configured.`);
+    }
+    validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
+  }
+  assertBoolean(config.email.enabled, "email.enabled");
+  assertBoolean(config.email.localPacketsDevEnabled, "email.localPacketsDevEnabled");
+  assertBoolean(config.email.indexAdminDevEnabled, "email.indexAdminDevEnabled");
+  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, "email.requireLocalActiveModelForPrivateTools");
+  assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
+  assertBoolean(config.sourceIndex.answerDevEnabled, "sourceIndex.answerDevEnabled");
+  config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
+  if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
+    const policyPath = config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath.trim();
+    if (!policyPath) {
+      throw new OperationError("config_error", "sourceIndex.ingestionPolicies.dropboxPersonal.policyPath must be a non-empty string.");
+    }
+    config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath = policyPath;
+  }
+  if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policy !== undefined) {
+    config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(config.sourceIndex.ingestionPolicies.dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
+  }
+  if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
+    throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
+  }
+  config.email.baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
+  if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
+    throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
+  }
+}
+function parseSchedulerSourceIds(value) {
+  const values = typeof value === "string" ? value.split(",") : value;
+  const selected = values.map((entry) => typeof entry === "string" ? entry.trim() : "");
+  if (selected.some((entry) => !V0_4_PUBLIC_SOURCE_IDS.includes(entry))) {
+    throw new OperationError("config_error", `worker.scheduler.sourceIds entries must be one of: ${V0_4_PUBLIC_SOURCE_IDS.join(", ")}.`);
+  }
+  return [...new Set(selected)];
+}
+function assertBoolean(value, name) {
+  if (typeof value !== "boolean") {
+    throw new OperationError("config_error", `${name} must be a boolean.`);
+  }
+}
+function assertPositiveNumber(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new OperationError("config_error", `${name} must be greater than zero.`);
+  }
+}
+function assertPositiveInteger(value, name) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new OperationError("config_error", `${name} must be a positive integer.`);
+  }
+}
+function validateSecretRef(value, name) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new OperationError("config_error", `${name} must be a non-empty string.`);
+  }
+  if (!normalizeSecretRef(value)) {
+    throw new OperationError("config_error", `${name} must use env:NAME or store:key.`);
+  }
+}
+function trimTrailingSlash(value) {
+  return value.replace(/\/+$/, "");
+}
+function normalizeSourceWorkerBaseUrl(value) {
+  const trimmed = trimTrailingSlash(value.trim());
+  try {
+    const url = new URL(trimmed);
+    if ((url.protocol === "http:" || url.protocol === "https:") && (url.pathname === "" || url.pathname === "/")) {
+      url.pathname = "/v1";
+      return trimTrailingSlash(url.toString());
+    }
+  } catch {
+    return trimmed;
+  }
+  return trimmed;
+}
+function parsePositiveNumber(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new OperationError("invalid_params", `${name} must be greater than zero.`);
+  }
+  return number;
+}
+function parseBoolean(value, name) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes")
+    return true;
+  if (normalized === "false" || normalized === "0" || normalized === "no")
+    return false;
+  throw new OperationError("invalid_params", `${name} must be true or false.`);
+}
+function parseOptionalBooleanEnv(value, name, options = {}) {
+  if (value === undefined || value.trim().length === 0)
+    return options.defaultValue ?? false;
+  try {
+    return parseBoolean(value, name);
+  } catch (error) {
+    if (options.invalid === "warn-false") {
+      const warning = `${name} has invalid boolean value; treating it as disabled.`;
+      if (options.warn)
+        options.warn(warning);
+      else
+        console.warn(warning);
+      return false;
+    }
+    throw error;
+  }
+}
+var DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var init_config = __esm(() => {
+  init_operation_error();
+  init_source_corpus_registry();
+  init_source_ingestion_policy();
+  init_source_ingestion_exclusions();
+  init_secret_store();
+  init_public_surface();
+  DEFAULT_CONFIG = {
+    worker: {
+      scheduler: {
+        enabled: false,
+        sourceIds: [],
+        tickSeconds: 60,
+        syncIntervalSeconds: 1800,
+        freshnessThresholdHours: 26,
+        errorBackoffSeconds: 60,
+        maxTransientRetries: 3
+      }
+    },
+    identity: {
+      ownerName: "the owner",
+      assistantName: "the calling assistant"
+    },
+    argus: {
+      defaultLane: "fast",
+      defaultProfile: "default_chat",
+      transport: "direct",
+      requestTimeoutSeconds: 180,
+      lanes: {
+        fast: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/default-chat"
+        },
+        deep: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/default-chat"
+        }
+      },
+      modelProfiles: {
+        default_chat: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/default-chat",
+          purpose: "chat"
+        },
+        source_answer: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/source-answer",
+          purpose: "text_reasoning"
+        },
+        classification_fast: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/default-chat",
+          purpose: "classification"
+        },
+        embedding_secure_local: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "secure-local-qwen3-embed",
+          purpose: "embedding"
+        },
+        vlm_document: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/vision-quality",
+          purpose: "vision"
+        },
+        vlm_fast: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/vision-fast",
+          purpose: "vision"
+        },
+        vlm_qwen36_27b: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/vision-deep",
+          purpose: "vision"
+        },
+        vlm_qwen36_35b: {
+          baseUrl: "http://127.0.0.1:28090/v1",
+          model: "delphi/vision-quality",
+          purpose: "vision"
+        }
+      }
+    },
+    email: {
+      enabled: true,
+      baseUrl: "http://127.0.0.1:8010/v1",
+      requestTimeoutSeconds: 180,
+      localPacketsDevEnabled: false,
+      indexAdminDevEnabled: false,
+      requireLocalActiveModelForPrivateTools: false
+    },
+    sourceIndex: {
+      enabled: true,
+      answerDevEnabled: false,
+      corpusRegistry: defaultSourceCorpusRegistryConfig(),
+      ingestionPolicies: {}
+    }
+  };
+  ARGUS_MODEL_PROFILES = [
+    "default_chat",
+    "source_answer",
+    "classification_fast",
+    "embedding_secure_local",
+    "vlm_document",
+    "vlm_fast",
+    "vlm_qwen36_27b",
+    "vlm_qwen36_35b"
+  ];
+});
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash4, randomBytes as randomBytes4 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin) {
+    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
+    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+    const ticket = randomBytes4(32).toString("base64url");
+    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash4("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+function dashboardLaunchPageHeaders() {
+  const script = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
+  const scriptHash = createHash4("sha256").update(script).digest("base64");
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+  };
+}
+var DASHBOARD_LAUNCH_PAGE_PATH = "/dashboard/launch", DASHBOARD_LAUNCH_MINT_PATH = "/dashboard/control/launch", DASHBOARD_LAUNCH_REDEEM_PATH = "/dashboard/control/launch/redeem", DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_LAUNCH_PAGE_HTML;
+var init_dashboard_launch = __esm(() => {
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var status = document.getElementById('status');
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          return new URLSearchParams(hash).get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            window.location.replace('/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
+// src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  db.transaction(() => {
+    for (const migration of ordered.filter((entry) => entry.version > currentVersion)) {
+      migration.up(db);
+      writeSqliteSchemaVersion(db, storeId, migration.version);
+      applied.push({ version: migration.version, name: migration.name });
+    }
+  })();
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var init_sqlite_migrations = __esm(() => {
+  init_operation_error();
+});
+
 // src/workers/source-checkpoint.ts
 function isBoundedSourceCheckpoint(value) {
   return typeof value === "string" && value.length > 0 && value.length <= SOURCE_CHECKPOINT_MAX_LENGTH;
@@ -5652,7 +8753,7 @@ function isBoundedSourceCheckpoint(value) {
 var SOURCE_CHECKPOINT_MAX_LENGTH = 32768;
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -5713,7 +8814,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash3("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash5("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -5800,7 +8901,7 @@ class DropboxApiMetadataClient {
     this.fetchImpl = options.fetch ?? fetch;
     this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   }
   async listFolder(request) {
     return this.postMetadataPage("/files/list_folder", {
@@ -6130,7 +9231,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -6476,7 +9577,7 @@ function resumedPageOffset(cursor, page) {
   return cursor.pageDigest === metadataPageDigest(page) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page) {
-  return createHash4("sha256").update(JSON.stringify({
+  return createHash6("sha256").update(JSON.stringify({
     entries: page.entries,
     cursor: page.cursor?.trim() || null,
     hasMore: Boolean(page.hasMore)
@@ -6503,7 +9604,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash4("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash6("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -6666,8 +9767,8 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash5 } from "node:crypto";
+import { Buffer as Buffer3 } from "node:buffer";
+import { createHash as createHash7 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
@@ -6826,7 +9927,7 @@ class GeminiSourceEmbeddingProvider {
       return {
         inlineData: {
           mimeType,
-          data: Buffer2.from(bytes).toString("base64")
+          data: Buffer3.from(bytes).toString("base64")
         }
       };
     } catch {
@@ -7322,7 +10423,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash7("sha256").update(value).digest("hex");
 }
 var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS;
 var init_embeddings = __esm(() => {
@@ -7336,7 +10437,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -7432,7 +10533,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash6("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash8("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: sync.cursor ?? null
       };
@@ -7443,7 +10544,7 @@ function createDropboxProviderStoreSyncHandler(options) {
 function dropboxConnectorIdForScope(account, approvedScopeKey) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
-  const scopeHash = createHash6("sha256").update(`${normalizedAccount}\x00${normalizedScope}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash8("sha256").update(`${normalizedAccount}\x00${normalizedScope}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function observedCompletion(connector) {
@@ -7575,7 +10676,7 @@ function optionalString2(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join6 } from "node:path";
+import { join as join14 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -7621,7 +10722,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join6(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join14(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -7682,14 +10783,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash7("sha256").update(block).digest());
+    blockDigests.push(createHash9("sha256").update(block).digest());
   }
-  return createHash7("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash9("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -7712,11 +10813,11 @@ var init_corpus_adapter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync, existsSync as existsSync7, lstatSync as lstatSync2, readFileSync as readFileSync7 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { dirname as dirname6, join as join7 } from "node:path";
+import { chmodSync as chmodSync3, existsSync as existsSync12, lstatSync as lstatSync6, readFileSync as readFileSync14 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname12, join as join15 } from "node:path";
 function defaultSensitivityMapPath() {
-  return join7(homedir6(), ".olympus", "sensitivity-map.json");
+  return join15(homedir13(), ".olympus", "sensitivity-map.json");
 }
 function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
@@ -7724,13 +10825,13 @@ function resolveSensitivityMapPath(options = {}) {
 }
 function loadSensitivityMap(options = {}) {
   const path = resolveSensitivityMapPath(options);
-  if (!existsSync7(path)) {
+  if (!existsSync12(path)) {
     if (options.allowMissing)
       return;
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync7(path, "utf8")), path);
+    return parseSensitivityMap(JSON.parse(readFileSync14(path, "utf8")), path);
   } catch (error) {
     if (options.ignoreInvalid)
       return;
@@ -7754,13 +10855,13 @@ function validateSensitivityMapFile(options = {}) {
 }
 function tightenSensitivityMapPermissions(path) {
   try {
-    const stat2 = lstatSync2(path);
+    const stat2 = lstatSync6(path);
     if (!stat2.isFile())
       return {};
     const mode = stat2.mode & 511;
     if ((mode & 63) === 0)
       return { permissions: formatFileMode(mode) };
-    chmodSync(path, 384);
+    chmodSync3(path, 384);
     return { permissions: "0600", permissionsTightened: true };
   } catch {
     return {};
@@ -7770,7 +10871,7 @@ function formatFileMode(mode) {
   return `0${(mode & 511).toString(8).padStart(3, "0")}`;
 }
 function sensitivityMapRemedy(path) {
-  return `Write the map to ${path}. Run olympus setup first if ${dirname6(path)} does not exist yet; it creates that directory with owner-only permissions.`;
+  return `Write the map to ${path}. Run olympus setup first if ${dirname12(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
   const root = asRecord4(rawMap);
@@ -8789,9 +11890,9 @@ function closeSqliteStore(db, options = {}) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash8, randomUUID as randomUUID4 } from "node:crypto";
-import { lstatSync as lstatSync3, mkdirSync as mkdirSync5, statSync as statSync2 } from "node:fs";
-import { dirname as dirname7 } from "node:path";
+import { createHash as createHash10, randomUUID as randomUUID4 } from "node:crypto";
+import { lstatSync as lstatSync7, mkdirSync as mkdirSync8, statSync as statSync4 } from "node:fs";
+import { dirname as dirname13 } from "node:path";
 import { Database } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -9275,7 +12376,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve4) => setTimeout(resolve4, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -9705,7 +12806,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash8("sha256");
+  const digest = createHash10("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -10888,7 +13989,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve4) => setTimeout(resolve4, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -11023,7 +14124,7 @@ function requireNonEmpty2(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash8("sha256").update(value).digest("hex");
+  return createHash10("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -11121,12 +14222,12 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync3(this.dbPath);
+        const stat2 = lstatSync7(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync5(dirname7(this.dbPath), { recursive: true });
+        mkdirSync8(dirname13(this.dbPath), { recursive: true });
       }
       this.db = new Database(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       try {
@@ -11708,7 +14809,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash8("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash10("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -12076,8 +15177,8 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store trust reconciliation requires two distinct stores.");
       }
       if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-        const looserFile = statSync2(this.dbPath);
-        const stricterFile = statSync2(options.stricter.dbPath);
+        const looserFile = statSync4(this.dbPath);
+        const stricterFile = statSync4(options.stricter.dbPath);
         if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
           throw new Error("Connector store trust reconciliation refuses one database as both stores.");
         }
@@ -12352,8 +15453,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash8("sha256");
-      const outputDigest = createHash8("sha256");
+      const inputDigest = createHash10("sha256");
+      const outputDigest = createHash10("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -12423,8 +15524,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash8("sha256");
-      const outputDigest = createHash8("sha256");
+      const inputDigest = createHash10("sha256");
+      const outputDigest = createHash10("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -16110,8 +19211,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve2) => {
-    timer = setTimeout(() => resolve2({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve4) => {
+    timer = setTimeout(() => resolve4({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -16739,11 +19840,11 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync2, existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join8 } from "node:path";
+import { chmodSync as chmodSync4, existsSync as existsSync13, mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
+import { dirname as dirname14, join as join16 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join8(homedir7(), ".olympus", "sovereignty.json");
+  return join16(homedir14(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -16754,8 +19855,8 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
-  if (existsSync8(configPath)) {
-    const parsed = JSON.parse(readFileSync8(configPath, "utf8"));
+  if (existsSync13(configPath)) {
+    const parsed = JSON.parse(readFileSync15(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -16983,23 +20084,23 @@ function describeSovereigntyPolicy(engine) {
 }
 function writeSovereigntyConfigFile(input) {
   const path = input.path?.trim() || defaultSovereigntyConfigPath();
-  if (existsSync8(path) && input.force !== true) {
+  if (existsSync13(path) && input.force !== true) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
-  const directory = dirname8(path);
-  mkdirSync6(directory, { recursive: true, mode: 448 });
-  chmodSync2(directory, 448);
-  writeFileSync3(path, `${JSON.stringify(config, null, 2)}
+  const directory = dirname14(path);
+  mkdirSync9(directory, { recursive: true, mode: 448 });
+  chmodSync4(directory, 448);
+  writeFileSync4(path, `${JSON.stringify(config, null, 2)}
 `, { mode: 384 });
-  chmodSync2(path, 384);
+  chmodSync4(path, 384);
   return path;
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join8(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join8(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
-  const path = existsSync8(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
-  const parsed = JSON.parse(readFileSync8(path, "utf8"));
+  const sourceLayoutPath = join16(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join16(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
+  const path = existsSync13(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const parsed = JSON.parse(readFileSync15(path, "utf8"));
   return validateSovereigntyConfig(parsed);
 }
 function parseSovereigntyConfig(value, label) {
@@ -18172,7 +21273,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve2) => setTimeout(resolve2, cancellationSettleMs))
+          new Promise((resolve4) => setTimeout(resolve4, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -18585,14 +21686,14 @@ var init_qualification = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector-store.ts
-import { homedir as homedir8 } from "node:os";
-import { join as join9 } from "node:path";
+import { homedir as homedir15 } from "node:os";
+import { join as join17 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join9(homedir8(), ".local", "share");
-  return join9(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir15(), ".local", "share");
+  return join17(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 function dropboxIngestionExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), DROPBOX_INGESTION_EXCLUSION_SOURCE, { enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA });
@@ -18858,13 +21959,13 @@ var init_classification = __esm(() => {
 
 // src/workers/google-connectors/request-budget.ts
 import {
-  chmodSync as chmodSync3,
-  existsSync as existsSync9,
-  mkdirSync as mkdirSync7,
-  readFileSync as readFileSync9,
-  renameSync as renameSync2
+  chmodSync as chmodSync5,
+  existsSync as existsSync14,
+  mkdirSync as mkdirSync10,
+  readFileSync as readFileSync16,
+  renameSync as renameSync3
 } from "node:fs";
-import { dirname as dirname9 } from "node:path";
+import { dirname as dirname15 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
@@ -18949,7 +22050,7 @@ function requestBudgetLedgerPath(statePath) {
   return statePath.endsWith(".sqlite") ? statePath : `${statePath}.sqlite`;
 }
 function initializeRequestBudgetLedger(ledgerPath, provider, now) {
-  mkdirSync7(dirname9(ledgerPath), { recursive: true, mode: 448 });
+  mkdirSync10(dirname15(ledgerPath), { recursive: true, mode: 448 });
   runBudgetLedgerOperation(ledgerPath, provider, now, () => withLedger(ledgerPath, (db) => {
     db.exec(`
         CREATE TABLE IF NOT EXISTS ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
@@ -19100,8 +22201,8 @@ function isSqliteBusy(error) {
 function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
-      if (existsSync9(path))
-        chmodSync3(path, 384);
+      if (existsSync14(path))
+        chmodSync5(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
@@ -19120,7 +22221,7 @@ function readLegacyRequestBudgetState(statePath, provider) {
     return;
   let raw;
   try {
-    raw = readFileSync9(statePath, "utf8");
+    raw = readFileSync16(statePath, "utf8");
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -19139,7 +22240,7 @@ function readLegacyRequestBudgetState(statePath, provider) {
 }
 function retireLegacyRequestBudgetState(statePath) {
   try {
-    renameSync2(statePath, `${statePath}.imported`);
+    renameSync3(statePath, `${statePath}.imported`);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
@@ -19207,9 +22308,9 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash9 } from "node:crypto";
-import { homedir as homedir9 } from "node:os";
-import { join as join10 } from "node:path";
+import { createHash as createHash11 } from "node:crypto";
+import { homedir as homedir16 } from "node:os";
+import { join as join18 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -19452,8 +22553,8 @@ function defaultGmailRequestBudgetStatePath(env = process.env) {
   const configured = env[GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "gmail-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir16(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "gmail-daily-request-budget.json");
 }
 function budgetedGmailApiClient(inner, budget, provenance) {
   return {
@@ -19519,15 +22620,15 @@ function defaultGmailConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "gmail-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir16(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "gmail-connector-store.sqlite");
 }
 function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir9(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join18(homedir16(), ".local", "share");
+  return join18(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -19545,7 +22646,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -19752,7 +22853,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash9("sha256").update(value).digest("hex");
+  return createHash11("sha256").update(value).digest("hex");
 }
 var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
 var init_gmail = __esm(() => {
@@ -19797,7 +22898,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
@@ -20050,7 +23151,7 @@ function taskOutcome(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash10("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash12("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError(error) {
   if (error instanceof TypeError)
@@ -20082,9 +23183,9 @@ var init_gmail_live_sync = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash11 } from "node:crypto";
-import { homedir as homedir10 } from "node:os";
-import { join as join11 } from "node:path";
+import { createHash as createHash13 } from "node:crypto";
+import { homedir as homedir17 } from "node:os";
+import { join as join19 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -20377,8 +23478,8 @@ function defaultGoogleDriveRequestBudgetStatePath(env = process.env) {
   const configured = env[GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "google-drive-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir17(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "google-drive-daily-request-budget.json");
 }
 function createRestGoogleDriveApiClient(options) {
   return new RestGoogleDriveApiClient({
@@ -20538,15 +23639,15 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir17(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 function defaultGoogleDriveSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "google-drive-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join19(homedir17(), ".local", "share");
+  return join19(dataHome, "openclaw", "olympus", "google-drive-secure-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -20564,7 +23665,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -20726,7 +23827,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString4(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -20787,7 +23888,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function createGoogleDriveConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGoogleDriveLiveSyncConfig(env);
@@ -21024,7 +24125,7 @@ function taskOutcome2(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash12("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash14("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -21133,13 +24234,13 @@ var init_google_connectors = __esm(() => {
 });
 
 // src/workers/telegram-messages/corpus-adapter.ts
-import { homedir as homedir11 } from "node:os";
-import { join as join12 } from "node:path";
+import { homedir as homedir18 } from "node:os";
+import { join as join20 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join12(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join20(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join12(env.HOME?.trim() || homedir11(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join20(env.HOME?.trim() || homedir18(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 function defineInternalTelegramMessagesCorpus() {
   return defineSourceIndexCorpus({
@@ -21173,14 +24274,14 @@ var init_corpus_adapter2 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync10, lstatSync as lstatSync4, readFileSync as readFileSync10, readdirSync } from "node:fs";
-import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
+import { createHash as createHash15 } from "node:crypto";
+import { existsSync as existsSync15, lstatSync as lstatSync8, readFileSync as readFileSync17, readdirSync } from "node:fs";
+import { homedir as homedir19 } from "node:os";
+import { join as join21 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
-  const home = env.HOME?.trim() || homedir12();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(home, ".local", "share");
-  return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join13(dataHome, "olympus", "telegram-capture", "spool");
+  const home = env.HOME?.trim() || homedir19();
+  const dataHome = env.XDG_DATA_HOME?.trim() || join21(home, ".local", "share");
+  return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join21(dataHome, "olympus", "telegram-capture", "spool");
 }
 function createTelegramCaptureSpoolConnector(options) {
   const spoolDir = requiredString3(options.spoolDir, "spool directory");
@@ -21274,15 +24375,15 @@ function readTelegramCaptureSpool(options) {
         continue;
       if (admitThrough && name > admitThrough.file)
         break;
-      const path = join13(options.spoolDir, name);
-      const stat2 = lstatSync4(path);
+      const path = join21(options.spoolDir, name);
+      const stat2 = lstatSync8(path);
       if (!stat2.isFile() || stat2.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
       bytes += stat2.size;
       if (bytes > MAX_SPOOL_BYTES)
         throw new Error("Telegram capture spool exceeds its bounded byte capacity.");
-      const payload = readFileSync10(path, "utf8");
+      const payload = readFileSync17(path, "utf8");
       const complete = payload.endsWith(`
 `) ? payload : payload.slice(0, payload.lastIndexOf(`
 `) + 1);
@@ -21351,9 +24452,9 @@ function mostRestrictiveTrust(observed, ...others) {
   return observed === "secure_local" || others.includes("secure_local") ? "secure_local" : "internal";
 }
 function assertTelegramCaptureSpoolDirectory(spoolDir) {
-  if (!existsSync10(spoolDir))
+  if (!existsSync15(spoolDir))
     throw new Error("Telegram capture spool directory does not exist.");
-  const dir = lstatSync4(spoolDir);
+  const dir = lstatSync8(spoolDir);
   if (!dir.isDirectory() || dir.isSymbolicLink()) {
     throw new Error("Telegram capture spool requires a real directory.");
   }
@@ -21566,7 +24667,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha256(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash15("sha256").update(value).digest("hex");
 }
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_SPOOL_BYTES = 768000000, MAX_RECORDS = 1e6, MAX_TEXT_CHARS = 4000000, DEFAULT_PAGE_LIMIT2 = 500, MAX_PAGE_LIMIT2 = 1e4;
 var init_capture_spool_connector = __esm(() => {
@@ -22003,10 +25104,10 @@ var init_corpus_adapter3 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash14 } from "node:crypto";
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync11 } from "node:fs";
-import { homedir as homedir13 } from "node:os";
-import { dirname as dirname10, join as join14 } from "node:path";
+import { createHash as createHash16 } from "node:crypto";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync18 } from "node:fs";
+import { homedir as homedir20 } from "node:os";
+import { dirname as dirname16, join as join22 } from "node:path";
 
 class ReadwiseDailyRequestBudget {
   utcDay = "";
@@ -22078,13 +25179,13 @@ function defaultReadwiseRequestBudgetStatePath(env = process.env) {
   const configured = env[READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir13(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "readwise-daily-request-budget.json");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir20(), ".local", "share");
+  return join22(dataHome, "openclaw", "olympus", "readwise-daily-request-budget.json");
 }
 function readReadwiseRequestBudgetState(statePath) {
   let raw;
   try {
-    raw = readFileSync11(statePath, "utf8");
+    raw = readFileSync18(statePath, "utf8");
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -22102,7 +25203,7 @@ function readReadwiseRequestBudgetState(statePath) {
   return { utcDay: parsed.utcDay, requests: parsed.requests };
 }
 function writeReadwiseRequestBudgetState(statePath, state) {
-  mkdirSync8(dirname10(statePath), { recursive: true, mode: 448 });
+  mkdirSync11(dirname16(statePath), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(statePath, `${JSON.stringify({ version: READWISE_REQUEST_BUDGET_STATE_VERSION, ...state })}
 `);
 }
@@ -22256,8 +25357,8 @@ function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir13(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir20(), ".local", "share");
+  return join22(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 function readwiseDailyRequestBudgetFromEnv(env = process.env) {
   const value = env[READWISE_DAILY_REQUEST_BUDGET_ENV];
@@ -22378,7 +25479,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash14("sha256").update(JSON.stringify({
+      contentHash: createHash16("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -22573,7 +25674,7 @@ var init_live_control = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -22740,7 +25841,7 @@ function taskOutcome3(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash15("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash17("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -23271,9 +26372,9 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash16 } from "node:crypto";
-import { homedir as homedir14 } from "node:os";
-import { join as join15 } from "node:path";
+import { createHash as createHash18 } from "node:crypto";
+import { homedir as homedir21 } from "node:os";
+import { join as join23 } from "node:path";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount2(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
@@ -23313,8 +26414,8 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir14(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir21(), ".local", "share");
+  return join23(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 function xBookmarkLocalItemId(account, postId) {
   return `${requireAccount2(account)}:${requirePostId(postId)}`;
@@ -23378,7 +26479,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash16("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
+      contentHash: createHash18("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -23425,10 +26526,10 @@ var init_connector3 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash17, randomUUID as randomUUID6 } from "node:crypto";
-import { chmodSync as chmodSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync9 } from "node:fs";
-import { homedir as homedir15 } from "node:os";
-import { dirname as dirname11, join as join16 } from "node:path";
+import { createHash as createHash19, randomUUID as randomUUID6 } from "node:crypto";
+import { chmodSync as chmodSync6, lstatSync as lstatSync9, mkdirSync as mkdirSync12 } from "node:fs";
+import { homedir as homedir22 } from "node:os";
+import { dirname as dirname17, join as join24 } from "node:path";
 import { Database as Database3 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -23467,8 +26568,8 @@ function defaultXBookmarksApiUsageDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir15(), ".local", "share");
-  return join16(dataHome, "openclaw", "olympus", "x-bookmarks-api-usage.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join24(homedir22(), ".local", "share");
+  return join24(dataHome, "openclaw", "olympus", "x-bookmarks-api-usage.sqlite");
 }
 function xBookmarksReconcileWatermarkResult(watermark) {
   const folderDegraded = watermark.folder_provenance === "degraded";
@@ -23524,10 +26625,10 @@ class LocalXBookmarksApiUsageStore {
   constructor(dbPath = defaultXBookmarksApiUsageDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
-      mkdirSync9(dirname11(dbPath), { recursive: true, mode: 448 });
+      mkdirSync12(dirname17(dbPath), { recursive: true, mode: 448 });
     this.db = new Database3(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync4(dbPath, 384);
+      chmodSync6(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, X_BOOKMARKS_API_USAGE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, xBookmarksApiUsageMigrations());
@@ -24242,7 +27343,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash17("sha256").update(resourceId).digest("hex");
+  return createHash19("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -24362,10 +27463,10 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash18, randomUUID as randomUUID7 } from "node:crypto";
-import { chmodSync as chmodSync5, mkdirSync as mkdirSync10 } from "node:fs";
-import { homedir as homedir16 } from "node:os";
-import { dirname as dirname12, join as join17 } from "node:path";
+import { createHash as createHash20, randomUUID as randomUUID7 } from "node:crypto";
+import { chmodSync as chmodSync7, mkdirSync as mkdirSync13 } from "node:fs";
+import { homedir as homedir23 } from "node:os";
+import { dirname as dirname18, join as join25 } from "node:path";
 import { Database as Database4 } from "bun:sqlite";
 function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH?.trim();
@@ -24375,8 +27476,8 @@ function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
     return ":memory:";
   if (usageDbPath?.trim())
     return `${usageDbPath.trim()}.reconcile`;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join17(homedir16(), ".local", "share");
-  return join17(dataHome, "openclaw", "olympus", "x-bookmarks-reconcile-state.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join25(homedir23(), ".local", "share");
+  return join25(dataHome, "openclaw", "olympus", "x-bookmarks-reconcile-state.sqlite");
 }
 
 class LocalXBookmarksReconcileStateStore {
@@ -24385,10 +27486,10 @@ class LocalXBookmarksReconcileStateStore {
   constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
-      mkdirSync10(dirname12(dbPath), { recursive: true, mode: 448 });
+      mkdirSync13(dirname18(dbPath), { recursive: true, mode: 448 });
     this.db = new Database4(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync5(dbPath, 384);
+      chmodSync7(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, xBookmarksReconcileStateMigrations());
@@ -24711,7 +27812,7 @@ class LocalXBookmarksReconcileStateStore {
   recordTruncationRetry(input) {
     const account = requireAccount4(input.account);
     const runId = boundedRequired(input.runId, 128, "X reconciliation run id");
-    const expectedToken = optionalToken(input.expectedToken);
+    const expectedToken = optionalToken2(input.expectedToken);
     const nextPageSize = requirePageSize(input.nextPageSize);
     const cursorColumn = input.phase === "global" ? "global_next_token" : "global_verify_next_token";
     const updated = this.db.query(`
@@ -24734,8 +27835,8 @@ class LocalXBookmarksReconcileStateStore {
     const account = requireAccount4(input.account);
     const limits = requireLimits(input.limits);
     const settledAt = validDate4(input.settledAt ?? new Date).toISOString();
-    const expectedToken = optionalToken(input.expectedToken);
-    const nextToken = optionalToken(input.page.nextToken);
+    const expectedToken = optionalToken2(input.expectedToken);
+    const nextToken = optionalToken2(input.page.nextToken);
     const posts = requirePostPage(input.page.posts);
     const requestedSize = requirePageSize(input.requestedSize);
     this.db.transaction(() => {
@@ -24778,7 +27879,7 @@ class LocalXBookmarksReconcileStateStore {
   }
   recordGlobalWindowBoundary(input) {
     const account = requireAccount4(input.account);
-    const expectedToken = optionalToken(input.expectedToken);
+    const expectedToken = optionalToken2(input.expectedToken);
     if (!expectedToken) {
       throw new ReconcileWindowBoundaryMismatchError("root_boundary");
     }
@@ -24812,8 +27913,8 @@ class LocalXBookmarksReconcileStateStore {
     const account = requireAccount4(input.account);
     const limits = requireLimits(input.limits);
     const settledAt = validDate4(input.settledAt ?? new Date).toISOString();
-    const expectedToken = optionalToken(input.expectedToken);
-    const nextToken = optionalToken(input.page.nextToken);
+    const expectedToken = optionalToken2(input.expectedToken);
+    const nextToken = optionalToken2(input.page.nextToken);
     const posts = requirePostPage(input.page.posts);
     const requestedSize = requirePageSize(input.requestedSize);
     this.db.transaction(() => {
@@ -24879,7 +27980,7 @@ class LocalXBookmarksReconcileStateStore {
   }
   recordGlobalVerificationWindowBoundary(input) {
     const account = requireAccount4(input.account);
-    const expectedToken = optionalToken(input.expectedToken);
+    const expectedToken = optionalToken2(input.expectedToken);
     if (!expectedToken) {
       throw new ReconcileWindowBoundaryMismatchError("root_boundary");
     }
@@ -24915,8 +28016,8 @@ class LocalXBookmarksReconcileStateStore {
     const account = requireAccount4(input.account);
     const limits = requireLimits(input.limits);
     const settledAt = validDate4(input.settledAt ?? new Date).toISOString();
-    const expectedToken = optionalToken(input.expectedToken);
-    const nextToken = optionalToken(input.page.nextToken);
+    const expectedToken = optionalToken2(input.expectedToken);
+    const nextToken = optionalToken2(input.page.nextToken);
     const folders = requireFolderPage(input.page.folders);
     const requestedSize = requirePageSize(input.requestedSize);
     this.db.transaction(() => {
@@ -24990,8 +28091,8 @@ class LocalXBookmarksReconcileStateStore {
     const limits = requireLimits(input.limits);
     const folderId = boundedRequired(input.folderId, MAX_FOLDER_ID_LENGTH, "folder id");
     const settledAt = validDate4(input.settledAt ?? new Date).toISOString();
-    const expectedToken = optionalToken(input.expectedToken);
-    const nextToken = optionalToken(input.page.nextToken);
+    const expectedToken = optionalToken2(input.expectedToken);
+    const nextToken = optionalToken2(input.page.nextToken);
     const posts = requirePostPage(input.page.posts);
     const requestedSize = requirePageSize(input.requestedSize);
     this.db.transaction(() => {
@@ -25750,10 +28851,10 @@ class LocalXBookmarksReconcileStateStore {
   }
   validateStagedRun(account, row, limits) {
     requirePhase(row.phase);
-    optionalToken(row.global_next_token ?? undefined);
-    optionalToken(row.global_verify_next_token ?? undefined);
-    optionalToken(row.folder_next_token ?? undefined);
-    optionalToken(row.membership_next_token ?? undefined);
+    optionalToken2(row.global_next_token ?? undefined);
+    optionalToken2(row.global_verify_next_token ?? undefined);
+    optionalToken2(row.folder_next_token ?? undefined);
+    optionalToken2(row.membership_next_token ?? undefined);
     requireNonNegative(row.global_pages, "global pages");
     requireNonNegative(row.global_verify_pages, "global verification pages");
     requireNonNegative(row.folder_pages, "folder pages");
@@ -26523,7 +29624,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash18("sha256").update(JSON.stringify({
+  return createHash20("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -26546,7 +29647,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash18("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash20("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -26702,7 +29803,7 @@ function boundedRequired(value, maxLength, label) {
   }
   return normalized;
 }
-function optionalToken(value) {
+function optionalToken2(value) {
   if (value === undefined)
     return;
   return boundedRequired(value, MAX_TOKEN_LENGTH, "pagination token");
@@ -26759,7 +29860,7 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash21 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -27462,7 +30563,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context, policy = X_BOO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash19("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash21("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -27660,17 +30761,17 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash20, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID8 } from "node:crypto";
 import {
-  chmodSync as chmodSync6,
-  existsSync as existsSync11,
-  mkdirSync as mkdirSync11,
-  renameSync as renameSync3,
-  statSync as statSync3,
+  chmodSync as chmodSync8,
+  existsSync as existsSync16,
+  mkdirSync as mkdirSync14,
+  renameSync as renameSync4,
+  statSync as statSync5,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync4
+  writeFileSync as writeFileSync5
 } from "node:fs";
-import { dirname as dirname13 } from "node:path";
+import { dirname as dirname19 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -27708,7 +30809,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash20("sha256").update(account).digest("hex"),
+    account_sha256: createHash22("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -27731,7 +30832,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash20("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash22("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -27903,19 +31004,19 @@ function writePrivateReport(pathValue, contents) {
   const reportPath = pathValue.trim();
   if (!reportPath)
     throw new TypeError("X bookmark diagnostic report path is required.");
-  const parent = dirname13(reportPath);
-  mkdirSync11(parent, { recursive: true, mode: 448 });
+  const parent = dirname19(reportPath);
+  mkdirSync14(parent, { recursive: true, mode: 448 });
   const temporaryPath = `${reportPath}.tmp-${randomUUID8()}`;
   try {
-    writeFileSync4(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
-    chmodSync6(temporaryPath, 384);
-    renameSync3(temporaryPath, reportPath);
-    chmodSync6(reportPath, 384);
-    if ((statSync3(reportPath).mode & 511) !== 384) {
+    writeFileSync5(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
+    chmodSync8(temporaryPath, 384);
+    renameSync4(temporaryPath, reportPath);
+    chmodSync8(reportPath, 384);
+    if ((statSync5(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
   } finally {
-    if (existsSync11(temporaryPath))
+    if (existsSync16(temporaryPath))
       unlinkSync2(temporaryPath);
   }
 }
@@ -28308,14 +31409,14 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash21, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash23, randomUUID as randomUUID9 } from "node:crypto";
 import {
-  chmodSync as chmodSync7,
-  renameSync as renameSync4,
-  rmSync as rmSync2,
-  writeFileSync as writeFileSync5
+  chmodSync as chmodSync9,
+  renameSync as renameSync5,
+  rmSync as rmSync6,
+  writeFileSync as writeFileSync6
 } from "node:fs";
-import { resolve as resolve2 } from "node:path";
+import { resolve as resolve4 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -28507,11 +31608,11 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash21("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash23("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve2(`${storePath}.content-recovery-receipt.json`);
+  return resolve4(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = requireBearerTokenCredentialSession(await input.broker.issueSession({
@@ -28599,26 +31700,26 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve2(pathValue);
+  const path = resolve4(pathValue);
   const temporary = `${path}.tmp-${randomUUID9()}`;
   try {
-    writeFileSync5(temporary, `${JSON.stringify(receipt, null, 2)}
+    writeFileSync6(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
       encoding: "utf8",
       flag: "wx",
       mode: 384
     });
-    chmodSync7(temporary, 384);
-    renameSync4(temporary, path);
-    chmodSync7(path, 384);
+    chmodSync9(temporary, 384);
+    renameSync5(temporary, path);
+    chmodSync9(path, 384);
     return receipt;
   } catch (error) {
-    rmSync2(temporary, { force: true });
+    rmSync6(temporary, { force: true });
     throw error;
   }
 }
 function sha256Json2(value) {
-  return createHash21("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash23("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty3(value, label) {
   const normalized = value.trim();
@@ -28838,8 +31939,8 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync12, readFileSync as readFileSync12, readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
-import { join as join18 } from "node:path";
+import { existsSync as existsSync17, readFileSync as readFileSync19, readdirSync as readdirSync2, statSync as statSync6 } from "node:fs";
+import { join as join26 } from "node:path";
 function createWhatsAppLiveSourceConnector(options) {
   const spoolDir = requireNonEmpty4(options.spoolDir, "WhatsApp live connector spoolDir");
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty4(options.account, "WhatsApp live connector account");
@@ -28847,7 +31948,7 @@ function createWhatsAppLiveSourceConnector(options) {
     id: CONNECTOR_ID2,
     family: "chat",
     async authenticate() {
-      if (!existsSync12(spoolDir) || !statSync4(spoolDir).isDirectory()) {
+      if (!existsSync17(spoolDir) || !statSync6(spoolDir).isDirectory()) {
         throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
       }
     },
@@ -28876,7 +31977,7 @@ function createWhatsAppLiveSourceConnector(options) {
       let match;
       const reactionIndex = createWhatsAppReactionIndexBuilder();
       for (const file of listSpoolFiles(spoolDir)) {
-        for (const line of terminatedLines(join18(spoolDir, file))) {
+        for (const line of terminatedLines(join26(spoolDir, file))) {
           const message = parseSpoolLine(line);
           if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid))
             continue;
@@ -28907,7 +32008,7 @@ function readWhatsAppLiveSpoolStatus(spoolDir) {
   const files = listSpoolFiles(spoolDir);
   const reactionIndex = createWhatsAppReactionIndexBuilder();
   for (const file of files) {
-    for (const line of terminatedLines(join18(spoolDir, file))) {
+    for (const line of terminatedLines(join26(spoolDir, file))) {
       lines += 1;
       if (line.trim() === "")
         continue;
@@ -28963,7 +32064,7 @@ function readSpoolPage(spoolDir, start, limit) {
   for (const file of files) {
     if (start !== undefined && file < start.file)
       continue;
-    const lines = terminatedLines(join18(spoolDir, file));
+    const lines = terminatedLines(join26(spoolDir, file));
     let lineIndex = start !== undefined && file === start.file ? Math.min(start.line, lines.length) : 0;
     while (lineIndex < lines.length) {
       if (projectedItems() >= limit) {
@@ -29039,7 +32140,7 @@ function resolveReactionTargets(spoolDir, targetIds) {
   if (targetIds.size === 0)
     return targets;
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join18(spoolDir, file))) {
+    for (const line of terminatedLines(join26(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined)
         continue;
@@ -29069,7 +32170,7 @@ function createReactionSnapshotReader(spoolDir) {
 function buildReactionSnapshot(spoolDir) {
   const builder = createWhatsAppReactionIndexBuilder();
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join18(spoolDir, file))) {
+    for (const line of terminatedLines(join26(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined)
         continue;
@@ -29084,7 +32185,7 @@ function buildReactionSnapshot(spoolDir) {
 function spoolFingerprint(spoolDir) {
   return listSpoolFiles(spoolDir).map((file) => {
     try {
-      const stats = statSync4(join18(spoolDir, file));
+      const stats = statSync6(join26(spoolDir, file));
       return `${file}:${stats.size}:${stats.mtimeMs}`;
     } catch {
       return `${file}:gone`;
@@ -29109,7 +32210,7 @@ function listSpoolFiles(spoolDir) {
 function terminatedLines(filePath) {
   let text;
   try {
-    text = readFileSync12(filePath, "utf8");
+    text = readFileSync19(filePath, "utf8");
   } catch {
     return [];
   }
@@ -29335,21 +32436,21 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/store-sync.ts
-import { homedir as homedir17 } from "node:os";
-import { join as join19 } from "node:path";
+import { homedir as homedir24 } from "node:os";
+import { join as join27 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join19(env.HOME?.trim() || homedir17(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join19(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join27(env.HOME?.trim() || homedir24(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join27(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppSpoolDir(env = process.env) {
-  return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join19(defaultWhatsAppStateDir(env), "spool");
+  return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join27(defaultWhatsAppStateDir(env), "spool");
 }
 function defaultWhatsAppMediaDir(env = process.env) {
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join19(transcribeStateDir || defaultWhatsAppStateDir(env), "media", "audio");
+  return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || join27(transcribeStateDir || defaultWhatsAppStateDir(env), "media", "audio");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join19(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join27(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 function sanitizeWhatsAppLiveCursor(cursor) {
   if (cursor === undefined)
@@ -29458,7 +32559,7 @@ var init_store_sync2 = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash24 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -29501,7 +32602,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash22("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash24("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
     }
@@ -29510,7 +32611,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { basename, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
+import { basename as basename3, relative as relative4, resolve as resolve5, sep as sep4 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -29529,7 +32630,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve3(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve5(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -29595,7 +32696,7 @@ class WhatsAppExtractionSource {
       localItemId: row.localItemId,
       ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
       ...row.mimeType ? { mimeType: row.mimeType } : {},
-      name: basename(row.locatorUri)
+      name: basename3(row.locatorUri)
     };
   }
   async pathIsInsideMediaRoot(path) {
@@ -29606,8 +32707,8 @@ class WhatsAppExtractionSource {
       } catch {
         continue;
       }
-      const fromRoot = relative2(root, path);
-      if (fromRoot === "" || !fromRoot.startsWith(`..${sep2}`) && fromRoot !== "..")
+      const fromRoot = relative4(root, path);
+      if (fromRoot === "" || !fromRoot.startsWith(`..${sep4}`) && fromRoot !== "..")
         return true;
     }
     return false;
@@ -29637,190 +32738,6 @@ var init_whatsapp = __esm(() => {
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
-});
-
-// src/core/pairing-session-paths.ts
-import { lstatSync as lstatSync6, realpathSync, rmSync as rmSync3 } from "node:fs";
-import { homedir as homedir18 } from "node:os";
-import { basename as basename2, dirname as dirname14, join as join20, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
-function resolveHomeDir(context) {
-  return context.homeDir?.trim() || homedir18();
-}
-function olympusDataRoots(context = {}) {
-  const home = resolveHomeDir(context);
-  return [
-    join20(home, ".olympus"),
-    join20(home, ".config", "olympus"),
-    join20(home, ".local", "share", "olympus"),
-    join20(home, ".local", "share", "openclaw", "olympus"),
-    join20(home, ".local", "state", "olympus"),
-    join20(home, ".cache", "olympus"),
-    join20(home, "Library", "Logs", "Olympus")
-  ];
-}
-function whatsappStateDir(context = {}) {
-  const env = context.env ?? {};
-  const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
-  return configured ? whatsappStateDirFromValue(configured) : join20(env.XDG_DATA_HOME?.trim() || join20(resolveHomeDir(context), ".local", "share"), "olympus", "whatsapp-live");
-}
-function whatsappPairingSessionPaths(context = {}) {
-  const stateDir = whatsappStateDir(context);
-  const sessionDb = join20(stateDir, "session.db");
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join20(stateDir, "qr.txt")];
-}
-function telegramSessionBase(value) {
-  const trimmed2 = value.trim();
-  return trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
-}
-function whatsappStateDirFromValue(value) {
-  const trimmed2 = value.trim();
-  return basename2(trimmed2) === "session.db" ? dirname14(trimmed2) : trimmed2;
-}
-function telegramSessionBasePath(context = {}) {
-  const env = context.env ?? {};
-  const home = context.homeDir?.trim() || env.HOME?.trim() || homedir18();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join20(home, ".local", "share");
-  const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
-  return configured ? telegramSessionBase(configured) : join20(dataHome, "olympus", "telegram", "telegram.personal");
-}
-function telegramPairingSessionPaths(context = {}) {
-  const base = telegramSessionBasePath(context);
-  return [`${base}.session`, `${base}.session-journal`];
-}
-function pairingSessionPathsFromStoredValue(source, storedValue) {
-  const value = storedValue.trim();
-  if (value === "")
-    return [];
-  if (source === "telegram") {
-    const base = telegramSessionBase(value);
-    return [`${base}.session`, `${base}.session-journal`];
-  }
-  const stateDir = whatsappStateDirFromValue(value);
-  const sessionDb = join20(stateDir, "session.db");
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join20(stateDir, "qr.txt")];
-}
-function pairingSessionPathOverridden(source, context = {}) {
-  const env = context.env ?? {};
-  const value = source === "telegram" ? env.OLYMPUS_TELEGRAM_SESSION_PATH : env.OLYMPUS_WHATSAPP_STATE_DIR;
-  return (value?.trim() ?? "") !== "";
-}
-function planPairingSessionRemoval(paths, context = {}) {
-  const roots = olympusDataRoots(context).map((root) => resolve4(root));
-  const canonicalRoots = canonicalOlympusDataRoots(roots);
-  const targets = [];
-  const absent = [];
-  for (const path of paths) {
-    const validated = validatePairingPath(path, roots, canonicalRoots);
-    if ("refusal" in validated)
-      return { ok: false, refusal: validated.refusal };
-    if (validated.target === undefined) {
-      absent.push(resolve4(path));
-      continue;
-    }
-    targets.push(validated.target);
-  }
-  return { ok: true, plan: { targets, absent } };
-}
-function canonicalOlympusDataRoots(roots) {
-  const canonical = [];
-  for (const root of roots) {
-    try {
-      const real = realpathSync(root);
-      if (lstatSync6(real).isDirectory())
-        canonical.push(real);
-    } catch {}
-  }
-  return [...new Set(canonical)];
-}
-function isInsideCanonicalRoot(path, canonicalRoots) {
-  return canonicalRoots.some((root) => path === root || path.startsWith(`${root}${sep3}`));
-}
-function validatePairingPath(path, roots, canonicalRoots) {
-  const absolute = resolve4(path);
-  const root = roots.find((candidate) => absolute === candidate || absolute.startsWith(`${candidate}${sep3}`));
-  if (root === undefined || absolute === root) {
-    return { refusal: { reason: "outside_root", path: absolute, component: absolute } };
-  }
-  const rootInspection = inspectPath(root);
-  if (rootInspection.kind === "error") {
-    return { refusal: { reason: "inspection_failed", path: absolute, component: root } };
-  }
-  if (rootInspection.kind === "absent")
-    return { target: undefined };
-  const components = relative3(root, absolute).split(sep3).filter((part) => part !== "");
-  let current = root;
-  for (const [index, component] of components.entries()) {
-    current = join20(current, component);
-    const inspection = inspectPath(current);
-    if (inspection.kind === "error") {
-      return { refusal: { reason: "inspection_failed", path: absolute, component: current } };
-    }
-    if (inspection.kind === "absent")
-      return { target: undefined };
-    const stat3 = inspection.stat;
-    if (stat3.isSymbolicLink()) {
-      return { refusal: { reason: "symlink_component", path: absolute, component: current } };
-    }
-    const leaf = index === components.length - 1;
-    if (leaf && !stat3.isFile()) {
-      return { refusal: { reason: "not_a_regular_file", path: absolute, component: current } };
-    }
-    if (!leaf && !stat3.isDirectory())
-      return { target: undefined };
-  }
-  let parentRealPath;
-  try {
-    parentRealPath = realpathSync(dirname14(absolute));
-  } catch {
-    return { refusal: { reason: "inspection_failed", path: absolute, component: dirname14(absolute) } };
-  }
-  if (!isInsideCanonicalRoot(parentRealPath, canonicalRoots)) {
-    return { refusal: { reason: "outside_root", path: absolute, component: parentRealPath } };
-  }
-  return { target: { path: absolute, parentRealPath } };
-}
-function removePlannedPairingSessionFile(target) {
-  const inspection = inspectPath(target.path);
-  if (inspection.kind === "error") {
-    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: target.path }, `Pairing artifact could not be inspected before removal (${inspection.code}): ${target.path}`);
-  }
-  if (inspection.kind === "absent")
-    return "already_gone";
-  const stat3 = inspection.stat;
-  if (stat3.isSymbolicLink() || !stat3.isFile()) {
-    throw new PairingSessionPathError({ reason: "not_a_regular_file", path: target.path, component: target.path }, `Pairing artifact changed to a non-regular file before removal: ${target.path}`);
-  }
-  let parentRealPath;
-  try {
-    parentRealPath = realpathSync(dirname14(target.path));
-  } catch (error) {
-    throw new PairingSessionPathError({ reason: "inspection_failed", path: target.path, component: dirname14(target.path) }, `Pairing artifact's parent directory could not be resolved before removal: ${error.message}`);
-  }
-  if (parentRealPath !== target.parentRealPath) {
-    throw new PairingSessionPathError({ reason: "symlink_component", path: target.path, component: dirname14(target.path) }, `Pairing artifact's parent directory changed between validation and removal: ${target.path}`);
-  }
-  rmSync3(target.path, { force: true });
-  return "removed";
-}
-function inspectPath(path) {
-  try {
-    return { kind: "stat", stat: lstatSync6(path) };
-  } catch (error) {
-    const code = error.code ?? "UNKNOWN";
-    if (code === "ENOENT" || code === "ENOTDIR")
-      return { kind: "absent" };
-    return { kind: "error", code };
-  }
-}
-var PairingSessionPathError;
-var init_pairing_session_paths = __esm(() => {
-  PairingSessionPathError = class PairingSessionPathError extends Error {
-    refusal;
-    constructor(refusal, message) {
-      super(message);
-      this.refusal = refusal;
-    }
-  };
 });
 
 // src/core/public-source-capabilities.ts
@@ -29929,7 +32846,7 @@ var init_public_source_capabilities = __esm(() => {
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
       contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Whatsmeow bridge", required_for: "QR pairing and live capture" }],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
       doctor_lane: {
@@ -29953,809 +32870,6 @@ var init_public_source_capabilities = __esm(() => {
     }
   ];
   CAPABILITIES_BY_SOURCE = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => [capability.source_id, capability]));
-});
-
-// src/core/worker-auth.ts
-import { createHmac as createHmac2 } from "node:crypto";
-import { readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
-import { homedir as homedir19 } from "node:os";
-import { join as join21 } from "node:path";
-function workerAuthTokenFromConfig(config, options = {}) {
-  return optionalToken2(config.worker.authToken) ?? optionalToken2((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
-}
-function withWorkerAuthHeader(init, authToken) {
-  const token = optionalToken2(authToken);
-  if (!token)
-    return init;
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  return {
-    ...init,
-    headers
-  };
-}
-function dashboardQueryTokenFromWorkerAuthToken(authToken) {
-  const token = optionalToken2(authToken);
-  if (!token)
-    return;
-  return `dash_${createHmac2("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
-}
-function workerAuthTokenFromSetupEnv(options = {}) {
-  return optionalToken2(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
-}
-function applyWorkerSetupEnv(options = {}) {
-  const targetEnv = options.env ?? process.env;
-  const path = workerSetupEnvPath(options);
-  const setupEnv = readWorkerSetupEnv({ ...options, workerEnvPath: path });
-  if (!setupEnv)
-    return { loaded: false, path, keys: [] };
-  const keys = [];
-  for (const [key, value] of Object.entries(setupEnv)) {
-    if (targetEnv[key]?.trim())
-      continue;
-    targetEnv[key] = value;
-    keys.push(key);
-  }
-  return { loaded: true, path, keys };
-}
-function readWorkerSetupEnv(options = {}) {
-  const path = workerSetupEnvPath(options);
-  try {
-    const stat3 = statSync5(path);
-    if (!stat3.isFile() || (stat3.mode & 63) !== 0)
-      return;
-    return parseWorkerSetupEnv(readFileSync13(path, "utf8"));
-  } catch {
-    return;
-  }
-}
-function environmentWithWorkerSetupEnv(options = {}) {
-  const env = options.env ?? process.env;
-  if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
-    return env;
-  const setupEnv = readWorkerSetupEnv(options);
-  if (!setupEnv)
-    return env;
-  const merged = { ...setupEnv };
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined && value.trim() !== "")
-      merged[key] = value;
-    else if (!(key in setupEnv))
-      merged[key] = value;
-  }
-  return merged;
-}
-function workerSetupEnvPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join21(options.homeDir ?? optionalToken2(env.HOME) ?? homedir19(), ".config", "olympus", "worker.env");
-}
-function isWorkerAuthTokenPlaceholder(value) {
-  const normalized = value?.trim().toLowerCase();
-  return normalized === "replace-with-generated-token" || normalized === "change-me" || normalized === "changeme" || normalized === "placeholder";
-}
-function normalizeWorkerAuthToken(value) {
-  const trimmed2 = value?.trim();
-  if (isWorkerAuthTokenPlaceholder(trimmed2))
-    return;
-  return trimmed2 ? trimmed2 : undefined;
-}
-function optionalToken2(value) {
-  return normalizeWorkerAuthToken(value);
-}
-function parseWorkerSetupEnv(text) {
-  const env = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed2 = line.trim();
-    if (!trimmed2 || trimmed2.startsWith("#"))
-      continue;
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed2);
-    if (!match)
-      continue;
-    env[match[1]] = unquoteEnvValue(match[2] ?? "");
-  }
-  return env;
-}
-function unquoteEnvValue(value) {
-  const trimmed2 = value.trim();
-  if (trimmed2.startsWith('"') && trimmed2.endsWith('"') || trimmed2.startsWith("'") && trimmed2.endsWith("'")) {
-    return trimmed2.slice(1, -1);
-  }
-  return trimmed2;
-}
-var init_worker_auth = () => {};
-
-// src/core/worker-service.ts
-import { chmodSync as chmodSync8, closeSync as closeSync4, existsSync as existsSync13, lstatSync as lstatSync7, mkdirSync as mkdirSync12, openSync as openSync4, readFileSync as readFileSync14, readSync, statSync as statSync6 } from "node:fs";
-import { homedir as homedir20, platform as osPlatform } from "node:os";
-import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute2, join as join22, relative as relative4, sep as sep4 } from "node:path";
-import { spawnSync as spawnSync3 } from "node:child_process";
-function installWorkerService(options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const envPath = options.envPath ?? paths.envPath;
-  validateManagedPath(envPath, "worker environment");
-  const unit = platform2 === "darwin" ? renderLaunchdWorkerUnit({ ...options, envPath, paths }) : renderSystemdWorkerUnit({ ...options, envPath, paths });
-  let wroteUnit = false;
-  let wroteEnv = false;
-  if (!options.dryRun) {
-    ensurePrivateRootDirectorySync(homeDir);
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    assertManagedParentSafety(homeDir, paths.logPath, "worker log");
-    if (pathIsWithin(homeDir, envPath))
-      assertManagedParentSafety(homeDir, envPath, "worker environment");
-    ensurePrivateDirectoryTreeSync(homeDir, dirname15(paths.unitPath));
-    ensurePrivateDirectoryTreeSync(homeDir, dirname15(paths.logPath));
-    if (pathIsWithin(homeDir, envPath))
-      ensurePrivateDirectoryTreeSync(homeDir, dirname15(envPath));
-    else
-      mkdirSync12(dirname15(envPath), { recursive: true });
-    wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, "worker unit");
-    wroteEnv = reconcileWorkerEnv(envPath, options);
-  }
-  return {
-    ok: true,
-    platform: platform2,
-    unit_path: paths.unitPath,
-    env_path: envPath,
-    log_path: paths.logPath,
-    error_log_path: paths.errorLogPath,
-    wrote_unit: wroteUnit,
-    wrote_env: wroteEnv,
-    unit,
-    commands: {
-      install: workerServiceCommand(platform2, "install", paths.unitPath),
-      status: workerServiceCommand(platform2, "status", paths.unitPath),
-      start: workerServiceCommand(platform2, "start", paths.unitPath),
-      stop: workerServiceCommand(platform2, "stop", paths.unitPath),
-      restart: workerServiceCommand(platform2, "restart", paths.unitPath),
-      uninstall: platform2 === "darwin" ? workerServiceCommand(platform2, "stop", paths.unitPath) : ["systemctl", "--user", "disable", "--now", "olympus-worker.service"]
-    }
-  };
-}
-function runWorkerServiceAction(action, options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const exec = options.exec ?? defaultWorkerServiceExec;
-  if (platform2 === "darwin" && action === "install") {
-    return runDarwinWorkerServiceInstall(paths, exec);
-  }
-  if (platform2 === "linux" && action === "install") {
-    return runLinuxWorkerServiceInstall(paths, exec);
-  }
-  if (platform2 === "darwin" && (action === "start" || action === "restart")) {
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    return runDarwinWorkerServiceActivation(action, paths, exec);
-  }
-  if (platform2 === "darwin" && action === "stop") {
-    return runDarwinWorkerServiceStop(paths, exec);
-  }
-  if (action === "uninstall") {
-    assertManagedParentSafety(homeDir, paths.unitPath, "worker unit");
-    return platform2 === "darwin" ? runDarwinWorkerServiceUninstall(paths, exec) : runLinuxWorkerServiceUninstall(paths, exec);
-  }
-  const command = workerServiceCommand(platform2, action, paths.unitPath);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError(action, result);
-  }
-  return {
-    ok: true,
-    command,
-    stdout: result.stdout,
-    stderr: result.stderr
-  };
-}
-function workerServiceFailureLogLine(options = {}) {
-  let paths;
-  try {
-    paths = workerServicePaths(normalizePlatform(options.platform ?? osPlatform()), validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory"));
-  } catch {
-    return;
-  }
-  return lastLogLine(paths.errorLogPath) ?? lastLogLine(paths.logPath);
-}
-function lastLogLine(path) {
-  let text;
-  try {
-    const size = statSync6(path).size;
-    if (size === 0)
-      return;
-    const length = Math.min(size, WORKER_LOG_TAIL_BYTES);
-    const buffer = Buffer.alloc(length);
-    const handle = openSync4(path, "r");
-    try {
-      readSync(handle, buffer, 0, length, size - length);
-    } finally {
-      closeSync4(handle);
-    }
-    text = buffer.toString("utf8");
-  } catch {
-    return;
-  }
-  const lines = text.split(/\r?\n/).map((line2) => line2.trim()).filter(Boolean);
-  const line = lines.at(-1);
-  if (!line)
-    return;
-  return redactWorkerLogLine(line).slice(0, WORKER_LOG_LINE_MAX_CHARS);
-}
-function redactWorkerLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function inspectWorkerService(options = {}) {
-  const platform2 = normalizePlatform(options.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(options.homeDir ?? homedir20(), "home directory");
-  const paths = workerServicePaths(platform2, homeDir);
-  const envPath = options.envPath ?? paths.envPath;
-  const command = workerServiceCommand(platform2, "status", paths.unitPath);
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  const unitPresent = isManagedRegularFile(paths.unitPath);
-  const unitPathPresent = existsSync13(paths.unitPath);
-  const envPathPresent = existsSync13(envPath);
-  const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
-  const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
-  const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform2, result, unitPresent);
-  return {
-    platform: platform2,
-    state,
-    unit_present: unitPresent,
-    env_present: isManagedRegularFile(envPath),
-    command,
-    exit_code: result.status,
-    detail: nonRegularDetail ?? boundedServiceDetail(result)
-  };
-}
-function runDarwinWorkerServiceInstall(paths, exec) {
-  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
-  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const installCommand = workerServiceCommand("darwin", "install", paths.unitPath);
-  const status = runWorkerServiceCommand(statusCommand, exec);
-  const outputs = [];
-  if (status.status === 0) {
-    outputs.push(status);
-    const stopped = runWorkerServiceCommand(stopCommand, exec);
-    outputs.push(stopped);
-    if (stopped.status !== 0) {
-      throwWorkerServiceActionError("install", stopped, "failed to unload the existing macOS worker service before reinstalling");
-    }
-  }
-  const installed = runWorkerServiceCommand(installCommand, exec);
-  outputs.push(installed);
-  if (installed.status !== 0) {
-    throwWorkerServiceActionError("install", installed);
-  }
-  return {
-    ok: true,
-    command: installCommand,
-    stdout: outputs.map((result) => result.stdout).join(""),
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runLinuxWorkerServiceInstall(paths, exec) {
-  const installCommand = workerServiceCommand("linux", "install", paths.unitPath);
-  const reloaded = reloadLinuxWorkerServiceManager({ exec });
-  const installed = runWorkerServiceCommand(installCommand, exec);
-  if (installed.status !== 0) {
-    throwWorkerServiceActionError("install", installed);
-  }
-  return {
-    ok: true,
-    command: installCommand,
-    stdout: `${reloaded.stdout}${installed.stdout}`,
-    stderr: `${reloaded.stderr}${installed.stderr}`
-  };
-}
-function reloadLinuxWorkerServiceManager(options = {}) {
-  const command = ["systemctl", "--user", "daemon-reload"];
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError("install", result, "failed to reload the user systemd manager after changing the worker unit");
-  }
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function resetFailedLinuxWorkerService(options = {}) {
-  const command = ["systemctl", "--user", "reset-failed", "olympus-worker.service"];
-  const result = runWorkerServiceCommand(command, options.exec ?? defaultWorkerServiceExec);
-  if (result.status !== 0) {
-    throwWorkerServiceActionError("stop", result, "failed to clear the latched systemd failure for the managed worker unit");
-  }
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceActivation(action, paths, exec) {
-  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
-  const unloaded = status.status === 3 || status.status === 113;
-  if (!unloaded && status.status !== 0)
-    throwWorkerServiceActionError(action, status);
-  if (unloaded && !isManagedRegularFile(paths.unitPath)) {
-    throwWorkerServiceActionError(action, status, "the managed macOS worker unit is not installed");
-  }
-  const command = unloaded ? workerServiceCommand("darwin", "install", paths.unitPath) : workerServiceCommand("darwin", action, paths.unitPath);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0)
-    throwWorkerServiceActionError(action, result);
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceStop(paths, exec) {
-  const command = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const status = runWorkerServiceCommand(workerServiceCommand("darwin", "status", paths.unitPath), exec);
-  if (status.status === 3 || status.status === 113) {
-    return { ok: true, command, stdout: "", stderr: status.stderr };
-  }
-  if (status.status !== 0)
-    throwWorkerServiceActionError("stop", status);
-  const result = runWorkerServiceCommand(command, exec);
-  if (result.status !== 0)
-    throwWorkerServiceActionError("stop", result);
-  return { ok: true, command, stdout: result.stdout, stderr: result.stderr };
-}
-function runDarwinWorkerServiceUninstall(paths, exec) {
-  const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
-  const stopCommand = workerServiceCommand("darwin", "stop", paths.unitPath);
-  const status = runWorkerServiceCommand(statusCommand, exec);
-  const outputs = [status];
-  if (status.status === 0) {
-    const stopped = runWorkerServiceCommand(stopCommand, exec);
-    outputs.push(stopped);
-    if (stopped.status !== 0)
-      throwWorkerServiceActionError("uninstall", stopped);
-  } else if (status.status !== 3 && status.status !== 113 && isManagedRegularFile(paths.unitPath)) {
-    throwWorkerServiceActionError("uninstall", status, "could not determine whether the macOS worker service was loaded");
-  }
-  const removed = removeManagedFile(paths.unitPath, "worker unit");
-  return {
-    ok: true,
-    command: stopCommand,
-    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
-` : `worker unit already absent
-`}`,
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runLinuxWorkerServiceUninstall(paths, exec) {
-  const disableCommand = ["systemctl", "--user", "disable", "--now", "olympus-worker.service"];
-  const reloadCommand = ["systemctl", "--user", "daemon-reload"];
-  const outputs = [];
-  const unitPresent = isManagedRegularFile(paths.unitPath);
-  const status = runWorkerServiceCommand(workerServiceCommand("linux", "status", paths.unitPath), exec);
-  if (unitPresent || classifyWorkerServiceState("linux", status, unitPresent) === "active") {
-    const disabled = runWorkerServiceCommand(disableCommand, exec);
-    outputs.push(disabled);
-    if (disabled.status !== 0)
-      throwWorkerServiceActionError("uninstall", disabled);
-  }
-  const removed = removeManagedFile(paths.unitPath, "worker unit");
-  const reloaded = runWorkerServiceCommand(reloadCommand, exec);
-  outputs.push(reloaded);
-  if (reloaded.status !== 0)
-    throwWorkerServiceActionError("uninstall", reloaded);
-  return {
-    ok: true,
-    command: disableCommand,
-    stdout: `${outputs.map((result) => result.stdout).join("")}${removed ? `removed worker unit
-` : `worker unit already absent
-`}`,
-    stderr: outputs.map((result) => result.stderr).join("")
-  };
-}
-function runWorkerServiceCommand(command, exec) {
-  const [cmd, ...args] = command;
-  return exec(cmd, args);
-}
-function throwWorkerServiceActionError(action, result, detail) {
-  throw new OperationError("config_error", `olympus worker ${action} failed with exit code ${result.status ?? "unknown"}.`, detail ?? (result.stderr.trim() || result.stdout.trim() || undefined));
-}
-function classifyWorkerServiceState(platform2, result, unitPresent) {
-  const output = `${result.stdout}
-${result.stderr}`.trim().toLowerCase();
-  if (platform2 === "linux") {
-    const status = result.stdout.trim().toLowerCase();
-    if (result.status === 0 && status === "active")
-      return "active";
-    if (status === "inactive")
-      return unitPresent ? "inactive" : "missing";
-    if (status === "failed")
-      return "failed";
-    if (!unitPresent && (result.status === 3 || result.status === 4))
-      return "missing";
-    return "unknown";
-  }
-  if (result.status === 0) {
-    if (/\bstate\s*=\s*running\b/.test(output))
-      return "active";
-    const lastExit = output.match(/\blast exit code\s*=\s*(-?\d+)\b/);
-    if (lastExit && Number(lastExit[1]) !== 0)
-      return "failed";
-    return "inactive";
-  }
-  if ((result.status === 3 || result.status === 113) && !unitPresent)
-    return "missing";
-  if (result.status === 3 || result.status === 113)
-    return "inactive";
-  return "unknown";
-}
-function boundedServiceDetail(result) {
-  const text = (result.stderr.trim() || result.stdout.trim() || `exit ${result.status ?? "unknown"}`).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  return text.slice(0, 240);
-}
-function defaultWorkerServiceExec(command, args) {
-  const result = spawnSync3(command, args, { encoding: "utf8" });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? (result.error ? `${command}: ${result.error.message}` : "")
-  };
-}
-function workerServicePaths(platform2, homeDir) {
-  homeDir = validatedAbsolutePath(homeDir, "home directory");
-  if (platform2 === "darwin") {
-    const logDir = join22(homeDir, "Library", "Logs", "Olympus");
-    return {
-      label: "com.openclaw.olympus.worker",
-      unitPath: join22(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join22(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join22(logDir, "worker.log"),
-      errorLogPath: join22(logDir, "worker.err")
-    };
-  }
-  const stateDir = join22(homeDir, ".local", "state", "olympus", "worker");
-  return {
-    label: "olympus-worker",
-    unitPath: join22(homeDir, ".config", "systemd", "user", "olympus-worker.service"),
-    envPath: join22(homeDir, ".config", "olympus", "worker.env"),
-    logPath: join22(stateDir, "worker.log"),
-    errorLogPath: join22(stateDir, "worker.err")
-  };
-}
-function renderLaunchdWorkerUnit(input) {
-  const command = workerServiceExecCommand(input);
-  const workingDirectory = input.workingDirectory ?? process.cwd();
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${input.paths.label}</string>
-  <key>WorkingDirectory</key>
-  <string>${escapeXml(workingDirectory)}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>${escapeXml(launchdEnvSourcingExec(input.envPath, command))}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-  <key>ThrottleInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>${escapeXml(input.paths.logPath)}</string>
-  <key>StandardErrorPath</key>
-  <string>${escapeXml(input.paths.errorLogPath)}</string>
-</dict>
-</plist>
-`;
-}
-function renderSystemdWorkerUnit(input) {
-  const command = workerServiceExecCommand(input);
-  const workingDirectory = input.workingDirectory ?? process.cwd();
-  return `[Unit]
-Description=Olympus source worker
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${workingDirectory}
-EnvironmentFile=-${input.envPath}
-ExecStart=${command.map(systemdExecArg).join(" ")}
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:${input.paths.logPath}
-StandardError=append:${input.paths.errorLogPath}
-
-[Install]
-WantedBy=default.target
-`;
-}
-function workerServiceCommand(platform2, action, unitPath) {
-  if (platform2 === "darwin") {
-    const uid = process.getuid?.() ?? 501;
-    const guiTarget = `gui/${uid}`;
-    const target = `${guiTarget}/com.openclaw.olympus.worker`;
-    if (action === "install")
-      return ["launchctl", "bootstrap", guiTarget, unitPath];
-    if (action === "status")
-      return ["launchctl", "print", target];
-    if (action === "start")
-      return ["launchctl", "kickstart", target];
-    if (action === "restart")
-      return ["launchctl", "kickstart", "-k", target];
-    return ["launchctl", "bootout", target];
-  }
-  if (action === "install")
-    return ["systemctl", "--user", "enable", "--now", "olympus-worker.service"];
-  if (action === "status")
-    return ["systemctl", "--user", "is-active", "olympus-worker.service"];
-  return ["systemctl", "--user", action, "olympus-worker.service"];
-}
-function defaultWorkerEnv(options) {
-  const trimmedAuthToken = options.authToken?.trim();
-  const authToken = isWorkerAuthTokenPlaceholder(trimmedAuthToken) ? undefined : trimmedAuthToken;
-  const bunBin = resolveBunBin(options);
-  return [
-    "# Olympus source worker environment.",
-    `PATH=${defaultWorkerPath(bunBin)}`,
-    `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
-    `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? "true" : "false"}`,
-    "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true",
-    authToken ? `OLYMPUS_WORKER_AUTH_TOKEN=${authToken}` : "# OLYMPUS_WORKER_AUTH_TOKEN=replace-with-generated-token",
-    ""
-  ].join(`
-`);
-}
-function launchdEnvSourcingExec(envPath, command) {
-  const source = `set -a; [ -f ${shellQuote(envPath)} ] && . ${shellQuote(envPath)}; set +a;`;
-  return `${source} exec ${command.map(shellQuote).join(" ")}`;
-}
-function shellQuote(value) {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-function workerServiceExecCommand(options) {
-  const bunBin = resolveBunBin(options);
-  return [bunBin, defaultOlympusCliJs(options), "__worker-service-run"];
-}
-function nextWorkerEnvAuthToken(text, authToken) {
-  const token = authToken?.trim();
-  if (!token || isWorkerAuthTokenPlaceholder(token))
-    return text;
-  const existing = text.match(/^OLYMPUS_WORKER_AUTH_TOKEN=(.+)$/m)?.[1];
-  if (existing && !isWorkerAuthTokenPlaceholder(existing))
-    return text;
-  return /^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m.test(text) ? text.replace(/^#?\s*OLYMPUS_WORKER_AUTH_TOKEN=.*$/m, `OLYMPUS_WORKER_AUTH_TOKEN=${token}`) : `${text.replace(/\n?$/, `
-`)}OLYMPUS_WORKER_AUTH_TOKEN=${token}
-`;
-}
-function nextWorkerEnvPath(text, options) {
-  const bunBin = resolveBunBin(options);
-  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
-  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`) : `${text.replace(/\n?$/, `
-`)}PATH=${desiredPath}
-`;
-}
-function reconcileWorkerEnv(envPath, options) {
-  mkdirSync12(dirname15(envPath), { recursive: true });
-  if (!existsSync13(envPath)) {
-    writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
-    return true;
-  }
-  assertManagedRegularFile(envPath, "worker environment");
-  const current = readFileSync14(envPath, "utf8");
-  let next = nextWorkerEnvAuthToken(current, options.authToken);
-  next = nextWorkerEnvPath(next, options);
-  if (!/^OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=/m.test(next)) {
-    next = `${next.replace(/\n?$/, `
-`)}OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
-`;
-  }
-  const mode = statSync6(envPath).mode & 511;
-  if (next !== current) {
-    writePrivateFileAtomicSync(envPath, next);
-    return true;
-  }
-  if (mode !== 384) {
-    chmodSync8(envPath, 384);
-    return true;
-  }
-  return false;
-}
-function writeManagedWorkerEnvSecret(input) {
-  if (!MANAGED_WORKER_ENV_SECRET_KEYS.includes(input.key)) {
-    throw new OperationError("invalid_params", `${input.key} is not a managed worker environment key.`);
-  }
-  const value = input.value.trim();
-  if (!value) {
-    throw new OperationError("invalid_params", `${input.key} must not be empty.`);
-  }
-  if (/\p{Cc}/u.test(value)) {
-    throw new OperationError("invalid_params", `${input.key} must not contain control characters.`);
-  }
-  if (value.includes("'")) {
-    throw new OperationError("invalid_params", `${input.key} value must not contain a single quote.`, "A single quote cannot be stored portably in the worker environment. Rotate the key at the provider and store one without a quote.");
-  }
-  const platform2 = normalizePlatform(input.platform ?? osPlatform());
-  const homeDir = validatedAbsolutePath(input.homeDir ?? homedir20(), "home directory");
-  const envPath = input.envPath ?? workerServicePaths(platform2, homeDir).envPath;
-  validateManagedPath(envPath, "worker environment");
-  if (!existsSync13(envPath)) {
-    throw new OperationError("config_error", `No Olympus worker environment exists at ${envPath}.`, "Run olympus setup --preset <preset> --yes first; it creates the worker environment this key is stored in.");
-  }
-  assertManagedRegularFile(envPath, "worker environment");
-  const current = readFileSync14(envPath, "utf8");
-  const assignment = `${input.key}=${shellSingleQuote(value)}`;
-  const pattern = new RegExp(`^#?[ \\t]*${input.key}=.*$`);
-  const lines = current.split(`
-`);
-  let replaced = false;
-  const kept = [];
-  for (const line of lines) {
-    if (!pattern.test(line)) {
-      kept.push(line);
-      continue;
-    }
-    if (replaced)
-      continue;
-    kept.push(assignment);
-    replaced = true;
-  }
-  const next = replaced ? kept.join(`
-`) : `${current.replace(/\n?$/, `
-`)}${assignment}
-`;
-  let wrote = false;
-  if (next !== current) {
-    writePrivateFileAtomicSync(envPath, next);
-    wrote = true;
-  }
-  if ((statSync6(envPath).mode & 511) !== 384) {
-    chmodSync8(envPath, 384);
-    wrote = true;
-  }
-  return { ok: true, path: envPath, key: input.key, wrote };
-}
-function shellSingleQuote(value) {
-  return `'${value}'`;
-}
-function normalizePlatform(value) {
-  if (value === "darwin" || value === "linux")
-    return value;
-  throw new OperationError("invalid_params", "olympus worker install supports macOS launchd and Linux user-systemd.");
-}
-function resolveBunBin(options) {
-  if (options.bunBin)
-    return validateBunBin(validatedAbsolutePath(options.bunBin, "Bun executable"));
-  const runtimePath = process.execPath;
-  if (runtimePath && isAbsolute2(runtimePath) && isBunExecutableName(runtimePath)) {
-    return validateBunBin(runtimePath);
-  }
-  const bunWhich = typeof Bun !== "undefined" ? Bun.which("bun") : null;
-  if (!bunWhich || !isAbsolute2(bunWhich)) {
-    throw new OperationError("config_error", "Could not resolve an absolute Bun executable path for the worker service.");
-  }
-  return validateBunBin(bunWhich);
-}
-function validateBunBin(bunBin) {
-  if (!isBunExecutableName(bunBin)) {
-    throw new OperationError("config_error", `Could not validate the resolved Bun executable path: ${bunBin}`);
-  }
-  try {
-    if (!statSync6(bunBin).isFile()) {
-      throw new OperationError("config_error", `Resolved Bun path is not a file: ${bunBin}`);
-    }
-  } catch (error) {
-    if (error instanceof OperationError)
-      throw error;
-    throw new OperationError("config_error", `Resolved Bun executable does not exist: ${bunBin}`);
-  }
-  return bunBin;
-}
-function isBunExecutableName(path) {
-  const base = basename3(path).toLowerCase();
-  return base === "bun" || base === "bun.exe";
-}
-function validatedAbsolutePath(value, label) {
-  const trimmed2 = value.trim();
-  if (trimmed2 && isAbsolute2(trimmed2) && !/[\0\r\n]/.test(trimmed2))
-    return trimmed2;
-  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
-}
-function defaultOlympusCliJs(options) {
-  if (options.workingDirectory) {
-    return join22(validatedAbsolutePath(options.workingDirectory, "working directory"), "dist", "cli.js");
-  }
-  const invoked = process.argv[1]?.trim();
-  if (invoked && !invoked.startsWith("-") && basename3(invoked) === "cli.js") {
-    return isAbsolute2(invoked) ? invoked : join22(process.cwd(), invoked);
-  }
-  return join22(process.cwd(), "dist", "cli.js");
-}
-function defaultWorkerPath(bunBin, existingPath) {
-  const entries = [
-    dirname15(bunBin),
-    ...existingPath ? existingPath.split(":") : [],
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/usr/sbin",
-    "/sbin"
-  ].map((entry) => entry.trim()).filter(Boolean);
-  return Array.from(new Set(entries)).join(":");
-}
-function systemdExecArg(value) {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value))
-    return value;
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
-}
-function escapeXml(value) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
-function validateManagedPath(path, label) {
-  validatedAbsolutePath(path, label);
-}
-function pathIsWithin(root, path) {
-  const suffix = relative4(root, path);
-  return suffix === "" || !isAbsolute2(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep4}`);
-}
-function assertManagedParentSafety(homeDir, path, label) {
-  try {
-    assertManagedPathParentsSync(homeDir, path, label);
-  } catch (error) {
-    throw new OperationError("config_error", `Refusing unsafe managed ${label} parent path: ${path}`, error instanceof Error ? error.message : undefined);
-  }
-}
-function managedParentSafetyDetail(homeDir, unitPath, envPath) {
-  try {
-    assertManagedPathParentsSync(homeDir, unitPath, "worker unit");
-    if (pathIsWithin(homeDir, envPath)) {
-      assertManagedPathParentsSync(homeDir, envPath, "worker environment");
-    }
-    return;
-  } catch {
-    return "managed worker path has an unsafe parent directory component";
-  }
-}
-function isManagedRegularFile(path) {
-  try {
-    return lstatSync7(path).isFile();
-  } catch {
-    return false;
-  }
-}
-function assertManagedRegularFile(path, label) {
-  let stats;
-  try {
-    stats = lstatSync7(path);
-  } catch {
-    throw new OperationError("config_error", `Could not inspect the managed ${label} path: ${path}`);
-  }
-  if (!stats.isFile()) {
-    throw new OperationError("config_error", `Refusing a non-regular managed ${label} path: ${path}`);
-  }
-}
-function writeManagedFileAtomicIfChanged(path, text, label) {
-  validateManagedPath(path, label);
-  if (existsSync13(path)) {
-    assertManagedRegularFile(path, label);
-    if (readFileSync14(path, "utf8") === text) {
-      if ((statSync6(path).mode & 511) !== 384) {
-        chmodSync8(path, 384);
-        return true;
-      }
-      return false;
-    }
-  }
-  writePrivateFileAtomicSync(path, text);
-  return true;
-}
-function removeManagedFile(path, label) {
-  validateManagedPath(path, label);
-  if (!existsSync13(path))
-    return false;
-  assertManagedRegularFile(path, label);
-  return removeFileDurablySync(path);
-}
-var WORKER_LOG_TAIL_BYTES, WORKER_LOG_LINE_MAX_CHARS = 300, MANAGED_WORKER_ENV_SECRET_KEYS;
-var init_worker_service = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_worker_auth();
-  WORKER_LOG_TAIL_BYTES = 64 * 1024;
-  MANAGED_WORKER_ENV_SECRET_KEYS = ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"];
 });
 
 // src/core/delphi.ts
@@ -31016,15 +33130,15 @@ var init_email_policy = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash24, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash26, randomUUID as randomUUID11 } from "node:crypto";
 import {
-  chmodSync as chmodSync9,
-  existsSync as existsSync15,
-  lstatSync as lstatSync9,
-  mkdirSync as mkdirSync14
+  chmodSync as chmodSync10,
+  existsSync as existsSync19,
+  lstatSync as lstatSync11,
+  mkdirSync as mkdirSync16
 } from "node:fs";
-import { homedir as homedir22 } from "node:os";
-import { dirname as dirname17, isAbsolute as isAbsolute3, join as join24 } from "node:path";
+import { homedir as homedir26 } from "node:os";
+import { dirname as dirname21, isAbsolute as isAbsolute3, join as join29 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -31038,11 +33152,11 @@ function sourceWatchAuthenticatedRouteHeaders(route) {
 }
 function defaultSourceWatchDbPath(env = process.env) {
   const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join24(homedir22(), ".local", "share");
+  const dataRoot = configured || join29(homedir26(), ".local", "share");
   if (!isAbsolute3(dataRoot)) {
     throw new TypeError("Source watch XDG_DATA_HOME must be an absolute private data root.");
   }
-  return join24(dataRoot, "openclaw", "olympus", "source-watches.sqlite");
+  return join29(dataRoot, "openclaw", "olympus", "source-watches.sqlite");
 }
 function createTrustedSourceWatchOwnerContext(input) {
   assertOnlyFields(input, OWNER_CONTEXT_FIELDS, "owner context");
@@ -31066,7 +33180,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash24("sha256").update(JSON.stringify([
+  return createHash26("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -31084,7 +33198,7 @@ class LocalSourceWatchStore {
     hardenPrivateDatabasePath(dbPath);
     this.db = new Database6(dbPath, { create: true });
     try {
-      chmodSync9(dbPath, 384);
+      chmodSync10(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
       refuseUnversionedOwnedSchema(this.db);
       assertSqliteSchemaCanOpen(this.db, SOURCE_WATCH_STORE_ID, SOURCE_WATCH_SCHEMA_VERSION);
@@ -31751,26 +33865,26 @@ function hardenPrivateDatabasePath(dbPath) {
   if (!isAbsolute3(dbPath)) {
     throw new TypeError("Source watch database path must be absolute.");
   }
-  const leafDir = dirname17(dbPath);
+  const leafDir = dirname21(dbPath);
   const forbiddenLeafDirs = new Set([
     "/",
     "/tmp",
     "/private/tmp",
     "/var/tmp",
     "/private/var/tmp",
-    homedir22()
+    homedir26()
   ]);
   if (forbiddenLeafDirs.has(leafDir)) {
     throw new Error("Source watch database must live inside a dedicated private leaf directory.");
   }
-  mkdirSync14(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync9(leafDir);
+  mkdirSync16(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync11(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
-  chmodSync9(leafDir, 448);
-  if (existsSync15(dbPath)) {
-    const dbStat = lstatSync9(dbPath);
+  chmodSync10(leafDir, 448);
+  if (existsSync19(dbPath)) {
+    const dbStat = lstatSync11(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
     }
@@ -32132,7 +34246,7 @@ function addMilliseconds(timestamp2, deltaMs) {
   return new Date(Date.parse(timestamp2) + deltaMs).toISOString();
 }
 function sha2562(value) {
-  return createHash24("sha256").update(value, "utf8").digest("hex");
+  return createHash26("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH2 = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -33258,7 +35372,7 @@ var init_operation_exposure = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
-import { existsSync as existsSync16 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
@@ -33266,7 +35380,7 @@ async function setupPreflight(options) {
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
   const inputEnv = options.env ?? process.env;
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync16(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync20(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
@@ -33322,7 +35436,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return "olympus connect gemini --api-key-prompt";
+    return "Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -33350,1420 +35464,13 @@ function localServerPrerequisite(profileId, profile) {
 }
 function storeSecretRemedy(key) {
   if (key === "venice.api_key") {
-    return "olympus connect venice --api-key-prompt";
+    return "Open Models in Olympus Setup to connect Venice. Headless fallback: olympus connect venice --api-key-prompt";
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
 var init_setup_preflight = __esm(() => {
   init_secret_store();
   init_worker_auth();
-});
-
-// src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync6, constants, fstatSync, lstatSync as lstatSync10, openSync as openSync6, readFileSync as readFileSync16 } from "node:fs";
-function unpairedSourcesPath(registryPath) {
-  return `${registryPath}.unpaired`;
-}
-function inspectRecordNode(path) {
-  let stat3;
-  try {
-    stat3 = lstatSync10(path);
-  } catch (error) {
-    const code = error.code ?? "UNKNOWN";
-    if (code === "ENOENT" || code === "ENOTDIR")
-      return { kind: "missing" };
-    return { kind: "unreadable", reason: `${code}: ${error.message}` };
-  }
-  if (stat3.isSymbolicLink())
-    return { kind: "unreadable", reason: "record path is a symbolic link" };
-  if (!stat3.isFile())
-    return { kind: "unreadable", reason: "record path is not a regular file" };
-  return { kind: "file", stat: stat3 };
-}
-function readRecordText(path) {
-  const node = inspectRecordNode(path);
-  if (node.kind !== "file")
-    return node;
-  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
-  let fd;
-  try {
-    fd = openSync6(path, flags);
-  } catch (error) {
-    const code = error.code ?? "UNKNOWN";
-    if (code === "ENOENT" || code === "ENOTDIR")
-      return { kind: "missing" };
-    return { kind: "unreadable", reason: `${code}: ${error.message}` };
-  }
-  try {
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
-      return { kind: "unreadable", reason: "record path changed between inspection and opening" };
-    }
-    return { kind: "ok", text: readFileSync16(fd, "utf8") };
-  } catch (error) {
-    const code = error.code ?? "UNKNOWN";
-    return { kind: "unreadable", reason: `${code}: ${error.message}` };
-  } finally {
-    try {
-      closeSync6(fd);
-    } catch {}
-  }
-}
-function assertUnpairedRecordWritable(registryPath) {
-  const path = unpairedSourcesPath(registryPath);
-  const node = inspectRecordNode(path);
-  if (node.kind === "missing" || node.kind === "file")
-    return;
-  throw new Error(`Unpaired-source record path cannot be written (${node.reason}): ${path}`);
-}
-function readUnpairedSources(registryPath) {
-  const path = unpairedSourcesPath(registryPath);
-  const read = readRecordText(path);
-  if (read.kind === "missing")
-    return { status: "missing" };
-  if (read.kind === "unreadable")
-    return { status: "unreadable", path, reason: read.reason };
-  let parsed;
-  try {
-    parsed = JSON.parse(read.text);
-  } catch (error) {
-    return { status: "unreadable", path, reason: error.message };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { status: "unreadable", path, reason: "record must be a JSON object" };
-  }
-  const record = parsed;
-  if (record.version !== 1) {
-    return { status: "unreadable", path, reason: `unsupported record version: ${String(record.version)}` };
-  }
-  if (!Array.isArray(record.sources)) {
-    return { status: "unreadable", path, reason: "record.sources must be an array" };
-  }
-  const records = new Map;
-  for (const [index, entry] of record.sources.entries()) {
-    const normalized = normalizeRecord(entry);
-    if (normalized === "invalid") {
-      return { status: "unreadable", path, reason: `record.sources[${index}] is not a recognized entry` };
-    }
-    records.set(normalized.source_id, normalized);
-  }
-  return {
-    status: "ok",
-    records: [...records.values()].sort((a, b) => a.source_id.localeCompare(b.source_id))
-  };
-}
-function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim() !== "");
-}
-function normalizeRecord(entry) {
-  if (typeof entry === "string") {
-    return entry.trim() === "" ? "invalid" : { source_id: entry.trim(), state: "unpaired" };
-  }
-  if (!entry || typeof entry !== "object" || Array.isArray(entry))
-    return "invalid";
-  const value = entry;
-  for (const key of Object.keys(value))
-    if (!UNPAIRED_RECORD_KEYS.has(key))
-      return "invalid";
-  if (typeof value.source_id !== "string" || value.source_id.trim() === "")
-    return "invalid";
-  if (value.state !== undefined && (typeof value.state !== "string" || !UNPAIRED_RECORD_STATES.has(value.state))) {
-    return "invalid";
-  }
-  if (value.unremoved_paths !== undefined && !isStringArray(value.unremoved_paths))
-    return "invalid";
-  if (value.failed_steps !== undefined && !isStringArray(value.failed_steps))
-    return "invalid";
-  const paths = value.unremoved_paths ?? [];
-  const steps = value.failed_steps ?? [];
-  return {
-    source_id: value.source_id.trim(),
-    state: value.state ?? "unpaired",
-    ...paths.length > 0 ? { unremoved_paths: [...new Set(paths)].sort() } : {},
-    ...steps.length > 0 ? { failed_steps: [...new Set(steps)].sort() } : {}
-  };
-}
-function writeUnpairedSources(records, registryPath) {
-  const sources = [...records].sort((a, b) => a.source_id.localeCompare(b.source_id)).map((record) => ({
-    source_id: record.source_id,
-    state: record.state,
-    ...record.unremoved_paths?.length ? { unremoved_paths: [...record.unremoved_paths].sort() } : {},
-    ...record.failed_steps?.length ? { failed_steps: [...record.failed_steps].sort() } : {}
-  }));
-  writePrivateFileAtomicSync(unpairedSourcesPath(registryPath), `${JSON.stringify({ version: 1, sources }, null, 2)}
-`);
-}
-function recordUnpairedSources(updates, registryPath) {
-  const existing = readUnpairedSources(registryPath);
-  if (existing.status === "unreadable") {
-    throw new UnpairedSourcesUnreadableError(existing.path, existing.reason);
-  }
-  const merged = new Map((existing.status === "ok" ? existing.records : []).map((record) => [record.source_id, record]));
-  for (const update of updates) {
-    merged.set(update.source_id, mergeUnpairedSourceUpdate(merged.get(update.source_id), update));
-  }
-  const next = [...merged.values()];
-  writeUnpairedSources(next, registryPath);
-  return next;
-}
-function mergeUnpairedSourceUpdate(existing, update) {
-  const dischargedPaths = new Set(update.discharged?.paths ?? []);
-  const dischargedSteps = new Set(update.discharged?.steps ?? []);
-  const paths = [...new Set([
-    ...existing?.unremoved_paths ?? [],
-    ...update.unremoved_paths ?? []
-  ])].filter((path) => !dischargedPaths.has(path)).sort();
-  const steps = [...new Set([
-    ...existing?.failed_steps ?? [],
-    ...update.failed_steps ?? []
-  ])].filter((step) => !dischargedSteps.has(step)).sort();
-  const outstanding = paths.length > 0 || steps.length > 0;
-  const state = !outstanding ? "unpaired" : update.state === "unpaired" ? "unpair_incomplete" : update.state;
-  return {
-    source_id: update.source_id,
-    state,
-    ...paths.length > 0 ? { unremoved_paths: paths } : {},
-    ...steps.length > 0 ? { failed_steps: steps } : {}
-  };
-}
-function clearUnpairedSource(sourceId, registryPath) {
-  const current = readUnpairedSources(registryPath);
-  if (current.status === "unreadable") {
-    throw new UnpairedSourcesUnreadableError(current.path, current.reason);
-  }
-  if (current.status === "missing")
-    return;
-  if (!current.records.some((record) => record.source_id === sourceId))
-    return;
-  writeUnpairedSources(current.records.filter((record) => record.source_id !== sourceId), registryPath);
-}
-function artifactPresence(path) {
-  try {
-    lstatSync10(path);
-    return "present";
-  } catch (error) {
-    const code = error.code ?? "UNKNOWN";
-    return code === "ENOENT" || code === "ENOTDIR" ? "gone" : "unknown";
-  }
-}
-function reconcileUnpairedSource(record, presence = artifactPresence) {
-  if (record.state === "unpaired")
-    return record;
-  const outstanding = (record.unremoved_paths ?? []).filter((path) => presence(path) !== "gone");
-  const failedSteps = record.failed_steps ?? [];
-  if (outstanding.length === 0 && failedSteps.length === 0) {
-    return { source_id: record.source_id, state: "unpaired" };
-  }
-  return {
-    source_id: record.source_id,
-    state: "unpair_incomplete",
-    ...outstanding.length > 0 ? { unremoved_paths: outstanding.sort() } : {},
-    ...failedSteps.length > 0 ? { failed_steps: [...failedSteps].sort() } : {}
-  };
-}
-function readReconciledUnpairedSources(registryPath, presence = artifactPresence) {
-  const read = readUnpairedSources(registryPath);
-  if (read.status !== "ok")
-    return read;
-  return {
-    status: "ok",
-    records: read.records.map((record) => reconcileUnpairedSource(record, presence))
-  };
-}
-function assertUnpairedSourcesReadable(registryPath) {
-  const read = readUnpairedSources(registryPath);
-  if (read.status === "unreadable")
-    throw new UnpairedSourcesUnreadableError(read.path, read.reason);
-}
-function unpairedLaneProviders(registryPath) {
-  const read = readUnpairedSources(registryPath);
-  if (read.status === "missing")
-    return new Set;
-  if (read.status === "unreadable")
-    return new Set(Object.values(UNPAIRED_SOURCE_PROVIDERS));
-  const providers = new Set;
-  for (const record of read.records) {
-    const provider = UNPAIRED_SOURCE_PROVIDERS[record.source_id];
-    if (provider)
-      providers.add(provider);
-  }
-  return providers;
-}
-function withoutUnpairedLaneHandles(handles, registryPath) {
-  const unpaired = unpairedLaneProviders(registryPath);
-  if (unpaired.size === 0)
-    return [...handles];
-  return handles.filter((handle) => !unpaired.has(handle.provider));
-}
-var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES, UnpairedSourcesUnreadableError, UNPAIRED_SOURCE_PROVIDERS;
-var init_unpaired_sources = __esm(() => {
-  init_atomic_file();
-  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-  UnpairedSourcesUnreadableError = class UnpairedSourcesUnreadableError extends Error {
-    path;
-    constructor(path, reason) {
-      super(`Olympus unpaired-source record is unreadable (${reason}): ${path}`);
-      this.path = path;
-    }
-  };
-  UNPAIRED_SOURCE_PROVIDERS = {
-    "telegram.messages": "telegram",
-    "whatsapp.personal.messages": "whatsapp_personal"
-  };
-});
-
-// src/core/connect.ts
-import { Buffer as Buffer3 } from "node:buffer";
-import { spawn } from "node:child_process";
-import { createHash as createHash25, randomBytes as randomBytes4 } from "node:crypto";
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { createServer } from "node:http";
-import { homedir as homedir23 } from "node:os";
-import { dirname as dirname18, join as join25 } from "node:path";
-import { stdin as processStdin } from "node:process";
-async function connectOAuthSource(options) {
-  const pending = await startOAuthSourceConnection(options);
-  return pending.completion;
-}
-async function connectOAuthSourceDetached(options) {
-  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
-  const grantEpoch = options.grantEpoch ?? readConnectedHandleGrantEpoch(registryPath);
-  const accountRole = safeAccountRole(options.accountRole ?? "personal");
-  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
-  const startedAtDate = options.now?.() ?? new Date;
-  const startedAt = startedAtDate.toISOString();
-  const expiresAt = new Date(startedAtDate.getTime() + authorizationTimeoutMs).toISOString();
-  const stateDir = options.stateDir ?? defaultDetachedOAuthStateDir();
-  const logDir = options.logDir ?? defaultDetachedOAuthLogDir();
-  mkdirSync15(stateDir, { recursive: true, mode: 448 });
-  mkdirSync15(logDir, { recursive: true, mode: 448 });
-  const statePath = detachedOAuthStatePath({ stateDir, source: options.source, accountRole });
-  cleanupTerminalDetachedOAuthState(statePath);
-  const logPath = join25(logDir, `${options.source}.${accountRole}.${startedAt.replaceAll(/[:.]/g, "-")}.log`);
-  const requestPath = `${statePath}.request.${process.pid}.${Date.now()}.json`;
-  writePrivateJson(requestPath, {
-    source: options.source,
-    clientId: options.clientId,
-    ...options.clientSecret ? { clientSecret: options.clientSecret } : {},
-    ...options.accountRole ? { accountRole: options.accountRole } : {},
-    ...options.authUrl ? { authUrl: options.authUrl } : {},
-    ...options.tokenUrl ? { tokenUrl: options.tokenUrl } : {},
-    ...options.redirectPort !== undefined ? { redirectPort: options.redirectPort } : {},
-    ...options.openBrowser !== undefined ? { openBrowser: options.openBrowser } : {},
-    registryPath,
-    grantEpoch,
-    ...options.secretStoreBackend ? { secretStoreBackend: options.secretStoreBackend } : {},
-    ...options.secretStorePath ? { secretStorePath: options.secretStorePath } : {},
-    ...options.secretStoreKeyPath ? { secretStoreKeyPath: options.secretStoreKeyPath } : {},
-    authorizationTimeoutMs,
-    ...options.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: options.tokenExchangeTimeoutMs } : {},
-    statePath,
-    logPath
-  });
-  const argv = options.childArgv ?? [process.execPath, process.argv[1] ?? "src/cli.ts"];
-  const child = Bun.spawn({
-    cmd: [...argv, "__oauth-detached-child", requestPath],
-    cwd: options.childCwd ?? process.cwd(),
-    stdin: "ignore",
-    stdout: Bun.file(logPath),
-    stderr: Bun.file(logPath),
-    detached: true,
-    env: { ...process.env, OLYMPUS_OAUTH_DETACHED_CHILD: "1" }
-  });
-  child.unref();
-  const pending = await waitForDetachedPendingState({
-    statePath,
-    source: options.source,
-    accountRole,
-    pid: child.pid,
-    logPath,
-    timeoutMs: options.parentWaitMs ?? DETACHED_PARENT_WAIT_MS
-  });
-  if (pending.status !== "pending" || !pending.authorizationUrl || !pending.port || !pending.pid) {
-    rmSync5(requestPath, { force: true });
-    throw new Error(`Detached OAuth child for ${pending.source}/${pending.accountRole} did not publish a pending authorization URL. See log: ${logPath}`);
-  }
-  return {
-    ok: true,
-    source: pending.source,
-    accountRole: pending.accountRole,
-    status: pending.status,
-    authorizationUrl: pending.authorizationUrl,
-    port: pending.port,
-    pid: pending.pid,
-    statePath,
-    logPath,
-    startedAt: pending.startedAt,
-    expiresAt: pending.expiresAt
-  };
-}
-async function runDetachedOAuthChildFromRequestFile(requestPath) {
-  const request = readDetachedOAuthRequestFile(requestPath);
-  rmSync5(requestPath, { force: true });
-  const secretStore = createDefaultSecretStore({
-    env: {
-      ...process.env,
-      ...request.secretStoreBackend ? { OLYMPUS_SECRET_STORE_BACKEND: request.secretStoreBackend } : {}
-    },
-    paths: {
-      ...request.secretStorePath ? { encryptedFilePath: request.secretStorePath } : {},
-      ...request.secretStoreKeyPath ? { keyFilePath: request.secretStoreKeyPath } : {}
-    }
-  });
-  await runDetachedOAuthLifecycle({
-    source: request.source,
-    clientId: request.clientId,
-    ...request.clientSecret ? { clientSecret: request.clientSecret } : {},
-    ...request.accountRole ? { accountRole: request.accountRole } : {},
-    ...request.authUrl ? { authUrl: request.authUrl } : {},
-    ...request.tokenUrl ? { tokenUrl: request.tokenUrl } : {},
-    ...request.redirectPort !== undefined ? { redirectPort: request.redirectPort } : {},
-    ...request.openBrowser !== undefined ? { openBrowser: request.openBrowser } : {},
-    ...request.registryPath ? { registryPath: request.registryPath } : {},
-    ...request.grantEpoch ? { grantEpoch: request.grantEpoch } : {},
-    secretStore,
-    ...request.authorizationTimeoutMs !== undefined ? { authorizationTimeoutMs: request.authorizationTimeoutMs } : {},
-    ...request.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: request.tokenExchangeTimeoutMs } : {},
-    statePath: request.statePath,
-    logPath: request.logPath
-  });
-}
-async function runDetachedOAuthLifecycle(options) {
-  const accountRole = safeAccountRole(options.accountRole ?? "personal");
-  const now = options.now ?? (() => new Date);
-  const startedAtDate = now();
-  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
-  const baseState = {
-    source: options.source,
-    accountRole,
-    startedAt: startedAtDate.toISOString(),
-    expiresAt: new Date(startedAtDate.getTime() + authorizationTimeoutMs).toISOString(),
-    pid: options.pid ?? process.pid,
-    logPath: options.logPath
-  };
-  try {
-    const pending = await startOAuthSourceConnection({
-      ...options,
-      accountRole,
-      authorizationTimeoutMs,
-      onAuthorizationUrl: async (authorizationUrl) => {
-        const redirectUri = new URL(authorizationUrl).searchParams.get("redirect_uri") ?? "";
-        const port = redirectUri ? Number(new URL(redirectUri).port) : undefined;
-        writeDetachedOAuthState(options.statePath, {
-          ...baseState,
-          status: "pending",
-          authorizationUrl,
-          ...redirectUri ? { redirectUri } : {},
-          ...typeof port === "number" && Number.isFinite(port) ? { port } : {}
-        });
-        await options.onAuthorizationUrl?.(authorizationUrl);
-      }
-    });
-    const result = await pending.completion;
-    const connected = {
-      ...baseState,
-      status: "connected",
-      handles: result.handles,
-      ...result.handles[0] ? { handleId: result.handles[0] } : {},
-      ...result.registryPath ? { registryPath: result.registryPath } : {}
-    };
-    writeDetachedOAuthState(options.statePath, connected);
-    return connected;
-  } catch (error) {
-    const reason = errorDetail(error);
-    const retry = retryableErrorDisposition(error, now());
-    const failed = {
-      ...baseState,
-      status: isOAuthAuthorizationTimeout(reason) ? "expired" : "failed",
-      reason,
-      ...retry ? {
-        errorCode: retry.code,
-        retryable: true,
-        retryAt: retry.retryAt
-      } : {}
-    };
-    writeDetachedOAuthState(options.statePath, failed);
-    return failed;
-  }
-}
-async function startOAuthSourceConnection(options) {
-  const pkce = createOAuthPkceState();
-  const callback = await createLoopbackCallbackServer({
-    state: pkce.state,
-    ...options.redirectPort !== undefined ? { port: options.redirectPort } : {}
-  });
-  const redirectUri = `http://127.0.0.1:${callback.port}/oauth/callback`;
-  const prepared = prepareOAuthSourceConnection(options, redirectUri, pkce);
-  try {
-    await options.onAuthorizationUrl?.(prepared.authorizationUrl);
-    if (options.openBrowser !== false)
-      openBrowser(prepared.authorizationUrl);
-  } catch (error) {
-    callback.server.close();
-    throw error;
-  }
-  const completion = finishOAuthSourceConnection({
-    prepared,
-    callback
-  });
-  return {
-    ok: true,
-    source: options.source,
-    authorizationUrl: prepared.authorizationUrl,
-    redirectUri,
-    completion,
-    cancel: () => callback.server.close()
-  };
-}
-async function startExternalOAuthSourceConnection(options) {
-  const pkce = createOAuthPkceState();
-  const prepared = prepareOAuthSourceConnection(options, options.redirectUri, options.state === undefined ? pkce : { ...pkce, state: assertExternalOAuthState(options.state) });
-  await options.onAuthorizationUrl?.(prepared.authorizationUrl);
-  return {
-    ok: true,
-    source: options.source,
-    authorizationUrl: prepared.authorizationUrl,
-    redirectUri: prepared.redirectUri,
-    state: prepared.state,
-    startedAt: prepared.startedAt.toISOString(),
-    expiresAt: new Date(prepared.startedAt.getTime() + prepared.authorizationTimeoutMs).toISOString(),
-    completeCallback: async (callback) => {
-      if (callback.state !== prepared.state)
-        throw new Error("OAuth state mismatch.");
-      return completeOAuthSourceConnection(prepared, callback.code);
-    },
-    cancel() {}
-  };
-}
-function assertExternalOAuthState(state) {
-  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state) || state.length > 2048) {
-    throw new Error("OAuth state must be two base64url segments of at most 2048 characters.");
-  }
-  return state;
-}
-async function finishOAuthSourceConnection(options) {
-  try {
-    const code = await waitForAuthorizationCode(options.callback.waitForCode, options.prepared.authorizationTimeoutMs);
-    return completeOAuthSourceConnection(options.prepared, code);
-  } finally {
-    options.callback.server.close();
-  }
-}
-function createOAuthPkceState() {
-  const verifier = base64Url(randomBytes4(32));
-  return {
-    verifier,
-    challenge: base64Url(createHash25("sha256").update(verifier).digest()),
-    state: base64Url(randomBytes4(24))
-  };
-}
-function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
-  const definition = oauthSourceDefinition(options.source);
-  const accountRole = safeAccountRole(options.accountRole ?? "personal");
-  const secretStore = options.secretStore ?? createDefaultSecretStore();
-  const oauth2StateStore = options.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(process.env);
-  const now = options.now ?? (() => new Date);
-  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
-  const grantEpoch = options.grantEpoch ?? readConnectedHandleGrantEpoch(registryPath);
-  const clientId = options.clientId.trim();
-  const clientSecret = options.source === "dropbox" ? undefined : options.clientSecret?.trim();
-  const authorizationTimeoutMs = normalizeOAuthTimeoutMs(options.authorizationTimeoutMs, DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, "OAuth authorization timeout");
-  const tokenExchangeTimeoutMs = normalizeOAuthTimeoutMs(options.tokenExchangeTimeoutMs, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, "OAuth token exchange timeout");
-  if (!clientId)
-    throw new Error("OAuth client ID is required.");
-  const authorizationUrl = buildAuthorizationUrl({
-    source: options.source,
-    authUrl: options.authUrl ?? definition.authUrl,
-    clientId,
-    redirectUri,
-    scopes: definition.scopes,
-    state: pkce.state,
-    challenge: pkce.challenge
-  });
-  return {
-    options,
-    definition,
-    accountRole,
-    secretStore,
-    ...oauth2StateStore ? { oauth2StateStore } : {},
-    now,
-    registryPath,
-    grantEpoch,
-    clientId,
-    ...clientSecret ? { clientSecret } : {},
-    redirectUri,
-    verifier: pkce.verifier,
-    state: pkce.state,
-    authorizationUrl,
-    authorizationTimeoutMs,
-    tokenExchangeTimeoutMs,
-    startedAt: now()
-  };
-}
-async function completeOAuthSourceConnection(prepared, code) {
-  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
-  const clientSecret = usesGooglePublisherExchange ? undefined : await resolveOAuthClientSecret(prepared);
-  const token = await exchangeAuthorizationCode({
-    source: prepared.options.source,
-    tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-    clientId: prepared.clientId,
-    ...clientSecret ? { clientSecret } : {},
-    code,
-    redirectUri: prepared.redirectUri,
-    verifier: prepared.verifier,
-    fetchImpl: prepared.options.fetch ?? fetch,
-    timeoutMs: prepared.tokenExchangeTimeoutMs,
-    state: prepared.state
-  });
-  if (!token.refreshToken)
-    throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
-  const refreshToken = token.refreshToken;
-  let xUserId;
-  if (prepared.options.source === "x") {
-    xUserId = await fetchXUserId({
-      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-      accessToken: token.accessToken,
-      fetchImpl: prepared.options.fetch ?? fetch,
-      timeoutMs: prepared.tokenExchangeTimeoutMs
-    });
-  }
-  return withConnectedHandleGrantCustody(prepared.registryPath, { expectedEpoch: prepared.grantEpoch }, async () => {
-    const proposedHandles = prepared.definition.handles.map((definition) => ({
-      handle: definition.handle(prepared.accountRole),
-      provider: definition.provider
-    }));
-    assertOneConnectedAccountForProposedProviders(prepared.registryPath, proposedHandles);
-    const secretRefs = [];
-    const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
-    const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
-    await prepared.secretStore.set(clientIdKey, prepared.clientId);
-    await prepared.secretStore.set(refreshKey, refreshToken);
-    secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
-    if (prepared.options.clientIdSource !== undefined) {
-      const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
-      await prepared.secretStore.set(clientIdSourceKey, prepared.options.clientIdSource);
-      secretRefs.push(`store:${clientIdSourceKey}`);
-    }
-    let clientSecretRef;
-    if (!usesGooglePublisherExchange && clientSecret && shouldStoreOAuthClientSecret(prepared.options.source)) {
-      const clientSecretKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_secret`;
-      await prepared.secretStore.set(clientSecretKey, clientSecret);
-      clientSecretRef = `store:${clientSecretKey}`;
-      secretRefs.push(clientSecretRef);
-    }
-    const handles = [];
-    const connectedAt = prepared.now();
-    const registryOwnsOAuth = prepared.options.source !== "x" || !prepared.oauth2StateStore;
-    for (const handleDefinition of prepared.definition.handles) {
-      const handle = handleDefinition.handle(prepared.accountRole);
-      handles.push(handle);
-      await prepared.oauth2StateStore?.save(handle, {
-        refreshToken,
-        scopes: handleDefinition.scopes,
-        status: "available",
-        updatedAt: connectedAt.toISOString(),
-        ...xUserId ? { providerAccountId: xUserId } : {}
-      });
-      upsertConnectedHandle({
-        handle,
-        provider: handleDefinition.provider,
-        accountRole: prepared.accountRole,
-        ...handleDefinition.trustDomain ? { trustDomain: handleDefinition.trustDomain } : {},
-        allowedCapabilities: [handleDefinition.capability],
-        scopes: handleDefinition.scopes,
-        ...registryOwnsOAuth ? {
-          oauth2Refresh: {
-            tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
-            clientIdSecretRef: `store:${clientIdKey}`,
-            ...clientSecretRef ? { clientSecretSecretRef: clientSecretRef } : {},
-            refreshTokenSecretRef: `store:${refreshKey}`,
-            scopes: handleDefinition.scopes,
-            ...usesGooglePublisherExchange ? { exchangeVia: "publisher_endpoint" } : {}
-          }
-        } : {},
-        connectedAt: connectedAt.toISOString(),
-        ...xUserId ? { providerAccountId: xUserId } : {}
-      }, prepared.registryPath);
-    }
-    return {
-      ok: true,
-      source: prepared.options.source,
-      handles,
-      registryPath: prepared.registryPath,
-      oauth2StateWrite: prepared.oauth2StateStore ? "updated" : "not_configured",
-      secretRefs: secretRefs.sort()
-    };
-  });
-}
-async function resolveOAuthClientSecret(prepared) {
-  if (prepared.clientSecret)
-    return prepared.clientSecret;
-  if (!isGoogleOAuthSource(prepared.options.source))
-    return;
-  const keys = new Set([prepared.options.source, "google", "gmail", "google-drive"]);
-  for (const key of keys) {
-    const stored = (await prepared.secretStore.get(`${key}.${prepared.accountRole}.oauth.client_secret`))?.trim();
-    if (stored)
-      return stored;
-  }
-  return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim() || undefined;
-}
-function assertOneConnectedAccountForProposedProviders(registryPath, proposed) {
-  const providers = new Set(proposed.map((handle) => handle.provider));
-  const handles = readConnectedHandleRegistry(registryPath).handles.filter((handle) => providers.has(handle.provider));
-  assertOneConnectedAccountPerProvider({ version: 1, handles }, proposed);
-}
-function normalizeOAuthTimeoutMs(value, defaultValue, label) {
-  if (value === undefined)
-    return defaultValue;
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive finite number of milliseconds.`);
-  }
-  return Math.floor(value);
-}
-async function waitForAuthorizationCode(waitForCode, timeoutMs) {
-  let timeout;
-  try {
-    return await Promise.race([
-      waitForCode,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(new Error(`OAuth authorization timed out after ${formatDurationMs(timeoutMs)}. Re-run connect when you are ready to finish browser authorization.`));
-        }, timeoutMs);
-      })
-    ]);
-  } finally {
-    if (timeout)
-      clearTimeout(timeout);
-  }
-}
-function formatDurationMs(value) {
-  if (value < 1000)
-    return `${value} ms`;
-  const seconds = Math.ceil(value / 1000);
-  return `${seconds} second${seconds === 1 ? "" : "s"}`;
-}
-async function connectPublicApiKeySource(options) {
-  const accountRole = safeAccountRole(options.accountRole ?? "personal");
-  const key = options.apiKey.trim();
-  if (!key)
-    throw new Error("API key is required.");
-  const secretStore = options.secretStore ?? createDefaultSecretStore();
-  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
-  const now = options.now ?? (() => new Date);
-  if (options.source === "venice") {
-    await validatePublicApiKeySource({
-      source: "venice",
-      apiKey: key,
-      fetchImpl: options.fetch ?? fetch,
-      ...options.veniceModelsUrl ? { veniceModelsUrl: options.veniceModelsUrl } : {},
-      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
-    });
-    await secretStore.set("venice.api_key", key);
-    return {
-      ok: true,
-      source: "venice",
-      handles: [],
-      registryPath,
-      secretRefs: ["store:venice.api_key"],
-      next: "Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Private answers use that configured pool; E2EE model ids remain gated pending local key handling."
-    };
-  }
-  await validatePublicApiKeySource({
-    source: "readwise",
-    apiKey: key,
-    fetchImpl: options.fetch ?? fetch,
-    ...options.readwiseAuthUrl ? { readwiseAuthUrl: options.readwiseAuthUrl } : {},
-    timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
-  });
-  const grantEpoch = readConnectedHandleGrantEpoch(registryPath);
-  return withConnectedHandleGrantCustody(registryPath, { expectedEpoch: grantEpoch }, async () => {
-    const handle = `readwise.${accountRole}`;
-    assertOneConnectedAccountForProposedProviders(registryPath, [{ handle, provider: "readwise" }]);
-    const secretKey = `readwise.${accountRole}.token`;
-    await secretStore.set(secretKey, key);
-    upsertConnectedHandle({
-      handle,
-      provider: "readwise",
-      accountRole,
-      trustDomain: "internal",
-      allowedCapabilities: ["readwise.sync"],
-      scopes: ["readwise.export:read", "readwise.reader:read"],
-      tokenSecretRefs: [`store:${secretKey}`],
-      connectedAt: now().toISOString()
-    }, registryPath);
-    return { ok: true, source: "readwise", handles: [handle], registryPath, secretRefs: [`store:${secretKey}`] };
-  });
-}
-async function connectGeminiApiKey(options) {
-  const key = options.apiKey.trim();
-  if (!key)
-    throw new Error("API key is required.");
-  if (options.validate !== false) {
-    await validateGeminiApiKey({
-      apiKey: key,
-      fetchImpl: options.fetch ?? fetch,
-      ...options.geminiModelsUrl ? { geminiModelsUrl: options.geminiModelsUrl } : {},
-      timeoutMs: options.validationTimeoutMs ?? DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS
-    });
-  }
-  const stored = writeManagedWorkerEnvSecret({
-    key: "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
-    value: key,
-    ...options.platform ? { platform: options.platform } : {},
-    ...options.homeDir ? { homeDir: options.homeDir } : {},
-    ...options.envPath ? { envPath: options.envPath } : {}
-  });
-  return {
-    ok: true,
-    source: "gemini",
-    handles: [],
-    secretRefs: [`env:${stored.key}`],
-    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`
-  };
-}
-async function validateGeminiApiKey(options) {
-  const url = options.geminiModelsUrl ?? process.env.OLYMPUS_CONNECT_GEMINI_MODELS_URL ?? "https://generativelanguage.googleapis.com/v1beta/models";
-  let response;
-  try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
-      method: "GET",
-      headers: { "x-goog-api-key": options.apiKey, Accept: "application/json" }
-    }, options.timeoutMs);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error("Gemini API key validation timed out. No credentials were stored; try again when the Gemini API is reachable.");
-    }
-    throw new Error("Could not validate the Gemini API key. No credentials were stored; try again when the Gemini API is reachable.");
-  }
-  if (!response.ok) {
-    throw new Error("Gemini rejected the API key. Paste a current Gemini API key from https://aistudio.google.com/apikey and try again.");
-  }
-}
-async function validatePublicApiKeySource(options) {
-  if (options.source === "readwise") {
-    const url2 = options.readwiseAuthUrl ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL ?? "https://readwise.io/api/v2/auth/";
-    let response2;
-    try {
-      response2 = await fetchWithTimeout(options.fetchImpl, url2, {
-        method: "GET",
-        headers: { Authorization: `Token ${options.apiKey}`, Accept: "application/json" }
-      }, options.timeoutMs);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error("Readwise token validation timed out. No credentials were stored; try again when Readwise is reachable.");
-      }
-      throw new Error("Could not validate the Readwise token. No credentials were stored; try again when Readwise is reachable.");
-    }
-    if (response2.status !== 204) {
-      throw new Error("Readwise rejected the API token. Paste a current Readwise access token and try again.");
-    }
-    return;
-  }
-  const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/models";
-  let response;
-  try {
-    response = await fetchWithTimeout(options.fetchImpl, url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" }
-    }, options.timeoutMs);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error("Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.");
-    }
-    throw new Error("Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.");
-  }
-  if (!response.ok) {
-    throw new Error("Venice rejected the API key. Paste a current Venice API key and try again.");
-  }
-}
-async function fetchXUserId(options) {
-  const userUrl = new URL("/2/users/me", options.tokenUrl).toString();
-  let response;
-  try {
-    response = await fetchWithTimeout(options.fetchImpl, userUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${options.accessToken}`,
-        Accept: "application/json"
-      }
-    }, options.timeoutMs);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error("X user lookup timed out. No credentials were stored; re-run connect when X is reachable.");
-    }
-    throw new Error("Could not read your X user id. No credentials were stored; re-run connect when X is reachable.");
-  }
-  if (!response.ok) {
-    throw new Error("X did not confirm the connected user id. No credentials were stored; re-run connect and ensure users.read is approved.");
-  }
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error("X user lookup returned invalid JSON. No credentials were stored; re-run connect when X is reachable.");
-  }
-  const data = payload.data;
-  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
-  if (typeof id !== "string" || !/^\d+$/.test(id.trim())) {
-    throw new Error("X user lookup did not return a numeric user id. No credentials were stored; re-run connect when X is reachable.");
-  }
-  return id.trim();
-}
-async function connectGuidedSession(options) {
-  const accountRole = safeAccountRole(options.accountRole ?? (options.source === "telegram" ? "personal" : "personal_local"));
-  const sessionPath = options.sessionPath.trim();
-  if (!sessionPath)
-    throw new Error("Session path is required.");
-  const secretStore = options.secretStore ?? createDefaultSecretStore();
-  const registryPath = options.registryPath ?? defaultHandleRegistryPath();
-  const grantEpoch = readConnectedHandleGrantEpoch(registryPath);
-  const now = options.now ?? (() => new Date);
-  const key = `${options.source}.${accountRole}.session_path`;
-  const handle = options.source === "telegram" ? "telegram.personal" : "whatsapp.personal_local";
-  const provider = options.source === "telegram" ? "telegram" : "whatsapp_personal";
-  const clearLatch = options.clearUnpairedSource ?? clearUnpairedSource;
-  const unpairedSourceId = options.source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
-  assertUnpairedSourcesReadable(registryPath);
-  return withConnectedHandleGrantCustody(registryPath, { expectedEpoch: grantEpoch }, async () => {
-    assertOneConnectedAccountForProposedProviders(registryPath, [{ handle, provider }]);
-    assertUnpairedSourcesReadable(registryPath);
-    const priorHandle = readConnectedHandleRegistry(registryPath).handles.find((candidate) => candidate.handle === handle);
-    const priorSessionPath = await secretStore.get(key);
-    const priorUnpaired = readUnpairedSources(registryPath);
-    try {
-      await secretStore.set(key, sessionPath);
-      const connectedAt = now().toISOString();
-      const registryHandle = options.source === "telegram" ? {
-        handle,
-        provider: "telegram",
-        sessionKind: "mtproto_session",
-        accountRole,
-        trustDomain: "secure_local",
-        allowedCapabilities: ["telegram.messages.sync"],
-        scopes: [],
-        tokenSecretRefs: [`store:${key}`],
-        backendState: {
-          kind: "mtproto_session",
-          status: options.sessionReady ? "available" : "reauth_required",
-          mtprotoProfileId: "telegram_personal",
-          runtimeEndpointId: "telegram_local_telethon_reader",
-          library: "telethon",
-          backendLabel: "local_private:telegram_telethon_reader"
-        },
-        connectedAt
-      } : {
-        handle,
-        provider: "whatsapp_personal",
-        sessionKind: "local_app_database",
-        accountRole,
-        trustDomain: "secure_local",
-        allowedCapabilities: ["whatsapp.personal.messages.sync"],
-        scopes: [],
-        tokenSecretRefs: [`store:${key}`],
-        backendState: {
-          kind: "local_app_database",
-          status: options.sessionReady ? "available" : "reauth_required",
-          databaseSourceId: "whatsapp_personal_local",
-          readerWorker: "whatsapp_local_reader",
-          databaseRole: "messages_readonly",
-          scopeLabel: "personal_messages",
-          backendLabel: "local_private:whatsapp_local_app_reader"
-        },
-        connectedAt
-      };
-      upsertConnectedHandle(registryHandle, registryPath);
-      if (registryHandle.backendState?.status !== "reauth_required") {
-        clearLatch(unpairedSourceId, registryPath);
-      }
-      return {
-        ok: true,
-        source: options.source,
-        handles: [handle],
-        registryPath,
-        secretRefs: [`store:${key}`],
-        next: options.source === "telegram" ? "Run the Telethon login helper for this session path if status is reauth_required." : "Run the whatsmeow QR pairing helper for this session path if status is reauth_required."
-      };
-    } catch (publishError) {
-      await rollbackGuidedSessionPublish({
-        registryPath,
-        secretStore,
-        key,
-        handle,
-        priorHandle,
-        priorSessionPath,
-        priorUnpaired,
-        unpairedSourceId,
-        cause: publishError
-      });
-      throw publishError;
-    }
-  });
-}
-async function rollbackGuidedSessionPublish(input) {
-  const failedSteps = [];
-  const errors = [];
-  const attempt = async (step, work) => {
-    try {
-      await work();
-    } catch (error) {
-      failedSteps.push(step);
-      errors.push(`${step}: ${error.message}`);
-    }
-  };
-  await attempt("connect_rollback_handle", () => {
-    if (input.priorHandle)
-      upsertConnectedHandle(input.priorHandle, input.registryPath);
-    else
-      removeConnectedHandles([input.handle], input.registryPath);
-  });
-  await attempt("connect_rollback_secret", async () => {
-    if (input.priorSessionPath === undefined)
-      await input.secretStore.delete(input.key);
-    else
-      await input.secretStore.set(input.key, input.priorSessionPath);
-  });
-  await attempt("connect_rollback_latch", () => {
-    restorePriorUnpairedRecord(input.priorUnpaired, input.registryPath);
-  });
-  if (failedSteps.length === 0)
-    return;
-  const prior = input.priorUnpaired.status === "ok" ? input.priorUnpaired.records.find((record) => record.source_id === input.unpairedSourceId) : undefined;
-  try {
-    recordUnpairedSources([{
-      source_id: input.unpairedSourceId,
-      state: "unpair_incomplete",
-      ...prior?.unremoved_paths ? { unremoved_paths: prior.unremoved_paths } : {},
-      failed_steps: [...prior?.failed_steps ?? [], ...failedSteps]
-    }], input.registryPath);
-  } catch {}
-  throw new Error(`Connect could not finish and could not undo itself: ${input.cause.message}. ` + `Rollback also failed: ${errors.join("; ")}. ` + `Remove the ${input.handle} handle with the CLI and retry.`);
-}
-function restorePriorUnpairedRecord(prior, registryPath) {
-  if (prior.status === "ok") {
-    writeUnpairedSources(prior.records, registryPath);
-    return;
-  }
-  if (prior.status === "missing")
-    rmSync5(unpairedSourcesPath(registryPath), { force: true });
-}
-async function readApiKeyFromStdin(stdin = processStdin) {
-  const chunks = [];
-  for await (const chunk of stdin) {
-    chunks.push(Buffer3.isBuffer(chunk) ? chunk : Buffer3.from(chunk));
-  }
-  return Buffer3.concat(chunks).toString("utf8").trim();
-}
-function oauthAuthorizeOrigin(source) {
-  return new URL(oauthSourceDefinition(source).authUrl).origin;
-}
-function oauthSourceDefinition(source) {
-  if (source === "dropbox") {
-    return {
-      authUrl: "https://www.dropbox.com/oauth2/authorize",
-      tokenUrl: "https://api.dropboxapi.com/oauth2/token",
-      scopes: ["files.metadata.read", "files.content.read", "sharing.read"],
-      handles: [{
-        handle: (role) => role === "personal" ? "dropbox.personal" : `dropbox.${role}`,
-        provider: "dropbox",
-        capability: "dropbox.files.sync",
-        trustDomain: "secure_local",
-        scopes: ["files.metadata.read", "files.content.read", "sharing.read"]
-      }]
-    };
-  }
-  if (source === "x") {
-    return {
-      authUrl: "https://x.com/i/oauth2/authorize",
-      tokenUrl: "https://api.x.com/2/oauth2/token",
-      scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"],
-      handles: [{
-        handle: (role) => role === "personal" ? "x.bookmarks.personal" : `x.bookmarks.${role}`,
-        provider: "x",
-        capability: "x.bookmarks.sync",
-        trustDomain: "internal",
-        scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
-      }]
-    };
-  }
-  const gmail = {
-    handle: (role) => role === "personal" ? "gmail.personal" : `gmail.${role}`,
-    provider: "gmail",
-    capability: "gmail.email.sync",
-    trustDomain: "secure_local",
-    scopes: ["https://www.googleapis.com/auth/gmail.readonly"]
-  };
-  const drive = {
-    handle: (role) => role === "personal" ? "google_drive.personal" : `google_drive.${role}`,
-    provider: "google_drive",
-    capability: "google_drive.docs.sync",
-    trustDomain: "internal",
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"]
-  };
-  return {
-    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-    tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: source === "gmail" ? gmail.scopes : source === "google-drive" ? drive.scopes : [...gmail.scopes, ...drive.scopes],
-    handles: source === "gmail" ? [gmail] : source === "google-drive" ? [drive] : [gmail, drive]
-  };
-}
-function buildAuthorizationUrl(options) {
-  const url = new URL(options.authUrl);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", options.clientId);
-  url.searchParams.set("redirect_uri", options.redirectUri);
-  url.searchParams.set("scope", options.scopes.join(" "));
-  url.searchParams.set("state", options.state);
-  url.searchParams.set("code_challenge", options.challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  if (isGoogleOAuthSource(options.source)) {
-    url.searchParams.set("access_type", "offline");
-    url.searchParams.set("prompt", "consent");
-  }
-  if (options.source === "dropbox") {
-    url.searchParams.set("token_access_type", "offline");
-  }
-  return url.toString();
-}
-async function createLoopbackCallbackServer(options) {
-  let resolveCode;
-  let rejectCode;
-  const waitForCode = new Promise((resolve6, reject) => {
-    resolveCode = resolve6;
-    rejectCode = reject;
-  });
-  const server = createServer((request, response) => {
-    try {
-      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
-      if (url.pathname !== "/oauth/callback") {
-        response.writeHead(404).end("Not found");
-        return;
-      }
-      if (url.searchParams.get("state") !== options.state) {
-        response.writeHead(400).end("OAuth state mismatch.");
-        rejectCode(new Error("OAuth state mismatch."));
-        return;
-      }
-      const code = url.searchParams.get("code")?.trim();
-      if (!code) {
-        response.writeHead(400).end("OAuth code missing.");
-        rejectCode(new Error("OAuth code missing."));
-        return;
-      }
-      response.writeHead(200, { "Content-Type": "text/plain" }).end("Olympus connection complete. You can close this browser tab.");
-      resolveCode(code);
-    } catch {
-      response.writeHead(400).end("OAuth callback failed.");
-      rejectCode(new Error("OAuth callback failed."));
-    }
-  });
-  await new Promise((resolve6, reject) => {
-    server.once("error", reject);
-    server.listen(options.port ?? 0, "127.0.0.1", () => resolve6());
-  });
-  const address = server.address();
-  if (!address || typeof address === "string")
-    throw new Error("OAuth loopback server did not bind.");
-  return { port: address.port, server, waitForCode };
-}
-async function exchangeAuthorizationCode(options) {
-  const usesGooglePublisherExchange = isGooglePublisherExchangeClient(options.source, options.clientId);
-  const url = usesGooglePublisherExchange ? googlePublisherExchangeUrl() : options.tokenUrl;
-  const init = usesGooglePublisherExchange ? {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code: options.code,
-      code_verifier: options.verifier,
-      redirect_uri: options.redirectUri,
-      ...options.state ? { state: options.state } : {}
-    })
-  } : directTokenExchangeRequest(options);
-  let response;
-  let text;
-  try {
-    ({ response, text } = await fetchBoundedText(options.fetchImpl, url, init, {
-      timeoutMs: options.timeoutMs,
-      limitBytes: OAUTH_TOKEN_RESPONSE_LIMIT_BYTES
-    }));
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error(`OAuth token exchange timed out after ${formatDurationMs(options.timeoutMs)}. No credentials were stored; re-run connect when the provider is reachable.`);
-    }
-    if (isBoundedResponseTooLargeError(error)) {
-      throw new Error("OAuth token exchange returned an oversized response. No credentials were stored; re-run connect when the provider is reachable.");
-    }
-    throw error;
-  }
-  if (!response.ok) {
-    const errorCode = safeOAuthErrorCode(oauthErrorCodeFromBody(text));
-    throw new Error(`OAuth token exchange failed with status ${response.status}${errorCode ? ` (${errorCode})` : ""}.`);
-  }
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new Error("OAuth token exchange returned invalid JSON.");
-  }
-  const accessToken = typeof payload.access_token === "string" ? payload.access_token.trim() : "";
-  if (!accessToken)
-    throw new Error("OAuth token exchange did not return an access token.");
-  return {
-    accessToken,
-    ...typeof payload.refresh_token === "string" && payload.refresh_token.trim() ? { refreshToken: payload.refresh_token.trim() } : {},
-    ...typeof payload.expires_in === "number" ? { expiresInSeconds: payload.expires_in } : {},
-    scopes: typeof payload.scope === "string" ? payload.scope.split(/\s+/).filter(Boolean) : []
-  };
-}
-function directTokenExchangeRequest(options) {
-  const body = new URLSearchParams;
-  body.set("grant_type", "authorization_code");
-  body.set("code", options.code);
-  body.set("redirect_uri", options.redirectUri);
-  body.set("code_verifier", options.verifier);
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/x-www-form-urlencoded"
-  };
-  if (options.source === "x" && options.clientSecret) {
-    headers.Authorization = `Basic ${Buffer3.from(`${options.clientId}:${options.clientSecret}`).toString("base64")}`;
-  } else {
-    body.set("client_id", options.clientId);
-    if (isGoogleOAuthSource(options.source) && options.clientSecret)
-      body.set("client_secret", options.clientSecret);
-  }
-  return { method: "POST", headers, body };
-}
-function isGoogleOAuthSource(source) {
-  return source === "google" || source === "gmail" || source === "google-drive";
-}
-function isGooglePublisherExchangeClient(source, clientId) {
-  return isGoogleOAuthSource(source) && isGooglePublisherWebClientId(clientId);
-}
-function shouldStoreOAuthClientSecret(source) {
-  return isGoogleOAuthSource(source) || source === "x";
-}
-function safeOAuthErrorCode(value) {
-  const code = value?.trim().toLowerCase();
-  return code && KNOWN_OAUTH_ERROR_CODES.has(code) ? code : undefined;
-}
-function oauthErrorCodeFromBody(text) {
-  try {
-    const parsed = JSON.parse(text);
-    return typeof parsed.error === "string" ? parsed.error : undefined;
-  } catch {
-    return;
-  }
-}
-function defaultDetachedOAuthStateDir() {
-  return join25(homedir23(), ".olympus", "pending-oauth");
-}
-function defaultDetachedOAuthLogDir() {
-  return join25(homedir23(), ".olympus", "logs");
-}
-function detachedOAuthStatePath(options) {
-  return join25(options.stateDir ?? defaultDetachedOAuthStateDir(), `${safeStatePathSegment(options.source)}.${safeStatePathSegment(safeAccountRole(options.accountRole ?? "personal"))}.json`);
-}
-function writeDetachedOAuthState(path, state) {
-  mkdirSync15(dirname18(path), { recursive: true, mode: 448 });
-  writePrivateJson(path, sanitizeDetachedOAuthState(state));
-}
-function readDetachedOAuthState(path) {
-  try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync17(path, "utf8")));
-  } catch {
-    return;
-  }
-}
-function listDetachedOAuthStates(options = {}) {
-  const stateDir = options.stateDir ?? defaultDetachedOAuthStateDir();
-  const entries = (() => {
-    try {
-      return Array.from(new Bun.Glob("*.json").scanSync({ cwd: stateDir, absolute: true }));
-    } catch {
-      return [];
-    }
-  })();
-  return entries.map((path) => readDetachedOAuthState(path)).filter((state) => !!state).filter((state) => !options.source || state.source === options.source).map((state) => withDiedStatus(state, options.pidAlive ?? isPidAlive));
-}
-function withDiedStatus(state, pidAlive) {
-  if (state.status !== "pending" || !state.pid)
-    return state;
-  if (pidAlive(state.pid))
-    return state;
-  return {
-    ...state,
-    status: "died",
-    reason: `Detached OAuth child process ${state.pid} is no longer running.`
-  };
-}
-function cleanupTerminalDetachedOAuthState(statePath) {
-  const state = readDetachedOAuthState(statePath);
-  if (!state)
-    return;
-  if (state.status === "connected" || state.status === "failed" || state.status === "expired" || state.status === "died") {
-    rmSync5(statePath, { force: true });
-  }
-}
-async function waitForDetachedPendingState(options) {
-  const deadline = Date.now() + options.timeoutMs;
-  while (Date.now() <= deadline) {
-    const state = readDetachedOAuthState(options.statePath);
-    if (state?.status === "pending" && state.authorizationUrl)
-      return state;
-    if (state && state.status !== "pending")
-      return state;
-    await new Promise((resolve6) => setTimeout(resolve6, 25));
-  }
-  return {
-    source: options.source,
-    accountRole: options.accountRole,
-    status: "failed",
-    startedAt: new Date().toISOString(),
-    expiresAt: new Date().toISOString(),
-    pid: options.pid,
-    logPath: options.logPath,
-    reason: "Detached OAuth child did not publish a pending state before the parent wait deadline."
-  };
-}
-function readDetachedOAuthRequestFile(path) {
-  const parsed = JSON.parse(readFileSync17(path, "utf8"));
-  if (!parsed.source || !isOAuthSource(parsed.source))
-    throw new Error("Detached OAuth request has an invalid source.");
-  if (!parsed.clientId?.trim())
-    throw new Error("Detached OAuth request is missing clientId.");
-  if (!parsed.statePath?.trim())
-    throw new Error("Detached OAuth request is missing statePath.");
-  if (!parsed.logPath?.trim())
-    throw new Error("Detached OAuth request is missing logPath.");
-  if (parsed.grantEpoch !== "initial" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.grantEpoch ?? "")) {
-    throw new Error("Detached OAuth request is missing a valid credential-grant generation.");
-  }
-  return {
-    source: parsed.source,
-    clientId: parsed.clientId,
-    ...parsed.clientSecret ? { clientSecret: parsed.clientSecret } : {},
-    ...parsed.accountRole ? { accountRole: parsed.accountRole } : {},
-    ...parsed.authUrl ? { authUrl: parsed.authUrl } : {},
-    ...parsed.tokenUrl ? { tokenUrl: parsed.tokenUrl } : {},
-    ...parsed.redirectPort !== undefined ? { redirectPort: parsed.redirectPort } : {},
-    ...parsed.openBrowser !== undefined ? { openBrowser: parsed.openBrowser } : {},
-    ...parsed.registryPath ? { registryPath: parsed.registryPath } : {},
-    ...parsed.grantEpoch ? { grantEpoch: parsed.grantEpoch } : {},
-    ...parsed.secretStoreBackend ? { secretStoreBackend: parsed.secretStoreBackend } : {},
-    ...parsed.secretStorePath ? { secretStorePath: parsed.secretStorePath } : {},
-    ...parsed.secretStoreKeyPath ? { secretStoreKeyPath: parsed.secretStoreKeyPath } : {},
-    ...parsed.authorizationTimeoutMs !== undefined ? { authorizationTimeoutMs: parsed.authorizationTimeoutMs } : {},
-    ...parsed.tokenExchangeTimeoutMs !== undefined ? { tokenExchangeTimeoutMs: parsed.tokenExchangeTimeoutMs } : {},
-    statePath: parsed.statePath,
-    logPath: parsed.logPath
-  };
-}
-function sanitizeDetachedOAuthState(input) {
-  const state = {
-    source: input.source,
-    accountRole: input.accountRole,
-    status: input.status,
-    startedAt: input.startedAt,
-    expiresAt: input.expiresAt,
-    ...input.authorizationUrl ? { authorizationUrl: input.authorizationUrl } : {},
-    ...input.redirectUri ? { redirectUri: input.redirectUri } : {},
-    ...typeof input.port === "number" ? { port: input.port } : {},
-    ...typeof input.pid === "number" ? { pid: input.pid } : {},
-    ...input.logPath ? { logPath: input.logPath } : {},
-    ...input.handles ? { handles: [...input.handles] } : {},
-    ...input.handleId ? { handleId: input.handleId } : {},
-    ...input.registryPath ? { registryPath: input.registryPath } : {},
-    ...input.reason ? { reason: input.reason } : {},
-    ...input.errorCode && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(input.errorCode) ? { errorCode: input.errorCode } : {},
-    ...input.retryable === true ? { retryable: true } : {},
-    ...input.retryAt && Number.isFinite(Date.parse(input.retryAt)) ? { retryAt: input.retryAt } : {}
-  };
-  return state;
-}
-function writePrivateJson(path, value) {
-  mkdirSync15(dirname18(path), { recursive: true, mode: 448 });
-  writeFileSync6(path, `${JSON.stringify(value, null, 2)}
-`, { mode: 384 });
-}
-function safeStatePathSegment(value) {
-  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function isOAuthAuthorizationTimeout(reason) {
-  return reason.includes("OAuth authorization timed out");
-}
-function isOAuthSource(source) {
-  return source === "google" || source === "gmail" || source === "google-drive" || source === "dropbox" || source === "x";
-}
-function openBrowser(url) {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(command, args, { stdio: "ignore", detached: true });
-  child.once("error", (error) => {
-    console.warn(`[olympus] WARNING: could not open the authorization URL automatically: ${error.message}`);
-    console.warn(`[olympus] Open this authorization URL manually: ${url}`);
-  });
-  child.unref();
-}
-function safeAccountRole(value) {
-  const trimmed2 = value.trim();
-  if (!isSafeSecretKey(trimmed2))
-    throw new Error("Account role must be a safe label.");
-  return trimmed2;
-}
-function base64Url(bytes) {
-  return bytes.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-function errorDetail(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function retryableErrorDisposition(error, now) {
-  if (!error || typeof error !== "object")
-    return;
-  const candidate = error;
-  if (typeof candidate.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate.code) || candidate.retryable !== true || typeof candidate.retryAfterMs !== "number" || !Number.isSafeInteger(candidate.retryAfterMs) || candidate.retryAfterMs <= 0)
-    return;
-  return {
-    code: candidate.code,
-    retryAt: new Date(now.getTime() + candidate.retryAfterMs).toISOString()
-  };
-}
-var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
-var init_connect = __esm(() => {
-  init_secret_store();
-  init_worker_service();
-  init_http_timeout();
-  init_oauth_relay();
-  init_publisher_oauth_client();
-  init_connected_handles();
-  init_unpaired_sources();
-  init_credential_broker();
-  DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
-  DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
-  OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  KNOWN_OAUTH_ERROR_CODES = new Set([
-    "invalid_request",
-    "invalid_client",
-    "invalid_grant",
-    "unauthorized_client",
-    "unsupported_grant_type",
-    "invalid_scope",
-    "access_denied",
-    "server_error",
-    "temporarily_unavailable",
-    "slow_down",
-    "expired_token",
-    "redirect_uri_mismatch"
-  ]);
 });
 
 // src/core/ingestion-throughput.ts
@@ -35565,16 +36272,16 @@ var init_phases = __esm(() => {
 });
 
 // src/workers/credential-health.ts
-import { readFileSync as readFileSync18 } from "node:fs";
-import { homedir as homedir24 } from "node:os";
-import { join as join26 } from "node:path";
+import { readFileSync as readFileSync21 } from "node:fs";
+import { homedir as homedir27 } from "node:os";
+import { join as join30 } from "node:path";
 function defaultCredentialHealthReportPath() {
-  return join26(homedir24(), ".local", "state", "olympus", "credential-health", "current.json");
+  return join30(homedir27(), ".local", "state", "olympus", "credential-health", "current.json");
 }
 function readCredentialHealthReport(path = defaultCredentialHealthReportPath()) {
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync18(path, "utf8"));
+    parsed = JSON.parse(readFileSync21(path, "utf8"));
   } catch {
     return;
   }
@@ -35934,19 +36641,19 @@ var init_status = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { mkdirSync as mkdirSync16 } from "node:fs";
-import { homedir as homedir25 } from "node:os";
-import { dirname as dirname19, join as join27 } from "node:path";
+import { mkdirSync as mkdirSync17 } from "node:fs";
+import { homedir as homedir28 } from "node:os";
+import { dirname as dirname22, join as join31 } from "node:path";
 import { Database as Database7 } from "bun:sqlite";
 function dashboardGuidedSessionAgentPrompt(source) {
   if (source === "telegram") {
-    return "Connect Telegram to Olympus using the supported pairing flow. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.";
+    return "Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.";
   }
-  return "Connect WhatsApp to Olympus using the supported QR pairing flow. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
+  return "Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.";
 }
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join27(homedir25(), ".local", "share");
-  return join27(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join31(homedir28(), ".local", "share");
+  return join31(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 function phaseAtParity(sample, counter, value) {
   if (sample.settled_pass !== true)
@@ -35965,7 +36672,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync16(dirname19(dbPath), { recursive: true });
+      mkdirSync17(dirname22(dbPath), { recursive: true });
     this.db = new Database7(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -36245,6 +36952,7 @@ function buildSourceDashboardViewModel(options) {
   ];
   return {
     kind: "source_dashboard",
+    ...options.modelSetup ? { model_setup: options.modelSetup } : {},
     generated_at: now.toISOString(),
     ...degradedCredentials.length ? { degraded_credentials: degradedCredentials } : {},
     summary,
@@ -36826,7 +37534,7 @@ function connectionStateFromDefinition(definition, registry, credentialHealth, c
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
     return {
       state: "waiting_for_first_sync",
-      label: "connected, waiting for first sync",
+      label: definition.source_id === "whatsapp.personal.messages" ? "connected · waiting for new messages" : "connected, waiting for first sync",
       action,
       handles: handleIds,
       ...connectedAt
@@ -36916,10 +37624,10 @@ function guidedSessionLabel(connected, reauthRequired, sessionEvidence) {
     return "Pairing required";
   return sessionEvidence === "unconfirmed" ? "Session state not surfaced" : "Session ready";
 }
-function publisherOAuthSetupInstructions(sourceLabel, actionLabel, byo) {
+function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
   return {
-    plain_intro: publisherConnectIntro(sourceLabel),
-    agent_prompt: `Connect ${sourceLabel} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
+    plain_intro: publisherConnectIntro(sourceLabel2),
+    agent_prompt: `Connect ${sourceLabel2} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel2} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
     provider_console_url: byo.provider_console_url,
     ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
     diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -36929,8 +37637,8 @@ function publisherOAuthSetupInstructions(sourceLabel, actionLabel, byo) {
     advanced_byo: byo
   };
 }
-function publisherConnectIntro(sourceLabel) {
-  return `Olympus connects ${sourceLabel} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
+function publisherConnectIntro(sourceLabel2) {
+  return `Olympus connects ${sourceLabel2} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
 }
 function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   const clientIdField = {
@@ -36946,14 +37654,14 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     secret: true
   };
   if (isGoogleOAuthSource2(source)) {
-    const sourceLabel = source === "google-drive" ? "Google Drive" : source === "google" ? "Google" : "Gmail";
+    const sourceLabel2 = source === "google-drive" ? "Google Drive" : source === "google" ? "Google" : "Gmail";
     const sourceObject = source === "google-drive" ? "your Google Drive" : source === "google" ? "your Google data" : "your Gmail";
     const web = googleOAuthClientType(redirectBaseUrl) === "web";
     const clientTypeName = web ? "Web application" : "Desktop app";
-    const redirectClause = web ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel} card to that client's Authorized redirect URIs` : "confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI";
+    const redirectClause = web ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel2} card to that client's Authorized redirect URIs` : "confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI";
     return {
       plain_intro: `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google ${clientTypeName} Client ID you create in your own Google account.${web ? " Register the redirect URI shown on this card on that client." : ""} PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
+      agent_prompt: `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
       provider_console_url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId),
       ...googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {},
       diy_summary: "Or set it up yourself (about 5 minutes)",
@@ -37228,7 +37936,7 @@ function sourceCardFromCorpus(corpus, scheduler, _history, _now) {
   return {
     corpus_id: corpus.corpus_id,
     source_id: sourceId,
-    label: sourceLabel(provider, corpus.family, corpus.trust_domain),
+    label: sourceLabel2(provider, corpus.family, corpus.trust_domain),
     provider,
     family: corpus.family,
     trust_domain: corpus.trust_domain,
@@ -37677,7 +38385,7 @@ function providerFromCorpusId2(corpusId) {
     return parts[1] ?? "source";
   return parts[0] ?? "source";
 }
-function sourceLabel(provider, family, trustDomain) {
+function sourceLabel2(provider, family, trustDomain) {
   const providerText = {
     gmail: "Gmail",
     dropbox: "Dropbox",
@@ -37990,9 +38698,9 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync18, mkdirSync as mkdirSync17 } from "node:fs";
-import { homedir as homedir26 } from "node:os";
-import { dirname as dirname20, join as join28 } from "node:path";
+import { existsSync as existsSync21, mkdirSync as mkdirSync18 } from "node:fs";
+import { homedir as homedir29 } from "node:os";
+import { dirname as dirname23, join as join32 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -38050,7 +38758,7 @@ class SqliteSourceIngestionLedgerStore {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync17(dirname20(dbPath), { recursive: true });
+      mkdirSync18(dirname23(dbPath), { recursive: true });
     this.db = new Database8(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
@@ -38117,7 +38825,7 @@ async function collectLocalSourceIngestionLedger(options = {}) {
   ]);
   const exclusionSources = [];
   for (const store of localConnectorStores(env)) {
-    if (!existsSync18(store.dbPath))
+    if (!existsSync21(store.dbPath))
       continue;
     const gated = store.family === "file";
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
@@ -38736,7 +39444,7 @@ function mergeConnectorStoreDefinitions(stores) {
   return Array.from(byCorpusId.values());
 }
 function whatsappConnectorStoreDbPath(env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join28(env.XDG_DATA_HOME?.trim() || join28(homedir26(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join32(env.XDG_DATA_HOME?.trim() || join32(homedir29(), ".local", "share"), "olympus", "whatsapp-live", "connector-store.db");
 }
 function number(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -38858,8 +39566,8 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync19, mkdirSync as mkdirSync18, readFileSync as readFileSync19, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname21, join as join29 } from "node:path";
+import { existsSync as existsSync22, mkdirSync as mkdirSync19, readFileSync as readFileSync22, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname24, join as join33 } from "node:path";
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
@@ -38916,7 +39624,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync19(configPath))
+  if (configPath === undefined || !existsSync22(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -38928,7 +39636,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join29(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join33(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -39643,7 +40351,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join29(dirname21(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join33(dirname24(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -39664,9 +40372,9 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync19(path))
+    if (!existsSync22(path))
       return;
-    const parsed = JSON.parse(readFileSync19(path, "utf8"));
+    const parsed = JSON.parse(readFileSync22(path, "utf8"));
     const record = asRecord9(parsed);
     const sources = asRecord9(record.sources);
     const normalized = {};
@@ -39687,7 +40395,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync18(dirname21(path), { recursive: true });
+  mkdirSync19(dirname24(path), { recursive: true });
   writeFileSync7(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -39896,7 +40604,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join29(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join33(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync4(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -40700,13 +41408,13 @@ var init_operations = __esm(() => {
 });
 
 // src/version.ts
-import { readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname22, join as join30 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync as readFileSync23 } from "node:fs";
+import { dirname as dirname25, join as join34 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var repoRoot, manifest, VERSION;
 var init_version = __esm(() => {
-  repoRoot = dirname22(dirname22(fileURLToPath(import.meta.url)));
-  manifest = JSON.parse(readFileSync20(join30(repoRoot, "openclaw.plugin.json"), "utf8"));
+  repoRoot = dirname25(dirname25(fileURLToPath2(import.meta.url)));
+  manifest = JSON.parse(readFileSync23(join34(repoRoot, "openclaw.plugin.json"), "utf8"));
   VERSION = manifest.version;
 });
 
@@ -47561,7 +48269,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+        await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -47573,7 +48281,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -47651,7 +48359,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve6(parseResult.data);
+            resolve7(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -47842,12 +48550,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve6, interval);
+      const timeoutId = setTimeout(resolve7, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -48324,11 +49032,11 @@ var require_codegen = __commonJS((exports) => {
       const rhs = this.rhs === undefined ? "" : ` = ${this.rhs}`;
       return `${varKind} ${this.name}${rhs};` + _n;
     }
-    optimizeNames(names, constants2) {
+    optimizeNames(names, constants3) {
       if (!names[this.name.str])
         return;
       if (this.rhs)
-        this.rhs = optimizeExpr(this.rhs, names, constants2);
+        this.rhs = optimizeExpr(this.rhs, names, constants3);
       return this;
     }
     get names() {
@@ -48346,10 +49054,10 @@ var require_codegen = __commonJS((exports) => {
     render({ _n }) {
       return `${this.lhs} = ${this.rhs};` + _n;
     }
-    optimizeNames(names, constants2) {
+    optimizeNames(names, constants3) {
       if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
         return;
-      this.rhs = optimizeExpr(this.rhs, names, constants2);
+      this.rhs = optimizeExpr(this.rhs, names, constants3);
       return this;
     }
     get names() {
@@ -48415,8 +49123,8 @@ var require_codegen = __commonJS((exports) => {
     optimizeNodes() {
       return `${this.code}` ? this : undefined;
     }
-    optimizeNames(names, constants2) {
-      this.code = optimizeExpr(this.code, names, constants2);
+    optimizeNames(names, constants3) {
+      this.code = optimizeExpr(this.code, names, constants3);
       return this;
     }
     get names() {
@@ -48446,12 +49154,12 @@ var require_codegen = __commonJS((exports) => {
       }
       return nodes.length > 0 ? this : undefined;
     }
-    optimizeNames(names, constants2) {
+    optimizeNames(names, constants3) {
       const { nodes } = this;
       let i = nodes.length;
       while (i--) {
         const n = nodes[i];
-        if (n.optimizeNames(names, constants2))
+        if (n.optimizeNames(names, constants3))
           continue;
         subtractNames(names, n.names);
         nodes.splice(i, 1);
@@ -48508,12 +49216,12 @@ var require_codegen = __commonJS((exports) => {
         return;
       return this;
     }
-    optimizeNames(names, constants2) {
+    optimizeNames(names, constants3) {
       var _a3;
-      this.else = (_a3 = this.else) === null || _a3 === undefined ? undefined : _a3.optimizeNames(names, constants2);
-      if (!(super.optimizeNames(names, constants2) || this.else))
+      this.else = (_a3 = this.else) === null || _a3 === undefined ? undefined : _a3.optimizeNames(names, constants3);
+      if (!(super.optimizeNames(names, constants3) || this.else))
         return;
-      this.condition = optimizeExpr(this.condition, names, constants2);
+      this.condition = optimizeExpr(this.condition, names, constants3);
       return this;
     }
     get names() {
@@ -48538,10 +49246,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.iteration})` + super.render(opts);
     }
-    optimizeNames(names, constants2) {
-      if (!super.optimizeNames(names, constants2))
+    optimizeNames(names, constants3) {
+      if (!super.optimizeNames(names, constants3))
         return;
-      this.iteration = optimizeExpr(this.iteration, names, constants2);
+      this.iteration = optimizeExpr(this.iteration, names, constants3);
       return this;
     }
     get names() {
@@ -48579,10 +49287,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
     }
-    optimizeNames(names, constants2) {
-      if (!super.optimizeNames(names, constants2))
+    optimizeNames(names, constants3) {
+      if (!super.optimizeNames(names, constants3))
         return;
-      this.iterable = optimizeExpr(this.iterable, names, constants2);
+      this.iterable = optimizeExpr(this.iterable, names, constants3);
       return this;
     }
     get names() {
@@ -48627,11 +49335,11 @@ var require_codegen = __commonJS((exports) => {
       (_b = this.finally) === null || _b === undefined || _b.optimizeNodes();
       return this;
     }
-    optimizeNames(names, constants2) {
+    optimizeNames(names, constants3) {
       var _a3, _b;
-      super.optimizeNames(names, constants2);
-      (_a3 = this.catch) === null || _a3 === undefined || _a3.optimizeNames(names, constants2);
-      (_b = this.finally) === null || _b === undefined || _b.optimizeNames(names, constants2);
+      super.optimizeNames(names, constants3);
+      (_a3 = this.catch) === null || _a3 === undefined || _a3.optimizeNames(names, constants3);
+      (_b = this.finally) === null || _b === undefined || _b.optimizeNames(names, constants3);
       return this;
     }
     get names() {
@@ -48905,7 +49613,7 @@ var require_codegen = __commonJS((exports) => {
   function addExprNames(names, from) {
     return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
   }
-  function optimizeExpr(expr, names, constants2) {
+  function optimizeExpr(expr, names, constants3) {
     if (expr instanceof code_1.Name)
       return replaceName(expr);
     if (!canOptimize(expr))
@@ -48920,14 +49628,14 @@ var require_codegen = __commonJS((exports) => {
       return items;
     }, []));
     function replaceName(n) {
-      const c = constants2[n.str];
+      const c = constants3[n.str];
       if (c === undefined || names[n.str] !== 1)
         return n;
       delete names[n.str];
       return c;
     }
     function canOptimize(e) {
-      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== undefined);
+      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants3[c.str] !== undefined);
     }
   }
   function subtractNames(names, from) {
@@ -50832,7 +51540,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve6.call(this, root, ref);
+    let _sch = resolve7.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a3 = root.localRefs) === null || _a3 === undefined ? undefined : _a3[ref];
       const { schemaId } = this.opts;
@@ -50859,7 +51567,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve6(root, ref) {
+  function resolve7(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -51389,7 +52097,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve6(baseURI, relativeURI, options) {
+  function resolve7(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse6(baseURI, schemelessOptions), parse6(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -51617,7 +52325,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize,
-    resolve: resolve6,
+    resolve: resolve7,
     resolveComponent,
     equal,
     serialize,
@@ -55000,12 +55708,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve6) => {
+    return new Promise((resolve7) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve6();
+        resolve7();
       } else {
-        this._stdout.once("drain", resolve6);
+        this._stdout.once("drain", resolve7);
       }
     });
   }
@@ -55092,9 +55800,355 @@ var init_server3 = __esm(() => {
   init_tools();
 });
 
+// src/core/model-setup.ts
+function requiredModelProfiles(config2) {
+  const required4 = new Map;
+  for (const domain of DOMAINS) {
+    const route = config2.routes[domain];
+    if (!route || route.mode === "disabled")
+      continue;
+    const ids = route.pool?.members ?? route.analyst ?? [];
+    for (const id of ids) {
+      const profile = config2.modelProfiles[id];
+      if (profile && !required4.has(id))
+        required4.set(id, profile);
+    }
+  }
+  for (const domain of DOMAINS) {
+    const policy = config2.retrieval.trustDomains[domain];
+    if (!policy?.embeddingProfile || !isActiveEmbeddingMode(policy.activationMode))
+      continue;
+    const profile = config2.modelProfiles[policy.embeddingProfile];
+    if (profile && !required4.has(policy.embeddingProfile)) {
+      required4.set(policy.embeddingProfile, profile);
+    }
+  }
+  return [...required4].map(([id, profile]) => ({ id, profile }));
+}
+
+class ModelSetupService {
+  config;
+  credentialState;
+  localApiKey;
+  expectedEmbeddingDimension;
+  fetchImpl;
+  now;
+  localCheckState = "not_configured";
+  localCheckPromise;
+  constructor(options) {
+    this.config = options.config;
+    this.credentialState = options.credentialState;
+    this.localApiKey = options.localApiKey;
+    this.expectedEmbeddingDimension = options.expectedEmbeddingDimension;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.now = options.now ?? (() => new Date);
+  }
+  getStatus() {
+    const required4 = requiredModelProfiles(this.config);
+    const cards = [];
+    const gemini = required4.filter(({ profile }) => profile.provider === "google-gemini");
+    if (gemini.length > 0)
+      cards.push(this.credentialCard("gemini", gemini));
+    const venice = required4.filter(({ profile }) => profile.provider === "venice");
+    if (venice.length > 0)
+      cards.push(this.credentialCard("venice", venice));
+    const local = required4.filter(({ profile }) => profile.provider === "local-openai-compatible");
+    if (local.length > 0)
+      cards.push(this.localCard(local));
+    const additional = required4.filter(({ profile }) => !["google-gemini", "venice", "local-openai-compatible", "openclaw-infer"].includes(profile.provider));
+    const additionalReady = this.aggregateCredentialState(additional) === "ready";
+    return {
+      ready: additionalReady && cards.every((card) => card.state === "ready"),
+      ...!additionalReady ? { attention: "An additional model provider in your policy needs agent-assisted setup. These key forms manage Gemini and Venice only." } : {},
+      checked_at: this.now().toISOString(),
+      cards
+    };
+  }
+  checkLocalModels() {
+    if (this.localCheckPromise)
+      return this.localCheckPromise;
+    const local = this.localUsages();
+    if (local.length === 0)
+      return Promise.resolve(this.getStatus());
+    const credentials = this.aggregateCredentialState(local);
+    if (credentials !== "ready") {
+      this.localCheckState = "not_configured";
+      return Promise.resolve(this.getStatus());
+    }
+    const targets = this.localTargets(local);
+    if (!targets) {
+      this.localCheckState = "needs_attention";
+      return Promise.resolve(this.getStatus());
+    }
+    this.localCheckState = "applying";
+    const check = this.runLocalChecks(targets).then((ready) => {
+      this.localCheckState = ready ? "ready" : "needs_attention";
+      return this.getStatus();
+    }).catch(() => {
+      this.localCheckState = "needs_attention";
+      return this.getStatus();
+    }).finally(() => {
+      this.localCheckPromise = undefined;
+    });
+    this.localCheckPromise = check;
+    return check;
+  }
+  credentialCard(id, profiles) {
+    const state = this.aggregateCredentialState(profiles);
+    const copy = CARD_COPY[id];
+    return {
+      id,
+      label: copy.label,
+      required: true,
+      state: state === "missing" ? "not_configured" : state,
+      detail: state === "missing" ? copy.missing : state === "applying" ? copy.applying : copy.ready
+    };
+  }
+  localCard(profiles) {
+    const credential = this.aggregateCredentialState(profiles);
+    const copy = CARD_COPY.local;
+    if (credential === "missing") {
+      return { id: "local", label: copy.label, required: true, state: "not_configured", detail: copy.missing };
+    }
+    if (credential === "applying") {
+      return { id: "local", label: copy.label, required: true, state: "applying", detail: copy.applying };
+    }
+    const detail = this.localCheckState === "ready" ? copy.ready : this.localCheckState === "applying" ? LOCAL_CHECKING_DETAIL : this.localCheckState === "needs_attention" ? LOCAL_ATTENTION_DETAIL : LOCAL_UNCHECKED_DETAIL;
+    return {
+      id: "local",
+      label: copy.label,
+      required: true,
+      state: this.localCheckState,
+      detail
+    };
+  }
+  aggregateCredentialState(profiles) {
+    let applying = false;
+    for (const { id, profile } of profiles) {
+      let state;
+      try {
+        state = this.credentialState(id, profile);
+      } catch {
+        return "missing";
+      }
+      if (state === "missing")
+        return "missing";
+      if (state === "applying")
+        applying = true;
+    }
+    return applying ? "applying" : "ready";
+  }
+  localUsages() {
+    const usages = new Map;
+    const add = (id, role) => {
+      const profile = this.config.modelProfiles[id];
+      if (!profile || profile.provider !== "local-openai-compatible")
+        return;
+      const usage = usages.get(id) ?? { id, profile, analyst: false, embedding: false };
+      usage[role] = true;
+      usages.set(id, usage);
+    };
+    for (const domain of DOMAINS) {
+      const route = this.config.routes[domain];
+      if (!route || route.mode === "disabled")
+        continue;
+      for (const id of route.pool?.members ?? route.analyst ?? [])
+        add(id, "analyst");
+    }
+    for (const domain of DOMAINS) {
+      const policy = this.config.retrieval.trustDomains[domain];
+      if (policy?.embeddingProfile && isActiveEmbeddingMode(policy.activationMode)) {
+        add(policy.embeddingProfile, "embedding");
+      }
+    }
+    return [...usages.values()];
+  }
+  localTargets(usages) {
+    const targets = [];
+    for (const usage of usages) {
+      const baseUrl = safeLocalBaseUrl(usage.profile.baseUrl);
+      if (!baseUrl)
+        return;
+      let apiKey;
+      if (usage.profile.secretRef) {
+        try {
+          apiKey = this.localApiKey?.(usage.id);
+        } catch {
+          return;
+        }
+        if (!apiKey || /[\r\n\0]/.test(apiKey))
+          return;
+      }
+      let expectedEmbeddingDimension;
+      if (usage.embedding) {
+        if (this.expectedEmbeddingDimension) {
+          try {
+            expectedEmbeddingDimension = this.expectedEmbeddingDimension(usage.id);
+          } catch {
+            return;
+          }
+          if (typeof expectedEmbeddingDimension !== "number" || !Number.isSafeInteger(expectedEmbeddingDimension) || expectedEmbeddingDimension < 1) {
+            return;
+          }
+        } else {
+          expectedEmbeddingDimension = canonicalEmbeddingDimension(usage.profile.model);
+        }
+      }
+      targets.push({
+        ...usage,
+        ...apiKey ? { apiKey } : {},
+        baseUrl,
+        ...expectedEmbeddingDimension !== undefined ? { expectedEmbeddingDimension } : {}
+      });
+    }
+    return targets;
+  }
+  async runLocalChecks(targets) {
+    for (const target of targets) {
+      if (!await this.modelIsListed(target.baseUrl, target.profile.model, target.apiKey))
+        return false;
+      if (target.analyst && !await this.chatCompletes(target.baseUrl, target.profile.model, target.apiKey))
+        return false;
+      if (target.embedding && !await this.embeddingCompletes(target.baseUrl, target.profile.model, target.expectedEmbeddingDimension, target.apiKey))
+        return false;
+    }
+    return true;
+  }
+  async modelIsListed(baseUrl, model, apiKey) {
+    const result = await this.requestJson(endpoint(baseUrl, "models"), { method: "GET" }, apiKey);
+    if (!isRecord2(result) || !Array.isArray(result.data))
+      return false;
+    return result.data.some((item) => isRecord2(item) && item.id === model);
+  }
+  async chatCompletes(baseUrl, model, apiKey) {
+    const result = await this.requestJson(endpoint(baseUrl, "chat/completions"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "Reply with one word: ready." }],
+        temperature: 0,
+        max_tokens: 8
+      })
+    }, apiKey);
+    if (!isRecord2(result) || !Array.isArray(result.choices))
+      return false;
+    const first = result.choices[0];
+    const message = isRecord2(first) ? first.message : undefined;
+    return isRecord2(message) && typeof message.content === "string" && message.content.trim().length > 0;
+  }
+  async embeddingCompletes(baseUrl, model, expectedDimension, apiKey) {
+    const result = await this.requestJson(endpoint(baseUrl, "embeddings"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: "Olympus model readiness check." })
+    }, apiKey);
+    if (!isRecord2(result) || !Array.isArray(result.data))
+      return false;
+    const first = result.data[0];
+    const vector = isRecord2(first) ? first.embedding : undefined;
+    if (!Array.isArray(vector) || vector.length === 0 || !vector.every((value) => typeof value === "number" && Number.isFinite(value))) {
+      return false;
+    }
+    return expectedDimension === undefined || vector.length === expectedDimension;
+  }
+  async requestJson(url, init, apiKey) {
+    const headers = new Headers(init.headers);
+    if (apiKey)
+      headers.set("Authorization", `Bearer ${apiKey}`);
+    const { response, text } = await fetchBoundedText(this.fetchImpl, url, {
+      ...init,
+      headers,
+      redirect: "error"
+    }, {
+      timeoutMs: LOCAL_REQUEST_TIMEOUT_MS,
+      limitBytes: LOCAL_RESPONSE_LIMIT_BYTES
+    });
+    if (!response.ok || response.redirected || response.status >= 300)
+      return;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return;
+    }
+  }
+}
+function isActiveEmbeddingMode(mode) {
+  return mode === "hybrid_shadow" || mode === "hybrid_primary";
+}
+function safeLocalBaseUrl(value) {
+  if (!value)
+    return;
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol !== "http:" && url.protocol !== "https:" || url.username !== "" || url.password !== "" || value.includes("?") || value.includes("#") || url.search !== "" || url.hash !== "" || !["localhost", "127.0.0.1", "[::1]", "::1"].includes(hostname)) {
+      return;
+    }
+    return url;
+  } catch {
+    return;
+  }
+}
+function endpoint(baseUrl, suffix) {
+  const url = new URL(baseUrl.href);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/${suffix}`;
+  return url.href;
+}
+function isRecord2(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+var DOMAINS, LOCAL_REQUEST_TIMEOUT_MS = 5000, LOCAL_RESPONSE_LIMIT_BYTES, CARD_COPY, LOCAL_UNCHECKED_DETAIL = "Check the configured local models to verify their model IDs and required endpoints.", LOCAL_CHECKING_DETAIL = "Checking the configured local model server.", LOCAL_ATTENTION_DETAIL = "Start the configured loopback model server and verify its model IDs and required endpoints.";
+var init_model_setup = __esm(() => {
+  init_http_timeout();
+  init_embedding_identity();
+  DOMAINS = ["public_safe", "internal", "secure_local"];
+  LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  CARD_COPY = {
+    gemini: {
+      label: "Gemini",
+      missing: "Gemini makes Public and Personal content searchable. Add its API key to continue.",
+      applying: "Applying the Gemini key.",
+      ready: "The Gemini key is connected."
+    },
+    venice: {
+      label: "Venice",
+      missing: "Venice handles Private data according to your privacy choice. Add its API key to continue.",
+      applying: "Applying the Venice key.",
+      ready: "The Venice key is connected."
+    },
+    local: {
+      label: "Local models",
+      missing: "Configure the required local model credential before checking the server.",
+      applying: "Local model credentials are being applied.",
+      ready: "The required local model checks passed."
+    }
+  };
+});
+
+// src/core/model-key-reload.ts
+function createModelKeyReload(options) {
+  let requested = false;
+  return () => {
+    if (!options.managed)
+      return false;
+    if (requested)
+      return true;
+    requested = true;
+    (options.schedule ?? setTimeout)(() => {
+      Promise.resolve().then(options.shutdown).finally(() => {
+        options.exit(75);
+      }).catch(() => {
+        return;
+      });
+    }, 750);
+    return true;
+  };
+}
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile4, realpath as realpath2, stat as stat3 } from "node:fs/promises";
-import { relative as relative6, resolve as resolve6, sep as sep6 } from "node:path";
+import { relative as relative6, resolve as resolve7, sep as sep6 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -55233,7 +56287,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve6(rootRealPath, relativePath);
+    const candidatePath = resolve7(rootRealPath, relativePath);
     const relativeToRoot = relative6(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
       return;
@@ -55568,17 +56622,17 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync11, mkdirSync as mkdirSync20 } from "node:fs";
-import { createHash as createHash28, randomUUID as randomUUID14 } from "node:crypto";
-import { homedir as homedir29 } from "node:os";
-import { dirname as dirname24, join as join34 } from "node:path";
+import { chmodSync as chmodSync12, mkdirSync as mkdirSync21 } from "node:fs";
+import { createHash as createHash29, randomUUID as randomUUID14 } from "node:crypto";
+import { homedir as homedir32 } from "node:os";
+import { dirname as dirname27, join as join38 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override)
     return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join34(homedir29(), ".local", "share");
-  return join34(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join38(homedir32(), ".local", "share");
+  return join38(dataHome, "openclaw", "olympus", "file-extraction-jobs.sqlite");
 }
 
 class LocalFileExtractionJobStore {
@@ -55591,11 +56645,11 @@ class LocalFileExtractionJobStore {
     this.readonly = options.readonly === true;
     const inMemory = dbPath === ":memory:";
     if (!inMemory && !this.readonly) {
-      mkdirSync20(dirname24(dbPath), { recursive: true, mode: 448 });
+      mkdirSync21(dirname27(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database9(dbPath, { readonly: true }) : new Database9(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync11(dbPath, 384);
+      chmodSync12(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -56629,7 +57683,7 @@ function makeJobId() {
   return `fx_${randomUUID14()}`;
 }
 function hashString5(value) {
-  return createHash28("sha256").update(value).digest("hex");
+  return createHash29("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -56839,7 +57893,7 @@ function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.ki
 }
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const child = spawn2(request.command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
@@ -56881,7 +57935,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer4.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve7(result);
+        resolve8(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -57411,7 +58465,7 @@ var init_document_formats = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
-import { join as join35 } from "node:path";
+import { join as join39 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version2 = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -57650,9 +58704,9 @@ async function extractPdfText(input) {
   });
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp(join35(tmpdir2(), TEMP_DIR_PREFIX));
+  const tempDir = await mkdtemp(join39(tmpdir2(), TEMP_DIR_PREFIX));
   try {
-    const inputPath = join35(tempDir, "input.pdf");
+    const inputPath = join39(tempDir, "input.pdf");
     await writeFile(inputPath, input.context.bytes);
     const result = await input.commandRunner({
       command: input.command,
@@ -57887,7 +58941,7 @@ var init_text = __esm(() => {
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir3 } from "node:os";
-import { join as join36 } from "node:path";
+import { join as join40 } from "node:path";
 function createOcrExtractor(options = {}) {
   const kind = options.kind ?? OCR_EXTRACTOR_KIND;
   const version2 = options.version ?? OCR_EXTRACTOR_VERSION;
@@ -57951,11 +59005,11 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp2(join36(tmpdir3(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp2(join40(tmpdir3(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join36(tempDir, "input.pdf");
-    const outputPath = join36(tempDir, "output.pdf");
-    const sidecarPath = join36(tempDir, "sidecar.txt");
+    const inputPath = join40(tempDir, "input.pdf");
+    const outputPath = join40(tempDir, "output.pdf");
+    const sidecarPath = join40(tempDir, "sidecar.txt");
     await writeFile2(inputPath, input.bytes);
     try {
       await input.commandRunner({
@@ -58012,9 +59066,9 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp2(join36(tmpdir3(), TEMP_DIR_PREFIX2));
+  const tempDir = await mkdtemp2(join40(tmpdir3(), TEMP_DIR_PREFIX2));
   try {
-    const inputPath = join36(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
+    const inputPath = join40(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile2(inputPath, input.bytes);
     const result = await input.commandRunner({
       command: OCR_IMAGE_COMMAND,
@@ -58112,7 +59166,7 @@ var init_ocr = __esm(() => {
 // src/workers/file-extraction/extractors/pdf-render.ts
 import { mkdtemp as mkdtemp3, readFile as readFile6, readdir, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import { join as join37 } from "node:path";
+import { join as join41 } from "node:path";
 function parsePdfInfoPageCount(stdout) {
   const match = /^Pages:\s*(\d+)\s*$/im.exec(stdout);
   if (!match?.[1])
@@ -58133,10 +59187,10 @@ async function renderPdfPages(input) {
   const infoCommandRunner = input.infoCommandRunner ?? renderCommandRunner;
   const timeoutMs = input.timeoutMs ?? DEFAULT_PDF_RENDER_TIMEOUT_MS;
   const outputFormat = input.outputFormat ?? "jpeg";
-  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join41(tmpdir4(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join37(tempDir, "input.pdf");
-    const outputPrefix = join37(tempDir, "page");
+    const inputPath = join41(tempDir, "input.pdf");
+    const outputPrefix = join41(tempDir, "page");
     await writeFile3(inputPath, input.bytes);
     let totalPages;
     try {
@@ -58190,7 +59244,7 @@ async function renderPdfPages(input) {
     return {
       pages: await Promise.all(entries.map(async (entry) => ({
         pageNumber: entry.pageNumber,
-        bytes: new Uint8Array(await readFile6(join37(tempDir, entry.name))),
+        bytes: new Uint8Array(await readFile6(join41(tempDir, entry.name))),
         mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
         dpi: DEFAULT_PDF_RENDER_DPI
       }))),
@@ -58201,10 +59255,10 @@ async function renderPdfPages(input) {
   }
 }
 async function renderSinglePdfPageForVision(input) {
-  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join41(tmpdir4(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join37(tempDir, "input.pdf");
-    const outputPrefix = join37(tempDir, "page");
+    const inputPath = join41(tempDir, "input.pdf");
+    const outputPrefix = join41(tempDir, "page");
     const outputPath = `${outputPrefix}.jpg`;
     await writeFile3(inputPath, input.bytes);
     await input.renderCommandRunner({
@@ -58236,10 +59290,10 @@ async function renderSinglePdfPageForVision(input) {
   }
 }
 async function renderPdfFirstPageForVision(input) {
-  const tempDir = await mkdtemp3(join37(tmpdir4(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join41(tmpdir4(), TEMP_DIR_PREFIX3));
   try {
-    const inputPath = join37(tempDir, "input.pdf");
-    const outputPrefix = join37(tempDir, "page");
+    const inputPath = join41(tempDir, "input.pdf");
+    const outputPrefix = join41(tempDir, "page");
     const outputPath = `${outputPrefix}.png`;
     await writeFile3(inputPath, input.bytes);
     await input.commandRunner({
@@ -58455,7 +59509,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp4, readFile as readFile7, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir5 } from "node:os";
-import { extname, join as join38 } from "node:path";
+import { extname, join as join42 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
   if (argv.length === 0) {
@@ -58531,8 +59585,8 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp4(join38(tmpdir5(), tempDirPrefix));
-          inputPath = join38(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
+          tempDir = await mkdtemp4(join42(tmpdir5(), tempDirPrefix));
+          inputPath = join42(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile4(inputPath, bytes);
         }
         const transcribed = await transcriber.transcribe({
@@ -58672,9 +59726,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash29("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash30("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -58793,7 +59847,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve7) => setTimeout(resolve7, pageRetryDelayMs));
+            await new Promise((resolve8) => setTimeout(resolve8, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -59297,7 +60351,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash30 } from "node:crypto";
+import { createHash as createHash31 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -59776,7 +60830,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash30("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash31("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -59891,7 +60945,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash30("sha256").update(value).digest("hex");
+  return createHash31("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -60403,25 +61457,25 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync23,
-  mkdirSync as mkdirSync21,
-  readFileSync as readFileSync24,
-  renameSync as renameSync7,
-  rmSync as rmSync7,
+  existsSync as existsSync26,
+  mkdirSync as mkdirSync22,
+  readFileSync as readFileSync27,
+  renameSync as renameSync8,
+  rmSync as rmSync9,
   writeFileSync as writeFileSync9
 } from "node:fs";
 import { randomUUID as randomUUID15 } from "node:crypto";
-import { homedir as homedir30 } from "node:os";
-import { dirname as dirname25, isAbsolute as isAbsolute6, join as join39 } from "node:path";
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir30(), type = "text") {
+import { homedir as homedir33 } from "node:os";
+import { dirname as dirname28, isAbsolute as isAbsolute6, join as join43 } from "node:path";
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir33(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join39(homeDir, ".cache");
-  return join39(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute6(configuredRoot) ? configuredRoot : join43(homeDir, ".cache");
+  return join43(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir30(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir33(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -60569,14 +61623,14 @@ async function fetchCatalog(input, fetchedAtMs) {
   return { status: "success", catalog };
 }
 function parseCatalogModels(payload) {
-  if (!isRecord(payload) || !Array.isArray(payload.data) || payload.data.length === 0) {
+  if (!isRecord3(payload) || !Array.isArray(payload.data) || payload.data.length === 0) {
     return;
   }
   const models = {};
   for (const rawItem2 of payload.data) {
-    if (!isRecord(rawItem2) || typeof rawItem2.id !== "string" || !rawItem2.id.trim())
+    if (!isRecord3(rawItem2) || typeof rawItem2.id !== "string" || !rawItem2.id.trim())
       continue;
-    if (!isRecord(rawItem2.model_spec))
+    if (!isRecord3(rawItem2.model_spec))
       continue;
     const category = parsePrivacyCategory(rawItem2.model_spec.privacy);
     if (!category)
@@ -60586,21 +61640,21 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync23(path))
+  if (!existsSync26(path))
     return;
   let payload;
   try {
-    payload = JSON.parse(readFileSync24(path, "utf8"));
+    payload = JSON.parse(readFileSync27(path, "utf8"));
   } catch {
     return;
   }
-  if (!isRecord(payload) || payload.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord3(payload) || payload.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload.catalog_type !== undefined && payload.catalog_type !== type)
     return;
   if (type === "embedding" && payload.catalog_type !== "embedding")
     return;
-  if (typeof payload.fetched_at !== "string" || !isRecord(payload.models))
+  if (typeof payload.fetched_at !== "string" || !isRecord3(payload.models))
     return;
   const fetchedAtMs = Date.parse(payload.fetched_at);
   if (!Number.isFinite(fetchedAtMs))
@@ -60622,7 +61676,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID15()}.tmp`;
   try {
-    mkdirSync21(dirname25(path), { recursive: true, mode: 448 });
+    mkdirSync22(dirname28(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync9(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -60631,9 +61685,9 @@ function writeCatalogCache(path, catalog) {
       models
     }, null, 2)}
 `, { mode: 384 });
-    renameSync7(tempPath, path);
+    renameSync8(tempPath, path);
   } catch {} finally {
-    rmSync7(tempPath, { force: true });
+    rmSync9(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value) {
@@ -60655,7 +61709,7 @@ function boundedPositiveMs(value, fallback, maximum) {
     return fallback;
   return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
-function isRecord(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function throwIfAborted(signal) {
@@ -61125,8 +62179,8 @@ import {
   stat as stat4,
   unlink as unlink2
 } from "node:fs/promises";
-import { homedir as homedir31 } from "node:os";
-import { dirname as dirname26, join as join40 } from "node:path";
+import { homedir as homedir34 } from "node:os";
+import { dirname as dirname29, join as join44 } from "node:path";
 function buildSourceAnswerLatencyRecord(result, now = () => new Date) {
   const audit = result.audit;
   const skipped = audit.skipped_corpora.map((skip) => ({
@@ -61231,7 +62285,7 @@ async function appendSourceAnswerLatencyLine(path, record3, options = {}) {
   const line = `${JSON.stringify(record3)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir3(dirname26(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname29(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -61284,8 +62338,8 @@ function resolveSourceAnswerLatencyLogPath(env = process.env) {
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join40(homedir31(), ".local", "share");
-  return join40(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join44(homedir34(), ".local", "share");
+  return join44(dataHome, "openclaw", "olympus", "source-answer-latency.jsonl");
 }
 async function makeExistingLedgerPrivate(path) {
   try {
@@ -61387,10 +62441,10 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash31 } from "node:crypto";
-import { existsSync as existsSync24, readFileSync as readFileSync25 } from "node:fs";
+import { createHash as createHash32 } from "node:crypto";
+import { existsSync as existsSync27, readFileSync as readFileSync28 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
-import { homedir as homedir32 } from "node:os";
+import { homedir as homedir35 } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { checkServerIdentity } from "node:tls";
 function trustedSourceWatchOwnerFromRequest(request) {
@@ -61554,7 +62608,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync25(trustPath, "utf8");
+        this.caPem = readFileSync28(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -61860,7 +62914,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2564(value) {
-  return createHash31("sha256").update(value, "utf8").digest("hex");
+  return createHash32("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -61902,7 +62956,7 @@ function resolvePublicCertificatePath(value, env, field) {
     throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
   }
   const trimmed2 = value.trim();
-  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir32();
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir35();
   const expanded = trimmed2 === "~" || trimmed2.startsWith("~/") || trimmed2.startsWith("~\\") ? `${home}${trimmed2.slice(1)}` : trimmed2;
   return resolvePath(expanded);
 }
@@ -61910,19 +62964,19 @@ function resolveOpenClawCommand(env) {
   const pathEntries = env.PATH?.split(":").map((entry) => entry.trim()).filter(Boolean) ?? [];
   for (const entry of pathEntries) {
     const candidate = resolvePath(entry, "openclaw");
-    if (existsSync24(candidate))
+    if (existsSync27(candidate))
       return candidate;
   }
   const found = Bun.which("openclaw");
   if (found)
     return found;
-  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir32();
+  const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir35();
   for (const candidate of [
     "/opt/homebrew/bin/openclaw",
     "/usr/local/bin/openclaw",
     resolvePath(home, ".openclaw", "bin", "openclaw")
   ]) {
-    if (existsSync24(candidate))
+    if (existsSync27(candidate))
       return candidate;
   }
   return "openclaw";
@@ -61951,7 +63005,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -61974,7 +63028,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve7(response);
+      resolve8(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -62391,9 +63445,12 @@ function mountDashboardController(options) {
   let disposed = false;
   let deferredSince = 0;
   let presented = options.presented !== false;
+  let awaitingAuthorizationReturn = false;
   const root = options.root;
-  const oauthSubmittedValues = new WeakMap;
+  const submittedFormValues = new WeakMap;
   const startedFromSheet = new WeakSet;
+  const pendingForms = new WeakSet;
+  let pendingFormCount = 0;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -62415,13 +63472,14 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-sync-kind],form[data-embedding-kind]," + "form[data-disconnect-kind],form[data-unpair-kind],form[data-model-check]").forEach((form) => {
+      const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
           control.dataset.olympusOriginallyDisabled = control.disabled ? "true" : "false";
         }
         const oauthUnavailable = form.hasAttribute("data-native-oauth-unavailable");
-        if (!canWrite || oauthUnavailable) {
+        if (pending && isSubmitControl(control) || !canWrite || oauthUnavailable) {
           control.disabled = true;
           control.setAttribute("aria-disabled", "true");
         } else {
@@ -62431,6 +63489,67 @@ function mountDashboardController(options) {
         }
       });
     });
+  }
+  function isSubmitControl(control) {
+    const type = (control.getAttribute("type") || "").toLowerCase();
+    if (control instanceof HTMLButtonElement)
+      return type === "" || type === "submit";
+    return type === "submit";
+  }
+  function setFormPending(form, pending, message) {
+    if (pending) {
+      if (!pendingForms.has(form))
+        pendingFormCount++;
+      pendingForms.add(form);
+      form.setAttribute("aria-busy", "true");
+      if (message !== undefined)
+        say(form, message);
+    } else {
+      if (pendingForms.has(form))
+        pendingFormCount--;
+      pendingForms.delete(form);
+      form.removeAttribute("aria-busy");
+    }
+    applyWriteCapability();
+  }
+  function pendingMessage(action) {
+    switch (action) {
+      case "start_oauth":
+        return "Connecting…";
+      case "connect_api_key":
+        return "Validating the key…";
+      case "cancel_oauth":
+        return "Cancelling…";
+      case "sync_now":
+        return "Starting sync…";
+      case "set_embedding_priority":
+        return "Saving…";
+      default:
+        return "Working…";
+    }
+  }
+  function successMessage(action) {
+    switch (action) {
+      case "connect_api_key":
+        return "Key accepted. This card updates when Olympus confirms the connection.";
+      case "start_oauth":
+        return "Waiting for authorization. This card updates when the connection completes.";
+      case "cancel_oauth":
+        return "Connection attempt cancelled. Press Connect when you are ready to start a new one.";
+      case "sync_now":
+        return "Sync started. This card updates when it finishes.";
+      case "set_embedding_priority":
+        return "Embedding preference saved.";
+      case "disconnect":
+        return "Disconnected. This card updates when Olympus confirms it.";
+      case "unpair":
+        return "Unpaired on this computer.";
+      default:
+        return "Saved.";
+    }
+  }
+  function unreleasedMessage(action) {
+    return action === "connect_api_key" ? "Key accepted. Your newer entry is still in the form — press Connect to submit it." : "Sent. Your newer entry is still in the form.";
   }
   function clearAuthorizationFallback(form) {
     const slot = form.querySelector("[data-authorization-fallback]");
@@ -62502,7 +63621,7 @@ function mountDashboardController(options) {
     const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
     return [...keys].every((key) => actual[key] === expected[key]);
   }
-  function releaseSubmittedOAuthPanel(form, submittedValues) {
+  function releaseSubmittedForm(form, submittedValues) {
     const sheet = form.closest(".sheet");
     const unchanged = submittedValues !== undefined && sameFormRecord(form, submittedValues);
     if (!unchanged)
@@ -62526,6 +63645,8 @@ function mountDashboardController(options) {
     return true;
   }
   function controlParams(form) {
+    if (form.hasAttribute("data-model-check"))
+      return { action: "check_model_setup" };
     const body = formRecord(form);
     const connect = form.dataset.connectKind;
     if (connect === "oauth") {
@@ -62626,6 +63747,10 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       return;
     }
+    if (pendingForms.has(form) || form.dataset.keyAccepted === "true") {
+      closeAuthorizationTab(authorizationTab);
+      return;
+    }
     if (params.action === "disconnect" || params.action === "unpair") {
       const fallback = params.action === "unpair" ? "Unpair this source?" : "Disconnect this source?";
       if (!window.confirm(form.dataset.confirmation || fallback)) {
@@ -62635,52 +63760,72 @@ function mountDashboardController(options) {
     }
     if (params.action === "start_oauth")
       clearAuthorizationFallback(form);
-    say(form, "Starting…");
+    setFormPending(form, true, pendingMessage(params.action));
+    let result;
     try {
-      const result = await options.transport.control(params);
-      if (result.status === 401 || result.status === 403) {
-        closeAuthorizationTab(authorizationTab);
-        if (options.authority === "worker-session") {
-          csrfToken = "";
-          say(form, "The control session expired — unlock controls in Setup, then try again.");
-        } else {
-          canWrite = false;
-          applyWriteCapability();
-          say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
-        }
-        return;
-      }
-      const authorizationUrl = result.body.authorization_url;
-      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
-        closeAuthorizationTab(authorizationTab);
-        say(form, errorMessage3(result));
-        return;
-      }
-      if (typeof authorizationUrl === "string" && authorizationUrl.startsWith("https://")) {
-        if (authorizationTab) {
-          authorizationTab.location.href = authorizationUrl;
-          say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus.");
-          if (releaseSubmittedOAuthPanel(form, submittedValues))
-            refreshNow(false, true);
-        } else if (openAuthorizationExternally(authorizationUrl)) {
-          say(form, "Authorization opened in your default browser. Approve it there, then come back to Olympus.");
-          if (releaseSubmittedOAuthPanel(form, submittedValues))
-            refreshNow(false, true);
-        } else {
-          say(form, "Open the authorization page to continue.");
-          showAuthorizationFallback(form, authorizationUrl);
-        }
-        return;
-      }
-      closeAuthorizationTab(authorizationTab);
-      form.reset();
-      const statusMessage = result.body.status_message;
-      say(form, typeof statusMessage === "string" ? statusMessage : "Done. Waiting for the next refresh.");
-      await refreshNow(false);
+      result = await options.transport.control(params);
     } catch {
       closeAuthorizationTab(authorizationTab);
       say(form, "Could not reach Olympus.");
+      return;
+    } finally {
+      setFormPending(form, false);
+      if (params.action !== "start_oauth")
+        submittedFormValues.delete(form);
     }
+    if (result.status === 401 || result.status === 403) {
+      closeAuthorizationTab(authorizationTab);
+      if (options.authority === "worker-session") {
+        csrfToken = "";
+        say(form, "The control session expired — unlock controls in Setup, then try again.");
+      } else {
+        canWrite = false;
+        applyWriteCapability();
+        say(form, "Your write access expired. Reconnect with operator.write access, then try again.");
+      }
+      return;
+    }
+    const authorizationUrl = result.body.authorization_url;
+    if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+      closeAuthorizationTab(authorizationTab);
+      say(form, errorMessage3(result));
+      return;
+    }
+    if (typeof authorizationUrl === "string" && authorizationUrl.startsWith("https://")) {
+      awaitingAuthorizationReturn = true;
+      if (authorizationTab) {
+        authorizationTab.location.href = authorizationUrl;
+        say(form, "Authorization opened in a new tab. Approve it there, then come back to Olympus — this card updates when the connection completes.");
+        if (releaseSubmittedForm(form, submittedValues))
+          refreshNow(false, true);
+      } else if (openAuthorizationExternally(authorizationUrl)) {
+        say(form, "Authorization opened in your default browser. Approve it there, then come back to Olympus — this card updates when the connection completes.");
+        if (releaseSubmittedForm(form, submittedValues))
+          refreshNow(false, true);
+      } else {
+        say(form, "Waiting for authorization. Open the page to continue — this card updates when the connection completes.");
+        showAuthorizationFallback(form, authorizationUrl);
+      }
+      return;
+    }
+    closeAuthorizationTab(authorizationTab);
+    const statusMessage = result.body.status_message;
+    const released = releaseSubmittedForm(form, submittedValues);
+    if (released && params.action === "connect_api_key") {
+      form.dataset.keyAccepted = "true";
+      form.querySelectorAll('input[name="api_key"]').forEach((input) => {
+        input.value = "";
+        input.hidden = true;
+      });
+      form.querySelectorAll('button[type="submit"],button:not([type])').forEach((button) => {
+        button.textContent = params.source === "readwise" ? "Connected" : "Key saved";
+      });
+      applyWriteCapability();
+    }
+    if (params.action === "cancel_oauth")
+      awaitingAuthorizationReturn = false;
+    say(form, typeof statusMessage === "string" ? statusMessage : released ? successMessage(params.action) : unreleasedMessage(params.action));
+    await refreshNow(false, released);
   }
   function copyText(node) {
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)
@@ -62720,7 +63865,11 @@ function mountDashboardController(options) {
   }
   function hasFocusedControl() {
     const active = activeElement();
-    return active !== null && root.contains(active);
+    if (active === null || !root.contains(active))
+      return false;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement)
+      return !active.disabled;
+    return active instanceof HTMLElement && active.isContentEditable;
   }
   function replaceBody(result, force) {
     canWrite = result.can_write;
@@ -62734,6 +63883,7 @@ function mountDashboardController(options) {
       applyWriteCapability();
       return;
     }
+    const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
     const open4 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
     const active = activeElement();
     const focused = focusKey(active);
@@ -62746,6 +63896,11 @@ function mountDashboardController(options) {
       if (open4.has(key))
         node.open = true;
     });
+    for (const id of openSheets) {
+      const sheet = queryAll(".sheet").find((candidate) => candidate.id === id);
+      sheet?.classList.add("on");
+      queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
+    }
     findByFocusKey(focused)?.focus();
     signature = result.signature;
     pollIntervalMs = result.poll_interval_ms;
@@ -62753,12 +63908,12 @@ function mountDashboardController(options) {
     applyWriteCapability();
   }
   async function refreshNow(force, requested = false) {
-    if (disposed || inFlight || options.signal.aborted || !force && !presented)
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || !force && !presented)
       return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
       return;
-    if (!force && query(".sheet.on"))
+    if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))
       return;
     if (!force && hasDirtyInput())
       return;
@@ -62802,12 +63957,11 @@ function mountDashboardController(options) {
         unlock(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind]"))
+    if (!form.matches("[data-connect-kind],[data-sync-kind],[data-embedding-kind],[data-disconnect-kind],[data-unpair-kind],[data-model-check]"))
       return;
     event.preventDefault();
-    const submittedValues = form.dataset.connectKind === "oauth" ? formRecord(form) : undefined;
-    if (submittedValues)
-      oauthSubmittedValues.set(form, submittedValues);
+    const submittedValues = formRecord(form);
+    submittedFormValues.set(form, submittedValues);
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
   }
@@ -62879,10 +64033,10 @@ function mountDashboardController(options) {
     const fallback = target.closest("[data-authorization-fallback] a");
     if (fallback) {
       const form = fallback.closest('form[data-connect-kind="oauth"]');
-      const submittedValues = form ? oauthSubmittedValues.get(form) : undefined;
+      const submittedValues = form ? submittedFormValues.get(form) : undefined;
       if (form && submittedValues) {
         setTimeout(() => {
-          if (disposed || !releaseSubmittedOAuthPanel(form, submittedValues))
+          if (disposed || !releaseSubmittedForm(form, submittedValues))
             return;
           refreshNow(false, true);
         }, 0);
@@ -62898,6 +64052,20 @@ function mountDashboardController(options) {
   }
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
+  const refreshOnReturn = () => {
+    if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
+      return;
+    awaitingAuthorizationReturn = false;
+    refreshNow(false, true);
+  };
+  const onVisibilityReturn = () => {
+    if (root.ownerDocument.visibilityState !== "visible")
+      return;
+    refreshOnReturn();
+  };
+  const view = root.ownerDocument.defaultView || window;
+  view.addEventListener("focus", refreshOnReturn);
+  root.ownerDocument.addEventListener("visibilitychange", onVisibilityReturn);
   applyWriteCapability();
   restartPoll();
   const dispose = () => {
@@ -62906,6 +64074,8 @@ function mountDashboardController(options) {
     disposed = true;
     if (interval)
       clearInterval(interval);
+    view.removeEventListener("focus", refreshOnReturn);
+    root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
   };
@@ -63968,7 +65138,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -64028,14 +65198,14 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash32("sha256").update(normalised).digest("hex");
+  return createHash33("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
   const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
-  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash32("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
+  const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : createHash33("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
     csrfToken: input.controller?.csrfToken ?? "",
@@ -64333,6 +65503,7 @@ function standaloneDashboardControllerScript(input) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
         if (action === 'cancel_oauth') return ['/dashboard/connect/oauth/cancel', withoutAction(params)];
+        if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
         if (action === 'set_embedding_priority') return ['/dashboard/embedding-priority', withoutAction(params)];
@@ -66561,18 +67732,51 @@ var init_detail = __esm(() => {
   DETAIL_GUARD_CONSEQUENCES = DASHBOARD_GUARD_CONSEQUENCES;
 });
 
+// src/workers/dashboard/model-setup.ts
+function renderModelSetup(view) {
+  if (!view)
+    return "";
+  const cards = view.cards.map((card) => {
+    const state = { not_configured: "Not configured", applying: "Applying…", needs_attention: "Needs attention", ready: "Ready" }[card.state];
+    let action = "";
+    if (card.id === "local") {
+      action = '<button type="button" class="btn" data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>';
+    } else {
+      const form = `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+      action = card.state === "ready" ? `<details><summary>Replace key</summary>${form}</details>` : card.state === "applying" ? "<p>Key saved. Olympus is applying the configuration or waiting for another required key.</p>" : form;
+      const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
+      action += `<p><a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></p>`;
+    }
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
+  }).join("");
+  return '<section aria-label="Models"><div class="sect">Models</div>' + "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>" + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + (view.cards.some((card) => card.id === "local") ? "" : '<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>') + '<form method="post" action="/dashboard/models/check" data-model-check><button class="btn" type="submit">Check readiness</button><span data-action-message role="status"></span></form>' + (view.ready ? '<p role="status">Models are ready. You can connect sources below.</p>' : '<p role="status">Finish the required model setup above to unlock new source connections.</p>') + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+}
+var MODEL_SETUP_CSS = `
+.modelcards{display:grid;gap:12px;margin:16px 0 24px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:18px}
+.modelcard header{display:flex;justify-content:space-between;gap:16px}.modelcard form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.modelcard input[type=password]{flex:1;min-width:160px}.modelcard p{margin:8px 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
+`, LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to Models in Setup and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.";
+var init_model_setup2 = __esm(() => {
+  init_components();
+});
+
 // src/workers/dashboard/pages/setup.ts
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
   const pilotNote = renderGooglePilotNote(view);
-  const sections = SETUP_GROUPS.map((group) => renderGroup(group, grouped[group.id], degraded, options?.basePath)).filter((section) => section.length > 0);
+  const sections = SETUP_GROUPS.map((group) => {
+    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath);
+    return group.id === "not_connected" && view.model_setup && !view.model_setup.ready && rendered ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
+  }).filter((section) => section.length > 0);
   const body = [
     renderDashboardNav("setup", {
       ...options?.basePath === undefined ? {} : { basePath: options.basePath }
     }),
     options?.controlMode === "native" ? options.canWrite === false ? '<div class="attncard plain" data-write-capability-note>Read-only OpenClaw connection — reconnect with operator.write access to change sources.</div>' : "" : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
     renderSetupSummary(view),
+    renderModelSetup(view.model_setup),
+    '<div class="sect">Sources</div>',
     ...pilotNote ? [pilotNote] : [],
     ...sections,
     connectorRow(),
@@ -66596,7 +67800,7 @@ function renderDashboardSetupPage(view, options) {
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }
     },
-    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS],
+    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS],
     ...options?.format === undefined ? {} : { format: options.format }
   });
 }
@@ -66874,6 +68078,7 @@ function formatDuration(minutes) {
 }
 var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_SHEET_COPY_LABEL = "Copy prompt", CONNECTOR_ROW_LABEL = "Something else", CONNECTOR_ROW_BLURB = "Anything with an API or an export — build the connector with your agent", CONNECTOR_ROW_BUTTON_LABEL = "Build a connector", CONNECTOR_PROMPT, SETUP_GROUPS;
 var init_setup = __esm(() => {
+  init_model_setup2();
   init_source_dashboard();
   init_vocabulary();
   init_components();
@@ -67371,6 +68576,7 @@ function isDashboardControlRoute(request) {
     "/dashboard/connect/oauth/start",
     "/dashboard/connect/oauth/cancel",
     "/dashboard/connect/api-key",
+    "/dashboard/models/check",
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
@@ -67713,35 +68919,35 @@ var init_http = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync22, readFileSync as readFileSync26, rmSync as rmSync8, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname27, join as join41 } from "node:path";
-import { homedir as homedir33 } from "node:os";
+import { mkdirSync as mkdirSync23, readFileSync as readFileSync29, rmSync as rmSync10, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname30, join as join45 } from "node:path";
+import { homedir as homedir36 } from "node:os";
 function guardStateDir(env) {
   const configured = env[GUARD_STATE_DIR_ENV]?.trim();
   if (configured)
     return configured;
-  return join41(env.HOME?.trim() || homedir33(), ...GUARD_STATE_DIR_SEGMENTS);
+  return join45(env.HOME?.trim() || homedir36(), ...GUARD_STATE_DIR_SEGMENTS);
 }
 function resolveEmbeddingOverridePath(env = process.env) {
   const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
-  return join41(guardStateDir(env), "operator-override");
+  return join45(guardStateDir(env), "operator-override");
 }
 function resolveGuardReportPath(env = process.env) {
-  return join41(guardStateDir(env), "latest.json");
+  return join45(guardStateDir(env), "latest.json");
 }
 function resolveEmbeddingDrainReportPath(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join41(dir, "source-embedding-drain-current.json");
+  return join45(dir, "source-embedding-drain-current.json");
 }
 function readEmbeddingOperatorOverride(path) {
   let raw;
   try {
-    raw = readFileSync26(path, "utf8");
+    raw = readFileSync29(path, "utf8");
   } catch (error2) {
     if (error2?.code === "ENOENT")
       return "none";
@@ -67758,10 +68964,10 @@ function readEmbeddingOperatorOverride(path) {
 }
 function writeEmbeddingOperatorOverride(path, on) {
   if (!on) {
-    rmSync8(path, { force: true });
+    rmSync10(path, { force: true });
     return;
   }
-  mkdirSync22(dirname27(path), { recursive: true });
+  mkdirSync23(dirname30(path), { recursive: true });
   writeFileSync10(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
@@ -67780,7 +68986,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord11(JSON.parse(readFileSync26(path, "utf8")));
+    return asRecord11(JSON.parse(readFileSync29(path, "utf8")));
   } catch {
     return;
   }
@@ -67968,8 +69174,8 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/workers/dashboard/background-runtime.ts
-import { readFileSync as readFileSync27 } from "node:fs";
-import { join as join42 } from "node:path";
+import { readFileSync as readFileSync30 } from "node:fs";
+import { join as join46 } from "node:path";
 function resolveLaneReportDir(env = process.env) {
   const explicit = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim();
   if (explicit)
@@ -67987,7 +69193,7 @@ function asRecord12(value) {
 }
 function readJsonFile2(path) {
   try {
-    return asRecord12(JSON.parse(readFileSync27(path, "utf8")));
+    return asRecord12(JSON.parse(readFileSync30(path, "utf8")));
   } catch {
     return;
   }
@@ -68096,7 +69302,7 @@ function readBackgroundRuntime(options = {}) {
   const guard = readGuardArbitration(resolveGuardReportPath(env));
   const lanes = [];
   for (const spec of LANE_REPORTS) {
-    const record3 = readJsonFile2(join42(dir, spec.file));
+    const record3 = readJsonFile2(join46(dir, spec.file));
     if (record3 === undefined)
       continue;
     const updatedAt = readStamp(record3.updated_at) ?? readStamp(record3.generated_at);
@@ -68637,8 +69843,8 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync12, copyFileSync, existsSync as existsSync25, lstatSync as lstatSync14, mkdirSync as mkdirSync23, readFileSync as readFileSync28 } from "node:fs";
-import { dirname as dirname28 } from "node:path";
+import { chmodSync as chmodSync13, copyFileSync, existsSync as existsSync28, lstatSync as lstatSync15, mkdirSync as mkdirSync24, readFileSync as readFileSync31 } from "node:fs";
+import { dirname as dirname31 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
   const scopeSourceIds = new Set((options.folderScopes ?? []).map((source) => source.disposition_source_id));
@@ -68695,7 +69901,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync25(path)) {
+  if (!existsSync28(path)) {
     return {
       path,
       present: false,
@@ -68703,7 +69909,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text = readFileSync28(path, "utf8");
+  const text = readFileSync31(path, "utf8");
   const raw = JSON.parse(text);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -68744,16 +69950,16 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync25(path)) {
-    const stat5 = lstatSync14(path);
+  if (existsSync28(path)) {
+    const stat5 = lstatSync15(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
     backupPath = `${path}.${stamp}.bak`;
     copyFileSync(path, backupPath);
-    chmodSync12(backupPath, 384);
+    chmodSync13(backupPath, 384);
   } else {
-    mkdirSync23(dirname28(path), { recursive: true });
+    mkdirSync24(dirname31(path), { recursive: true });
   }
   writePrivateFileAtomicSync(path, text);
   return {
@@ -69088,7 +70294,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash33 } from "node:crypto";
+import { createHash as createHash34 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -69116,7 +70322,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash33("sha256").update(value).digest("hex");
+  return createHash34("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -69278,12 +70484,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve7) => {
+        new Promise((resolve8) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve7({
+              resolve8({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -69307,10 +70513,10 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash34, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-import { readFileSync as readFileSync29, statSync as statSync9 } from "node:fs";
-import { homedir as homedir34 } from "node:os";
-import { join as join43, resolve as resolve7 } from "node:path";
+import { createHash as createHash35, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { readFileSync as readFileSync32, statSync as statSync9 } from "node:fs";
+import { homedir as homedir37 } from "node:os";
+import { join as join47, resolve as resolve8 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -69374,6 +70580,7 @@ function createEmailSourceWorker(options = {}) {
   let dashboardSchedulerRegistryStamp;
   let dashboardSchedulerAdoptionTick;
   let dashboardWorkerClosed = false;
+  const dashboardPostConnectRuns = new Map;
   if (options.sourceScheduler && options.sourceDashboard?.refreshSchedulerSources) {
     const intervalMs = options.sourceDashboard.registryAdoptionIntervalMs ?? 30000;
     if (intervalMs > 0) {
@@ -69544,6 +70751,7 @@ function createEmailSourceWorker(options = {}) {
             });
           }
           if (postBody?.action === "approve_source_scope_and_start") {
+            assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes) {
               throw new EmailSourceWorkerError(501, "source_index_not_enabled", "Folder scope approval is not configured.");
             }
@@ -69639,6 +70847,7 @@ function createEmailSourceWorker(options = {}) {
             }),
             ...schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {},
             sovereigntyEngine: sourceDashboard.sovereigntyEngine,
+            ...sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {},
             ...sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {},
             ...sourceDashboard.history ? { history: sourceDashboard.history } : {},
             connectedHandleRegistry: registry2,
@@ -69789,6 +70998,7 @@ function createEmailSourceWorker(options = {}) {
             }
             const record3 = await parseObjectBody(request);
             const source = parseDashboardOAuthSource(record3.source);
+            assertDashboardModelsReady();
             const secretStore = dashboardSecretStore(sourceDashboard);
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
             assertDashboardAccountCardinality(registry2, source);
@@ -69881,6 +71091,15 @@ function createEmailSourceWorker(options = {}) {
             });
           });
         }
+        if (request.method === "POST" && url.pathname === "/dashboard/models/check") {
+          if (!sourceDashboard?.checkModelSetup) {
+            throw new EmailSourceWorkerError(501, "model_setup_not_supported", "This worker does not support model setup checks.");
+          }
+          sourceDashboard.checkModelSetup().catch(() => {
+            return;
+          });
+          return json({ ok: true, status_message: "Checking model connections…" });
+        }
         if (request.method === "POST" && url.pathname === "/dashboard/connect/api-key") {
           return await withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
@@ -69889,11 +71108,24 @@ function createEmailSourceWorker(options = {}) {
             const record3 = await parseObjectBody(request);
             const source = parseDashboardApiKeySource(record3.source);
             if (source === "readwise") {
+              assertDashboardModelsReady();
               assertDashboardAccountCardinality(readConnectedHandleRegistry(sourceDashboard.registryPath ?? defaultHandleRegistryPath()), source);
             }
             const apiKey = asOptionalString(record3.api_key);
             if (!apiKey)
               throw new EmailSourceWorkerError(400, "invalid_request", "api_key is required.");
+            if (source === "gemini" || source === "venice" && sourceDashboard.connectModelKey) {
+              if (!sourceDashboard.connectModelKey) {
+                throw new EmailSourceWorkerError(501, "model_setup_not_supported", "Upgrade the worker to connect model keys here.");
+              }
+              try {
+                await sourceDashboard.connectModelKey(source, apiKey);
+              } catch {
+                throw new EmailSourceWorkerError(400, "model_key_setup_failed", "The model key could not be validated or applied. Check the Models card and retry.");
+              }
+              const modelSetup = sourceDashboard.modelSetup?.();
+              return json({ ok: true, source, status_message: modelSetup?.ready ? "Model connection ready." : "Key saved. Finish the remaining model requirements; Olympus applies the keys automatically." });
+            }
             const connectApiKey = sourceDashboard.connectApiKey ?? connectPublicApiKeySource;
             let result;
             try {
@@ -69921,6 +71153,7 @@ function createEmailSourceWorker(options = {}) {
             return json({
               ok: true,
               source,
+              status_message: source === "readwise" ? "Connected. Initial sync requested." : "Key connected.",
               handles: result.handles.filter((handle) => knownHandles.includes(handle)),
               policy: {
                 raw_runtime_secrets_exposed: false,
@@ -69981,6 +71214,17 @@ function createEmailSourceWorker(options = {}) {
                   throw new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
                 }
                 sourceScheduler.updateSources(nextSources);
+              }
+              if (sourceDashboard.stopMessagingCapture) {
+                for (const [id, source] of [["telegram.messages", "telegram"], ["whatsapp.personal.messages", "whatsapp"]]) {
+                  if (!plan.sourceIds.has(id))
+                    continue;
+                  try {
+                    await sourceDashboard.stopMessagingCapture(source);
+                  } catch {
+                    throw new EmailSourceWorkerError(409, "capture_stop_unconfirmed", "Capture has not confirmed it stopped. Credentials were retained; retry Disconnect.");
+                  }
+                }
               }
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
@@ -70084,6 +71328,13 @@ function createEmailSourceWorker(options = {}) {
               })), registryPath);
               for (const unpairedSource of selectedSourceIds)
                 dashboardUnpairedSources.add(unpairedSource);
+              if (sourceDashboard.stopMessagingCapture) {
+                try {
+                  await sourceDashboard.stopMessagingCapture(sourceId === "telegram.messages" ? "telegram" : "whatsapp");
+                } catch {
+                  throw new EmailSourceWorkerError(409, "capture_stop_unconfirmed", "Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.");
+                }
+              }
               const removedSessionPaths = [];
               const unremovedSessionPaths = [];
               for (const target of removalPlan.plan.targets) {
@@ -70585,11 +71836,16 @@ function createEmailSourceWorker(options = {}) {
       }
     }
   };
+  function assertDashboardModelsReady() {
+    if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
+      throw new EmailSourceWorkerError(409, "model_setup_required", "Finish model setup at the top of Setup before connecting sources or starting ingestion.");
+    }
+  }
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve8) => {
-      release = resolve8;
+    dashboardGrantMutationTail = new Promise((resolve9) => {
+      release = resolve9;
     });
     await previous;
     try {
@@ -70610,6 +71866,8 @@ function createEmailSourceWorker(options = {}) {
   async function runDashboardSourceSync(request) {
     assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
+    if (dashboardWorkerClosed)
+      throw new EmailSourceWorkerError(503, "worker_stopping", "The worker is restarting.");
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
       const schedulerStatus = sourceScheduler?.status();
@@ -70665,15 +71923,35 @@ function createEmailSourceWorker(options = {}) {
     }
   }
   async function triggerDashboardPostConnectSync(request) {
-    if (!isDashboardSyncSource(request.source))
-      return;
-    if (!dashboardSourceSyncAvailable(request.source))
+    if (!isDashboardSyncSource(request.source) || dashboardWorkerClosed)
       return;
     try {
-      await runDashboardSourceSync(request);
-    } catch (error2) {
-      console.warn(`Olympus post-connect first sync did not start for ${request.source}: ${scrubSourceWorkerLogMessage(error2 instanceof Error ? error2.message : error2)}`);
+      await refreshDashboardSchedulerSources();
+    } catch {
+      console.warn("Olympus connected the source; scheduler adoption will retry on its next tick.");
+      return;
     }
+    if (!dashboardSourceSyncAvailable(request.source) || dashboardPostConnectRuns.has(request.source))
+      return;
+    try {
+      assertDashboardModelsReady();
+      assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
+    } catch {
+      return;
+    }
+    const work = Promise.resolve().then(async () => {
+      if (dashboardWorkerClosed)
+        return;
+      if (sourceDashboard)
+        assertDashboardSourceMayRead(request.source, sourceDashboard, dashboardDisconnectedSources);
+      await runDashboardSourceSync(request);
+    }).catch((error2) => {
+      if (!dashboardWorkerClosed)
+        console.warn(`Olympus initial sync needs attention for ${request.source}: ${scrubSourceWorkerLogMessage(error2 instanceof Error ? error2.message : error2)}`);
+    }).finally(() => {
+      dashboardPostConnectRuns.delete(request.source);
+    });
+    dashboardPostConnectRuns.set(request.source, work);
   }
   function dashboardSyncHookServes(source) {
     if (sourceDashboard?.triggerSourceSync === undefined)
@@ -70682,6 +71960,9 @@ function createEmailSourceWorker(options = {}) {
     return served === undefined || served.includes(source);
   }
   function dashboardSourceSyncAvailable(source) {
+    const schedulerId = dashboardSchedulerSourceId(source);
+    if (schedulerId && sourceScheduler?.status().sources.some((candidate) => candidate.source_id === schedulerId || candidate.corpus_id === schedulerId))
+      return true;
     if (source === "gmail") {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === "gmail.email" || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true || dashboardSyncHookServes(source);
@@ -70826,7 +72107,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep2(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 async function parseSourceIndexAnswerRequest(request) {
   const record3 = await parseObjectBody(request);
@@ -71622,9 +72903,9 @@ function parseDashboardOAuthSource(value) {
 }
 function parseDashboardApiKeySource(value) {
   const source = asOptionalString(value);
-  if (source === "venice" || source === "readwise")
+  if (source === "gemini" || source === "venice" || source === "readwise")
     return source;
-  throw new EmailSourceWorkerError(400, "invalid_request", "source must be venice or readwise.");
+  throw new EmailSourceWorkerError(400, "invalid_request", "source must be gemini, venice, or readwise.");
 }
 function parseDashboardSyncSource(value) {
   const source = asOptionalString(value);
@@ -71738,10 +73019,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve7(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve8(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize = (paths) => [...new Set(paths.map((path) => resolve7(path)))].sort();
+  const normalize = (paths) => [...new Set(paths.map((path) => resolve8(path)))].sort();
   const a = normalize(left);
   const b = normalize(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -71998,7 +73279,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual3(createHash34("sha256").update(expected).digest(), createHash34("sha256").update(state).digest());
+  return timingSafeEqual3(createHash35("sha256").update(expected).digest(), createHash35("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -72102,7 +73383,7 @@ function readDashboardRegistryOutcome(registryPath) {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync29(join43(homedir34(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync32(join47(homedir37(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -72798,13 +74079,13 @@ var init_analyst_anthropic = __esm(() => {
 });
 
 // src/core/analyst-openclaw-infer.ts
-import { existsSync as existsSync26 } from "node:fs";
+import { existsSync as existsSync29 } from "node:fs";
 function resolveOpenClawCommand2() {
   const found = Bun.which(DEFAULT_COMMAND);
   if (found)
     return found;
   for (const candidate of ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw", `${process.env.HOME ?? ""}/.openclaw/bin/openclaw`]) {
-    if (candidate && existsSync26(candidate))
+    if (candidate && existsSync29(candidate))
       return candidate;
   }
   return DEFAULT_COMMAND;
@@ -73127,13 +74408,13 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync13, mkdirSync as mkdirSync24 } from "node:fs";
-import { homedir as homedir35 } from "node:os";
-import { dirname as dirname29, join as join44 } from "node:path";
+import { chmodSync as chmodSync14, mkdirSync as mkdirSync25 } from "node:fs";
+import { homedir as homedir38 } from "node:os";
+import { dirname as dirname32, join as join48 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join44(homedir35(), ".local", "share");
-  return join44(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join48(homedir38(), ".local", "share");
+  return join48(dataHome, "openclaw", "olympus", "source-scheduler.sqlite");
 }
 
 class LocalSourceSchedulerStateStore {
@@ -73142,11 +74423,11 @@ class LocalSourceSchedulerStateStore {
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
-      mkdirSync24(dirname29(dbPath), { recursive: true, mode: 448 });
+      mkdirSync25(dirname32(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database10(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync13(dbPath, 384);
+      chmodSync14(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
@@ -73690,7 +74971,7 @@ var init_source_scheduler_state = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash35 } from "node:crypto";
+import { createHash as createHash36 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -73759,7 +75040,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -74356,7 +75637,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash35("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash36("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -74916,7 +76197,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash35("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash36("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -75105,11 +76386,11 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash36, randomUUID as randomUUID16 } from "node:crypto";
-import { existsSync as existsSync27, readFileSync as readFileSync30 } from "node:fs";
-import { dirname as dirname30, join as join45 } from "node:path";
+import { createHash as createHash37, randomUUID as randomUUID16 } from "node:crypto";
+import { existsSync as existsSync30, readFileSync as readFileSync33 } from "node:fs";
+import { dirname as dirname33, join as join49 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
-  return join45(dirname30(handleRegistryPath), "file-source-scopes.json");
+  return join49(dirname33(handleRegistryPath), "file-source-scopes.json");
 }
 function isFileSourceScopeId(value) {
   return FILE_SOURCE_SCOPE_IDS.includes(value);
@@ -75120,7 +76401,7 @@ function connectedFileSourceAccountGeneration(sourceId, registry2) {
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash36("sha256").update(JSON.stringify([
+  const generation = createHash37("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -75271,15 +76552,15 @@ function normalizeAncestorKeys(input) {
   return [...new Set(keys)];
 }
 function readState(path) {
-  if (!existsSync27(path))
+  if (!existsSync30(path))
     return { kind: "missing" };
   let raw;
   try {
-    raw = readFileSync30(path, "utf8");
+    raw = readFileSync33(path, "utf8");
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash36("sha256").update(raw).digest("hex");
+  const digest = createHash37("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -75803,7 +77084,7 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync28 } from "node:fs";
+import { existsSync as existsSync31 } from "node:fs";
 import { isAbsolute as isAbsolute7 } from "node:path";
 function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
@@ -76087,7 +77368,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync28(store.dbPath))
+        if (!existsSync31(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -76512,6 +77793,42 @@ async function main() {
   const dropboxFilesAccount = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT?.trim() || accountFromDropboxCredentialHandle(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE);
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
+  const packageRoot = olympusPackageRoot();
+  const captures = {
+    telegram: new MessagingCaptureSupervisor({ source: "telegram", registryPath: connectedHandleRegistryPath, packageRoot }),
+    whatsapp: new MessagingCaptureSupervisor({
+      source: "whatsapp",
+      registryPath: connectedHandleRegistryPath,
+      packageRoot,
+      whatsappBridgePath: whatsappBridgePathForPackage(packageRoot, { env: process.env })
+    })
+  };
+  let captureReconcileRunning = false;
+  let capturesClosed = false;
+  const reconcileCaptures = async () => {
+    if (capturesClosed || captureReconcileRunning)
+      return;
+    captureReconcileRunning = true;
+    if (sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
+      try {
+        await Promise.all(Object.values(captures).map((capture) => capture.stop()));
+      } finally {
+        captureReconcileRunning = false;
+      }
+      return;
+    }
+    try {
+      await Promise.all(Object.values(captures).map((capture) => capture.reconcile()));
+    } catch {
+      console.warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+    } finally {
+      captureReconcileRunning = false;
+    }
+  };
+  const stopMessagingCapture = async (source) => {
+    revokeMessagingCaptureGrant(defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath));
+    await captures[source].stop();
+  };
   const fileSourceScopeAuthority = connectedHandleRegistryPath ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath }) : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
@@ -76545,6 +77862,60 @@ async function main() {
   const dropboxFilesEmbeddingProvider = secureLocalPolicyEmbeddingProvider ?? (sourceIndexEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(sourceIndexEmbeddingProvider) ? sourceIndexEmbeddingProvider : undefined);
   const telegramMessagesEmbeddingProvider = envPolicyFallback ? createCloudSourceIndexEmbeddingProviderFromEnv(process.env, "OLYMPUS_SOURCE_INDEX_TELEGRAM") ?? sourceIndexEmbeddingProvider : sourceIndexEmbeddingProvider;
   const googleDriveDocsEmbeddingProvider = sourceIndexEmbeddingProvider;
+  const requiredProfiles = requiredModelProfiles(sovereigntyEngine.config);
+  const safeModelCredential = (profile, env) => {
+    if (!profile.secretRef)
+      return;
+    try {
+      return resolveSecretRefValueSync(profile.secretRef, { env })?.trim() || undefined;
+    } catch {
+      return;
+    }
+  };
+  const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
+  const modelCredentialState = (id, profile) => {
+    if (!profile.secretRef)
+      return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? "missing" : "ready";
+    const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
+    const current = safeModelCredential(profile, storedEnv);
+    if (!current)
+      return "missing";
+    if (current !== bootModelCredentials.get(id) || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)))
+      return "applying";
+    return "ready";
+  };
+  let requestModelReload = () => false;
+  let modelReloadUnavailable = false;
+  const modelSetup = new ModelSetupService({
+    config: sovereigntyEngine.config,
+    credentialState: modelCredentialState,
+    localApiKey: (id) => bootModelCredentials.get(id),
+    expectedEmbeddingDimension: (id) => {
+      const secure = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
+      if (secure?.id === id)
+        return secureLocalPolicyEmbeddingProvider?.dimension;
+      const internal = sovereigntyEngine.resolveEmbeddingProfile("internal");
+      if (internal?.id === id)
+        return internalPolicyEmbeddingProvider?.dimension;
+      return;
+    }
+  });
+  const getModelSetup = () => {
+    const view = modelSetup.getStatus();
+    if (!modelReloadUnavailable)
+      return view;
+    return { ...view, ready: false, cards: view.cards.map((card) => card.state === "applying" ? { ...card, state: "needs_attention", detail: "Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself." } : card) };
+  };
+  const connectModelKey = async (provider, apiKey) => {
+    if (provider === "gemini")
+      await connectGeminiApiKey({ apiKey });
+    else
+      await connectPublicApiKeySource({ source: "venice", apiKey });
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    if (!credentials.includes("missing") && credentials.includes("applying")) {
+      modelReloadUnavailable = !requestModelReload();
+    }
+  };
   const fileExtractionPdfTextCommandEnv = process.env.OLYMPUS_FILE_EXTRACTION_PDF_TEXT_COMMAND?.trim();
   const fileExtractionPdfTextCommand = fileExtractionPdfTextCommandEnv === "off" ? undefined : fileExtractionPdfTextCommandEnv || "pdftotext";
   const fileExtractionPdfTextTimeoutMs = parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_PDF_TEXT_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_PDF_TEXT_TIMEOUT_SECONDS");
@@ -77440,6 +78811,10 @@ async function main() {
     ...sourceIndexReadEnabled ? {
       sourceDashboard: {
         sovereigntyEngine,
+        modelSetup: getModelSetup,
+        checkModelSetup: () => modelSetup.checkLocalModels(),
+        connectModelKey,
+        stopMessagingCapture,
         corpusRegistry: sourceCorpusRegistry,
         registryPath: handleRegistryPathFromEnv(process.env, true),
         ...sourceDashboardHistory ? { history: sourceDashboardHistory } : {},
@@ -77483,16 +78858,35 @@ async function main() {
     fetch: withWorkerBearerAuth(worker.fetch, { authToken })
   });
   sourceScheduler?.start();
+  await reconcileCaptures();
+  const captureTick = setInterval(() => {
+    reconcileCaptures();
+  }, 1e4);
+  captureTick.unref?.();
   let shuttingDown = false;
   const shutdown = (signal) => {
     if (shuttingDown)
       return;
     shuttingDown = true;
+    capturesClosed = true;
+    clearInterval(captureTick);
+    Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => {
+      return;
+    });
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
     server.stop();
   };
+  requestModelReload = createModelKeyReload({
+    managed: process.env.OLYMPUS_MANAGED_WORKER === "1",
+    shutdown: async () => {
+      shutdown("SIGTERM");
+      await Promise.all(Object.values(captures).map((capture) => capture.stop()));
+      await server.stop(true);
+    },
+    exit: (code) => process.exit(code)
+  });
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   console.log(`Olympus private email source worker listening on http://${hostname}:${port}/v1`);
@@ -77891,6 +79285,12 @@ function mergeConnectorStores(stores) {
 }
 var INGESTION_DISPOSITION_SOURCES, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES;
 var init_server4 = __esm(async () => {
+  init_package_root();
+  init_messaging_capture();
+  init_messaging_pairing();
+  init_model_setup();
+  init_connect();
+  init_worker_auth();
   init_file_extraction_runtime();
   init_readiness_ledger();
   init_venice_client();
@@ -78279,10 +79679,13 @@ ${prompt}`)) {
 }
 
 // src/cli.ts
+init_package_root();
+init_messaging_pairing();
+init_messaging_capture();
 init_config();
 init_dashboard_launch();
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { readFileSync as readFileSync31 } from "node:fs";
+import { readFileSync as readFileSync34, openSync as openSync9, closeSync as closeSync9, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -78301,23 +79704,23 @@ init_sovereignty();
 init_pairing_session_paths();
 init_public_source_capabilities();
 init_worker_service();
-import { createHash as createHash23, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash25, randomUUID as randomUUID10 } from "node:crypto";
 import {
-  closeSync as closeSync5,
-  existsSync as existsSync14,
+  closeSync as closeSync7,
+  existsSync as existsSync18,
   fsyncSync as fsyncSync3,
-  lstatSync as lstatSync8,
-  mkdirSync as mkdirSync13,
-  openSync as openSync5,
+  lstatSync as lstatSync10,
+  mkdirSync as mkdirSync15,
+  openSync as openSync7,
   readSync as readSync2,
   readdirSync as readdirSync3,
-  readFileSync as readFileSync15,
-  renameSync as renameSync5,
-  rmSync as rmSync4,
+  readFileSync as readFileSync20,
+  renameSync as renameSync6,
+  rmSync as rmSync7,
   statSync as statSync7
 } from "node:fs";
-import { homedir as homedir21 } from "node:os";
-import { basename as basename4, dirname as dirname16, join as join23, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
+import { homedir as homedir25 } from "node:os";
+import { basename as basename4, dirname as dirname20, join as join28, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -78395,7 +79798,7 @@ function legacySourceIndexPath(env, overrideKey, fileName) {
   return env[overrideKey]?.trim() || olympusSharedDataFile(env, fileName);
 }
 function olympusSharedDataFile(env, fileName) {
-  return join23(env.XDG_DATA_HOME?.trim() || join23(homedir21(), ".local", "share"), "openclaw", "olympus", fileName);
+  return join28(env.XDG_DATA_HOME?.trim() || join28(homedir25(), ".local", "share"), "openclaw", "olympus", fileName);
 }
 function whatsappStateDir2(env) {
   return whatsappStateDir({ env });
@@ -78403,22 +79806,22 @@ function whatsappStateDir2(env) {
 function whatsappRawStatePaths(env) {
   const stateDir = whatsappStateDir2(env);
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join23(transcribeStateDir, "media") : undefined);
+  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join28(transcribeStateDir, "media") : undefined);
   return [...new Set([
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join23(stateDir, "spool"),
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join28(stateDir, "spool"),
     ...whatsappPairingSessionPaths({ env }),
-    join23(stateDir, "media"),
+    join28(stateDir, "media"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ])];
 }
 function telegramPreservationOnlyPaths(env) {
-  const home = env.HOME?.trim() || homedir21();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join23(home, ".local", "share");
-  const stateHome = env.XDG_STATE_HOME?.trim() || join23(home, ".local", "state");
-  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join23(dataHome, "olympus", "telegram-capture", "spool");
-  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join23(stateHome, "olympus", "telegram-capture-gateway");
-  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join23(stateHome, "olympus", "telegram-spool-drain");
-  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join23(drainStateDir, "cursor.json");
+  const home = env.HOME?.trim() || homedir25();
+  const dataHome = env.XDG_DATA_HOME?.trim() || join28(home, ".local", "share");
+  const stateHome = env.XDG_STATE_HOME?.trim() || join28(home, ".local", "state");
+  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim() || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim() || join28(dataHome, "olympus", "telegram-capture", "spool");
+  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join28(stateHome, "olympus", "telegram-capture-gateway");
+  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim() || join28(stateHome, "olympus", "telegram-spool-drain");
+  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim() || join28(drainStateDir, "cursor.json");
   return [...new Set([
     spoolDir,
     cursorPath,
@@ -78431,13 +79834,13 @@ function exportOlympusData(options) {
   const selected = selectSources(options.sourceId);
   const durabilityBoundary = exportDurabilityBoundary(destination);
   makeDurableDirectory(destination, durabilityBoundary);
-  rmSync4(join23(destination, "manifest.json"), { force: true });
+  rmSync7(join28(destination, "manifest.json"), { force: true });
   syncDirectorySync2(destination);
   const files = [];
   const skipped = [];
   const artifacts = [];
   for (const source of selected) {
-    const sourceRoot = join23(destination, "sources", safePathSegment(source.sourceId));
+    const sourceRoot = join28(destination, "sources", safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
     const legacyIndexPath = source.sqlitePath?.(options);
     if (legacyIndexPath) {
@@ -78467,7 +79870,7 @@ function exportOlympusData(options) {
       });
     }
     for (const policyPath of source.policyPaths?.(options) ?? []) {
-      const destinationPath = join23(sourceRoot, basename4(policyPath));
+      const destinationPath = join28(sourceRoot, basename4(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
         artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
       }
@@ -78477,17 +79880,17 @@ function exportOlympusData(options) {
     for (const statePath of source.preservationOnlyPaths?.(options) ?? [])
       skipped.push(statePath);
   }
-  const configRoot = join23(destination, "config");
+  const configRoot = join28(destination, "config");
   makeDurableDirectory(configRoot, durabilityBoundary);
   for (const [sourcePath, destinationPath] of [
-    [join23(resolveHome(options.homeDir), ".olympus", "config.json"), join23(configRoot, "config.json")],
-    [defaultSovereigntyConfigPathForHome(options.homeDir), join23(configRoot, "sovereignty.json")]
+    [join28(resolveHome(options.homeDir), ".olympus", "config.json"), join28(configRoot, "config.json")],
+    [defaultSovereigntyConfigPathForHome(options.homeDir), join28(configRoot, "sovereignty.json")]
   ]) {
     if (copySanitizedJsonIfPresent(sourcePath, destinationPath, files, skipped)) {
       artifacts.push(fileArtifact(destination, destinationPath, "olympus.config", "sanitized_config"));
     }
   }
-  writePrivateFileAtomicSync(join23(destination, "manifest.json"), JSON.stringify({
+  writePrivateFileAtomicSync(join28(destination, "manifest.json"), JSON.stringify({
     kind: "olympus_data_export",
     version: 2,
     exported_at: new Date().toISOString(),
@@ -78497,24 +79900,24 @@ function exportOlympusData(options) {
     skipped,
     artifacts
   }, null, 2));
-  files.push(join23(destination, "manifest.json"));
+  files.push(join28(destination, "manifest.json"));
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve5(requirePath(options.destination, "--input"));
-  const manifestPath = join23(destination, "manifest.json");
-  const parsed = JSON.parse(readFileSync15(manifestPath, "utf8"));
+  const destination = resolve6(requirePath(options.destination, "--input"));
+  const manifestPath = join28(destination, "manifest.json");
+  const parsed = JSON.parse(readFileSync20(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
     throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
   }
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve5(destination, artifact.relativePath);
+    const path = resolve6(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
-    const stats = lstatSync8(path);
+    const stats = lstatSync10(path);
     if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== artifact.bytes || sha256File(path) !== artifact.sha256) {
       throw new OperationError("source_index_error", `Olympus data export artifact failed verification: ${artifact.relativePath}`);
     }
@@ -78537,17 +79940,17 @@ function deleteOlympusData(options) {
   const missing = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
   for (const target of uniqueDeleteTargets) {
-    if (existsSync14(target.path))
+    if (existsSync18(target.path))
       assertDeleteTargetSafe(target);
   }
   for (const target of uniqueDeleteTargets) {
-    if (!existsSync14(target.path)) {
+    if (!existsSync18(target.path)) {
       missing.push(target.path);
       continue;
     }
     removed.push(target.path);
     if (options.dryRun !== true) {
-      rmSync4(target.path, { recursive: target.allowRecursive, force: true });
+      rmSync7(target.path, { recursive: target.allowRecursive, force: true });
     }
   }
   return {
@@ -78630,8 +80033,8 @@ function allDeleteTargets(context) {
     })),
     serviceUnitTarget(workerServicePaths("darwin", home).unitPath),
     serviceUnitTarget(workerServicePaths("linux", home).unitPath),
-    ...globExisting(join23(home, "Library", "LaunchAgents"), /^(?:com|org)\.openclaw\.olympus.*\.plist$/).map(serviceUnitTarget),
-    ...globExisting(join23(home, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
+    ...globExisting(join28(home, "Library", "LaunchAgents"), /^(?:com|org)\.openclaw\.olympus.*\.plist$/).map(serviceUnitTarget),
+    ...globExisting(join28(home, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
   ];
 }
 function sourceDeleteTargets(source, context) {
@@ -78699,24 +80102,24 @@ function requireSource(sourceId) {
 }
 function exportSqliteStore(options) {
   const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped, artifacts } = options;
-  if (!existsSync14(sqlitePath)) {
+  if (!existsSync18(sqlitePath)) {
     for (const path of sqliteWithSidecars(sqlitePath))
       skipped.push(path);
     return;
   }
-  const destination = join23(destinationRoot, basename4(sqlitePath));
+  const destination = join28(destinationRoot, basename4(sqlitePath));
   const staging = `${destination}.${randomUUID10()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
       sqlite = inspectSqliteSnapshot(staging, sqlitePath, expectedStoreId);
       syncFileSync(staging);
-      renameSync5(staging, destination);
+      renameSync6(staging, destination);
     } catch (error) {
-      rmSync4(staging, { force: true });
+      rmSync7(staging, { force: true });
       throw error;
     }
-    syncDirectorySync2(dirname16(destination));
+    syncDirectorySync2(dirname20(destination));
     files.push(destination);
     artifacts.push({
       ...fileArtifact(exportRoot, destination, sourceId, role),
@@ -78727,7 +80130,7 @@ function exportSqliteStore(options) {
   throw new OperationError("source_index_error", `Declared Olympus SQLite store is not a readable database: ${sqlitePath}`, "The export failed closed; repair or explicitly account for the store before transition.");
 }
 function snapshotSqliteStore(sqlitePath, staging) {
-  rmSync4(staging, { force: true });
+  rmSync7(staging, { force: true });
   let db;
   try {
     db = new Database5(sqlitePath, { readonly: true });
@@ -78738,7 +80141,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
     db.exec("PRAGMA busy_timeout = 10000;");
     db.exec(`VACUUM INTO '${sqliteStringLiteral(staging)}'`);
   } catch (error) {
-    rmSync4(staging, { force: true });
+    rmSync7(staging, { force: true });
     if (isUnreadableSqliteError(error))
       return false;
     throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
@@ -78778,14 +80181,14 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative5(resolve5(exportRoot), resolve5(path)),
+    relativePath: relative5(resolve6(exportRoot), resolve6(path)),
     bytes: stats.size,
     sha256: sha256File(path)
   };
 }
 function sha256File(path) {
-  const hash = createHash23("sha256");
-  const descriptor = openSync5(path, "r");
+  const hash = createHash25("sha256");
+  const descriptor = openSync7(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
     for (;; ) {
@@ -78795,7 +80198,7 @@ function sha256File(path) {
       hash.update(buffer.subarray(0, bytesRead));
     }
   } finally {
-    closeSync5(descriptor);
+    closeSync7(descriptor);
   }
   return hash.digest("hex");
 }
@@ -78820,57 +80223,57 @@ function sqliteWithSidecars(sqlitePath) {
   return [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
 }
 function copySanitizedJsonIfPresent(source, destination, files, skipped) {
-  if (!existsSync14(source)) {
+  if (!existsSync18(source)) {
     skipped.push(source);
     return false;
   }
-  const parsed = JSON.parse(readFileSync15(source, "utf8"));
-  mkdirSync13(dirname16(destination), { recursive: true });
+  const parsed = JSON.parse(readFileSync20(source, "utf8"));
+  mkdirSync15(dirname20(destination), { recursive: true });
   writePrivateFileAtomicSync(destination, JSON.stringify(sanitizeForExport(parsed), null, 2));
   files.push(destination);
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current = dirname16(resolve5(destination));
+  let current = dirname20(resolve6(destination));
   for (;; ) {
-    if (existsSync14(current))
+    if (existsSync18(current))
       return current;
-    const parent = dirname16(current);
+    const parent = dirname20(current);
     if (parent === current)
       return current;
     current = parent;
   }
 }
 function makeDurableDirectory(path, boundary) {
-  mkdirSync13(path, { recursive: true });
-  let current = resolve5(path);
+  mkdirSync15(path, { recursive: true });
+  let current = resolve6(path);
   for (;; ) {
     syncDirectorySync2(current);
     if (current === boundary)
       return;
-    const parent = dirname16(current);
+    const parent = dirname20(current);
     if (parent === current)
       return;
     current = parent;
   }
 }
 function syncFileSync(path) {
-  const descriptor = openSync5(path, "r");
+  const descriptor = openSync7(path, "r");
   try {
     fsyncSync3(descriptor);
   } finally {
-    closeSync5(descriptor);
+    closeSync7(descriptor);
   }
 }
 function syncDirectorySync2(path) {
-  const descriptor = openSync5(path, "r");
+  const descriptor = openSync7(path, "r");
   try {
     fsyncSync3(descriptor);
   } catch (error) {
     if (!isUnsupportedDirectorySyncError(error))
       throw error;
   } finally {
-    closeSync5(descriptor);
+    closeSync7(descriptor);
   }
 }
 function sanitizeForExport(value) {
@@ -78902,9 +80305,9 @@ function containsPrivateKeyBlock(value) {
   return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
 }
 function globExisting(root, pattern) {
-  if (!existsSync14(root))
+  if (!existsSync18(root))
     return [];
-  return readdirSync3(root).map((entry) => join23(root, entry)).filter((path) => {
+  return readdirSync3(root).map((entry) => join28(root, entry)).filter((path) => {
     const name = basename4(path);
     return pattern.test(name) && statSync7(path).isFile();
   });
@@ -78924,7 +80327,7 @@ function assertDeleteTargetSafe(target) {
     return;
   }
   if (target.kind === "known_root") {
-    if (!lstatSync8(target.path).isDirectory()) {
+    if (!lstatSync10(target.path).isDirectory()) {
       throw new OperationError("invalid_params", `Refusing to recursively delete non-directory Olympus root: ${target.path}`);
     }
     return;
@@ -78936,7 +80339,7 @@ function assertDeleteTargetSafe(target) {
   }
 }
 function assertRegularFileTarget(path) {
-  const stat3 = lstatSync8(path);
+  const stat3 = lstatSync10(path);
   if (!stat3.isFile()) {
     throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
   }
@@ -78971,27 +80374,27 @@ function isInsideKnownOlympusRoot(path, context) {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve5(path);
-  const absoluteRoot = resolve5(root);
+  const absolutePath = resolve6(path);
+  const absoluteRoot = resolve6(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep5}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
   if (!homeDir)
     return defaultSovereigntyConfigPath();
-  return join23(homeDir, ".olympus", "sovereignty.json");
+  return join28(homeDir, ".olympus", "sovereignty.json");
 }
 function defaultDropboxIngestionPolicyPathForHome(homeDir) {
   if (!homeDir)
     return defaultDropboxIngestionPolicyPath();
-  return join23(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
+  return join28(homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
 }
 function envForHome(homeDir) {
   if (!homeDir)
     return process.env;
   return {
     HOME: homeDir,
-    XDG_DATA_HOME: join23(homeDir, ".local", "share"),
-    XDG_STATE_HOME: join23(homeDir, ".local", "state")
+    XDG_DATA_HOME: join28(homeDir, ".local", "share"),
+    XDG_STATE_HOME: join28(homeDir, ".local", "state")
   };
 }
 function envForContext(context) {
@@ -79002,7 +80405,7 @@ function envForContext(context) {
   return { ...envForHome(context.homeDir), ...context.env };
 }
 function resolveHome(homeDir) {
-  return homeDir?.trim() || homedir21();
+  return homeDir?.trim() || homedir25();
 }
 function requirePath(value, name) {
   if (!value?.trim())
@@ -79032,63 +80435,63 @@ init_version();
 
 // src/core/lifecycle.ts
 init_atomic_file();
-import { createHash as createHash27 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync19, readFileSync as readFileSync23 } from "node:fs";
-import { homedir as homedir27, platform as osPlatform2 } from "node:os";
-import { dirname as dirname23, isAbsolute as isAbsolute5, join as join33 } from "node:path";
+import { existsSync as existsSync25, lstatSync as lstatSync14, mkdirSync as mkdirSync20, readFileSync as readFileSync26 } from "node:fs";
+import { homedir as homedir30, platform as osPlatform2 } from "node:os";
+import { dirname as dirname26, isAbsolute as isAbsolute5, join as join37 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash26, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash27, randomUUID as randomUUID12 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import {
-  chmodSync as chmodSync10,
-  closeSync as closeSync7,
-  existsSync as existsSync20,
+  chmodSync as chmodSync11,
+  closeSync as closeSync8,
+  existsSync as existsSync23,
   fsyncSync as fsyncSync4,
-  lstatSync as lstatSync11,
+  lstatSync as lstatSync12,
   mkdtempSync,
-  openSync as openSync7,
-  readFileSync as readFileSync21,
+  openSync as openSync8,
+  readFileSync as readFileSync24,
   readdirSync as readdirSync4,
-  renameSync as renameSync6,
-  rmSync as rmSync6,
+  renameSync as renameSync7,
+  rmSync as rmSync8,
   statSync as statSync8,
   writeFileSync as writeFileSync8
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename as basename5, isAbsolute as isAbsolute4, join as join31 } from "node:path";
+import { basename as basename5, isAbsolute as isAbsolute4, join as join35 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
 function prepareWorkerUpgradeArtifact(options) {
   const sourcePath = validateArtifactPath(options.artifactPath);
-  const artifactBytes = readFileSync21(sourcePath);
+  const artifactBytes = readFileSync24(sourcePath);
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash26("sha256").update(artifactBytes).digest("hex");
-  const snapshotDir = mkdtempSync(join31(tmpdir(), ".olympus-artifact-snapshot-"));
-  const artifactPath = join31(snapshotDir, "artifact.tgz");
-  const descriptor = openSync7(artifactPath, "wx", 384);
+  const artifactSha256 = createHash27("sha256").update(artifactBytes).digest("hex");
+  const snapshotDir = mkdtempSync(join35(tmpdir(), ".olympus-artifact-snapshot-"));
+  const artifactPath = join35(snapshotDir, "artifact.tgz");
+  const descriptor = openSync8(artifactPath, "wx", 384);
   try {
     writeFileSync8(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
-    closeSync7(descriptor);
+    closeSync8(descriptor);
   }
   syncDirectorySync(snapshotDir);
   try {
     inspectArchive(artifactPath);
-    const versionsDir = join31(options.homeDir, ".local", "share", "olympus", "versions");
-    const workingDirectory = join31(versionsDir, artifactSha256);
+    const versionsDir = join35(options.homeDir, ".local", "share", "olympus", "versions");
+    const workingDirectory = join35(versionsDir, artifactSha256);
     assertVersionParentSafety(options.homeDir, workingDirectory);
     const stagingParent = options.dryRun ? tmpdir() : versionsDir;
     if (!options.dryRun)
       ensurePrivateDirectoryTreeSync(options.homeDir, versionsDir);
-    const staging = mkdtempSync(join31(stagingParent, ".olympus-upgrade-"));
+    const staging = mkdtempSync(join35(stagingParent, ".olympus-upgrade-"));
     try {
       extractArchive(artifactPath, staging);
       assertRegularTree(staging);
@@ -79100,7 +80503,7 @@ function prepareWorkerUpgradeArtifact(options) {
       }
       if (options.dryRun)
         return { artifactSha256, packageVersion, workingDirectory };
-      const metadataPath = join31(staging, ".olympus-artifact-v1.json");
+      const metadataPath = join35(staging, ".olympus-artifact-v1.json");
       writePrivateFileAtomicSync(metadataPath, `${JSON.stringify({
         schema_version: 1,
         artifact_sha256: artifactSha256,
@@ -79109,10 +80512,10 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync20(workingDirectory)) {
+      if (existsSync23(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
-        const existingMode = lstatSync11(workingDirectory).mode & 511;
+        const existingMode = lstatSync12(workingDirectory).mode & 511;
         if (existingMode === 365 && versionTreeDigest(workingDirectory) === expectedDigest) {
           removeStagingTree(staging);
           syncDirectorySync(versionsDir);
@@ -79122,17 +80525,17 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync20(staging))
+      if (existsSync23(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync20(staging))
-        rmSync6(staging, { recursive: true, force: true });
+      if (options.dryRun && existsSync23(staging))
+        rmSync8(staging, { recursive: true, force: true });
     }
   } finally {
-    rmSync6(snapshotDir, { recursive: true, force: true });
+    rmSync8(snapshotDir, { recursive: true, force: true });
   }
 }
 function assertVersionParentSafety(homeDir, workingDirectory) {
@@ -79149,7 +80552,7 @@ function validateArtifactPath(path) {
   }
   let stats;
   try {
-    stats = lstatSync11(trimmed2);
+    stats = lstatSync12(trimmed2);
   } catch {
     throw new OperationError("invalid_params", `Upgrade artifact does not exist: ${trimmed2}`);
   }
@@ -79225,8 +80628,8 @@ function runTar(args, action) {
 }
 function assertRegularTree(root, budget = { bytes: 0 }) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join31(root, entry.name);
-    const stats = lstatSync11(path);
+    const path = join35(root, entry.name);
+    const stats = lstatSync12(path);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new OperationError("invalid_params", `Upgrade artifact extracted an unsafe entry: ${entry.name}`);
     }
@@ -79241,9 +80644,9 @@ function assertRegularTree(root, budget = { bytes: 0 }) {
   }
 }
 function validateExtractedPackage(root, bunBin, executePreflight) {
-  const packageJson = readJsonRecord(join31(root, "package.json"), "package.json");
-  const manifest2 = readJsonRecord(join31(root, "openclaw.plugin.json"), "openclaw.plugin.json");
-  const cliPath = join31(root, "dist", "cli.js");
+  const packageJson = readJsonRecord(join35(root, "package.json"), "package.json");
+  const manifest2 = readJsonRecord(join35(root, "openclaw.plugin.json"), "openclaw.plugin.json");
+  const cliPath = join35(root, "dist", "cli.js");
   assertRegularFile(cliPath, "dist/cli.js");
   const version = typeof packageJson.version === "string" ? packageJson.version.trim() : "";
   if (packageJson.name !== "olympus" || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -79261,7 +80664,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
   return version;
 }
 function assertManagedVersionRoot(root, artifactSha256) {
-  const stats = lstatSync11(root);
+  const stats = lstatSync12(root);
   if (!stats.isDirectory() || stats.isSymbolicLink() || basename5(root) !== artifactSha256) {
     throw new OperationError("config_error", "Managed upgrade version path is unsafe.");
   }
@@ -79270,7 +80673,7 @@ function assertManagedVersionRoot(root, artifactSha256) {
 function readJsonRecord(path, label) {
   assertRegularFile(path, label);
   try {
-    const value = JSON.parse(readFileSync21(path, "utf8"));
+    const value = JSON.parse(readFileSync24(path, "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("not an object");
     return value;
@@ -79280,7 +80683,7 @@ function readJsonRecord(path, label) {
 }
 function assertRegularFile(path, label) {
   try {
-    const stats = lstatSync11(path);
+    const stats = lstatSync12(path);
     if (stats.isFile() && !stats.isSymbolicLink())
       return;
   } catch {}
@@ -79288,15 +80691,15 @@ function assertRegularFile(path, label) {
 }
 function makeVersionTreeReadOnly(root) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join31(root, entry.name);
+    const path = join35(root, entry.name);
     if (entry.isDirectory()) {
       makeVersionTreeReadOnly(path);
-      chmodSync10(path, 365);
+      chmodSync11(path, 365);
     } else {
-      chmodSync10(path, 292);
+      chmodSync11(path, 292);
     }
   }
-  chmodSync10(root, 448);
+  chmodSync11(root, 448);
   const rootStats = statSync8(root);
   if (!rootStats.isDirectory() || (rootStats.mode & 511) !== 448) {
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
@@ -79304,22 +80707,22 @@ function makeVersionTreeReadOnly(root) {
 }
 function syncVersionTree(root) {
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
-    const path = join31(root, entry.name);
+    const path = join35(root, entry.name);
     if (entry.isDirectory()) {
       syncVersionTree(path);
       continue;
     }
-    const descriptor = openSync7(path, "r");
+    const descriptor = openSync8(path, "r");
     try {
       fsyncSync4(descriptor);
     } finally {
-      closeSync7(descriptor);
+      closeSync8(descriptor);
     }
   }
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest = createHash26("sha256");
+  const digest = createHash27("sha256");
   hashVersionTree(root, "", digest);
   return digest.digest("hex");
 }
@@ -79327,8 +80730,8 @@ function hashVersionTree(root, relativeRoot, digest) {
   const entries = readdirSync4(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const relativePath = relativeRoot ? `${relativeRoot}/${entry.name}` : entry.name;
-    const path = join31(root, entry.name);
-    const stats = lstatSync11(path);
+    const path = join35(root, entry.name);
+    const stats = lstatSync12(path);
     if (stats.isDirectory() && !stats.isSymbolicLink()) {
       digest.update(`d\x00${relativePath}\x00${stats.mode & 511}\x00`);
       hashVersionTree(path, relativePath, digest);
@@ -79338,29 +80741,29 @@ function hashVersionTree(root, relativeRoot, digest) {
       throw new OperationError("config_error", `Managed upgrade version contains an unsafe entry: ${relativePath}`);
     }
     digest.update(`f\x00${relativePath}\x00${stats.mode & 511}\x00${stats.size}\x00`);
-    digest.update(readFileSync21(path));
+    digest.update(readFileSync24(path));
   }
 }
 function publishVersionTree(staging, workingDirectory, versionsDir, syncDirectory2 = syncDirectorySync) {
   let replacedPath;
   let published = false;
   try {
-    if (existsSync20(workingDirectory)) {
-      replacedPath = join31(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
-      renameSync6(workingDirectory, replacedPath);
+    if (existsSync23(workingDirectory)) {
+      replacedPath = join35(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID12()}`);
+      renameSync7(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
-    renameSync6(staging, workingDirectory);
+    renameSync7(staging, workingDirectory);
     published = true;
-    chmodSync10(workingDirectory, 365);
+    chmodSync11(workingDirectory, 365);
     syncDirectory2(workingDirectory);
     syncDirectory2(versionsDir);
   } catch (error) {
     try {
-      if (published && existsSync20(workingDirectory))
+      if (published && existsSync23(workingDirectory))
         removeStagingTree(workingDirectory);
-      if (replacedPath && existsSync20(replacedPath) && !existsSync20(workingDirectory)) {
-        renameSync6(replacedPath, workingDirectory);
+      if (replacedPath && existsSync23(replacedPath) && !existsSync23(workingDirectory)) {
+        renameSync7(replacedPath, workingDirectory);
       }
       syncDirectory2(versionsDir);
     } catch (rollbackError) {
@@ -79370,18 +80773,18 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     }
     throw error;
   }
-  if (replacedPath && existsSync20(replacedPath)) {
+  if (replacedPath && existsSync23(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectory2(versionsDir);
   }
 }
 function removeStagingTree(root) {
-  chmodSync10(root, 448);
+  chmodSync11(root, 448);
   for (const entry of readdirSync4(root, { withFileTypes: true })) {
     if (entry.isDirectory())
-      removeStagingTree(join31(root, entry.name));
+      removeStagingTree(join35(root, entry.name));
   }
-  rmSync6(root, { recursive: true, force: true });
+  rmSync8(root, { recursive: true, force: true });
 }
 
 // src/core/lifecycle-lock.ts
@@ -79389,11 +80792,11 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID13 } from "node:crypto";
-import { existsSync as existsSync21, linkSync, lstatSync as lstatSync12, readFileSync as readFileSync22 } from "node:fs";
-import { join as join32 } from "node:path";
+import { existsSync as existsSync24, linkSync, lstatSync as lstatSync13, readFileSync as readFileSync25 } from "node:fs";
+import { join as join36 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
-  const dir = join32(homeDir, ".local", "state", "olympus", "lifecycle");
-  const lockPath = join32(dir, "mutation-v1.lock");
+  const dir = join36(homeDir, ".local", "state", "olympus", "lifecycle");
+  const lockPath = join36(dir, "mutation-v1.lock");
   ensurePrivateDirectoryTreeSync(homeDir, dir);
   const ownerProcessInstance = processInstanceIdentity(process.pid);
   if (!ownerProcessInstance) {
@@ -79408,7 +80811,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       action,
       started_at: now().toISOString()
     };
-    const candidate = join32(dir, `mutation-owner-${owner.nonce}.tmp`);
+    const candidate = join36(dir, `mutation-owner-${owner.nonce}.tmp`);
     writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner, null, 2)}
 `);
     try {
@@ -79419,20 +80822,20 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
-      if (existsSync21(candidate))
+      if (existsSync24(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
       let activeOwner;
-      withFileLeaseSync(join32(dir, "mutation-v1-recovery"), () => {
+      withFileLeaseSync(join36(dir, "mutation-v1-recovery"), () => {
         const current = readLifecycleMutationOwner(lockPath);
         if (recordedProcessOwnerIsAlive(current.pid, current.process_instance)) {
           activeOwner = current;
           return;
         }
         removeFileDurablySync(lockPath);
-        const staleCandidate = join32(dir, `mutation-owner-${current.nonce}.tmp`);
-        if (existsSync21(staleCandidate))
+        const staleCandidate = join36(dir, `mutation-owner-${current.nonce}.tmp`);
+        if (existsSync24(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -79456,10 +80859,10 @@ function releaseLifecycleMutationLock(lockPath, nonce) {
 }
 function readLifecycleMutationOwner(path) {
   try {
-    const stats = lstatSync12(path);
+    const stats = lstatSync13(path);
     if (!stats.isFile() || stats.isSymbolicLink())
       throw new Error("not a regular lock file");
-    const value = JSON.parse(readFileSync22(path, "utf8"));
+    const value = JSON.parse(readFileSync25(path, "utf8"));
     const processInstance = parseProcessInstanceIdentity(value.process_instance);
     if (value.schema_version !== 1 || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0 || !processInstance || typeof value.nonce !== "string" || !/^[0-9a-f-]{36}$/i.test(value.nonce) || typeof value.action !== "string" || !value.action || typeof value.started_at !== "string" || !Number.isFinite(Date.parse(value.started_at))) {
       throw new Error("invalid lock owner shape");
@@ -79481,7 +80884,7 @@ init_worker_service();
 var OLYMPUS_LIFECYCLE_SCHEMA_VERSION = 1;
 function runWorkerLifecycle(action, options = {}) {
   const platform2 = normalizeLifecyclePlatform(options.platform ?? osPlatform2());
-  const homeDir = validateHomeDir(options.homeDir ?? homedir27());
+  const homeDir = validateHomeDir(options.homeDir ?? homedir30());
   const normalized = { ...options, platform: platform2, homeDir };
   if (action === "status")
     return lifecycleStatus(normalized);
@@ -79660,7 +81063,7 @@ function installOrUpgradeLifecycle(action, options) {
 }
 function installManagedWorkerFiles(options = {}) {
   const platform2 = normalizeLifecyclePlatform(options.platform ?? osPlatform2());
-  const homeDir = validateHomeDir(options.homeDir ?? homedir27());
+  const homeDir = validateHomeDir(options.homeDir ?? homedir30());
   const effective = { ...options, platform: platform2, homeDir };
   const activate = options.activate !== false;
   if (options.dryRun === true) {
@@ -79866,15 +81269,15 @@ function markTransactionCommitReady(options) {
   updateTransactionPhase(options, "commit_ready");
 }
 function readTransaction(options) {
-  const homeDir = validateHomeDir(options.homeDir ?? homedir27());
+  const homeDir = validateHomeDir(options.homeDir ?? homedir30());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync22(paths.transaction))
+  if (!existsSync25(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value;
   try {
-    value = JSON.parse(readFileSync23(paths.transaction, "utf8"));
+    value = JSON.parse(readFileSync26(paths.transaction, "utf8"));
   } catch {
     throw new OperationError("config_error", "The Olympus lifecycle transaction is unreadable; refusing to guess recovery state.");
   }
@@ -79888,33 +81291,33 @@ function readTransaction(options) {
     throw new OperationError("config_error", "The Olympus lifecycle transaction does not match this installation; refusing recovery.");
   }
   if (transaction.action === "upgrade") {
-    const expectedVersionsDir = join33(homeDir, ".local", "share", "olympus", "versions");
-    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join33(expectedVersionsDir, transaction.artifact_sha256)) {
+    const expectedVersionsDir = join37(homeDir, ".local", "share", "olympus", "versions");
+    if (typeof transaction.artifact_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(transaction.artifact_sha256) || typeof transaction.package_version !== "string" || typeof transaction.desired_working_directory !== "string" || transaction.desired_working_directory !== join37(expectedVersionsDir, transaction.artifact_sha256)) {
       throw new OperationError("config_error", "The Olympus upgrade transaction is not bound to valid managed artifact bytes.");
     }
   }
   return transaction;
 }
 function clearTransaction(options) {
-  const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir27()));
-  assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir27()), paths);
+  const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir30()));
+  assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir30()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.transaction]) {
-    if (!existsSync22(path))
+    if (!existsSync25(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync22(path)) {
+  if (!existsSync25(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
-  return readFileSync23(path, "utf8");
+  return readFileSync26(path, "utf8");
 }
 function writeSnapshotBackup(path, text) {
   if (text === undefined) {
-    if (existsSync22(path)) {
+    if (existsSync25(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -79924,33 +81327,33 @@ function writeSnapshotBackup(path, text) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync22(path)) {
+    if (existsSync25(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
     return;
   }
   assertRegularFile2(backupPath, "lifecycle backup");
-  const text = readFileSync23(backupPath, "utf8");
+  const text = readFileSync26(backupPath, "utf8");
   if (!expectedDigest || sha2563(text) !== expectedDigest) {
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
-    ensurePrivateDirectoryTreeSync(homeDir, dirname23(path));
+    ensurePrivateDirectoryTreeSync(homeDir, dirname26(path));
   else
-    mkdirSync19(dirname23(path), { recursive: true });
+    mkdirSync20(dirname26(path), { recursive: true });
   writePrivateFileAtomicSync(path, text);
 }
 function isRecordedManagedPath(value) {
   return typeof value === "string" && value.trim() !== "" && isAbsolute5(value) && !/[\0\r\n]/.test(value);
 }
 function transactionPaths(homeDir) {
-  const dir = join33(homeDir, ".local", "state", "olympus", "lifecycle");
+  const dir = join37(homeDir, ".local", "state", "olympus", "lifecycle");
   return {
     dir,
-    transaction: join33(dir, "transaction-v1.json"),
-    unitBackup: join33(dir, "worker-unit.backup"),
-    envBackup: join33(dir, "worker-env.backup")
+    transaction: join37(dir, "transaction-v1.json"),
+    unitBackup: join37(dir, "worker-unit.backup"),
+    envBackup: join37(dir, "worker-env.backup")
   };
 }
 function assertTransactionParentSafety(homeDir, paths) {
@@ -80004,10 +81407,10 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync22(envPath))
+  if (!existsSync25(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
-  const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync23(envPath, "utf8"))?.[1];
+  const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync26(envPath, "utf8"))?.[1];
   const configured = line === undefined ? undefined : unquoteEnvValue(line);
   return configured ? validateWorkerReadinessPort(Number(configured)) : 8010;
 }
@@ -80114,13 +81517,13 @@ function validateHomeDir(value) {
 }
 function assertRegularFile2(path, label) {
   try {
-    if (lstatSync13(path).isFile())
+    if (lstatSync14(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2563(value) {
-  return createHash27("sha256").update(value).digest("hex");
+  return createHash28("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts
@@ -80135,7 +81538,7 @@ init_sensitivity_map();
 init_privacy_language();
 import { randomBytes as randomBytes5 } from "node:crypto";
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { homedir as homedir28 } from "node:os";
+import { homedir as homedir31 } from "node:os";
 init_operation_error();
 init_sovereignty();
 init_setup_preflight();
@@ -80194,7 +81597,7 @@ function runSetupDependencyCheck(input = {}) {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, "telethon")),
       detail: "Optional Telegram guided-session reader.",
-      repairHint: "Install Python 3 and run python3 -m pip install telethon before connecting Telegram."
+      repairHint: "Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram."
     }),
     dependencyFinding({
       id: "go",
@@ -80223,7 +81626,7 @@ async function runSetupWizard(options) {
     config: presetConfig,
     ...options.env ? { env: options.env } : {},
     ...options.secretStore ? { secretStore: options.secretStore } : {},
-    workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir28() })
+    workerEnvPath: options.envPath ?? workerSetupEnvPath({ homeDir: options.homeDir ?? homedir31() })
   });
   const sovereigntyPath = options.sovereigntyPath ?? defaultSovereigntyConfigPath();
   const workerToken = options.tokenGenerator?.() ?? generateWorkerToken();
@@ -80286,7 +81689,9 @@ async function runSetupWizard(options) {
     connections,
     dashboard: {
       url: "http://127.0.0.1:8010/dashboard",
-      next: "Open Olympus in the OpenClaw Control UI (2026.9.2 with Custom plugin UI enabled), or run olympus dashboard for standalone access."
+      url_scope: "worker_local",
+      handoff_required: true,
+      next: "Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Setup connects sources and scopes, Home shows readiness and attention, Background monitors syncing/extraction/embeddings. Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link."
     }
   };
 }
@@ -80645,7 +82050,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync31("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync34("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -80740,7 +82145,7 @@ function printHelp() {
   console.log("  olympus doctor");
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
-  console.log("  olympus connect telegram|whatsapp --session-path <path>");
+  console.log("  olympus connect telegram|whatsapp --pair");
   console.log("  olympus connect venice|readwise --api-key-prompt");
   console.log("  olympus connect gemini --api-key-prompt");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
@@ -80767,8 +82172,8 @@ var PUBLIC_LEAF_USAGE = {
   "connect gmail": "olympus connect gmail --client-id <id>",
   "connect google-drive": "olympus connect google-drive --client-id <id>",
   "connect dropbox": "olympus connect dropbox --client-id <id>",
-  "connect telegram": "olympus connect telegram --session-path <path>",
-  "connect whatsapp": "olympus connect whatsapp --session-path <path>",
+  "connect telegram": "olympus connect telegram --pair",
+  "connect whatsapp": "olympus connect whatsapp --pair",
   "connect venice": "olympus connect venice --api-key-prompt",
   "connect readwise": "olympus connect readwise --api-key-prompt",
   "connect gemini": "olympus connect gemini --api-key-prompt",
@@ -80836,7 +82241,7 @@ var COMMAND_GROUP_HELP = {
     "Commands:",
     "  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]",
     "  olympus connect dropbox --client-id <id>",
-    "  olympus connect telegram|whatsapp --session-path <path>",
+    "  olympus connect telegram|whatsapp --pair",
     "  olympus connect venice|readwise --api-key-prompt",
     "  olympus connect gemini --api-key-prompt"
   ],
@@ -81248,7 +82653,7 @@ async function runConnect(args) {
       usage: [
         "olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
         "olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
-        "olympus connect telegram|whatsapp --session-path <path> [--session-ready]",
+        "olympus connect telegram|whatsapp --pair",
         "olympus connect venice|readwise --api-key-prompt",
         "olympus connect gemini --api-key-prompt",
         "olympus connect status [google|gmail|google-drive|dropbox]"
@@ -81277,6 +82682,12 @@ async function runConnect(args) {
   const source = rawSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.pair && source !== "telegram" && source !== "whatsapp") {
+    throw new OperationError("invalid_params", "--pair is supported only for Telegram and WhatsApp.");
+  }
+  if (options.pair && (options.sessionPath || options.sessionReady)) {
+    throw new OperationError("invalid_params", "--pair verifies its own session; do not combine it with session import flags.");
+  }
   if (options.apiKeyPrompt && options.apiKeyStdin) {
     throw new OperationError("invalid_params", "Choose either --api-key-prompt or --api-key-stdin, not both.");
   }
@@ -81348,6 +82759,8 @@ async function runConnect(args) {
     });
   }
   if (source === "telegram" || source === "whatsapp") {
+    if (options.pair)
+      return await runMessagingPairing(source, secretStore, options.registryPath);
     if (!options.sessionPath)
       throw new OperationError("invalid_params", "--session-path is required.");
     return connectGuidedSession({
@@ -81379,8 +82792,64 @@ async function runConnect(args) {
   }
   throw new OperationError("invalid_params", `Unsupported connect source: ${source}`);
 }
+async function runMessagingPairing(source, secretStore, registryPath) {
+  const policy = loadSovereigntyEngine().config;
+  if (policy.routes.secure_local?.mode === "disabled" || policy.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
+    throw new OperationError("invalid_params", "This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.");
+  }
+  let terminal;
+  try {
+    terminal = openSync9("/dev/tty", "r+");
+  } catch {
+    throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
+  }
+  const tell = (text) => writeSync2(terminal, text);
+  try {
+    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
+`);
+    const paired = await pairMessagingSource({
+      source,
+      packageRoot: olympusPackageRoot(),
+      ...secretStore ? { secretStore } : {},
+      ...registryPath ? { registryPath } : {},
+      whatsappQrMode: "terminal",
+      requestCaptureScope: async ({ chats }) => {
+        if (source === "telegram") {
+          if (chats.length === 0) {
+            tell(`No chats were available to select. Nothing will be captured.
+`);
+            return;
+          }
+          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "")}
+`));
+          const answer2 = await readSecretFromTerminal("Choose chat numbers separated by commas, or type CANCEL (input hidden): ");
+          if (answer2.trim().toUpperCase() === "CANCEL")
+            return;
+          const indices = answer2.split(",").map((value) => Number(value.trim()) - 1);
+          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
+            throw new OperationError("invalid_params", "Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.");
+          }
+          return { source: "telegram", explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index].chatScope))] };
+        }
+        tell(`WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.
+`);
+        const answer = await readSecretFromTerminal("Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ");
+        return answer.trim() === "ALL" ? { source: "whatsapp", explicitApproval: true, wholeAccount: true } : undefined;
+      }
+    });
+    if (!paired.registered)
+      return paired;
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
+    tell(`Pairing and scope verified. Restarting the managed Olympus worker to start capture.
+`);
+    const activation = runWorkerLifecycle("restart");
+    return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : "Pairing is saved. Ask your agent to repair the managed worker before capture can start." };
+  } finally {
+    closeSync9(terminal);
+  }
+}
 function parseConnectOptions(args) {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false };
+  const options = { detach: false, noOpen: false, sessionReady: false, pair: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false };
   for (let index = 0;index < args.length; index += 1) {
     const arg = args[index];
     if (!arg)
@@ -81442,6 +82911,9 @@ function parseConnectOptions(args) {
         break;
       case "--session-path":
         options.sessionPath = nextValue();
+        break;
+      case "--pair":
+        options.pair = true;
         break;
       case "--session-ready":
         options.sessionReady = true;

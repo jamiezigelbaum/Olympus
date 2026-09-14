@@ -1,3 +1,4 @@
+import { MODEL_SETUP_CSS, renderModelSetup } from '../model-setup.ts';
 import { SETUP_JOURNEY_CSS } from '../static-styles.ts';
 export { SETUP_JOURNEY_CSS };
 /**
@@ -96,7 +97,11 @@ export function renderDashboardSetupPage(
   const grouped = groupSources(view.sources, degraded);
   const pilotNote = renderGooglePilotNote(view);
   const sections = SETUP_GROUPS
-    .map((group) => renderGroup(group, grouped[group.id], degraded, options?.basePath))
+    .map((group) => {
+      const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath);
+      return group.id === 'not_connected' && view.model_setup && !view.model_setup.ready && rendered
+        ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
+    })
     .filter((section) => section.length > 0);
   const body = [
     renderDashboardNav('setup', {
@@ -108,6 +113,8 @@ export function renderDashboardSetupPage(
         : '')
       : dashboardControlGate({ connected: options?.controlSessionCsrfToken !== undefined }),
     renderSetupSummary(view),
+    renderModelSetup(view.model_setup),
+    '<div class="sect">Sources</div>',
     // Above every Google row, because Google raises its unverified-app screen
     // only after the reader has already pressed Connect.
     ...(pilotNote ? [pilotNote] : []),
@@ -138,7 +145,7 @@ export function renderDashboardSetupPage(
       unlocked: options?.controlSessionCsrfToken !== undefined,
       ...(options?.controlSessionCsrfToken === undefined ? {} : { controlSessionCsrfToken: options.controlSessionCsrfToken }),
     },
-    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS],
+    styles: [DASHBOARD_NAV_CSS, SETUP_JOURNEY_CSS, MODEL_SETUP_CSS],
     ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }

@@ -23,7 +23,7 @@ describe('first-run docs', () => {
     expect(docs).toContain('olympus setup --preset no-sensitive --yes --dry-run');
     expect(docs).toContain('olympus sensitivity validate');
     expect(docs).toContain('olympus connect google --client-id <google-oauth-client-id>');
-    expect(docs).toContain('olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready');
+    expect(docs).toContain('olympus connect telegram --pair');
     expect(docs).toContain("printf '%s' \"$VENICE_API_KEY\" | olympus connect venice --api-key-stdin");
     expect(docs).toContain('Private answers are served by the approved Venice');
     expect(docs).not.toContain('E2EE secure-answer ids remain gated until');
@@ -46,7 +46,7 @@ describe('first-run docs', () => {
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
-    expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    expect(install).toContain('Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).');
     expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
     expect(install).not.toContain('Ask which sources they want now');
     expect(install).toContain('Keep the selected Olympus dashboard open as the operator-facing progress view.');
@@ -96,8 +96,8 @@ describe('first-run docs', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
     for (const [doc, steps] of [
-      [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Optional source setup', '## Step 7 — Verify the chosen source']],
-      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Optionally connect a source', '## 6. Verify a cited answer']],
+      [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Finish installation: dashboard handoff', '## Step 7 — Verify the chosen source']],
+      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Open your dashboard and optionally connect sources', '## 6. Verify a cited answer']],
     ] as const) {
       const positions = steps.map((step) => doc.indexOf(step));
       expect(positions.every((position) => position > 0)).toBe(true);
@@ -156,7 +156,7 @@ describe('first-run docs', () => {
   test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
     const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
-    const dashboardStep = quickstart.indexOf('## 5. Optionally connect a source');
+    const dashboardStep = quickstart.indexOf('## 5. Open your dashboard and optionally connect sources');
 
     expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
     expect(dashboardStep).toBeGreaterThan(0);
@@ -209,6 +209,8 @@ function relativeMarkdownLinks(markdown: string): Array<{ href: string; path: st
   const links: Array<{ href: string; path: string }> = [];
   for (const match of markdown.matchAll(/!?\[[^\]\n]*\]\(([^)\n]+)\)/g)) {
     const href = match[1]!.trim();
+    // This required response template is replaced with a verified URL at handoff.
+    if (href === '<verified-dashboard-url>') continue;
     if (isExternalOrAnchorHref(href)) continue;
     links.push({ href, path: href.split('#')[0]! });
   }

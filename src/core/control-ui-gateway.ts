@@ -380,11 +380,15 @@ export function parseDashboardControlParams(value: unknown): OlympusDashboardCon
     const record = exactRecord(outer, ['action', 'source']);
     return { action, source: enumValue(record.source, OAUTH_CALLBACK_SOURCES, 'source') };
   }
+  if (action === 'check_model_setup') {
+    exactRecord(outer, ['action']);
+    return { action };
+  }
   if (action === 'connect_api_key') {
     const record = exactRecord(outer, ['action', 'source', 'api_key']);
     return {
       action,
-      source: enumValue(record.source, ['venice', 'readwise'] as const, 'source'),
+      source: enumValue(record.source, ['gemini', 'venice', 'readwise'] as const, 'source'),
       api_key: boundedString(record.api_key, 8_192, 'api_key', false),
     };
   }
@@ -655,6 +659,8 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
       };
     case 'cancel_oauth':
       return { path: '/dashboard/connect/oauth/cancel', body: { source: params.source } };
+    case 'check_model_setup':
+      return { path: '/dashboard/models/check', body: {} };
     case 'connect_api_key':
       return { path: '/dashboard/connect/api-key', body: { source: params.source, api_key: params.api_key } };
     case 'sync_now':

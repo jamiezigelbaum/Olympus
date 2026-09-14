@@ -48,7 +48,7 @@ describe('pilot installation entry points', () => {
   test('the agent guide requires provider readiness before source Connect', () => {
     const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const receipt = document.indexOf('**Pre-source completion receipt — mandatory before inviting Connect.**');
-    const handoff = document.indexOf('> Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    const handoff = document.indexOf('> Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).');
     expect(receipt).toBeGreaterThan(0);
     expect(receipt).toBeLessThan(handoff);
     const section = document.slice(receipt, handoff);
@@ -63,5 +63,10 @@ describe('pilot installation entry points', () => {
     expect(section).toContain('Skipped');
     expect(section).toContain('key being present');
     expect(section).toContain('keep source Connect unopened');
+    expect(document).toContain('Connecting sources is optional;');
+    expect(document).toContain('the dashboard handoff is required');
+    expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
+    expect(document).toContain('**Background** to monitor syncing, extraction, and embeddings');
+    expect(document).toContain('Come back here if you have any');
   });
 });

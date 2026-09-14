@@ -1,3 +1,4 @@
+import type { ModelSetupView } from '../core/model-setup.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -174,6 +175,7 @@ export interface DashboardAdvancedByoInstructions {
 }
 
 export interface SourceDashboardViewModel {
+  model_setup?: ModelSetupView;
   kind: 'source_dashboard';
   generated_at: string;
   degraded_credentials?: WorkerCredentialDegradation[];
@@ -948,9 +950,9 @@ export type DashboardSourceAction =
  */
 export function dashboardGuidedSessionAgentPrompt(source: 'telegram' | 'whatsapp'): string {
   if (source === 'telegram') {
-    return 'Connect Telegram to Olympus using the supported pairing flow. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.';
+    return 'Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.';
   }
-  return 'Connect WhatsApp to Olympus using the supported QR pairing flow. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.';
+  return 'Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.';
 }
 
 export interface SourceDashboardHistory {
@@ -989,6 +991,7 @@ export interface SourceDashboardHistorySample {
 }
 
 export interface SourceDashboardBuildOptions {
+  modelSetup?: ModelSetupView;
   sourceIndexStatus: SourceIndexStatusResult;
   ingestionLedger?: SourceIngestionLedgerSnapshot;
   schedulerStatus?: SourceSchedulerStatus;
@@ -1951,6 +1954,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
 
   return {
     kind: 'source_dashboard',
+    ...(options.modelSetup ? { model_setup: options.modelSetup } : {}),
     generated_at: now.toISOString(),
     ...(degradedCredentials.length
       ? { degraded_credentials: degradedCredentials }
@@ -3045,7 +3049,8 @@ function connectionStateFromDefinition(
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
     return {
       state: 'waiting_for_first_sync',
-      label: 'connected, waiting for first sync',
+      label: definition.source_id === 'whatsapp.personal.messages'
+        ? 'connected · waiting for new messages' : 'connected, waiting for first sync',
       action,
       handles: handleIds,
       ...connectedAt,

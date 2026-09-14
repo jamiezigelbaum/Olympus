@@ -1,3 +1,5 @@
+import { ModelSetupService } from '../src/core/model-setup.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 // Local design-iteration harness for the source dashboard.
 // Serves renderDashboardHtmlRoute with fixture data in three states so the
 // pages can be audited in a real browser without a live worker or real
@@ -27,7 +29,7 @@ import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { buildSourceDashboardViewModel, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
@@ -236,7 +238,12 @@ function connectPreview(
   });
 }
 
-export function buildDashboardPreviewView(state: string) {
+export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'models') {
+    const view = buildDashboardPreviewView('fresh');
+    view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'missing' }).getStatus();
+    return view;
+  }
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -485,7 +492,7 @@ if (import.meta.main) {
       || /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];

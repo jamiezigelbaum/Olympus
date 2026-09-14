@@ -92,7 +92,7 @@ export interface OlympusDashboardReadResult {
 }
 
 export type OlympusDashboardOAuthSource = 'gmail' | 'google-drive' | 'dropbox' | 'x';
-export type OlympusDashboardApiKeySource = 'venice' | 'readwise';
+export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'readwise';
 export type OlympusDashboardSyncSource = 'gmail' | 'google-drive' | 'dropbox' | 'x' | 'readwise';
 export type OlympusDashboardSourceId =
   | 'gmail.email'
@@ -111,6 +111,7 @@ export interface OlympusSourceDispositionEdit {
 }
 
 export type OlympusDashboardControlParams =
+  | { action: 'check_model_setup' }
   | {
       /** Standalone browser transport for the same read-only native RPC action. */
       action: 'browse_folder_scope';

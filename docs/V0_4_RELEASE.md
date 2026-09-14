@@ -27,6 +27,25 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-14 — Approved setup feedback batch.** Base activation hands off a
+  working Setup link. Models appears first, with Gemini/Venice key entry and
+  automatic managed-worker credential application. Required profiles follow
+  the selected privacy policy; new source controls stay gated until ready.
+  Local models are existing servers only, configured with agent assistance and
+  checked explicitly using synthetic input; Olympus installs or maintains no
+  model runtime. Completed connections update their controls immediately and
+  request first sync without waiting for a full import. Telegram/WhatsApp must
+  have packaged, verified private pairing and explicit capture scope before
+  this beta is sent; missing-helper wording alone does not satisfy this scope.
+
+- **2026-09-14 — Installation completion includes dashboard handoff.** The
+  final reply must contain a verified operator-reachable dashboard link,
+  instructions for connecting sources in Setup and monitoring them in Home
+  and Background, and an invitation to return to chat for help. This applies
+  after restart/resume too. Connecting sources remains optional; the handoff
+  is required. Setup output marks its static URL as worker-local and keeps
+  the operator handoff explicitly pending.
+
 - **2026-09-13 — Tier and setup terminology.** Display Public, Personal
   (formerly Private), Private (formerly Secure), and Secrets throughout the
   current product and setup guidance. Use Local models with Venice fallback,

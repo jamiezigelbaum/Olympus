@@ -56,6 +56,10 @@ describe('olympus setup wizard', () => {
       expect(result.unmet_prerequisites.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
       expect(result.worker.authTokenRef).toBe('worker.env:OLYMPUS_WORKER_AUTH_TOKEN');
       expect(result.dashboard.url).toBe('http://127.0.0.1:8010/dashboard');
+      expect(result.dashboard.url_scope).toBe('worker_local');
+      expect(result.dashboard.handoff_required).toBe(true);
+      expect(result.dashboard.next).toContain('operator-reachable dashboard link');
+      expect(result.dashboard.next).toContain('Background monitors');
       expect(existsSync(sovereigntyPath)).toBe(true);
       expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8')).routes.secure_local.mode).toBe('disabled');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=test-worker-token');
@@ -175,7 +179,7 @@ describe('olympus setup wizard', () => {
         kind: 'env_secret',
         // An export in the operator's shell never reaches the launchd worker,
         // so the remedy names the command that writes the key into worker.env.
-        remedy: 'olympus connect gemini --api-key-prompt',
+        remedy: 'Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt',
       }]);
 
       const present = await runIsolatedSetupWizard({

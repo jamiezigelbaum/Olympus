@@ -1,6 +1,9 @@
 import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
+import { olympusPackageRoot } from './core/package-root.ts';
+import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
+import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { loadConfig } from './core/config.ts';
@@ -47,6 +50,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
@@ -468,7 +472,7 @@ function printHelp(): void {
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
-  console.log('  olympus connect telegram|whatsapp --session-path <path>');
+  console.log('  olympus connect telegram|whatsapp --pair');
   console.log('  olympus connect venice|readwise --api-key-prompt');
   console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
@@ -496,8 +500,8 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
   'connect dropbox': 'olympus connect dropbox --client-id <id>',
-  'connect telegram': 'olympus connect telegram --session-path <path>',
-  'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
+  'connect telegram': 'olympus connect telegram --pair',
+  'connect whatsapp': 'olympus connect whatsapp --pair',
   'connect venice': 'olympus connect venice --api-key-prompt',
   'connect readwise': 'olympus connect readwise --api-key-prompt',
   'connect gemini': 'olympus connect gemini --api-key-prompt',
@@ -565,7 +569,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]',
     '  olympus connect dropbox --client-id <id>',
-    '  olympus connect telegram|whatsapp --session-path <path>',
+    '  olympus connect telegram|whatsapp --pair',
     '  olympus connect venice|readwise --api-key-prompt',
     '  olympus connect gemini --api-key-prompt',
   ],
@@ -1037,7 +1041,7 @@ async function runConnect(args: string[]): Promise<unknown> {
       usage: [
         'olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
-        'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
+        'olympus connect telegram|whatsapp --pair',
         'olympus connect venice|readwise --api-key-prompt',
         'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
@@ -1070,6 +1074,12 @@ async function runConnect(args: string[]): Promise<unknown> {
   const source = rawSource as ConnectSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.pair && source !== 'telegram' && source !== 'whatsapp') {
+    throw new OperationError('invalid_params', '--pair is supported only for Telegram and WhatsApp.');
+  }
+  if (options.pair && (options.sessionPath || options.sessionReady)) {
+    throw new OperationError('invalid_params', '--pair verifies its own session; do not combine it with session import flags.');
+  }
   if (options.apiKeyPrompt && options.apiKeyStdin) {
     throw new OperationError('invalid_params', 'Choose either --api-key-prompt or --api-key-stdin, not both.');
   }
@@ -1144,6 +1154,7 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'telegram' || source === 'whatsapp') {
+    if (options.pair) return await runMessagingPairing(source, secretStore, options.registryPath);
     if (!options.sessionPath) throw new OperationError('invalid_params', '--session-path is required.');
     return connectGuidedSession({
       source,
@@ -1179,6 +1190,54 @@ async function runConnect(args: string[]): Promise<unknown> {
   throw new OperationError('invalid_params', `Unsupported connect source: ${source}`);
 }
 
+async function runMessagingPairing(
+  source: 'telegram' | 'whatsapp',
+  secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
+  registryPath?: string,
+): Promise<unknown> {
+  const policy = loadSovereigntyEngine().config;
+  if (policy.routes.secure_local?.mode === 'disabled' || policy.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+    throw new OperationError('invalid_params', 'This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.');
+  }
+  let terminal: number;
+  try { terminal = openSync('/dev/tty', 'r+'); }
+  catch { throw new OperationError('invalid_params', 'Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.'); }
+  const tell = (text: string) => writeSync(terminal, text);
+  try {
+    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    const paired = await pairMessagingSource({
+      source,
+      packageRoot: olympusPackageRoot(),
+      ...(secretStore ? { secretStore } : {}),
+      ...(registryPath ? { registryPath } : {}),
+      whatsappQrMode: 'terminal',
+      requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
+        if (source === 'telegram') {
+          if (chats.length === 0) { tell('No chats were available to select. Nothing will be captured.\n'); return undefined; }
+          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '')}\n`));
+          const answer = await readSecretFromTerminal('Choose chat numbers separated by commas, or type CANCEL (input hidden): ');
+          if (answer.trim().toUpperCase() === 'CANCEL') return undefined;
+          const indices = answer.split(',').map((value) => Number(value.trim()) - 1);
+          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
+            throw new OperationError('invalid_params', 'Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.');
+          }
+          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index]!.chatScope))] };
+        }
+        tell('WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.\n');
+        const answer = await readSecretFromTerminal('Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ');
+        return answer.trim() === 'ALL' ? { source: 'whatsapp', explicitApproval: true, wholeAccount: true } : undefined;
+      },
+    });
+    if (!paired.registered) return paired;
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
+    tell('Pairing and scope verified. Restarting the managed Olympus worker to start capture.\n');
+    const activation = runWorkerLifecycle('restart');
+    return { ...paired, captureStarted: false, captureActivation: activation.ok ? 'requested' : 'needs_attention', next: activation.ok
+      ? 'Open this source in the Olympus dashboard to monitor capture and initial indexing.'
+      : 'Pairing is saved. Ask your agent to repair the managed worker before capture can start.' };
+  } finally { closeSync(terminal); }
+}
+
 function parseConnectOptions(args: string[]): {
   clientId?: string;
   clientSecret?: string;
@@ -1198,10 +1257,11 @@ function parseConnectOptions(args: string[]): {
   secretStoreKeyPath?: string;
   sessionPath?: string;
   sessionReady: boolean;
+  pair: boolean;
   apiKeyStdin: boolean;
   apiKeyPrompt: boolean;
 } {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
+  const options = { detach: false, noOpen: false, sessionReady: false, pair: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -1262,6 +1322,9 @@ function parseConnectOptions(args: string[]): {
         break;
       case '--session-path':
         options.sessionPath = nextValue();
+        break;
+      case '--pair':
+        options.pair = true;
         break;
       case '--session-ready':
         options.sessionReady = true;

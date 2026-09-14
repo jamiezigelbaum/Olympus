@@ -157,7 +157,7 @@ describe('OAuth browser handoff', () => {
     expect(popupAttempts).toBe(0);
     expect(messages).toEqual([{ type: 'open-link', url: authorizationUrl, target: 'external' }]);
     expect(root.querySelector('[data-action-message]')?.textContent)
-      .toBe('Authorization opened in your default browser. Approve it there, then come back to Olympus.');
+      .toBe('Authorization opened in your default browser. Approve it there, then come back to Olympus — this card updates when the connection completes.');
     expect(root.textContent).not.toContain(authorizationUrl);
     expect(root.querySelector('[data-authorization-fallback] a')).toBeNull();
     controller.dispose();
@@ -395,7 +395,278 @@ describe('OAuth browser handoff', () => {
   });
 });
 
+describe('control submit state', () => {
+  function keyFormRoot(): {
+    root: HTMLDivElement;
+    form: HTMLFormElement;
+    key: HTMLInputElement;
+    submit: HTMLButtonElement;
+  } {
+    const root = document.createElement('div');
+    root.innerHTML = '<button type="button" data-sheet-toggle="#connect-readwise" aria-expanded="true">Reauthenticate</button>'
+      + '<div class="sheet on" id="connect-readwise" aria-hidden="false">'
+      + '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
+      + '<input name="api_key" type="password"><button type="submit">Connect</button>'
+      + '<span data-action-message></span></form></div>';
+    document.body.append(root);
+    return {
+      root,
+      form: root.querySelector<HTMLFormElement>('form[data-connect-kind="api_key"]')!,
+      key: root.querySelector<HTMLInputElement>('input[name="api_key"]')!,
+      submit: root.querySelector<HTMLButtonElement>('button[type="submit"]')!,
+    };
+  }
+
+  test('a focused Connect button still lands the accepted key and reads the authoritative card', async () => {
+    const { root, form, key, submit } = keyFormRoot();
+    key.value = 'sk-readwise-secret';
+    submit.focus();
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => ({ status: 200, body: { ok: true } }) },
+      navigate() {},
+      async refresh() {
+        reads += 1;
+        return result('<p id="connected">Readwise · Connected</p>', 'connected');
+      },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    expect(document.activeElement).toBe(submit);
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    // The form the request was made from is gone — and with it the secret —
+    // rather than a reset Connect row sitting under a "Done" sentence.
+    expect(reads).toBe(1);
+    expect(root.querySelector('#connected')?.textContent).toBe('Readwise · Connected');
+    expect(root.querySelector('.sheet.on')).toBeNull();
+    expect(root.querySelector('[data-sheet-toggle]')).toBeNull();
+    expect(root.querySelector('form[data-connect-kind="api_key"]')).toBeNull();
+    expect(document.activeElement).not.toBe(submit);
+    expect(root.innerHTML).not.toContain('sk-readwise-secret');
+    controller.dispose();
+  });
+
+  test('a successful key submit leaves an unrelated form’s unsaved typing alone', async () => {
+    const { root, form, key, submit } = keyFormRoot();
+    const other = document.createElement('form');
+    other.setAttribute('data-connect-kind', 'api_key');
+    other.innerHTML = '<input name="source" type="hidden" value="x"><input name="api_key" value="unsaved-client">'
+      + '<button type="submit">Connect</button>';
+    root.append(other);
+    const draft = other.querySelector<HTMLInputElement>('input[name="api_key"]')!;
+    key.value = 'sk-readwise-secret';
+    draft.value = 'typed-but-not-submitted';
+    draft.focus();
+    submit.focus();
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => ({ status: 200, body: { ok: true } }) },
+      navigate() {},
+      async refresh() { reads += 1; return result('<p id="connected">Readwise · Connected</p>', 'connected'); },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    // The submitted secret is cleared, the unreleased card is honest, and the
+    // unsaved input in the other form is neither replaced nor reset.
+    expect(key.value).toBe('');
+    expect(root.querySelector('[data-action-message]')?.textContent)
+      .toBe('Key accepted. This card updates when Olympus confirms the connection.');
+    expect(reads).toBe(0);
+    expect(root.querySelector('#connected')).toBeNull();
+    expect(submit.disabled).toBe(true);
+    expect(submit.textContent).toBe('Connected');
+    expect(key.hidden).toBe(true);
+    expect(draft.value).toBe('typed-but-not-submitted');
+    expect(root.contains(draft)).toBe(true);
+    controller.dispose();
+  });
+
+  test('a pending submit holds one transport call and states the work in progress', async () => {
+    const { root, form, key, submit } = keyFormRoot();
+    const calls: unknown[] = [];
+    let finish!: (value: OlympusDashboardControlResult) => void;
+    const pending = new Promise<OlympusDashboardControlResult>((resolve) => { finish = resolve; });
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async (params) => { calls.push(params); return pending; } },
+      navigate() {},
+      async refresh() { reads += 1; return result('<p id="connected">Readwise · Connected</p>', 'connected'); },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    key.value = 'sk-readwise-secret';
+    submit.focus();
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    expect(calls.length).toBe(1);
+    expect(submit.disabled).toBe(true);
+    expect(root.querySelector('[data-action-message]')?.textContent).toBe('Validating the key…');
+
+    // A repeated click while the request is outstanding is not a second act.
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    submit.click();
+    expect(calls.length).toBe(1);
+
+    finish({ status: 200, body: { ok: true } });
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(calls.length).toBe(1);
+    expect(reads).toBe(1);
+    controller.dispose();
+  });
+
+  test('a refused key reports the refusal, keeps the entry, and stays retryable', async () => {
+    const { root, form, key, submit } = keyFormRoot();
+    let attempts = 0;
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: {
+        control: async () => {
+          attempts += 1;
+          return attempts === 1
+            ? { status: 400, body: { ok: false, error: { message: 'That API key was refused.' } } }
+            : { status: 200, body: { ok: true } };
+        },
+      },
+      navigate() {},
+      async refresh() { reads += 1; return result('<p id="connected">Readwise · Connected</p>', 'connected'); },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    key.value = 'sk-refused';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(root.querySelector('[data-action-message]')?.textContent).toBe('That API key was refused.');
+    expect(submit.disabled).toBe(false);
+    expect(key.value).toBe('sk-refused');
+    expect(reads).toBe(0);
+    expect(root.textContent).not.toContain('Connected');
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(attempts).toBe(2);
+    expect(reads).toBe(1);
+    controller.dispose();
+  });
+
+  test('OAuth start waits for the provider and re-reads when the owner comes back', async () => {
+    const { root, form } = oauthFormRoot();
+    const popup = { opener: {}, location: { href: '' }, close() {} } as unknown as Window;
+    Object.defineProperty(window, 'open', { configurable: true, value: () => popup });
+    const authorizationUrl = 'https://accounts.google.com/o/oauth2/auth?state=oauth-state';
+    const bodies = [
+      result('<p id="pending">Gmail · Awaiting approval</p>', 'pending'),
+      result('<p id="connected">Gmail · Connected</p>', 'connected'),
+    ];
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => oauthResult(authorizationUrl) },
+      navigate() {},
+      async refresh() { return bodies[Math.min(reads++, bodies.length - 1)]; },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    // Starting the flow is not a connection: the card still says it is waiting.
+    expect(reads).toBe(1);
+    expect(root.querySelector('#pending')?.textContent).toBe('Gmail · Awaiting approval');
+    expect(root.textContent).not.toContain('Connected');
+
+    window.dispatchEvent(new Event('focus'));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(reads).toBe(2);
+    expect(root.querySelector('#connected')?.textContent).toBe('Gmail · Connected');
+    controller.dispose();
+  });
+
+  test('the same submit state holds when the native page mounts inside a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'
+      + '<input name="api_key" type="password"><button type="submit">Connect</button>'
+      + '<span data-action-message></span></form>';
+    const form = root.querySelector<HTMLFormElement>('form')!;
+    const key = root.querySelector<HTMLInputElement>('input[name="api_key"]')!;
+    const submit = root.querySelector<HTMLButtonElement>('button')!;
+    let reads = 0;
+    const controller = mountDashboardController({
+      root,
+      transport: { control: async () => ({ status: 200, body: { ok: true } }) },
+      navigate() {},
+      async refresh() {
+        reads += 1;
+        return result('<p id="connected">Readwise · Connected</p>', 'connected');
+      },
+      returnUrl: 'https://gateway.test/?view=setup',
+      canWrite: true,
+      signal: new AbortController().signal,
+      signature: 'old',
+      pollIntervalMs: 0,
+    });
+
+    key.value = 'sk-shadow-secret';
+    submit.focus();
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+
+    expect(reads).toBe(1);
+    expect(root.querySelector('#connected')?.textContent).toBe('Readwise · Connected');
+    expect(root.innerHTML).not.toContain('sk-shadow-secret');
+    controller.dispose();
+  });
+});
+
 describe('dashboard controller DOM lifetime', () => {
+  test('a focused copy button in a read-only agent sheet does not freeze connection updates', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<p id="source-state">Not connected</p><div id="pair-sheet" class="sheet on"><p>Run the pairing command</p><button id="copy-pair">Copy prompt</button></div>';
+    document.body.append(root);
+    root.querySelector<HTMLButtonElement>('#copy-pair')!.focus();
+    const controller = mountDashboardController({ root, canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0, signature: 'before',
+      transport: { control: async () => ({ status: 200, body: { ok: true } }) }, navigate() {},
+      returnUrl: 'https://gateway.test/?view=setup',
+      refresh: async () => result('<p id="source-state">Connected</p><div id="pair-sheet" class="sheet"><p>Run the pairing command</p><button id="copy-pair">Copy prompt</button></div>', 'after'),
+    });
+    await controller.refresh();
+    expect(root.querySelector('#source-state')?.textContent).toBe('Connected');
+    expect(root.querySelector('#pair-sheet')?.classList.contains('on')).toBe(true);
+    controller.dispose();
+  });
+
   test('a dirty draft survives refresh after any focus age and permission revoke/regrant', async () => {
     const root = document.createElement('div');
     root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="readwise">'

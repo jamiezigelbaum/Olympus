@@ -109,6 +109,8 @@ export interface SetupWizardResult {
   }>;
   dashboard: {
     url: string;
+    url_scope: 'worker_local';
+    handoff_required: true;
     next: string;
   };
 }
@@ -175,7 +177,7 @@ export function runSetupDependencyCheck(input: {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, 'telethon')),
       detail: 'Optional Telegram guided-session reader.',
-      repairHint: 'Install Python 3 and run python3 -m pip install telethon before connecting Telegram.',
+      repairHint: 'Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram.',
     }),
     dependencyFinding({
       id: 'go',
@@ -290,7 +292,9 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     connections,
     dashboard: {
       url: 'http://127.0.0.1:8010/dashboard',
-      next: 'Open Olympus in the OpenClaw Control UI (2026.9.2 with Custom plugin UI enabled), or run olympus dashboard for standalone access.',
+      url_scope: 'worker_local',
+      handoff_required: true,
+      next: 'Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Setup connects sources and scopes, Home shows readiness and attention, Background monitors syncing/extraction/embeddings. Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.',
     },
   };
 }

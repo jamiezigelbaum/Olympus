@@ -12,6 +12,26 @@ Read the current step in full before carrying it out. Immediately before an
 operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
 
+## Normal setup sequence
+
+Choose the privacy posture with the operator, activate the base worker, and
+open the dashboard's Setup page. Its **Models** section comes first: Gemini
+and Venice keys are entered there, and existing local models have an
+agent-assisted configuration starting point plus **Check readiness**. Missing
+model keys are expected at this stage; do not block the dashboard handoff or
+send browser users to terminal key commands. Source connections unlock only
+when the selected posture's model requirements are ready. Olympus does not
+install, download, or maintain local models.
+
+## Installation completion requires a dashboard handoff
+
+Every final installation reply, including a reply after a restart or a request
+such as "continue from Step 6", must include a clickable, operator-reachable
+Olympus dashboard link and instructions to connect and monitor sources there.
+Do not end with only "Step 6 is complete", health checks, CLI commands, or a
+statement that connecting sources is optional. Connecting sources is optional;
+the dashboard handoff is required. Follow Step 6 before declaring completion.
+
 ## Rule zero — the residue gate binds EVERY Olympus-touching action
 
 This rule binds every action that installs, updates, enables, re-enables,
@@ -677,7 +697,22 @@ answer "that's not indexed" honestly, and it is routed nowhere. Do not
 report it to the operator as a problem, and do not try to "fix" it by
 adding a lane they did not choose.
 
-## Step 3 — Prerequisites and secrets
+## Step 3 — Model setup in the dashboard
+
+For the normal browser flow, continue through base-worker and Gateway
+activation in Steps 4–5, then hand over the Setup link in Step 6. Do not require
+keys to be present before that link: the operator enters them in **Models**.
+Connect validates and stores the key privately. After all required keys are
+saved, the managed worker applies them automatically; wait for the Models
+cards to show Ready. Source buttons remain disabled until then. Local-model
+users choose **Connect existing local models**, follow the concrete agent
+prompt, and use **Check readiness** after their configuration is applied.
+
+### Headless credential fallback — only when explicitly chosen
+
+The remaining terminal/password-manager instructions in this step apply only
+when the operator chooses a headless workflow. They are not the normal browser
+installation path.
 
 **Code-block contract:** a code block in your message means exactly one
 thing to the operator — "copy this and run it yourself." Show one only
@@ -905,6 +940,11 @@ lanes only for `local-first`/`local-only` postures, in plain words
 ("your local model isn't reachable yet").
 
 ## Step 4 — Verify the worker
+
+Separate base activation from model readiness. A running worker and reachable
+dashboard are enough to hand over Models in Setup. Missing model credentials
+are pending dashboard work, not a reason to loop through terminal commands or
+reinstall. Source ingestion remains gated until Models is ready.
 
 **This step verifies; it does not install.** `olympus setup` in Step 2
 already registered the background service, wrote `worker.env`, AND started
@@ -1177,11 +1217,12 @@ The optional `integrations/hermes/ask-sources` adaptation may be copied to
 `hermes://mcp/install` link is published because current Hermes documentation
 does not define that handler, and no external catalog submission is authorized.
 
-## Step 6 — Optional source setup
+## Step 6 — Finish installation: dashboard handoff
 
-**Pre-source completion receipt — mandatory before inviting Connect.** Do not
-say "Setup is complete" or invite the operator to click a source's Connect
-button until this receipt is green. It proves that the selected posture's
+**Pre-source completion receipt — mandatory before inviting Connect.** This
+gate applies to source connections, not to opening the Models section. Always
+provide the Setup link after base activation, even when model keys are still
+missing. Do not invite a source Connect until Models is Ready. It proves that the selected posture's
 model/provider wiring is usable by the worker; it does not choose a source,
 and it does not require any source to be connected yet.
 
@@ -1226,16 +1267,25 @@ the observed facts:
 > source is connected yet, and I will wait to invite Connect until every
 > required provider check is green.
 
-Only after the receipt is green deliver the required handoff below.
+Deliver the dashboard handoff below after base activation. If Models is not
+ready, direct the operator to finish that section before connecting sources.
 
 **Base installation is complete before source choice.** Report the selected
 posture, model prerequisites, worker health, and successful plugin/tool and
 selected-dashboard activation from Steps 1–5. No connected source is required.
-Open the selected dashboard, then deliver this required user-facing handoff:
+Resolve and verify the selected dashboard as described below. The final reply
+must contain the actual clickable link, even if the dashboard is already open.
+Replace `<verified-dashboard-url>` with the real operator-facing address; never
+send the placeholder, a host-only loopback URL, or only a terminal command.
+Then deliver this required user-facing handoff:
 
-> Setup is complete. In the Olympus dashboard, connect the sources you use.
-> You can start with one and add others whenever you like. I'll help if any
-> connection needs extra setup.
+> Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).
+> In **Setup**, finish any required **Models** cards at the top. Then connect
+> the sources you want below and choose their scope.
+> Use **Home** to see source readiness and anything needing attention, and
+> **Background** to monitor syncing, extraction, and embeddings.
+> You can add more sources whenever you like. Come back here if you have any
+> trouble connecting a source or understanding its progress.
 
 Source selection happens in the dashboard. Do not turn all supported providers
 into a checklist, choose Gmail to satisfy a health hint, or add a chat question
@@ -1263,7 +1313,12 @@ Provider/model readiness and any required cost approval remain separate from
 permission to use selected folders.
 
 This candidate artifact includes native Control UI support. On OpenClaw
-**2026.9.2**, use **Olympus** in the Control UI sidebar. Native plugin pages need
+**2026.9.2**, use **Olympus** in the Control UI sidebar. For the final reply,
+resolve that page against the same Gateway origin the operator is actually
+using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
+not assume port 18789, reuse the agent host's localhost origin for a remote
+operator, or link only to the OpenClaw chat homepage. Verify that the page loads
+and exposes Setup, Home, and Background before handing it over. Native plugin pages need
 **Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
 managed procedure, and a browser reload. Explain this opt-in and obtain any
 uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
@@ -1488,10 +1543,32 @@ locally; never ask them to paste the raw token into chat. Venice still uses the
 approved API-key secret-entry path for the current environment when needed for
 the selected posture.
 
-Telegram/WhatsApp need local pairing helpers. If the dashboard card says to
-pair via your agent, use the existing helper for that source. Omit
-`--session-ready` until the operator has actually paired the session; Olympus
-records the handle as `reauth_required` until then.
+Telegram and WhatsApp use the packaged pairing commands below. The dashboard
+has **Ask your agent**, not a Connect/Pair button or a phone/code form. Never
+send the operator back to a nonexistent control or regenerate a dashboard link
+as a substitute for starting pairing.
+
+```bash
+olympus connect telegram --pair
+olympus connect whatsapp --pair
+```
+
+Run only the selected command in a private terminal the operator can actually
+use on the Olympus host. If your captured tool terminal is not accessible to
+them, give one complete SSH command with the correct host, account, and
+resolved Olympus executable. Do not ask for login codes, API hashes, or 2FA
+passwords in chat. Telegram uses the operator's own app API ID/hash from
+https://my.telegram.org, then phone/code/2FA entry; it needs Python with
+Telethon. WhatsApp needs Go and a C compiler for the packaged bridge build;
+the command builds into an Olympus cache, never into the managed plugin.
+WhatsApp shows a scannable QR in the private terminal. This guided pairing
+flow treats messaging as Private data; it refuses under Don't ingest Private
+data rather than capturing it outside that policy. Pairing is verified
+before the operator approves chat/account capture scope. The command then
+registers the verified session and starts capture through the managed worker.
+
+`--session-path` / `--session-ready` remain advanced imports of an already
+verified session. Never use them to skip the normal pairing proof.
 
 **QR delivery (WhatsApp): render the QR as a local PNG image file and show
 that image to the operator.** Do not paste terminal QR blocks or ASCII art
@@ -1569,7 +1646,8 @@ should be absent. Then show the operator Olympus in OpenClaw: source freshness
 and where Public, Personal, Private, and Secrets are allowed to go. Use
 `olympus dashboard` when standalone access is needed.
 
-Report to the operator: what was installed, the chosen posture, which
+End with the required Step 6 dashboard link and connect/monitor instructions.
+Also report what was installed, the chosen posture, which
 sources are connected, which prerequisites remain open, and the doctor
 summary. Report base installation and cited-answer proof separately. Explain every
 non-green doctor check; resolve required model or worker failures before

@@ -1,9 +1,27 @@
 # Sovereignty Configuration
 
 Status: active
-Updated: 2026-09-10
+Updated: 2026-09-14
 
 ## Agent-led model setup for the v0.4 beta
+
+After base activation, open **Setup → Models** in the Olympus dashboard.
+Enter the required Gemini/Venice keys there; Connect validates and saves them,
+and the managed worker applies them automatically. Models shows whether a key
+is missing, applying, ready, or needs attention. The requirements come from the
+active privacy policy, so local-only and no-sensitive do not demand Venice.
+Source connections stay unavailable until required model setup is ready.
+
+For local models, use **Connect existing local models** to start an
+agent-assisted workflow. Olympus connects to servers you already run; it does
+not install model software, download models, or maintain servers. Local means
+the machine hosting Olympus. After the agent applies the approved existing
+server configuration, **Check readiness** performs bounded synthetic chat and
+embedding checks against those loopback endpoints, including model IDs and
+runtime embedding dimensions. Dashboard polling does not repeat inference.
+
+The terminal credential commands below are a headless fallback, not the
+normal browser setup path.
 
 Use this guide with your own agent after the plugin is installed. The
 [Quickstart](QUICKSTART.md) covers installation; the
@@ -212,12 +230,10 @@ keyword-only operation honestly. No indexed data means no answer proof yet;
 leaving source setup for later is a valid completed base install. Do not choose
 Gmail or connect every source merely to make a readiness check green.
 
-The v0.4 dashboard handles source connections and shows progress/credential
-problems, but it has no complete model-account or embedding-configuration
-wizard. Full model setup in the dashboard is planned for v0.5. The registered
-defaults remove the missing-dimension startup failure for shipped models;
-custom model configuration and clean-install qualification still need their
-own proof. Do not repair testers' machines through undocumented edits.
+The dashboard handles model keys, existing-local-model readiness, source
+connections, and progress. Custom endpoint/model configuration remains
+agent-assisted; there is no model installer or arbitrary model picker. Keep
+existing model identities and vectors intact while connecting existing servers.
 
 ## Purpose
 
