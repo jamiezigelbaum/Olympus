@@ -400,6 +400,50 @@ describe('extraction runner: settlement comes from the source, never re-derived'
       }
     });
   }
+
+  test('keeps the known item MIME when a download reports a generic octet stream', async () => {
+    const jobs = jobStore();
+    const seen: Array<string | undefined> = [];
+    try {
+      jobs.enqueue({
+        refs: [
+          ref(1, { mimeType: 'application/pdf', name: 'one.pdf' }),
+          ref(2, { mimeType: 'application/pdf', name: 'two.pdf' }),
+        ],
+        extractorKind: FAKE_KIND,
+        extractorVersion: FAKE_VERSION,
+        policyDecision: 'index_allowed',
+      });
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({
+          async extract(input) {
+            seen.push(input.mimeType);
+            return { status: 'indexed', text: 'extracted text' };
+          },
+        })],
+        corpus: {
+          source: fakeSource({
+            async fetch(itemRef) {
+              return {
+                bytes: new TextEncoder().encode('bytes'),
+                mimeType: itemRef.providerItemId === 'item-1'
+                  ? 'application/octet-stream'
+                  : 'image/png',
+              };
+            },
+          }),
+        },
+      });
+
+      const result = await runner.run({ ...LANE });
+
+      expect(result.counts.indexed).toBe(2);
+      expect(seen.sort()).toEqual(['application/pdf', 'image/png']);
+    } finally {
+      jobs.close();
+    }
+  });
 });
 
 describe('extraction runner: empty output never reaches the sink', () => {

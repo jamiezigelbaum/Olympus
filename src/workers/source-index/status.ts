@@ -1,6 +1,9 @@
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
-import { ITEMS_WITH_TEXT_COUNT_KEY } from '../dashboard/answer-ready-coverage.ts';
+import {
+  ITEMS_WITH_TEXT_COUNT_KEY,
+  METADATA_ONLY_EXPECTED_COUNT_KEY,
+} from '../dashboard/answer-ready-coverage.ts';
 import {
   assessSourceIndexRetrievalState,
   type SourceIndexHybridAvailability,
@@ -11,6 +14,7 @@ import {
   type ConnectorStoreStatus,
   type ConnectorStoreSyncRun,
 } from '../connector-store/index.ts';
+import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import {
   defineGmailSecureLocalCorpus,
   defineGoogleDriveDocsCorpus,
@@ -126,6 +130,8 @@ export interface SourceIndexCorpusStatusBase {
 
 export interface SourceIndexConnectorStoreStatus extends SourceIndexCorpusStatusBase {
   configured: true;
+  /** Opaque approval revision binding these counts to one file-source scope. */
+  scope_revision?: string;
   counts: {
     indexed_items: number;
     tombstoned_items: number;
@@ -165,6 +171,8 @@ export interface SourceIndexStatusHandlerOptions {
   connectorStores?: LocalConnectorStore[];
   retrievalAvailability?: Readonly<Record<string, SourceIndexStatusRetrievalAvailability | undefined>>;
   readinessLedger?: SourceIndexReadinessLedger;
+  /** Dynamic trusted scope for store counts; absent preserves whole-store status. */
+  connectorStoreStatusScope?: (store: LocalConnectorStore) => ConnectorStoreStatusScope | undefined;
   nowMs?: () => number;
 }
 
@@ -222,6 +230,7 @@ export function createSourceIndexStatusHandler(
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
       const statuses = corpora.map((corpus) => {
         const store = storesByCorpusId.get(corpus.corpusId);
+        const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
         // Availability is resolved BEFORE the cache is consulted and is part of
         // the key: the embedded counts are a claim about the serving model, so
@@ -243,6 +252,7 @@ export function createSourceIndexStatusHandler(
             availability.reason ?? null,
             availability.backend ?? null,
           ],
+          statusScope ?? null,
         ]);
         const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
         if (cached && nowMs() - cached.recordedAtMs <= maxAgeMs) return cached.status;
@@ -256,7 +266,7 @@ export function createSourceIndexStatusHandler(
         const status = store
           ? connectorStoreStatus(
             corpus,
-            store.status(),
+            store.status(statusScope),
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
@@ -374,12 +384,14 @@ function connectorStoreStatus(
   return {
     ...baseStatus(corpus),
     configured: true,
+    ...(status.scopeRevision ? { scope_revision: status.scopeRevision } : {}),
     counts: {
       // The ledger's vocabulary first, so the read authority's own facts below
       // always win a collision. What the store holds is never the ledger's
       // answer to give.
       ...readinessCounts,
-      indexed_items: status.counts.items,
+      indexed_items: status.counts.files ?? status.counts.items,
+      ...(status.counts.folders === undefined ? {} : { folders: status.counts.folders }),
       tombstoned_items: status.counts.tombstonedItems,
       chunks: status.counts.chunks,
       embedded_chunks: forModel?.embeddedChunks ?? status.counts.embeddedChunks,
@@ -389,6 +401,25 @@ function connectorStoreStatus(
       // it to the gated ledger is what let an ungated status answer with no
       // per-item readiness at all.
       [ITEMS_WITH_TEXT_COUNT_KEY]: status.counts.itemsWithText,
+      ...(status.counts.fullIngestionFiles === undefined
+        ? {}
+        : { scope_full_ingestion_files: status.counts.fullIngestionFiles }),
+      ...(status.counts.scopeMetadataOnlyFiles === undefined
+        ? {}
+        : { scope_metadata_only_files: status.counts.scopeMetadataOnlyFiles }),
+      ...(status.counts.policyDeferredItems === undefined
+        ? {}
+        : { scope_policy_deferred_files: status.counts.policyDeferredItems }),
+      ...(status.counts.contentEligibleItems === undefined
+        ? {}
+        : { qa_eligible_items: status.counts.contentEligibleItems }),
+      ...(status.counts.scopeMetadataOnlyFiles === undefined
+        || status.counts.policyDeferredItems === undefined
+        ? {}
+        : {
+            [METADATA_ONLY_EXPECTED_COUNT_KEY]:
+              status.counts.scopeMetadataOnlyFiles + status.counts.policyDeferredItems,
+          }),
       // The per-item parity gauge the dashboard's embedding bar divides in
       // files: published only against a known serving model.
       ...(forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded }),

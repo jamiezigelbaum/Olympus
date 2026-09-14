@@ -7,10 +7,6 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
 import { createEmailTransport, EmailClient } from '../core/email.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { createFileDeliveryTransport, FileDeliveryClient } from '../core/file-delivery.ts';
-import { createCastorWorkspaceTransport, CastorWorkspaceClient } from '../core/castor-workspace.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import { shouldExposeOperation } from '../core/operation-exposure.ts';
 import { findOperationByName, operations, OperationError } from '../core/operations.ts';
 import type { OperationContext } from '../core/operations.ts';
@@ -37,7 +33,7 @@ export async function handleMcpCallTool(
     throw new OperationError(
       'invalid_params',
       `Olympus operation is not available on this MCP surface: ${operation.name}`,
-      'Enable the matching product or operator configuration for this Olympus surface.',
+      'Enable the matching product configuration for this Olympus surface.',
     );
   }
   const result = await operation.handler(ctx, request.params.arguments ?? {});
@@ -83,9 +79,5 @@ function makeContext(): OperationContext {
     config,
     delphi: new DelphiClient(config, createDelphiTransport(config)),
     email: new EmailClient(config, createEmailTransport(config)),
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
-    castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   };
 }

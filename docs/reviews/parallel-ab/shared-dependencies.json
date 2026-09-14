@@ -1,0 +1,23 @@
+{
+  "kind": "olympus_ab_shared_dependency_receipt",
+  "observedAt": "2026-09-07T23:38:17.525308+00:00",
+  "bunVersion": "1.3.8",
+  "mainNodeModulesIsSymlink": true,
+  "bothArmsResolveToSameDependencyDirectory": true,
+  "dependencyOwner": "parallel/node_modules",
+  "installation": "Candidate bun.lock, bun install --frozen-lockfile --ignore-scripts; main/node_modules linked to it before prepare or model calls.",
+  "measuredEntries": 4145,
+  "inventorySha256": "d838271dce008925a03dffc542f761ebcef76ef114aba4416cf486e28bbed79e",
+  "digestMethod": "JSON array sorted by relative path, each entry [path, file, SHA256] or [path, symlink, link target], compact UTF-8 JSON.",
+  "sourceInputs": {
+    "main": {
+      "package.json": "730df13bec52c01eb2e14d5b0eb26617dfd85bdd4a7f48afa854c50cfac13e79",
+      "bun.lock": "e01b6cdc19981ef1e2b81b973aa68264b9127439ffced4bed2eeb5489e7a84b4"
+    },
+    "parallel": {
+      "package.json": "7e8b3a64b4cde7cae38c322c09ecf16d0a7a4b93859bb3acb928a48f62505d88",
+      "bun.lock": "4d7918bb630ef5e821187a288151ca31e0d5493c5493ab91aa6cfca4b73f09bd"
+    }
+  },
+  "scope": "The model comparison controls dependency runtime by sharing the candidate dependency tree. It is not an independent locked-dependency installation proof for each source tree. Separate packaged-host tests used their independently built artifacts."
+}

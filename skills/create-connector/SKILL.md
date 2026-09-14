@@ -227,10 +227,10 @@ Two distinct behaviors, both present in the repo — pick the right one:
 - [ ] Add a row to `SOURCE_CORPUS_REGISTRY` in
       `src/core/source-corpus-registry.ts`: `corpusId`, `sourceId`, `provider`,
       `family`, `trustDomain`, `activationMode`, `capabilities`, `description`.
-- [ ] Add a posture row to `OLYMPUS_SOURCE_FAMILY_POSTURES` in
-      `src/core/source-family.ts` (status, ingest mode, custodian, packet
-      kinds, credential kinds, Castor evidence forms, write posture). This is
-      the executable posture registry `docs/SOURCE_FAMILIES.md` points at.
+- [ ] When the source joins the supported product roster, add its authentication,
+      dependencies, scope, format support, and provider limits to
+      `src/core/public-source-capabilities.ts`. Keep the public source IDs and
+      qualification matrix aligned with that declared support.
 - [ ] Choose the corpus definition helper:
   - `defineConnectorCorpus({corpusId, family, trustDomain, activationMode})`
     from `src/workers/connector-store/` — the generic path, defaults to

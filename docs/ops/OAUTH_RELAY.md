@@ -22,8 +22,7 @@ and the routes in `src/workers/email-source/index.ts`. It satisfies
 
 | Source | Dashboard origin | Client | `redirect_uri` | `state` |
 |---|---|---|---|---|
-| `gmail`, `google-drive` | loopback | packaged Google **Desktop** pilot client | `http://127.0.0.1:<port>/oauth/callback/<source>` | random |
-| `gmail`, `google-drive` | anything else | publisher Google **Web** client | the relay URL | signed |
+| `gmail`, `google-drive` | any, including HTTP/HTTPS `localhost`, `127.0.0.1`, and `[::1]` | publisher Google **Web** client | the relay URL | signed |
 | `dropbox` | any | publisher Dropbox app key | the relay URL | signed |
 | `x` | any | bring-your-own | the dashboard's own callback | random |
 
@@ -49,10 +48,12 @@ Two rules decide this, and both are enforced in `dashboardPublisherOAuthFlow`:
   the moment it needed reauthentication, sending the dashboard-origin
   callback where Dropbox had only ever registered the relay (Codex round 3 on
   e75598f7).
-- **Google on loopback keeps the loopback redirect.** A Desktop app client
-  cannot register an https redirect URI, so the pilot client cannot use the
-  relay — and does not need to: a loopback callback reaches the worker directly.
-  Same publisher app, no relay, no signed state.
+- **Publisher Google always uses the Web client, relay, and publisher
+  exchange.** This includes HTTP and HTTPS loopback dashboards on `localhost`,
+  `127.0.0.1`, and `[::1]`. The Desktop pilot identity is not the publisher
+  dashboard route: using it sent the code directly to Google's token endpoint,
+  where the existing Desktop registration was refused without its client
+  secret. One Web-client path keeps that secret only at the publisher exchange.
 
 Both publisher apps ship **filled in**. Dropbox: the owner created the
 "Olympus-Plugin" app 2026-09-03, registered both redirect URIs it needs (the
@@ -63,10 +64,10 @@ Publisher" Web-application client the same day, registered the relay as its
 one redirect URI, and its client id is `DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID`
 in the same file.
 
-The publisher-side token-exchange endpoint the Google web client needs
+The publisher-side token-exchange endpoint the Google Web client needs
 (`docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`) is built, DEPLOYED — verified live
-2026-09-03 — and wired into the worker: a non-loopback Google flow's token
-exchange and refresh go through it instead of straight to Google, with
+2026-09-03 — and wired into the worker: every publisher-mode Google flow's
+token exchange and refresh go through it instead of straight to Google, with
 `oauth2Refresh.exchangeVia: 'publisher_endpoint'` recorded on the resulting
 credential so refresh knows which path to use. Only the exchange leg moves —
 the relay contract, the state format, and the registered `redirect_uri` are
@@ -567,9 +568,9 @@ token.
 2. **Authorized redirect URIs**: add
    `https://auth.olympusplugin.ai/oauth/callback/`, exactly, trailing slash
    included. Google matches the string, not the path prefix (RFC 9700 §4.1.3).
-3. Keep the existing **Desktop app** client for the same-machine loopback flow.
-   A Desktop client cannot register an `https` redirect URI, so the two clients
-   coexist: Desktop for loopback, Web for the relay.
+3. Keep the existing **Desktop app** client only for legacy or explicitly
+   configured direct flows. New publisher dashboard connections use the Web
+   client and relay even when the dashboard is on loopback.
 4. OAuth consent screen: add `olympusplugin.ai` to **Authorized domains**. It is
    an ordinary registrable domain the owner controls, so verification is the
    normal Search Console flow — either the DNS TXT record (easiest, the zone is

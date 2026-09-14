@@ -2,39 +2,66 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { configFromPluginConfig, defaultConfig } from '../src/core/config.ts';
-import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
+import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport } from '../src/core/email.ts';
-import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
   unquoteEnvValue,
   workerAuthTokenFromConfig,
 } from '../src/core/worker-auth.ts';
-import { createCastorWorkspaceWorker } from '../src/workers/castor-workspace/index.ts';
-import { resolveCastorWorkspaceBindHostFromEnv } from '../src/workers/castor-workspace/server.ts';
 import {
   createEmailSourceWorker,
   type EmailSourceConnector,
   type EmailSourceHealth,
 } from '../src/workers/email-source/index.ts';
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
-import { createFileDeliveryWorker, type FileDeliveryRootPolicy } from '../src/workers/file-delivery/index.ts';
-import { resolveFileDeliveryBindHostFromEnv } from '../src/workers/file-delivery/server.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
 } from '../src/workers/http.ts';
 
 describe('worker HTTP bind and auth', () => {
+  test('trusts Gateway public-origin context only beside the worker bearer', async () => {
+    const seen: Array<string | null> = [];
+    const guarded = withWorkerBearerAuth(async (request) => {
+      seen.push(request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER));
+      return new Response('ok');
+    }, { authToken: 'worker-secret' });
+
+    // OAuth callbacks are public and state-authenticated, so a browser may
+    // reach them; its attempt to forge the internal Gateway origin is stripped.
+    await guarded(new Request('http://worker.test/oauth/callback/dropbox?code=c&state=s', {
+      headers: { [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://attacker.test' },
+    }));
+    await guarded(new Request('http://worker.test/oauth/callback/dropbox?code=c&state=s', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+    await guarded(new Request('http://worker.test/dashboard/ui', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'http://non-loopback.example',
+      },
+    }));
+    await guarded(new Request('http://worker.test/v1/private', {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+
+    expect(seen).toEqual([null, 'https://gateway.example', null, null]);
+  });
+
   test('every worker server binds loopback by default and honors the shared override', () => {
     const resolvers = [
       resolveEmailSourceBindHostFromEnv,
-      resolveFileDeliveryBindHostFromEnv,
-      resolveCastorWorkspaceBindHostFromEnv,
     ];
 
     for (const resolve of resolvers) {
@@ -446,16 +473,7 @@ describe('worker HTTP bind and auth', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: 'hello' }),
     });
-    await new DirectHttpFileDeliveryTransport(fetchImpl, token).requestJson('http://file.test/v1/file/deliver', {
-      method: 'POST',
-      body: '{}',
-    });
-    await new DirectHttpCastorWorkspaceTransport(fetchImpl, token).requestJson('http://workspace.test/v1/workspace', {
-      method: 'POST',
-      body: '{}',
-    });
-
-    expect(captured).toHaveLength(3);
+    expect(captured).toHaveLength(1);
     for (const request of captured) {
       expect(request.headers.get('Authorization')).toBe('Bearer client-secret');
       expect(await request.text()).not.toContain('client-secret');
@@ -595,16 +613,6 @@ function workerCases(): Array<{
   request: (token?: string) => Request;
   cleanup?: () => void;
 }> {
-  const fileRoot = mkdtempSync(join(tmpdir(), 'olympus-worker-auth-file-'));
-  const filePolicy: FileDeliveryRootPolicy = {
-    rootId: 'safe',
-    path: fileRoot,
-    allowedTrustDomains: ['internal'],
-    maxBytes: 1024,
-    allowParentCreate: true,
-    allowDotfiles: false,
-    allowOverwrite: false,
-  };
   const emailConnector = fakeEmailConnector();
   return [
     {
@@ -614,38 +622,7 @@ function workerCases(): Array<{
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       }),
     },
-    {
-      name: 'file-delivery',
-      fetch: createFileDeliveryWorker({ roots: [filePolicy] }).fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/file/deliver', {
-        root_id: 'safe',
-        relative_path: 'note.md',
-        content: 'hello',
-        write_mode: 'dry_run',
-        trust_domain: 'internal',
-        idempotency_key: 'auth-test',
-      }, token),
-      cleanup: () => rmSync(fileRoot, { recursive: true, force: true }),
-    },
-    {
-      name: 'castor-workspace',
-      fetch: createCastorWorkspaceWorker().fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/workspace', {
-        action: 'health',
-      }, token),
-    },
   ];
-}
-
-function jsonRequest(url: string, body: unknown, token?: string): Request {
-  return new Request(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
 }
 
 function fakeEmailConnector(): EmailSourceConnector {

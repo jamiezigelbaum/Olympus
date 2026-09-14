@@ -1,0 +1,162 @@
+{
+  "baseline": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+  "kind": "fixture_html_parity",
+  "total": 19,
+  "identical": 18,
+  "expected_differences": 1,
+  "results": [
+    {
+      "route": "/fresh",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "96d94b7730b7735bf607ef70c591af808ccba719b7c70cc320aafb142dabd55d",
+      "candidate_sha256": "96d94b7730b7735bf607ef70c591af808ccba719b7c70cc320aafb142dabd55d",
+      "identical": true
+    },
+    {
+      "route": "/partial",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "a10f8b13e561284e010e0a5180dde3450599df2d92a4a966e4184739c39ff4bc",
+      "candidate_sha256": "a10f8b13e561284e010e0a5180dde3450599df2d92a4a966e4184739c39ff4bc",
+      "identical": true
+    },
+    {
+      "route": "/full",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "778c145b9fd17ebb41dd8fa16600e3db8b39c47576c7a79590f6a62fdb6bfe19",
+      "candidate_sha256": "778c145b9fd17ebb41dd8fa16600e3db8b39c47576c7a79590f6a62fdb6bfe19",
+      "identical": true
+    },
+    {
+      "route": "/dropbox-initial",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "30c52e1ba0ebbd99869f7a54e4921df550a0ba145c788d0e7d849e5eea2a370f",
+      "candidate_sha256": "30c52e1ba0ebbd99869f7a54e4921df550a0ba145c788d0e7d849e5eea2a370f",
+      "identical": true
+    },
+    {
+      "route": "/dropbox-update",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "d4624ecf13a5d7e284e42d23ec003590e189c4f8ca5eb6afe545143f9b6d3c41",
+      "candidate_sha256": "d4624ecf13a5d7e284e42d23ec003590e189c4f8ca5eb6afe545143f9b6d3c41",
+      "identical": true
+    },
+    {
+      "route": "/fresh?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "96d94b7730b7735bf607ef70c591af808ccba719b7c70cc320aafb142dabd55d",
+      "candidate_sha256": "96d94b7730b7735bf607ef70c591af808ccba719b7c70cc320aafb142dabd55d",
+      "identical": true
+    },
+    {
+      "route": "/full?setup&controls=connected",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "510db1114917133be8623889d06a3da2346d6b703e64809532e1f1a3d45c46a1",
+      "candidate_sha256": "510db1114917133be8623889d06a3da2346d6b703e64809532e1f1a3d45c46a1",
+      "identical": true
+    },
+    {
+      "route": "/full?source=gmail.email",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "f8e3c6854bc056592954dac543eec925e684169ee08b04449ae572b7ed234fa4",
+      "candidate_sha256": "f8e3c6854bc056592954dac543eec925e684169ee08b04449ae572b7ed234fa4",
+      "identical": true
+    },
+    {
+      "route": "/full?source=google_drive.docs",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "45370b55f1f815e118099be3b473cb6a970ce0a8bbc7786d21252d8dc76e08ff",
+      "candidate_sha256": "45370b55f1f815e118099be3b473cb6a970ce0a8bbc7786d21252d8dc76e08ff",
+      "identical": true
+    },
+    {
+      "route": "/dropbox-initial?source=dropbox.files",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "a1b52513dec8ef3bc6096a3b0b7762b8f26d50189fedbff0b4ee172960b67c75",
+      "candidate_sha256": "a1b52513dec8ef3bc6096a3b0b7762b8f26d50189fedbff0b4ee172960b67c75",
+      "identical": true
+    },
+    {
+      "route": "/dropbox-update?source=dropbox.files",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "cffe01849e209cdd80262f0e64336fcbfddc9bbefc6584c481c130380803d948",
+      "candidate_sha256": "cffe01849e209cdd80262f0e64336fcbfddc9bbefc6584c481c130380803d948",
+      "identical": true
+    },
+    {
+      "route": "/full?background",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "87a6dbc33f72d9bac709030db6f3498b081ea55af0d295c853f6ba88c4a5e019",
+      "candidate_sha256": "6cb1b3fe849ab99dcb48e310a92777e663462965684a46b62f8f42650d75cfd3",
+      "identical": false,
+      "expected_private_link_removal": true
+    },
+    {
+      "route": "/connect-google?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "997659f8604a65e0311f0700295bab7f598f9d8bd91cf7660d9467d5d9059bc3",
+      "candidate_sha256": "997659f8604a65e0311f0700295bab7f598f9d8bd91cf7660d9467d5d9059bc3",
+      "identical": true
+    },
+    {
+      "route": "/connect-google-loopback?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "4d92db51330a35d965f2126d44800bb8252fdf77b2853dcdfc8977ddbc2c7ea5",
+      "candidate_sha256": "4d92db51330a35d965f2126d44800bb8252fdf77b2853dcdfc8977ddbc2c7ea5",
+      "identical": true
+    },
+    {
+      "route": "/connect-dropbox?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "9b90dbc420323874336ed80a05f0be2070fe379e2b1610473f4c8babab07518f",
+      "candidate_sha256": "9b90dbc420323874336ed80a05f0be2070fe379e2b1610473f4c8babab07518f",
+      "identical": true
+    },
+    {
+      "route": "/connect-x?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "e4430a6e30ca4fc74b0e97ddd9707c920de8a42b776a4b96f6f5df4ab38a0712",
+      "candidate_sha256": "e4430a6e30ca4fc74b0e97ddd9707c920de8a42b776a4b96f6f5df4ab38a0712",
+      "identical": true
+    },
+    {
+      "route": "/connect-dropbox-refused?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "5684e87cb568397ff9d249182060ed21e01f4091e163b8bd73f14af0856fc5a1",
+      "candidate_sha256": "5684e87cb568397ff9d249182060ed21e01f4091e163b8bd73f14af0856fc5a1",
+      "identical": true
+    },
+    {
+      "route": "/connect-dropbox-publisher?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "c03f045d286ff59b8aeaaa4c0714c72dc15f5e16e7de3f6773017e51eeb6dfc4",
+      "candidate_sha256": "c03f045d286ff59b8aeaaa4c0714c72dc15f5e16e7de3f6773017e51eeb6dfc4",
+      "identical": true
+    },
+    {
+      "route": "/connect-google-publisher?setup",
+      "baseline_status": 200,
+      "candidate_status": 200,
+      "baseline_sha256": "b060418d6a340b668902e05f7fad30a0ea2fcdea16b0e8ab9526358347fe9006",
+      "candidate_sha256": "b060418d6a340b668902e05f7fad30a0ea2fcdea16b0e8ab9526358347fe9006",
+      "identical": true
+    }
+  ]
+}

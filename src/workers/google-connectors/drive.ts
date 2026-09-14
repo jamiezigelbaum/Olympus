@@ -100,6 +100,15 @@ export interface GoogleDriveSourceConnectorOptions {
    * can refuse it before the download.
    */
   exclusions?: SourceExclusionMatcher;
+  /** Account-bound scope gate, supplied by the shared approval capability. */
+  scope?: GoogleDriveContentScope;
+}
+
+export interface GoogleDriveContentScope {
+  generation: string;
+  revision: string;
+  allowsMetadata(folderAncestorIds: readonly string[]): boolean;
+  allowsContent(folderAncestorIds: readonly string[]): boolean;
 }
 
 /**
@@ -284,6 +293,7 @@ export class GoogleDriveSourceConnector implements SourceConnector {
   private contentReadFailures = 0;
   private readonly itemsByLocalId = new Map<string, RawItem>();
   private readonly exclusions: SourceExclusionMatcher | undefined;
+  private readonly scope: GoogleDriveContentScope | undefined;
   private ancestry: GoogleDriveFolderAncestry | undefined;
 
   constructor(options: GoogleDriveSourceConnectorOptions = {}) {
@@ -310,6 +320,7 @@ export class GoogleDriveSourceConnector implements SourceConnector {
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
     this.exclusions = options.exclusions;
+    this.scope = options.scope;
   }
 
   async authenticate(): Promise<void> {
@@ -343,16 +354,20 @@ export class GoogleDriveSourceConnector implements SourceConnector {
       });
       const files = page.files.filter((file) => file.id);
       const items: RawItem[] = [];
+      let processedFiles = 0;
       for (const file of files) {
         if (items.length >= remaining) break;
+        processedFiles += 1;
         const read = await this.rawItemFromDriveFile(file);
-        this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
-        items.push(read.item);
+        if (read) {
+          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
+          items.push(read.item);
+        }
         if (file.modifiedTime) {
           if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
             highWater = file.modifiedTime;
           }
-          if (read.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
+          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
             deferredFloor = file.modifiedTime;
           }
         }
@@ -363,7 +378,7 @@ export class GoogleDriveSourceConnector implements SourceConnector {
       // AND the bound did not truncate this one. The shipped connector called
       // every bounded slice done, which told the spine that a partial window
       // was a full traversal.
-      const pageTruncated = items.length < files.length;
+      const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
       const nextCursor = done
@@ -449,7 +464,7 @@ export class GoogleDriveSourceConnector implements SourceConnector {
     });
   }
 
-  private async rawItemFromDriveFile(file: GoogleDriveFile): Promise<GoogleDriveListedFile> {
+  private async rawItemFromDriveFile(file: GoogleDriveFile): Promise<GoogleDriveListedFile | undefined> {
     const title = file.name ?? file.id;
     // Ancestry BEFORE content. An excluded file must cost a folder walk and
     // nothing else: no export, no download, no chunk, no vector. Resolving
@@ -482,11 +497,16 @@ export class GoogleDriveSourceConnector implements SourceConnector {
       ...(folderAncestorIds ? { folderAncestorIds } : {}),
       ...(file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}),
     });
+    if (!folderAncestorIds && this.scope) return undefined;
+    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? [])) return undefined;
     const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
+    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
     // An excluded file is a settled answer; a file the cap skipped is owed work.
-    const read = excluded || this.contentReads >= this.maxContentFiles
-      ? { deferred: !excluded }
-      : await this.tryReadText(file);
+    const read = excluded || !contentAllowed
+      ? {}
+      : this.contentReads >= this.maxContentFiles
+        ? { deferred: true }
+        : await this.tryReadText(file);
     const text = read.text;
     if (text !== undefined) this.contentReads += 1;
     return {
@@ -521,7 +541,7 @@ export class GoogleDriveSourceConnector implements SourceConnector {
    * on the gate having nothing to ask — not on the answer being convenient.
    */
   private async resolveFolderAncestry(file: GoogleDriveFile): Promise<string[] | undefined> {
-    if (this.exclusions?.identityActive !== true) return undefined;
+    if (this.exclusions?.identityActive !== true && !this.scope) return undefined;
     const client = await this.clientForRequest();
     this.ancestry ??= new GoogleDriveFolderAncestry(client);
     return this.ancestry.resolve(file);

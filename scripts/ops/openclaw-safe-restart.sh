@@ -48,6 +48,7 @@ EXIT_CREDENTIAL_UNSAFE=78
 SECRETS_TOUCHED=0
 DRY_RUN=0
 PREFLIGHT_ONLY=0
+NATIVE_CREDENTIALS=0
 
 if [[ ! -f "$GATEWAY_RUNTIME_PROOF_HELPER" ]]; then
   echo "Gateway runtime proof helper is missing: ${GATEWAY_RUNTIME_PROOF_HELPER}" >&2
@@ -75,12 +76,14 @@ source "$SYSTEMD_ACTIVITY_HELPER"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/ops/openclaw-safe-restart.sh [--secrets-touched] [--preflight-only] [--dry-run]
+Usage: scripts/ops/openclaw-safe-restart.sh [--secrets-touched] [--native-credentials] [--preflight-only] [--dry-run]
 
 Validates the OpenClaw runtime, restarts the Gateway exactly once, and proves
 the new invocation by systemd identity, a bounded loopback HTTP request, and a
 corroborating current-invocation journal line. With --preflight-only, runs every
 pre-restart gate and exits before reading runtime proof state or restarting.
+On Linux, --native-credentials replaces the 1Password broker preflight with a
+strict native env/file/store/OAuth audit that cannot execute secret providers.
 EOF
 }
 
@@ -94,6 +97,9 @@ while (( $# > 0 )); do
       ;;
     --preflight-only)
       PREFLIGHT_ONLY=1
+      ;;
+    --native-credentials)
+      NATIVE_CREDENTIALS=1
       ;;
     -h|--help)
       usage
@@ -127,6 +133,7 @@ process.stdout.write(`${remaining}\t${reset}\t${used}\t${limit}\t${brokerUsed}\t
 }
 
 run_secrets_audit_gate() {
+  local allow_exec="$1"
   # Supported OpenClaw audit v1: --check returns 1 even for native OAuth
   # information. Match only that record, never arbitrary LEGACY_RESIDUE.
   # Capture reports in memory without shell substitution (which drops NULs)
@@ -142,7 +149,12 @@ const text = value => typeof value === "string" && value.trim().length > 0
   && !/[\u0000-\u001f\u007f]/u.test(value);
 const count = value => Number.isSafeInteger(value) && value >= 0;
 try {
-  const audit = spawnSync(process.argv[1], ["secrets", "audit", "--check", "--allow-exec", "--json"], {
+  const allowExec = process.argv[2];
+  if (allowExec !== "0" && allowExec !== "1") process.exit(1);
+  const auditArgs = ["secrets", "audit", "--check"];
+  if (allowExec === "1") auditArgs.push("--allow-exec");
+  auditArgs.push("--json");
+  const audit = spawnSync(process.argv[1], auditArgs, {
     stdio: ["ignore", "pipe", "ignore"], maxBuffer: 8 * 1024 * 1024,
   });
   if (audit.error || audit.signal || ![0, 1].includes(audit.status)) process.exit(1);
@@ -185,7 +197,7 @@ try {
 } catch {
   process.exit(1);
 }
-' "$OPENCLAW_BIN"
+' "$OPENCLAW_BIN" "$allow_exec"
 }
 
 prove_gateway_stale_cache_readiness() {
@@ -261,6 +273,14 @@ preflight_1password_rate_limits() {
 
 print_plan() {
   echo "OpenClaw safe restart plan:"
+  if (( NATIVE_CREDENTIALS == 1 )); then
+    echo "  1. Run: ${OPENCLAW_BIN} secrets audit --check --json (exec refs refuse; only exact native OAuth information may pass with exit 1)."
+    echo "  2. Run: ${OPENCLAW_BIN} config validate"
+    echo "  3. Run: ${OPENCLAW_BIN} doctor --lint --severity-min error --non-interactive"
+    echo "  4. Run once: ${OPENCLAW_BIN} gateway restart"
+    echo "  5. Prove the current systemd invocation identity, bounded loopback HTTP response, and any exact corroborating listening line from that InvocationID."
+    return
+  fi
   echo "  1. Check 1Password account quota (minimum remaining: ${ONEPASSWORD_MIN_REMAINING})."
   if [[ -n "$BROKER_CACHE_READINESS_SCRIPT" && -n "$BROKER_MANIFEST" ]]; then
     echo "     If only the broker rolling window is exhausted, prove every Gateway cache inside its max-stale window."
@@ -302,7 +322,7 @@ if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
   echo "Node is required to validate the corroborating Gateway journal line but was not found: ${NODE_BIN}" >&2
   exit "$EXIT_PREFLIGHT_REFUSED"
 fi
-if [[ ! "$ONEPASSWORD_MIN_REMAINING" =~ ^[0-9]+$ ]]; then
+if (( NATIVE_CREDENTIALS == 0 )) && [[ ! "$ONEPASSWORD_MIN_REMAINING" =~ ^[0-9]+$ ]]; then
   echo "OPENCLAW_SAFE_RESTART_1PASSWORD_MIN_REMAINING must be a non-negative integer." >&2
   exit 64
 fi
@@ -310,12 +330,21 @@ if [[ ! "$BOOT_TIMEOUT_SECONDS" =~ ^[0-9]+$ || ! "$BOOT_POLL_SECONDS" =~ ^[1-9][
   echo "OPENCLAW_SAFE_RESTART_BOOT_TIMEOUT_SECONDS must be a non-negative integer and OPENCLAW_SAFE_RESTART_BOOT_POLL_SECONDS must be a positive integer." >&2
   exit 64
 fi
-if [[ ! "$BROKER_CACHE_MIN_REMAINING_SECONDS" =~ ^[0-9]+$ ]]; then
+if (( NATIVE_CREDENTIALS == 0 )) && [[ ! "$BROKER_CACHE_MIN_REMAINING_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "OPENCLAW_SAFE_RESTART_BROKER_CACHE_MIN_REMAINING_SECONDS must be a non-negative integer." >&2
   exit 64
 fi
-echo "==> 1Password quota preflight"
-preflight_1password_rate_limits
+if (( NATIVE_CREDENTIALS == 1 )); then
+  echo "==> OpenClaw native credential audit"
+  audit_environment=(env)
+  if ! run_secrets_audit_gate 0; then
+    echo "openclaw secrets audit --check --json refused: exec refs, credential findings, unsupported report, or command failure; refusing Gateway restart." >&2
+    exit "$EXIT_CREDENTIAL_UNSAFE"
+  fi
+else
+  echo "==> 1Password quota preflight"
+  preflight_1password_rate_limits
+fi
 
 echo "==> OpenClaw config validation"
 if ! "$OPENCLAW_BIN" config validate; then
@@ -331,7 +360,7 @@ if ! "$OPENCLAW_BIN" doctor --lint --severity-min error --non-interactive; then
   exit "$EXIT_CREDENTIAL_UNSAFE"
 fi
 
-if (( SECRETS_TOUCHED == 1 )); then
+if (( SECRETS_TOUCHED == 1 && NATIVE_CREDENTIALS == 0 )); then
   echo "==> OpenClaw secrets audit"
   # The audit resolves exec-provider refs in THIS process's environment.
   # Broker-backed providers (op-cached-read) need the Gateway's OLYMPUS_OP_*
@@ -433,7 +462,7 @@ for (const value of words) process.stdout.write(value + "\0");
     audit_environment+=("${gateway_broker_env[@]}")
     echo "Auditing under ${#gateway_broker_env[@]} OLYMPUS_OP_* variable(s) borrowed from ${GATEWAY_UNIT}."
   fi
-  if ! run_secrets_audit_gate; then
+  if ! run_secrets_audit_gate 1; then
     echo "openclaw secrets audit --check --allow-exec --json refused: credential findings, unsupported report, or command failure; refusing Gateway restart." >&2
     exit "$EXIT_CREDENTIAL_UNSAFE"
   fi

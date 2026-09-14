@@ -21,6 +21,12 @@ Use this skill when the user wants the calling assistant to search
 Olympus-indexed sources, including the owner's X/Twitter bookmarks and saved
 posts.
 
+Use the tier names Public, Personal, Private, and Secrets when explaining
+results. Personal maps to `internal` (S1–S3); Private maps to `secure_local`
+(S4). Existing IDs and tool flags such as `include_secure_local` keep their
+spelling. In schema-v1 sensitivity maps, `private` means Personal and `secure`
+means Private; never substitute one for the other.
+
 ## Contract
 
 Use Olympus source tools, not raw stores.
@@ -347,7 +353,7 @@ If the owner says the content should stay out of the calling assistant, or asks 
 channel, use the secure-local/Argus path instead and do not set
 `include_secure_local_content`.
 
-## Secure-Local Examples
+## Private-tier Examples (`secure_local`)
 
 Unified private ask across private email, Dropbox, and protected Telegram:
 

@@ -3,7 +3,6 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSy
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { minify } from 'terser';
 import { assertStagedEntrypointsAreSynchronouslyLoadable } from './top-level-await-scan.ts';
 import { assertStagedManifestIsPublic } from './public-manifest-guard.ts';
 import { OWNER_IDENTIFIER_PATTERNS, scannableText } from './owner-identifier-patterns.ts';
@@ -15,13 +14,6 @@ import {
   V0_4_SOURCE_CHECKOUT_PACKAGE_FILES,
   V0_4_SOURCE_CHECKOUT_PACKAGE_NAME,
 } from '../src/core/public-surface.ts';
-import {
-  PUBLIC_RUNTIME_CREDENTIAL_BROKER_MODULE,
-  PUBLIC_RUNTIME_STRIPPED_MODULES,
-  PUBLIC_RUNTIME_STRIPPED_MODULE_FILTER,
-  replacePublicRuntimeCredentialHandles,
-  stripPublicRuntimeExcludedBlocks,
-} from './public-runtime-strip.ts';
 
 interface PackageJson {
   name: string;
@@ -188,10 +180,6 @@ function readJson<T>(relativePath: string): T {
 
 async function buildPublicRuntime(entry: string, output: string): Promise<void> {
   const destination = join(stagingDir, output);
-  const buildFlavorPath = join(rootDir, 'src/core/build-flavor.ts');
-  const googlePilotClientPath = join(rootDir, 'src/core/google-pilot-client.ts');
-  const strippedModulePaths = PUBLIC_RUNTIME_STRIPPED_MODULES.map((module) => join(rootDir, module));
-  const credentialBrokerPath = join(rootDir, PUBLIC_RUNTIME_CREDENTIAL_BROKER_MODULE);
   mkdirSync(dirname(destination), { recursive: true });
   const result = await Bun.build({
     entrypoints: [join(rootDir, entry)],
@@ -200,42 +188,9 @@ async function buildPublicRuntime(entry: string, output: string): Promise<void> 
     minify: true,
     outdir: dirname(destination),
     naming: basename(destination),
-    plugins: [{
-      name: 'olympus-public-build-flavor',
-      setup(builder) {
-        builder.onLoad({ filter: /build-flavor\.ts$/ }, ({ path }) => {
-          if (path !== buildFlavorPath) {
-            throw new Error(`Unexpected public build-flavor module: ${path}`);
-          }
-          return {
-            contents: 'export const PUBLIC_RUNTIME_BUILD = true;\n',
-            loader: 'ts',
-          };
-        });
-        builder.onLoad({ filter: /google-pilot-client\.ts$/ }, ({ path }) => {
-          if (path !== googlePilotClientPath) {
-            throw new Error(`Unexpected Google pilot-client module: ${path}`);
-          }
-          return {
-            contents: `export const DEFAULT_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)};\nexport const PACKAGED_GOOGLE_PILOT_CLIENT_ID = ${JSON.stringify(googlePilotClientId)};\nexport function resolveGooglePilotClientId(packaged, shipped) { return (packaged || '').trim() || (shipped || '').trim() || undefined; }\nexport function packagedGooglePilotClientId() { return PACKAGED_GOOGLE_PILOT_CLIENT_ID; }\n`,
-            loader: 'ts',
-          };
-        });
-        builder.onLoad({ filter: PUBLIC_RUNTIME_STRIPPED_MODULE_FILTER }, ({ path }) => {
-          if (!strippedModulePaths.includes(path)) {
-            throw new Error(`Unexpected public-runtime stripped module: ${path}`);
-          }
-          let contents = stripPublicRuntimeExcludedBlocks(readFileSync(path, 'utf8'), path);
-          if (path === credentialBrokerPath) {
-            contents = replacePublicRuntimeCredentialHandles(contents, path);
-          }
-          return {
-            contents,
-            loader: 'ts',
-          };
-        });
-      },
-    }],
+    // The release carries the publisher's public client identity. Runtime
+    // logic is built directly from the same source the tests typecheck.
+    define: { OLYMPUS_PACKAGED_GOOGLE_PILOT_CLIENT_ID: JSON.stringify(googlePilotClientId) },
   });
   if (!result.success) {
     throw new Error(`Public runtime build failed for ${entry}:\n${result.logs.join('\n')}`);
@@ -245,22 +200,6 @@ async function buildPublicRuntime(entry: string, output: string): Promise<void> 
   if (built.path !== destination) {
     throw new Error(`Public runtime build wrote ${built.path}; expected ${destination}.`);
   }
-  const optimized = await minify(readFileSync(destination, 'utf8'), {
-    module: true,
-    compress: {
-      dead_code: true,
-      evaluate: true,
-      passes: 3,
-      toplevel: true,
-      unused: true,
-    },
-    mangle: true,
-    format: { comments: false },
-  });
-  if (!optimized.code) {
-    throw new Error(`Public runtime optimizer produced no output for ${entry}.`);
-  }
-  writeFileSync(destination, `${optimized.code}\n`);
 }
 
 /**

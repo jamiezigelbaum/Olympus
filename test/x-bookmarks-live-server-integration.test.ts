@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { EmailClient, type EmailTransport } from '../src/core/email.ts';
-import { operations, type OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createXBookmarksConnectorStoreRuntime } from '../src/workers/email-source/server.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
@@ -178,33 +177,7 @@ describe('X bookmarks live server integration', () => {
     expect(noMode.error.code).toBe('source_index_sync_not_supported');
   });
 
-  test('carries X mode through the operation and private EmailClient transport', async () => {
-    const operation = operations.find((candidate) => candidate.name === 'source_index_sync')!;
-    expect(operation.nativeExposure).toBe('emailIndexAdminDevOnly');
-    expect(operation.params.mode).toMatchObject({
-      enum: ['head', 'reconcile', 'window_diagnostic', 'folder_facet_refresh', 'preservation-reattest'],
-    });
-    const delegated: unknown[] = [];
-    const context = {
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {
-        sourceIndexSync: async (request: unknown) => {
-          delegated.push(request);
-          return { status: 'idle', counts: { api_requests: 1 } };
-        },
-      } as unknown as OperationContext['email'],
-    } satisfies OperationContext;
-    await operation.handler(context, {
-      corpus_id: X_BOOKMARKS_CORPUS_ID,
-      mode: 'head',
-    });
-    expect(delegated).toEqual([{ corpusId: X_BOOKMARKS_CORPUS_ID, mode: 'head' }]);
-    await expect(operation.handler(context, {
-      corpus_id: 'internal.drive.docs',
-      mode: 'head',
-    })).rejects.toThrow('mode is supported only for internal.x.bookmarks');
-
+  test('carries X mode through the internal EmailClient transport', async () => {
     const config = defaultConfig();
     config.email.enabled = true;
     config.email.indexAdminDevEnabled = true;

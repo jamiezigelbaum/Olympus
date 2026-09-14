@@ -30,10 +30,10 @@ import {
   defaultProtectedTelegramConnectorStoreDbPath,
 } from '../src/workers/telegram-messages/index.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
+import { defaultWhatsAppConnectorStoreDbPath } from '../src/workers/whatsapp/index.ts';
 
 // The path helpers are the oracle here, read independently of the lifecycle
-// inventory under test. Reflect and Roam have no worker helper to read, so
-// their product paths are declared explicitly beside the other product paths.
+// inventory under test.
 function connectorStorePaths(homeDir: string) {
   const env = { HOME: homeDir, XDG_DATA_HOME: join(homeDir, '.local', 'share') };
   return {
@@ -46,8 +46,7 @@ function connectorStorePaths(homeDir: string) {
     telegramInternal: defaultInternalTelegramConnectorStoreDbPath(env),
     telegramProtected: defaultProtectedTelegramConnectorStoreDbPath(env),
     xBookmarks: defaultXBookmarksConnectorStoreDbPath(env),
-    reflect: join(homeDir, '.local', 'share', 'openclaw', 'olympus', 'reflect-notes.sqlite'),
-    roam: join(homeDir, '.local', 'share', 'openclaw', 'olympus', 'roam-notes.sqlite'),
+    whatsapp: defaultWhatsAppConnectorStoreDbPath(env),
   };
 }
 
@@ -82,7 +81,7 @@ describe('lifecycle inventory covers the connector stores', () => {
     }
   });
 
-  test('delete --source removes that family connector stores and leaves the others', () => {
+  test('delete --source removes that family connector stores and leaves every other source', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-delete-'));
     const homeDir = join(dir, 'home');
     try {
@@ -94,8 +93,10 @@ describe('lifecycle inventory covers the connector stores', () => {
       expect(result.removed).toContain(paths.gmailSecure);
       expect(existsSync(paths.gmail)).toBe(false);
       expect(existsSync(paths.gmailSecure)).toBe(false);
-      expect(existsSync(paths.dropbox)).toBe(true);
-      expect(existsSync(paths.xBookmarks)).toBe(true);
+      for (const [name, path] of Object.entries(paths)) {
+        if (name === 'gmail' || name === 'gmailSecure') continue;
+        expect(`${name}:${existsSync(path)}`).toBe(`${name}:true`);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -111,30 +112,17 @@ describe('lifecycle inventory covers the connector stores', () => {
 
       expect(result.removed).toContain(paths.xBookmarks);
       expect(existsSync(paths.xBookmarks)).toBe(false);
-      expect(existsSync(paths.gmail)).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('delete --source reflect.notes takes the note store and leaves its Roam twin', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-reflect-delete-'));
-    const homeDir = join(dir, 'home');
-    try {
-      const paths = seedStores(homeDir);
-
-      const result = deleteOlympusData({ sourceId: 'reflect.notes', homeDir });
-
-      expect(result.removed).toContain(paths.reflect);
-      expect(existsSync(paths.reflect)).toBe(false);
-      expect(existsSync(paths.roam)).toBe(true);
+      for (const [name, path] of Object.entries(paths)) {
+        if (name === 'xBookmarks') continue;
+        expect(`${name}:${existsSync(path)}`).toBe(`${name}:true`);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   // The inventory drifted out of the mount list twice (X bookmarks, then
-  // WhatsApp, then the two note stores), each time silently: an unlisted store
+  // WhatsApp), each time silently: an unlisted store
   // is not exported and not reported as skipped, while `delete --all` still
   // erases the root it lives in. This binds the two lists so the next mount
   // cannot land without an inventory entry.
@@ -143,7 +131,7 @@ describe('lifecycle inventory covers the connector stores', () => {
     const inventory = new Set(lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.({ homeDir }) ?? []));
     const mounted = Object.values(connectorStorePaths(homeDir));
 
-    expect(mounted).toHaveLength(11);
+    expect(mounted).toHaveLength(10);
     for (const dbPath of mounted) {
       expect(`${dbPath}:${inventory.has(dbPath)}`).toBe(`${dbPath}:true`);
     }

@@ -1,5 +1,15 @@
 # Olympus Agent Instructions
 
+## Parallel experiment branch
+
+This branch is an independent simplification experiment authorized on
+2026-09-07. Its outcome, scope, and evidence live in
+[`docs/PARALLEL_SIMPLIFICATION.md`](docs/PARALLEL_SIMPLIFICATION.md).
+Keep its work separate from `main`: do not open a merge-directed pull request,
+merge it, deploy it, or replace the v0.4 candidate. Adoption requires a later
+owner decision. The v0.4 release plan below is baseline context for this branch;
+its completion receipts do not qualify the experimental artifact.
+
 Olympus is an OpenClaw plugin.
 
 ## Velocity ruling (owner, 2026-07-30) — no calendar scheduling for ready work

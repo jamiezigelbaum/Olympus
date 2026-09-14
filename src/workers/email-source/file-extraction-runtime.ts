@@ -31,7 +31,10 @@ import {
   buildSourceSensitivity,
   type SourceTrustTier,
 } from '../../core/source-index/types.ts';
-import type { ExtractionCandidateReader } from '../../core/file-extraction-source.ts';
+import {
+  FileExtractionSourceError,
+  type ExtractionCandidateReader,
+} from '../../core/file-extraction-source.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
@@ -92,6 +95,10 @@ export interface FileExtractionCorpusConfig {
   corpusId: string;
   provider: string;
   scopes: readonly string[];
+  /** Live scope list for a connected account whose approval may change without restart. */
+  resolveScopes?: () => readonly string[];
+  /** Live trusted store filters applied before candidate pagination. */
+  resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
   credentialHandle?: string;
   /**
    * Resolves the credential handle at RUN time, from whatever the connected
@@ -136,6 +143,15 @@ export interface FileExtractionRuntimeOptions {
    * by tests; the runtime builds one over its own `env`.
    */
   credentialBroker?: CredentialBroker;
+  /** Rechecked before candidate enumeration and immediately before bytes. */
+  scopeGuard?: {
+    assertAuthorized(input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore }): void;
+    allowsRef(input: {
+      config: FileExtractionCorpusConfig;
+      store: LocalConnectorStore;
+      ref: import('../file-extraction/types.ts').ExtractionItemRef;
+    }): boolean;
+  };
   /** Where a dropped corpus is reported. Defaults to `console.warn`. */
   warn?: (message: string) => void;
   jobsDbPath?: string;
@@ -204,7 +220,35 @@ export function createFileExtractionRuntime(
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
-      source: () => buildSource({ config, store }),
+      source: async () => {
+        options.scopeGuard?.assertAuthorized({ config, store });
+        const source = await buildSource({ config, store });
+        if (!options.scopeGuard) return source;
+        const guard = options.scopeGuard;
+        return {
+          id: source.id,
+          corpusId: source.corpusId,
+          provider: source.provider,
+          async listCandidates(listOptions) {
+            guard.assertAuthorized({ config, store });
+            const page = await source.listCandidates(listOptions);
+            return {
+              ...page,
+              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, ref })),
+            };
+          },
+          async fetch(ref, fetchOptions) {
+            guard.assertAuthorized({ config, store });
+            if (!guard.allowsRef({ config, store, ref })) {
+              throw new FileExtractionSourceError('source_permission_denied');
+            }
+            return source.fetch(ref, fetchOptions);
+          },
+          ...(source.verifyBytes
+            ? { verifyBytes: (ref, bytes) => source.verifyBytes!(ref, bytes) }
+            : {}),
+        } satisfies FileExtractionSource;
+      },
       sink: createConnectorStoreExtractionSink({
         store,
         classify: (item: RawItem) => buildSourceSensitivity({
@@ -230,6 +274,18 @@ export function createFileExtractionRuntime(
       trustTiers: {
         itemTrustTier: (ref) => store.localContent(ref.localItemId, 1)?.trustTier,
       },
+      ...(options.scopeGuard
+        ? {
+            authorization: {
+              assertCurrent(ref) {
+                options.scopeGuard!.assertAuthorized({ config, store });
+                if (!options.scopeGuard!.allowsRef({ config, store, ref })) {
+                  throw new FileExtractionSourceError('source_permission_denied');
+                }
+              },
+            },
+          }
+        : {}),
     });
   }
   if (corpora.length === 0) {
@@ -282,6 +338,8 @@ export function fileExtractionCorporaRoster(input: {
   /** Present when the Dropbox connector store and its extraction scopes exist. */
   dropbox?: {
     extractionScopes: readonly string[];
+    resolveExtractionScopes?: () => readonly string[];
+    resolveCandidateFilters?: () => import('../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
     resolveCredentialHandle: () => string | undefined;
   };
   /** True when the WhatsApp connector store exists. */
@@ -292,12 +350,21 @@ export function fileExtractionCorporaRoster(input: {
   );
   const canonicalIds = new Set<string>();
   const canonical: FileExtractionCorpusConfig[] = [];
-  if (input.dropbox && input.dropbox.extractionScopes.length > 0) {
+  if (input.dropbox && (
+    input.dropbox.extractionScopes.length > 0
+    || input.dropbox.resolveExtractionScopes !== undefined
+  )) {
     canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       provider: 'dropbox',
       scopes: input.dropbox.extractionScopes,
+      ...(input.dropbox.resolveExtractionScopes
+        ? { resolveScopes: input.dropbox.resolveExtractionScopes }
+        : {}),
+      ...(input.dropbox.resolveCandidateFilters
+        ? { resolveCandidateFilters: input.dropbox.resolveCandidateFilters }
+        : {}),
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
       ownerConnectorId: 'dropbox',
       ...(configuredDropbox?.maxTrustTierForRemote
@@ -404,9 +471,13 @@ function defaultSourceFactories(
         id: `${input.config.corpusId}:extraction`,
         corpusId: input.config.corpusId,
         provider: input.config.provider,
-        candidates: connectorStoreExtractionCandidateReader(input.store),
+        candidates: connectorStoreExtractionCandidateReader(
+          input.store,
+          input.config.resolveCandidateFilters?.(),
+        ),
         locators: input.store,
-        scopes: input.config.scopes.map((approvedScopeKey) => ({ approvedScopeKey })),
+        scopes: (input.config.resolveScopes?.() ?? input.config.scopes)
+          .map((approvedScopeKey) => ({ approvedScopeKey })),
         token,
         ...(localRoots.length > 0 ? { localRoots } : {}),
       });
@@ -466,10 +537,11 @@ function defaultSourceFactories(
  */
 export function connectorStoreExtractionCandidateReader(
   store: LocalConnectorStore,
+  filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters,
 ): ExtractionCandidateReader {
   return {
     extractionCandidates(options) {
-      const page = store.extractionCandidates(options);
+      const page = store.extractionCandidates({ ...options, ...(filters ? { filters } : {}) });
       return {
         candidates: page.candidates.map((candidate) => ({
           localItemId: candidate.identity.localItemId,

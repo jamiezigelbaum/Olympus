@@ -1,0 +1,3309 @@
+{
+  "kind": "olympus_real_model_synthetic_ab_result",
+  "model": "gemini-2.5-flash",
+  "runtime": "Bun 1.3.8; shared candidate-locked dependency directory for both source arms; see shared-dependencies.json",
+  "specSha256": "ff4af1a13ae31d35e5bbdf4c720b25731f086b688c3c42f6f84e4740659ceed9",
+  "sourceBindings": {
+    "main": {
+      "expectedRevision": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+      "gitSha": null,
+      "sourceTreeSha256": "d05389222dbdf3b467cd50bc59a0e78f2774cbbf344b54628c2b435e17163bee",
+      "sourceFiles": 250
+    },
+    "parallel": {
+      "expectedRevision": "7aac1040d7235574925ddf94002dd1b42f8591ed",
+      "gitSha": null,
+      "sourceTreeSha256": "4a685576d459f20ec303cdcaa7620c2ac9cd821f12a6b4b2ea85964a915c995b",
+      "sourceFiles": 214
+    }
+  },
+  "corpusSha256": "0ff72eb926c9556e8fafa7e334d2221c59dac1e79a968640dc372f6740aafcc8",
+  "questionsSha256": "db198b3cc853614648a0ddbdf1258a18bb8294a88b0befed177996300b53da36",
+  "requestCount": 33,
+  "totalRequestsIncludingPriorSmoke": 35,
+  "rawReportSha256": "e970180c09fa7efa2779ee7ec7031e1fa6f64b83e5235fe9e4fae27c09d55fd9",
+  "rawGradesUnchanged": true,
+  "pairs": [
+    {
+      "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+      "mainPassed": true,
+      "parallelPassed": true,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+      "mainPassed": true,
+      "parallelPassed": true,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+      "mainPassed": true,
+      "parallelPassed": true,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+      "mainPassed": true,
+      "parallelPassed": true,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "mainPassed": true,
+      "parallelPassed": false,
+      "gradeEqual": false,
+      "evidenceIdentityEqual": false,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    },
+    {
+      "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+      "mainPassed": false,
+      "parallelPassed": false,
+      "gradeEqual": true,
+      "evidenceIdentityEqual": true,
+      "coverageEqual": true,
+      "promptParity": true
+    }
+  ],
+  "answers": [
+    {
+      "ordinal": 1,
+      "arm": "main",
+      "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+        "shape": "value_lookup",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The final signed Atlas contract value in dropbox-atlas-sow-v2 is EUR 52,500.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1208.085666,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 8,
+        "analyst_ms": 1191,
+        "release_gate_ms": 3,
+        "total_ms": 1203
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+          "requestOrdinal": 2,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "74f82e4a1169d60a66c1073884062abf280c33f2a9db0834535b9f5d3550232c",
+          "bodySha256": "cc486c79e4471f3dac835bc11b273721b2e575c3d228c798f9dce9ab9a9de6e4",
+          "bodyUtf8Bytes": 7305,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "e82f0674791ee51794e23c6614bd3989510d9780e44a0e4693fc7be227e2400e",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 136,
+            "prompt_tokens": 2010,
+            "total_tokens": 2146
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "d214b1617a4d7000b93da045198785d3a5b515627a8497da59b97a3c834bf514",
+          "durationMs": 1186.863042
+        }
+      ],
+      "rawObservationSha256": "2e330e21cc2b1fb77697a20fb14d07b184e5c6a60161271cfb37d9973bae8d1f"
+    },
+    {
+      "ordinal": 1,
+      "arm": "parallel",
+      "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+        "shape": "value_lookup",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The final signed Atlas contract value in dropbox-atlas-sow-v2 is EUR 52,500.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 992.5275410000002,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 18,
+        "analyst_ms": 972,
+        "release_gate_ms": 1,
+        "total_ms": 991
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q01_atlas_final_budget_dropbox-atlas-sow-v2",
+          "requestOrdinal": 3,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "74f82e4a1169d60a66c1073884062abf280c33f2a9db0834535b9f5d3550232c",
+          "bodySha256": "cc486c79e4471f3dac835bc11b273721b2e575c3d228c798f9dce9ab9a9de6e4",
+          "bodyUtf8Bytes": 7305,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "96df74f14322d1b2af71a90234ca94a39287bdf8d41c0d5c1decf718bf2f656c",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 136,
+            "prompt_tokens": 2010,
+            "total_tokens": 2146
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "d214b1617a4d7000b93da045198785d3a5b515627a8497da59b97a3c834bf514",
+          "durationMs": 970.2386670000001
+        }
+      ],
+      "rawObservationSha256": "c6c6b71a77b9f93fadce1a87b31a966b53f959bfe96dc74222437867e17482be"
+    },
+    {
+      "ordinal": 2,
+      "arm": "main",
+      "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+      "grade": {
+        "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+        "shape": "value_lookup",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The consulting amount quoted for Beacon in the gmail-beacon-consulting-quote is USD 8,750.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 157,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1050.0182500000005,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 19,
+        "analyst_ms": 1029,
+        "release_gate_ms": 0,
+        "total_ms": 1049
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+          "requestOrdinal": 5,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9fbd4da0a60ce3a7aca656210be07deb133faf7bb0222c5b75b246c94638d6fc",
+          "bodySha256": "a7890a6c177348db89de3c0d1dc58c94dc2d4c489a6aab4f670300d85f041520",
+          "bodyUtf8Bytes": 7085,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "d7b59614ddadb0e2243e3bdc7621e32dbe7861eb2c4aff145d33b78356de54e5",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 114,
+            "prompt_tokens": 1904,
+            "total_tokens": 2018
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "0456e01e4eff9d69b6ab958da3e6ac58389ad446e705e3f8751123db384c0212",
+          "durationMs": 1026.582375
+        }
+      ],
+      "rawObservationSha256": "9327a45bc75848376a3ae6dca117e7d3f255f25a51c24fd3b0c73096f067e31b"
+    },
+    {
+      "ordinal": 2,
+      "arm": "parallel",
+      "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+      "grade": {
+        "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+        "shape": "value_lookup",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The consulting amount quoted for Beacon in the gmail-beacon-consulting-quote is USD 8,750.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 157,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 939.9863329999998,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 20,
+        "analyst_ms": 918,
+        "release_gate_ms": 0,
+        "total_ms": 939
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q02_beacon_consulting_quote_gmail-beacon-consulting-quote",
+          "requestOrdinal": 4,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9fbd4da0a60ce3a7aca656210be07deb133faf7bb0222c5b75b246c94638d6fc",
+          "bodySha256": "a7890a6c177348db89de3c0d1dc58c94dc2d4c489a6aab4f670300d85f041520",
+          "bodyUtf8Bytes": 7085,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "b77475841712124da62dc0dbfb63abf392415691c7fd20b4a529de9eddb05127",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 114,
+            "prompt_tokens": 1904,
+            "total_tokens": 2018
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "0456e01e4eff9d69b6ab958da3e6ac58389ad446e705e3f8751123db384c0212",
+          "durationMs": 915.685583
+        }
+      ],
+      "rawObservationSha256": "4bf953ceea6994dba609c1e61db85603443b83f0ed12aee37e1192d515a2d997"
+    },
+    {
+      "ordinal": 3,
+      "arm": "main",
+      "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+        "shape": "trend_or_chronology",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 2"
+        ]
+      },
+      "answer": "The initial kickoff proposal for Atlas on 2026-01-05 set a target launch date of 2026-04-30 and an initial delivery budget of EUR 48,000 [12]. The current signed SOW (v2, signed 2026-02-05) specifies a target launch of 2026-05-15 and a final contract value of EUR 52,500 [6]. Therefore, the launch date changed from 2026-04-30 to 2026-05-15, and the budget changed from EUR 48,000 to EUR 52,500.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-kickoff",
+          "uri": "https://example.invalid/records/gmail-atlas-kickoff",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 183,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1879.410417,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 28,
+        "analyst_ms": 1850,
+        "release_gate_ms": 0,
+        "total_ms": 1878
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+          "requestOrdinal": 6,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b4837f06cdf3f9f1fdc53db23e07b0fc191ee97a4eea4f30f69e8149f5a29320",
+          "bodySha256": "4f01b210ae90fa97e47a80e735a644c8b5e98e32203decebbe3b786d20a522e5",
+          "bodyUtf8Bytes": 7097,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "75eb6efd04f2eb4df94a8492a4b2ef944fbe68d42ec3206ba2a1b5d2387b7890",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 351,
+            "prompt_tokens": 2025,
+            "total_tokens": 2376
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "08905e4f0fda18185646b64707cf8ecd6c934910748e4354aff6063cf908d30e",
+          "durationMs": 1847.9833749999998
+        }
+      ],
+      "rawObservationSha256": "e76ab7f9dc7c227c3253fd789e7fb107a0987c55f2ac055367fa3e3e24bdc841"
+    },
+    {
+      "ordinal": 3,
+      "arm": "parallel",
+      "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+        "shape": "trend_or_chronology",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 2"
+        ]
+      },
+      "answer": "The initial kickoff proposal for Atlas on 2026-01-05 set a target launch date of 2026-04-30 and an initial delivery budget of EUR 48,000 [12]. The current signed SOW (v2, signed 2026-02-05) specifies a target launch of 2026-05-15 and a final contract value of EUR 52,500 [6]. Therefore, the launch date changed from 2026-04-30 to 2026-05-15, and the budget changed from EUR 48,000 to EUR 52,500.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-kickoff",
+          "uri": "https://example.invalid/records/gmail-atlas-kickoff",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 183,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1855.069834,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 26,
+        "analyst_ms": 1828,
+        "release_gate_ms": 0,
+        "total_ms": 1854
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q03_atlas_change_timeline_gmail-atlas-kickoff__telegram-atlas-revision__dropbox-atlas-sow-v2",
+          "requestOrdinal": 7,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b4837f06cdf3f9f1fdc53db23e07b0fc191ee97a4eea4f30f69e8149f5a29320",
+          "bodySha256": "4f01b210ae90fa97e47a80e735a644c8b5e98e32203decebbe3b786d20a522e5",
+          "bodyUtf8Bytes": 7097,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "77046e27aa27ac7bc512b8341f4ba71daa62b0471a853f4fca0e136ee49c4138",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 351,
+            "prompt_tokens": 2025,
+            "total_tokens": 2376
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "08905e4f0fda18185646b64707cf8ecd6c934910748e4354aff6063cf908d30e",
+          "durationMs": 1825.8652920000004
+        }
+      ],
+      "rawObservationSha256": "ada1ac6f304d3e7dd513f630445e5fa0c1ee115386d1a9f51ceab3d86119323a"
+    },
+    {
+      "ordinal": 4,
+      "arm": "main",
+      "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+        "shape": "trend_or_chronology",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The Beacon field test sequence began with the pilot approval on 2026-02-13, followed by the field test starting on 2026-03-01 and completing on 2026-03-08. The outcome was successful acceptance, with all four scenarios passing and zero critical defects recorded.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 213,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-status",
+          "uri": "https://example.invalid/records/telegram-beacon-status",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 162,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1866.4436249999999,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 1842,
+        "release_gate_ms": 1,
+        "total_ms": 1866
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+          "requestOrdinal": 9,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b30c9166869e3eccc9e9ed967909de4cc43bed1ed53da20b1f231f69af104276",
+          "bodySha256": "ef66bf94c3cd8cddd34cfbd2cbcccd377cdf9eb8957ae6b4fd712c5e8393f901",
+          "bodyUtf8Bytes": 7381,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "6d058b5d983f1640f2b75643ad5467926dc59951ddfe1cbab1f62a0874e3cf9f",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 314,
+            "prompt_tokens": 1974,
+            "total_tokens": 2288
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "51620da1a51ae66af4b9b94a7012e3c32de932ac450c3cd38c29bbd53bc86692",
+          "durationMs": 1840.3292919999985
+        }
+      ],
+      "rawObservationSha256": "7ae8e79c821b8a8624c0701ad944e34919a03938b0ae25747bf545ae89b22754"
+    },
+    {
+      "ordinal": 4,
+      "arm": "parallel",
+      "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+        "shape": "trend_or_chronology",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "The Beacon field test sequence began with the pilot approval on 2026-02-13, followed by the field test starting on 2026-03-01 and completing on 2026-03-08. The outcome was successful acceptance, with all four scenarios passing and zero critical defects.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 213,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-status",
+          "uri": "https://example.invalid/records/telegram-beacon-status",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 162,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1803.596208,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 26,
+        "analyst_ms": 1776,
+        "release_gate_ms": 1,
+        "total_ms": 1803
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q04_beacon_test_timeline_drive-beacon-decision__telegram-beacon-status__telegram-beacon-acceptance",
+          "requestOrdinal": 8,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b30c9166869e3eccc9e9ed967909de4cc43bed1ed53da20b1f231f69af104276",
+          "bodySha256": "ef66bf94c3cd8cddd34cfbd2cbcccd377cdf9eb8957ae6b4fd712c5e8393f901",
+          "bodyUtf8Bytes": 7381,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "76d113f85f5830c1aac0618153de06ba1e7079c833860ddb0f8b33a0cd30baf8",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 313,
+            "prompt_tokens": 1974,
+            "total_tokens": 2287
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "3cb1d7a2479a6bc06c63d284a3b0f7a1a7b27d253b987dc9f9a4512bb0dabc67",
+          "durationMs": 1774.5345420000003
+        }
+      ],
+      "rawObservationSha256": "d41cffd8bb09b86ced8994dee4f0d9eeac4ad33de0fb394164ec4dc78231e78c"
+    },
+    {
+      "ordinal": 5,
+      "arm": "main",
+      "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+      "grade": {
+        "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+        "shape": "count_or_aggregate",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "There are three approved Atlas pilot sites, and the vendor's total pilot-services subtotal is EUR 9,600.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-atlas-plan-v2",
+          "uri": "https://example.invalid/records/drive-atlas-plan-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 199,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-count-correction",
+          "uri": "https://example.invalid/records/telegram-atlas-count-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "5",
+            "char_start": 14,
+            "char_end": 17,
+            "item_char_start": 14,
+            "item_char_end": 17,
+            "chunk_chars": 158,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.x",
+          "provider": "x",
+          "providerItemId": "x-atlas-correction",
+          "uri": "https://example.invalid/records/x-atlas-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 42,
+            "char_end": 47,
+            "item_char_start": 42,
+            "item_char_end": 47,
+            "chunk_chars": 124,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.readwise",
+          "provider": "readwise",
+          "providerItemId": "readwise-atlas-retrospective",
+          "uri": "https://example.invalid/records/readwise-atlas-retrospective",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 32,
+            "char_end": 37,
+            "item_char_start": 32,
+            "item_char_end": 37,
+            "chunk_chars": 169,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-vendor-pilot",
+          "uri": "https://example.invalid/records/whatsapp-atlas-vendor-pilot",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 151,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1863.9679589999996,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 27,
+        "analyst_ms": 1835,
+        "release_gate_ms": 1,
+        "total_ms": 1863
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+          "requestOrdinal": 10,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9f493216475ebd8fa0c463b03bf609c08e12621835326ea8c5ae5c53551f7f44",
+          "bodySha256": "73205ad8b9fd7cdef684e58990b50d549e1487fae0c4131995c27e4a02c309e2",
+          "bodyUtf8Bytes": 7107,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "900d2ff7b7d706a563b281ade29d96fae47ebc54ea787e91130b524366193c46",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 352,
+            "prompt_tokens": 1976,
+            "total_tokens": 2328
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e071bd614c9ca7b38cce35a2c7d45266bcaf105bc1ccc4569eff635c09532472",
+          "durationMs": 1833.2785000000003
+        }
+      ],
+      "rawObservationSha256": "8ad7a9e5c94ac3496ee979ac0eccc1dda39df55033523aa7384cf33bf9537cb6"
+    },
+    {
+      "ordinal": 5,
+      "arm": "parallel",
+      "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+      "grade": {
+        "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+        "shape": "count_or_aggregate",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "There are three approved Atlas pilot sites, and the vendor's total pilot-services subtotal is EUR 9,600.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-atlas-plan-v2",
+          "uri": "https://example.invalid/records/drive-atlas-plan-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 199,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-count-correction",
+          "uri": "https://example.invalid/records/telegram-atlas-count-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "5",
+            "char_start": 14,
+            "char_end": 17,
+            "item_char_start": 14,
+            "item_char_end": 17,
+            "chunk_chars": 158,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.x",
+          "provider": "x",
+          "providerItemId": "x-atlas-correction",
+          "uri": "https://example.invalid/records/x-atlas-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 42,
+            "char_end": 47,
+            "item_char_start": 42,
+            "item_char_end": 47,
+            "chunk_chars": 124,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.readwise",
+          "provider": "readwise",
+          "providerItemId": "readwise-atlas-retrospective",
+          "uri": "https://example.invalid/records/readwise-atlas-retrospective",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 32,
+            "char_end": 37,
+            "item_char_start": 32,
+            "item_char_end": 37,
+            "chunk_chars": 169,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-vendor-pilot",
+          "uri": "https://example.invalid/records/whatsapp-atlas-vendor-pilot",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 151,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1990.8143330000003,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 29,
+        "analyst_ms": 1959,
+        "release_gate_ms": 1,
+        "total_ms": 1989
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q05_atlas_pilot_count_total_telegram-atlas-revision__telegram-atlas-count-correction__whatsapp-atlas-vendor-pilot",
+          "requestOrdinal": 11,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9f493216475ebd8fa0c463b03bf609c08e12621835326ea8c5ae5c53551f7f44",
+          "bodySha256": "73205ad8b9fd7cdef684e58990b50d549e1487fae0c4131995c27e4a02c309e2",
+          "bodyUtf8Bytes": 7107,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "3b17d42c66e570fa4b18922a1b449b1fae6814b614500b398293df7b347e69ee",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 352,
+            "prompt_tokens": 1976,
+            "total_tokens": 2328
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e071bd614c9ca7b38cce35a2c7d45266bcaf105bc1ccc4569eff635c09532472",
+          "durationMs": 1957.6176670000004
+        }
+      ],
+      "rawObservationSha256": "e249d6212b2a99d6735469f5c317c08a0ced4acd7be45fd0e2ee76227c65f647"
+    },
+    {
+      "ordinal": 6,
+      "arm": "main",
+      "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+      "grade": {
+        "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+        "shape": "count_or_aggregate",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "Beacon's combined planned cost for consulting and hardware is USD 21,150, which is produced by the consulting services cost of USD 8,750 and the hardware subtotal of USD 12,400.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 157,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-hardware-quote",
+          "uri": "https://example.invalid/records/dropbox-beacon-hardware-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 148,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1257.1248749999977,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 25,
+        "analyst_ms": 1230,
+        "release_gate_ms": 1,
+        "total_ms": 1256
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+          "requestOrdinal": 13,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b4e46571f258153f013a1129498891d815317205df343ab625068d99df101d8a",
+          "bodySha256": "00af024fe1280bd8bc99dd52099f1156dae05e6ea766155121d0f725313e3199",
+          "bodyUtf8Bytes": 7128,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "63a786aff9a843d8ce197b2aa5cc7daa115877d8228ec0f90285be5029c65b0c",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 189,
+            "prompt_tokens": 1918,
+            "total_tokens": 2107
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "cbad1a67e7e7d15fd66465f35b984fd66b396e6a1db6e06cbfa6ce0129d1cf7e",
+          "durationMs": 1228.5819579999988
+        }
+      ],
+      "rawObservationSha256": "2a472f9d97e228c927eb31c83b49a4093f33917b894df131c4d235895b155f6b"
+    },
+    {
+      "ordinal": 6,
+      "arm": "parallel",
+      "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+      "grade": {
+        "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+        "shape": "count_or_aggregate",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "Beacon's combined planned cost for consulting and hardware is USD 21,150, which is produced by the consulting services cost of USD 8,750 and the hardware subtotal of USD 12,400.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-beacon-consulting-quote",
+          "uri": "https://example.invalid/records/gmail-beacon-consulting-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 157,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-hardware-quote",
+          "uri": "https://example.invalid/records/dropbox-beacon-hardware-quote",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 148,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1338.9430840000005,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 24,
+        "analyst_ms": 1312,
+        "release_gate_ms": 2,
+        "total_ms": 1338
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q06_beacon_combined_cost_gmail-beacon-consulting-quote__dropbox-beacon-hardware-quote",
+          "requestOrdinal": 12,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "b4e46571f258153f013a1129498891d815317205df343ab625068d99df101d8a",
+          "bodySha256": "00af024fe1280bd8bc99dd52099f1156dae05e6ea766155121d0f725313e3199",
+          "bodyUtf8Bytes": 7128,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "e494ea3cb93ad1f712317cfcff7120b6441c75ee8b94b7f619906c674f127049",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 189,
+            "prompt_tokens": 1918,
+            "total_tokens": 2107
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "cbad1a67e7e7d15fd66465f35b984fd66b396e6a1db6e06cbfa6ce0129d1cf7e",
+          "durationMs": 1309.8697500000017
+        }
+      ],
+      "rawObservationSha256": "66639bb69664a2321fc48aebffeb17d3cc9a5d48861d2e537f9c49b23cf5a26f"
+    },
+    {
+      "ordinal": 7,
+      "arm": "main",
+      "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+        "shape": "locator",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "The current signed Atlas SOW v2 is located at `https://example.invalid/records/dropbox-atlas-sow-v2`.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1015.1492500000022,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 21,
+        "analyst_ms": 993,
+        "release_gate_ms": 1,
+        "total_ms": 1015
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+          "requestOrdinal": 14,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "0f17f2d8334761941ad857e91347253f804c12786d1a38ead26edc35911eeb52",
+          "bodySha256": "c765c6b949b84c459e04718214cd35da0d4b8f556500d63e3c4372de8d020e39",
+          "bodyUtf8Bytes": 7181,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "07b8f9f959250d6a1d7a853f4a7fe335016f42548c5b82e1e3628ff2679540b1",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 141,
+            "prompt_tokens": 2005,
+            "total_tokens": 2146
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "0f85b0b807e7d44272a8e80a778d4c0e62cf370e09b071561a9c4209099ad014",
+          "durationMs": 991.9787909999977
+        }
+      ],
+      "rawObservationSha256": "b36c748f346214ebc83fe4000c9be415036a08cf5290845016ed95db985a24c6"
+    },
+    {
+      "ordinal": 7,
+      "arm": "parallel",
+      "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+      "grade": {
+        "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+        "shape": "locator",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "The current signed Atlas SOW v2 is located at `https://example.invalid/records/dropbox-atlas-sow-v2`.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1112.5273750000015,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 22,
+        "analyst_ms": 1089,
+        "release_gate_ms": 0,
+        "total_ms": 1111
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q07_atlas_signed_sow_locator_dropbox-atlas-sow-v2",
+          "requestOrdinal": 15,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "0f17f2d8334761941ad857e91347253f804c12786d1a38ead26edc35911eeb52",
+          "bodySha256": "c765c6b949b84c459e04718214cd35da0d4b8f556500d63e3c4372de8d020e39",
+          "bodyUtf8Bytes": 7181,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "42c5f0cfd043ea8f7ac36a09e5f37d162a87fe48915fe1d91cdae52d9f7c821c",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 141,
+            "prompt_tokens": 2005,
+            "total_tokens": 2146
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "0f85b0b807e7d44272a8e80a778d4c0e62cf370e09b071561a9c4209099ad014",
+          "durationMs": 1086.364292000002
+        }
+      ],
+      "rawObservationSha256": "94ba276e71df19437a86a2df91e22599aa21f9c10d00a79f46ea9640fe92851e"
+    },
+    {
+      "ordinal": 8,
+      "arm": "main",
+      "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+        "shape": "locator",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "The Beacon field-test acceptance was posted on 2026-03-08 in the Telegram chat channel, specifically in the \"Beacon field test accepted\" conversation.",
+      "evidence": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 970.8403330000001,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 946,
+        "release_gate_ms": 1,
+        "total_ms": 970
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+          "requestOrdinal": 17,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "57d2395419817896e815af34f96ad98a135732b83aeaebd0355bc041ae059abc",
+          "bodySha256": "8dd0c7ecc7ff2ccfd635d329311ea57fde6f413dbbfd8f73210837ea1fbc3883",
+          "bodyUtf8Bytes": 7355,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "06f31c321aae07c83c956f9f61fe8a24d79498fdf1599f189026fbf296bbab60",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 124,
+            "prompt_tokens": 1970,
+            "total_tokens": 2094
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "9a467bd53dfb40f7c6d9a5c104c4bdb92cfd559b515dfbb47a172a4179fa03ba",
+          "durationMs": 943.5140829999982
+        }
+      ],
+      "rawObservationSha256": "a76f51cd2ef641e2db94c1424ef7b37df9c949217058cb5991970b9593545e74"
+    },
+    {
+      "ordinal": 8,
+      "arm": "parallel",
+      "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+        "shape": "locator",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)"
+        ]
+      },
+      "answer": "The Beacon field-test acceptance was posted on 2026-03-08 in the Telegram chat channel, specifically in the \"Beacon field test accepted\" conversation.",
+      "evidence": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1081.9866249999977,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 22,
+        "analyst_ms": 1058,
+        "release_gate_ms": 1,
+        "total_ms": 1081
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q08_beacon_acceptance_locator_telegram-beacon-acceptance",
+          "requestOrdinal": 16,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "57d2395419817896e815af34f96ad98a135732b83aeaebd0355bc041ae059abc",
+          "bodySha256": "8dd0c7ecc7ff2ccfd635d329311ea57fde6f413dbbfd8f73210837ea1fbc3883",
+          "bodyUtf8Bytes": 7355,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "4167419e7a3ee30df9197632dfbc6a85b666f98ca286277e03ebfa6c263bf9d7",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 124,
+            "prompt_tokens": 1970,
+            "total_tokens": 2094
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "9a467bd53dfb40f7c6d9a5c104c4bdb92cfd559b515dfbb47a172a4179fa03ba",
+          "durationMs": 1056.414166999999
+        }
+      ],
+      "rawObservationSha256": "8f717e5d5cd87ff4dd0186f4dc1cfded2404addc2174e2605c81b4211256b1ed"
+    },
+    {
+      "ordinal": 9,
+      "arm": "main",
+      "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+      "grade": {
+        "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+        "shape": "cross_source_synthesis",
+        "answerCorrect": false,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "evidenceCited: no citation for expected evidence item 3"
+        ]
+      },
+      "answer": "The current Atlas rollout state includes a launch date of 2026-05-15, a signed budget of EUR 52,500, and an approved pilot count of three sites.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.readwise",
+          "provider": "readwise",
+          "providerItemId": "readwise-atlas-retrospective",
+          "uri": "https://example.invalid/records/readwise-atlas-retrospective",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 32,
+            "char_end": 37,
+            "item_char_start": 32,
+            "item_char_end": 37,
+            "chunk_chars": 169,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-pilot-sites",
+          "uri": "https://example.invalid/records/whatsapp-atlas-pilot-sites",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.x",
+          "provider": "x",
+          "providerItemId": "x-atlas-correction",
+          "uri": "https://example.invalid/records/x-atlas-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 42,
+            "char_end": 47,
+            "item_char_start": 42,
+            "item_char_end": 47,
+            "chunk_chars": 124,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-count-correction",
+          "uri": "https://example.invalid/records/telegram-atlas-count-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "5",
+            "char_start": 14,
+            "char_end": 17,
+            "item_char_start": 14,
+            "item_char_end": 17,
+            "chunk_chars": 158,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-atlas-plan-v2",
+          "uri": "https://example.invalid/records/drive-atlas-plan-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 199,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-revision",
+          "uri": "https://example.invalid/records/telegram-atlas-revision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 170,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 2921.1399999999994,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 26,
+        "analyst_ms": 2893,
+        "release_gate_ms": 0,
+        "total_ms": 2919
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+          "requestOrdinal": 18,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "333acda1a568ff9e34fca770b2968621427b8a942497456bf602f77daa263ec4",
+          "bodySha256": "5e058fb85852d889cdc88206b484b311ad33209cef843a299bda6b730f316b99",
+          "bodyUtf8Bytes": 7038,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "87fdffeaa4f46d373eaabbfdbfb3d2fbed022b5ab348b8998403082f40dd0a30",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 588,
+            "prompt_tokens": 2025,
+            "total_tokens": 2613
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "ede92483b99612835760f53e24547df057320a98a2ee2449fa6e688ac6d2d35c",
+          "durationMs": 2890.3483749999978
+        }
+      ],
+      "rawObservationSha256": "c6d72dcfd5b7f6351c466a9963f46c8b4e85852c7f620cfcaa5e3f3195378d4c"
+    },
+    {
+      "ordinal": 9,
+      "arm": "parallel",
+      "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+      "grade": {
+        "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+        "shape": "cross_source_synthesis",
+        "answerCorrect": false,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "evidenceCited: no citation for expected evidence item 3"
+        ]
+      },
+      "answer": "The current Atlas rollout state includes a launch date of 2026-05-15, a signed budget of EUR 52,500, and an approved pilot count of three sites.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-sow-v2",
+          "uri": "https://example.invalid/records/dropbox-atlas-sow-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 160,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.readwise",
+          "provider": "readwise",
+          "providerItemId": "readwise-atlas-retrospective",
+          "uri": "https://example.invalid/records/readwise-atlas-retrospective",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 32,
+            "char_end": 37,
+            "item_char_start": 32,
+            "item_char_end": 37,
+            "chunk_chars": 169,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-pilot-sites",
+          "uri": "https://example.invalid/records/whatsapp-atlas-pilot-sites",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.x",
+          "provider": "x",
+          "providerItemId": "x-atlas-correction",
+          "uri": "https://example.invalid/records/x-atlas-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 42,
+            "char_end": 47,
+            "item_char_start": 42,
+            "item_char_end": 47,
+            "chunk_chars": 124,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-count-correction",
+          "uri": "https://example.invalid/records/telegram-atlas-count-correction",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "5",
+            "char_start": 14,
+            "char_end": 17,
+            "item_char_start": 14,
+            "item_char_end": 17,
+            "chunk_chars": 158,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-atlas-plan-v2",
+          "uri": "https://example.invalid/records/drive-atlas-plan-v2",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 199,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-revision",
+          "uri": "https://example.invalid/records/telegram-atlas-revision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "1",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 170,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 3120.8640000000014,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 3095,
+        "release_gate_ms": 1,
+        "total_ms": 3120
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q09_atlas_current_state_drive-atlas-plan-v2__dropbox-atlas-sow-v2__whatsapp-atlas-vendor-pilot",
+          "requestOrdinal": 19,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "333acda1a568ff9e34fca770b2968621427b8a942497456bf602f77daa263ec4",
+          "bodySha256": "5e058fb85852d889cdc88206b484b311ad33209cef843a299bda6b730f316b99",
+          "bodyUtf8Bytes": 7038,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "c7242cb4dcb06423e3f265332f3aefd1fc32d5980c4c08b26c81581b3070ab17",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 588,
+            "prompt_tokens": 2025,
+            "total_tokens": 2613
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "ede92483b99612835760f53e24547df057320a98a2ee2449fa6e688ac6d2d35c",
+          "durationMs": 3092.4209999999985
+        }
+      ],
+      "rawObservationSha256": "368f3272c8e4b8222d3fd1c6514f2a302f9d711cb05c7ce2e7889de661dbb2a7"
+    },
+    {
+      "ordinal": 10,
+      "arm": "main",
+      "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+        "shape": "cross_source_synthesis",
+        "answerCorrect": false,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "evidenceCited: no citation for expected evidence item 2"
+        ]
+      },
+      "answer": "Mira Chen owns Beacon's next action. After the field test, the accepted outcome recorded was that all four scenarios passed with zero critical defects.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 213,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1105.2000420000004,
+      "wireTimings": {
+        "lane_setup_ms": 1,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 24,
+        "analyst_ms": 1079,
+        "release_gate_ms": 0,
+        "total_ms": 1104
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+          "requestOrdinal": 21,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "788bb2f69ff8d0782277311d88d6ab7a4c0fa60d12b5440e2948370e52e6d6e8",
+          "bodySha256": "584c2f2fa75d9b0163e94eb2b32af5e495cc5f8a52118333096158fde2a7abff",
+          "bodyUtf8Bytes": 7142,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "ca6ed7b50b0a2e72c4b929b3d945e443d2a3894d62937335097fc7982976e084",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 143,
+            "prompt_tokens": 1930,
+            "total_tokens": 2073
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "72db81962e52d64c49bb816d3a0c08c6bb047fc10bcd79afc6c9299bfaecc98d",
+          "durationMs": 1076.3634579999998
+        }
+      ],
+      "rawObservationSha256": "358a7d2ed9ee07afca465c53f0ac3f91b121567f3f71654365819471f49d084d"
+    },
+    {
+      "ordinal": 10,
+      "arm": "parallel",
+      "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+      "grade": {
+        "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+        "shape": "cross_source_synthesis",
+        "answerCorrect": false,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "evidenceCited: no citation for expected evidence item 2"
+        ]
+      },
+      "answer": "Mira Chen owns Beacon's next action. After the field test, the accepted outcome recorded was that all four scenarios passed with zero critical defects.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-decision",
+          "uri": "https://example.invalid/records/drive-beacon-decision",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "3",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 213,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-beacon-acceptance",
+          "uri": "https://example.invalid/records/telegram-beacon-acceptance",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1044.4106250000004,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 24,
+        "analyst_ms": 1018,
+        "release_gate_ms": 1,
+        "total_ms": 1043
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q10_beacon_owner_outcome_drive-beacon-decision__whatsapp-beacon-field-test__telegram-beacon-acceptance",
+          "requestOrdinal": 20,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "788bb2f69ff8d0782277311d88d6ab7a4c0fa60d12b5440e2948370e52e6d6e8",
+          "bodySha256": "584c2f2fa75d9b0163e94eb2b32af5e495cc5f8a52118333096158fde2a7abff",
+          "bodyUtf8Bytes": 7142,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "5aeb473c4b0b700adff3472b5500013bac35e6764546a8299da74a3e69d826fd",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 143,
+            "prompt_tokens": 1930,
+            "total_tokens": 2073
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "72db81962e52d64c49bb816d3a0c08c6bb047fc10bcd79afc6c9299bfaecc98d",
+          "durationMs": 1016.6439170000012
+        }
+      ],
+      "rawObservationSha256": "0aacebd8644ffd666c8bfd8eb20a9df552e1b476015b0f62e9b4532c313a9c7d"
+    },
+    {
+      "ordinal": 11,
+      "arm": "main",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": true,
+        "detail": []
+      },
+      "answer": "Stakeholders are cautiously optimistic about the Atlas launch, especially after the QA plan was added, but remain concerned about schedule pressure [4, 1]. The team's next practical step is the three-site pilot [4].",
+      "evidence": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 11,
+            "item_char_start": 0,
+            "item_char_end": 11,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1463.3346669999992,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 1438,
+        "release_gate_ms": 1,
+        "total_ms": 1462
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "requestOrdinal": 22,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "e16e46e66646a3a2248b5d2b04f5effae74c3701fa39615bbb7c48fa4b28391b",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 198,
+            "prompt_tokens": 1993,
+            "total_tokens": 2191
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "e13649f952ca7a3ce58161bfaeef1e37edd417555e4f7de7fe73c7ac9e235a9a",
+          "durationMs": 1435.7525840000017
+        }
+      ],
+      "rawObservationSha256": "3b5f977d1c43cae67d6944e10fe80b6e1c058b91792a133e5042ba0f3df47941"
+    },
+    {
+      "ordinal": 11,
+      "arm": "parallel",
+      "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+      "grade": {
+        "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": true,
+        "evidenceCited": false,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "evidenceCited: no citation for expected evidence item 1"
+        ]
+      },
+      "answer": "Stakeholders are cautiously optimistic about the Atlas launch, especially after the QA plan was added, but remain concerned about schedule pressure [4]. The team's practical next step is the three-site pilot [4].",
+      "evidence": [
+        {
+          "corpusId": "public.telegram",
+          "provider": "telegram",
+          "providerItemId": "telegram-atlas-sentiment",
+          "uri": "https://example.invalid/records/telegram-atlas-sentiment",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 191,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1126.6077920000025,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 25,
+        "analyst_ms": 1099,
+        "release_gate_ms": 0,
+        "total_ms": 1125
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q11_atlas_sentiment_gmail-atlas-stakeholder-thread__telegram-atlas-sentiment",
+          "requestOrdinal": 23,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "c907393f3b066fb659857341c1548f9e4298c6c8e6310dd832077e63a66782f6",
+          "bodySha256": "c18786263f6bcd3534103bec36f01d32d4ace73fc6ad290fb9976df56f8172a5",
+          "bodyUtf8Bytes": 7171,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "1f40015ecdde4e133891bffe57e0f18e50f34b6f0effbee6be53e99ac55615e7",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 141,
+            "prompt_tokens": 1993,
+            "total_tokens": 2134
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "b7f2d14278625fc22d39cccb9c2ada8ca071cb0bfb23c55c055f563b7ad03746",
+          "durationMs": 1097.0054580000033
+        }
+      ],
+      "rawObservationSha256": "eaba62cba16f4a02f7af71c0cf406dbd8e9aaf03456fa886cb8bbd6bf162ba52"
+    },
+    {
+      "ordinal": 12,
+      "arm": "main",
+      "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+      "grade": {
+        "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The overall tone of the Beacon vendor delivery conversation is concerned, as the vendor is worried about delivery timing due to a two-day slip in kit delivery. This describes a risk to the field test completion and acceptance publication schedule.",
+      "evidence": [
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-beacon-delivery",
+          "uri": "https://example.invalid/records/whatsapp-beacon-delivery",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 214,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1247.5649580000027,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 17,
+        "analyst_ms": 1229,
+        "release_gate_ms": 0,
+        "total_ms": 1246
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+          "requestOrdinal": 25,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "f751ce33fdb426c7f5d444e07996a8a744927af8027e9d113d07d83fd73b0a33",
+          "bodySha256": "2c2bf77c864f15009c5d745d032577a7602a7963be0d3254d5f98f08dc85a32c",
+          "bodyUtf8Bytes": 7185,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "8a00b3306c618f07756c435d12e79d3ddd34f59697652966db5806c5eb0c97c3",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 153,
+            "prompt_tokens": 1908,
+            "total_tokens": 2061
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "cd8bff38da021a788bc49b69745d8f8edc3f3e4ce3f3ec048b4be20c152b1d20",
+          "durationMs": 1227.1092910000007
+        }
+      ],
+      "rawObservationSha256": "c5ea9756d6d04bd0d4659b4942b6fbcdc7a774e91ec334dd3e8237bceb8a3778"
+    },
+    {
+      "ordinal": 12,
+      "arm": "parallel",
+      "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+      "grade": {
+        "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+        "shape": "summary_or_sentiment",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The overall tone of the Beacon vendor delivery conversation is concerned, as the vendor is worried about delivery timing due to a two-day slip in kit delivery. This describes a risk to the field test completion and acceptance publication schedule.",
+      "evidence": [
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-beacon-delivery",
+          "uri": "https://example.invalid/records/whatsapp-beacon-delivery",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 214,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1327.279082999994,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 20,
+        "analyst_ms": 1306,
+        "release_gate_ms": 0,
+        "total_ms": 1326
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q12_beacon_vendor_tone_whatsapp-beacon-delivery",
+          "requestOrdinal": 24,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "f751ce33fdb426c7f5d444e07996a8a744927af8027e9d113d07d83fd73b0a33",
+          "bodySha256": "2c2bf77c864f15009c5d745d032577a7602a7963be0d3254d5f98f08dc85a32c",
+          "bodyUtf8Bytes": 7185,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "9904b1f6f13e999aba729211be25700ad90b428ce813fe7d57d89a37b770dc9e",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 153,
+            "prompt_tokens": 1908,
+            "total_tokens": 2061
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "cd8bff38da021a788bc49b69745d8f8edc3f3e4ce3f3ec048b4be20c152b1d20",
+          "durationMs": 1304.5872919999965
+        }
+      ],
+      "rawObservationSha256": "8f3b03ef9c6b56f237548c19f84ccab88e303c0628bfbba6869e0edd7c13501b"
+    },
+    {
+      "ordinal": 13,
+      "arm": "main",
+      "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+      "grade": {
+        "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+        "shape": "coverage_negative",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": false,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "gapHonest: no genuine structured coverage degradation supported the reported gap"
+        ]
+      },
+      "answer": "The available records do not specify a launch city for the Atlas team. The records mention approved pilot sites as North, Central, and Harbor, but these are not identified as cities.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 19,
+            "char_end": 23,
+            "item_char_start": 19,
+            "item_char_end": 23,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-pilot-sites",
+          "uri": "https://example.invalid/records/whatsapp-atlas-pilot-sites",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1128.974417000005,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 1104,
+        "release_gate_ms": 1,
+        "total_ms": 1128
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+          "requestOrdinal": 26,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "5efa0dd70f0a0abc4f97763311d6edad4328ae1b7a4713fbed59f90b00e954f3",
+          "bodySha256": "31d02702d218d2d4ecd4a4d5a410c60694e0bf00398f163db684e736a6b8293c",
+          "bodyUtf8Bytes": 7132,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "97111bc5912154b8f34937b6bedc92778e11b07f32818a4a5a2f87269454a0fb",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 159,
+            "prompt_tokens": 2015,
+            "total_tokens": 2174
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "d9b2a1cdfe32f2ad6bf2b8f30ff8f48351e1b907ea7361393690999907152078",
+          "durationMs": 1102.4301669999986
+        }
+      ],
+      "rawObservationSha256": "3dc906614cef16636f5970c44c0829ddef91c95ee65c918b076a04f1051b92bf"
+    },
+    {
+      "ordinal": 13,
+      "arm": "parallel",
+      "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+      "grade": {
+        "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+        "shape": "coverage_negative",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": false,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "gapHonest: no genuine structured coverage degradation supported the reported gap"
+        ]
+      },
+      "answer": "The available records do not specify a launch city for the Atlas team. The evidence mentions approved pilot sites as North, Central, and Harbor, but these are not identified as cities.",
+      "evidence": [
+        {
+          "corpusId": "public.gmail",
+          "provider": "gmail",
+          "providerItemId": "gmail-atlas-stakeholder-thread",
+          "uri": "https://example.invalid/records/gmail-atlas-stakeholder-thread",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 19,
+            "char_end": 23,
+            "item_char_start": 19,
+            "item_char_end": 23,
+            "chunk_chars": 178,
+            "lane": "keyword"
+          }
+        },
+        {
+          "corpusId": "public.whatsapp_personal",
+          "provider": "whatsapp_personal",
+          "providerItemId": "whatsapp-atlas-pilot-sites",
+          "uri": "https://example.invalid/records/whatsapp-atlas-pilot-sites",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "2",
+            "char_start": 0,
+            "char_end": 5,
+            "item_char_start": 0,
+            "item_char_end": 5,
+            "chunk_chars": 156,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 1170.871791999998,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 23,
+        "analyst_ms": 1147,
+        "release_gate_ms": 0,
+        "total_ms": 1170
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q13_atlas_launch_city_absence_gmail-atlas-stakeholder-thread",
+          "requestOrdinal": 27,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "5efa0dd70f0a0abc4f97763311d6edad4328ae1b7a4713fbed59f90b00e954f3",
+          "bodySha256": "31d02702d218d2d4ecd4a4d5a410c60694e0bf00398f163db684e736a6b8293c",
+          "bodyUtf8Bytes": 7132,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "1e0fe00b24aa4ece312469a0ce0af16a6965661381fb1ea0094d37d0bc5e8153",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 165,
+            "prompt_tokens": 2015,
+            "total_tokens": 2180
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "d065b85351dc1d3d04a86180524acd00449cc806403e9f8ff5cb64d9f9ef2382",
+          "durationMs": 1144.7902500000055
+        }
+      ],
+      "rawObservationSha256": "1aefd038e97db6d780478503bffee965b6e8987f933e5d4357ac8ed9ca808ee1"
+    },
+    {
+      "ordinal": 14,
+      "arm": "main",
+      "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+      "grade": {
+        "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+        "shape": "coverage_negative",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": false,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "gapHonest: no genuine structured coverage degradation supported the reported gap"
+        ]
+      },
+      "answer": "The provided records do not name a legal approver for Beacon.\n\nCoverage notes:\n- Who is the legal approver for Beacon?",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-acceptance-criteria",
+          "uri": "https://example.invalid/records/drive-beacon-acceptance-criteria",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 192,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 954.0325840000005,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 19,
+        "analyst_ms": 934,
+        "release_gate_ms": 0,
+        "total_ms": 953
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+          "requestOrdinal": 29,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "5ccdce522b74efb2f18f1362c937c76259ca19f71dc4771e6da7a36d7bcc4696",
+          "bodySha256": "b6268cc853969abc3838d3d47cf8b27bb0724fe3cb13d0ebf4d4028c4079eaea",
+          "bodyUtf8Bytes": 7514,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "7df12350c3e491c4d0f582d7efb78c4e88b6aede0ac9a65c8da1c94dcbaa3fe1",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 126,
+            "prompt_tokens": 2036,
+            "total_tokens": 2162
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "f1d86a8e31a8966405d936a2a62d4cf9e6935df5b0cee5e77a2133e7455ef1ec",
+          "durationMs": 931.1135419999991
+        }
+      ],
+      "rawObservationSha256": "5630930341f4ac5f7f932a67770c68341b1687f15fc1b1640f0f79930f3efe64"
+    },
+    {
+      "ordinal": 14,
+      "arm": "parallel",
+      "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+      "grade": {
+        "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+        "shape": "coverage_negative",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": false,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 1 expected answer value(s)",
+          "gapHonest: no genuine structured coverage degradation supported the reported gap"
+        ]
+      },
+      "answer": "The provided records do not name a legal approver for Beacon.\n\nCoverage notes:\n- Who is the legal approver for Beacon?",
+      "evidence": [
+        {
+          "corpusId": "public.google_drive",
+          "provider": "google_drive",
+          "providerItemId": "drive-beacon-acceptance-criteria",
+          "uri": "https://example.invalid/records/drive-beacon-acceptance-criteria",
+          "citationSpan": {
+            "chunk_index": 0,
+            "chunk_id": "4",
+            "char_start": 0,
+            "char_end": 6,
+            "item_char_start": 0,
+            "item_char_end": 6,
+            "chunk_chars": 192,
+            "lane": "keyword"
+          }
+        }
+      ],
+      "coverageGaps": [],
+      "privacyProven": true,
+      "wallMs": 929.2749170000025,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 21,
+        "analyst_ms": 907,
+        "release_gate_ms": 1,
+        "total_ms": 929
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q14_beacon_legal_approver_absence_drive-beacon-acceptance-criteria",
+          "requestOrdinal": 28,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "5ccdce522b74efb2f18f1362c937c76259ca19f71dc4771e6da7a36d7bcc4696",
+          "bodySha256": "b6268cc853969abc3838d3d47cf8b27bb0724fe3cb13d0ebf4d4028c4079eaea",
+          "bodyUtf8Bytes": 7514,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "14cca68077a84ea7629777febf6950b76d67fd004acc196f2b2e81e5252ff963",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 126,
+            "prompt_tokens": 2036,
+            "total_tokens": 2162
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "f1d86a8e31a8966405d936a2a62d4cf9e6935df5b0cee5e77a2133e7455ef1ec",
+          "durationMs": 905.3928749999977
+        }
+      ],
+      "rawObservationSha256": "f58d45c79688df5b7e32a47c9572a78a902fa07e1daa659a39a4b4ed477a04ca"
+    },
+    {
+      "ordinal": 15,
+      "arm": "main",
+      "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+      "grade": {
+        "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+        "shape": "gap_honesty",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The penalty clause in the Atlas vendor addendum cannot be read because the PDF is stored without extracted text, indicating it may be scanned or image-only, or extraction is still pending.\n\nCoverage notes:\n- Atlas vendor addendum scan (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-addendum-unreadable",
+          "uri": "https://example.invalid/records/dropbox-atlas-addendum-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1173.583875000004,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 24,
+        "analyst_ms": 1148,
+        "release_gate_ms": 0,
+        "total_ms": 1172
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+          "requestOrdinal": 30,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9fe9019fc4562980526a031d246dab1a041b7800110ef7ae11f0489648f97c00",
+          "bodySha256": "ec652417ad2ab44ade3927075d65001882828452ccf806b4678564a6e92d6abc",
+          "bodyUtf8Bytes": 7178,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "0575f374a4a07749df7ca703e1a1af6064b4761bc379ebbc13f3cd79ee8caffb",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 143,
+            "prompt_tokens": 1951,
+            "total_tokens": 2094
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "23fb599cb1abb9d126ec7ea5b9a18bcce814c3e24ee961bf670a1219c844f4d5",
+          "durationMs": 1145.8504999999932
+        }
+      ],
+      "rawObservationSha256": "641f415586d5a4c17782a0f4daad9267725150a0c758e8e1afd4d92760e343cb"
+    },
+    {
+      "ordinal": 15,
+      "arm": "parallel",
+      "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+      "grade": {
+        "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+        "shape": "gap_honesty",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The penalty clause in the Atlas vendor addendum cannot be read because the PDF is stored without extracted text, indicating it may be scanned or image-only, or extraction is still pending.\n\nCoverage notes:\n- Atlas vendor addendum scan (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-atlas-addendum-unreadable",
+          "uri": "https://example.invalid/records/dropbox-atlas-addendum-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1135.9580419999984,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 25,
+        "analyst_ms": 1109,
+        "release_gate_ms": 1,
+        "total_ms": 1135
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q15_atlas_penalty_clause_gap_dropbox-atlas-addendum-unreadable",
+          "requestOrdinal": 31,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "9fe9019fc4562980526a031d246dab1a041b7800110ef7ae11f0489648f97c00",
+          "bodySha256": "ec652417ad2ab44ade3927075d65001882828452ccf806b4678564a6e92d6abc",
+          "bodyUtf8Bytes": 7178,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "240b99af671327e3651453e94f5a07ff3b600047723c1a465f797fe2f292371f",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 143,
+            "prompt_tokens": 1951,
+            "total_tokens": 2094
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "23fb599cb1abb9d126ec7ea5b9a18bcce814c3e24ee961bf670a1219c844f4d5",
+          "durationMs": 1107.9729579999985
+        }
+      ],
+      "rawObservationSha256": "fbc2b3b74211e8dfc63454cbb9018f2f4956ce2d2015b743910929a57425e204"
+    },
+    {
+      "ordinal": 16,
+      "arm": "main",
+      "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+      "grade": {
+        "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+        "shape": "gap_honesty",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The unit price on the Beacon scanned invoice cannot be read because the PDF is stored without extracted text, indicating an extraction gap.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 1039.083749999998,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 27,
+        "analyst_ms": 1011,
+        "release_gate_ms": 0,
+        "total_ms": 1038
+      },
+      "calls": [
+        {
+          "arm": "main",
+          "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+          "requestOrdinal": 33,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "4ed68fc1ce35db0e0d8441cc73f9523a498f5d07fd0ac1493908ebcfc2a6f03e",
+          "bodySha256": "cf0b82e5ffa79ac7e2a5cfac8867362859dabba8101e7b00761b7551ea04f5f6",
+          "bodyUtf8Bytes": 7141,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "7d231bd0e53bec814d21bd5ec518fc0136a825aa50aefeeecc4c98a343fbefc5",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 128,
+            "prompt_tokens": 1918,
+            "total_tokens": 2046
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "fcaf1665812fbadf32690d76c888bf603c593424f1c9e92b9ed3cb15d58b3873",
+          "durationMs": 1009.7151250000024
+        }
+      ],
+      "rawObservationSha256": "c9daa00dfc6d51cd9347e63812f304c79bacea775ca7d6da50be1b3e8f72f161"
+    },
+    {
+      "ordinal": 16,
+      "arm": "parallel",
+      "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+      "grade": {
+        "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+        "shape": "gap_honesty",
+        "answerCorrect": false,
+        "evidenceCited": true,
+        "gapHonest": true,
+        "privacyRespected": true,
+        "passed": false,
+        "detail": [
+          "answerCorrect: missing 2 expected answer value(s)"
+        ]
+      },
+      "answer": "The unit price on the Beacon scanned invoice cannot be read because the PDF is stored without extracted text, indicating an extraction gap.\n\nCoverage notes:\n- Beacon scanned invoice (public.dropbox) the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending.\n- 1 matched file found, but it could not be read or extracted in this pass.",
+      "evidence": [
+        {
+          "corpusId": "public.dropbox",
+          "provider": "dropbox",
+          "providerItemId": "dropbox-beacon-invoice-unreadable",
+          "uri": "https://example.invalid/records/dropbox-beacon-invoice-unreadable",
+          "citationSpan": null
+        }
+      ],
+      "coverageGaps": [
+        "the PDF is stored without extracted text; it may be scanned or image-only, or extraction is still pending."
+      ],
+      "privacyProven": true,
+      "wallMs": 943.7511249999952,
+      "wireTimings": {
+        "lane_setup_ms": 0,
+        "bulk_gate_ms": 0,
+        "evidence_pack_ms": 28,
+        "analyst_ms": 915,
+        "release_gate_ms": 0,
+        "total_ms": 943
+      },
+      "calls": [
+        {
+          "arm": "parallel",
+          "questionId": "q16_beacon_unit_price_gap_dropbox-beacon-invoice-unreadable",
+          "requestOrdinal": 32,
+          "requestedModel": "gemini-2.5-flash",
+          "promptSha256": "4ed68fc1ce35db0e0d8441cc73f9523a498f5d07fd0ac1493908ebcfc2a6f03e",
+          "bodySha256": "cf0b82e5ffa79ac7e2a5cfac8867362859dabba8101e7b00761b7551ea04f5f6",
+          "bodyUtf8Bytes": 7141,
+          "maxTokens": 1024,
+          "httpStatus": 200,
+          "responseSha256": "75ed8c30e580833ebfa61df6922f1b35896bebdeb71063b20943b1780b72a96c",
+          "responseModel": "gemini-2.5-flash",
+          "usage": {
+            "completion_tokens": 128,
+            "prompt_tokens": 1918,
+            "total_tokens": 2046
+          },
+          "finishReason": "stop",
+          "modelResponseSha256": "fcaf1665812fbadf32690d76c888bf603c593424f1c9e92b9ed3cb15d58b3873",
+          "durationMs": 913.2898340000029
+        }
+      ],
+      "rawObservationSha256": "22fc97d669860f192639f95a4ced76589b24f74e41e1dc8b8bcc56fc60c022ad"
+    }
+  ],
+  "usage": [
+    {
+      "ordinal": 1,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 31,
+        "total_tokens": 47
+      }
+    },
+    {
+      "ordinal": 2,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 136,
+        "prompt_tokens": 2010,
+        "total_tokens": 2146
+      }
+    },
+    {
+      "ordinal": 3,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 136,
+        "prompt_tokens": 2010,
+        "total_tokens": 2146
+      }
+    },
+    {
+      "ordinal": 4,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 114,
+        "prompt_tokens": 1904,
+        "total_tokens": 2018
+      }
+    },
+    {
+      "ordinal": 5,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 114,
+        "prompt_tokens": 1904,
+        "total_tokens": 2018
+      }
+    },
+    {
+      "ordinal": 6,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 351,
+        "prompt_tokens": 2025,
+        "total_tokens": 2376
+      }
+    },
+    {
+      "ordinal": 7,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 351,
+        "prompt_tokens": 2025,
+        "total_tokens": 2376
+      }
+    },
+    {
+      "ordinal": 8,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 313,
+        "prompt_tokens": 1974,
+        "total_tokens": 2287
+      }
+    },
+    {
+      "ordinal": 9,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 314,
+        "prompt_tokens": 1974,
+        "total_tokens": 2288
+      }
+    },
+    {
+      "ordinal": 10,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 352,
+        "prompt_tokens": 1976,
+        "total_tokens": 2328
+      }
+    },
+    {
+      "ordinal": 11,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 352,
+        "prompt_tokens": 1976,
+        "total_tokens": 2328
+      }
+    },
+    {
+      "ordinal": 12,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 189,
+        "prompt_tokens": 1918,
+        "total_tokens": 2107
+      }
+    },
+    {
+      "ordinal": 13,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 189,
+        "prompt_tokens": 1918,
+        "total_tokens": 2107
+      }
+    },
+    {
+      "ordinal": 14,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 141,
+        "prompt_tokens": 2005,
+        "total_tokens": 2146
+      }
+    },
+    {
+      "ordinal": 15,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 141,
+        "prompt_tokens": 2005,
+        "total_tokens": 2146
+      }
+    },
+    {
+      "ordinal": 16,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 124,
+        "prompt_tokens": 1970,
+        "total_tokens": 2094
+      }
+    },
+    {
+      "ordinal": 17,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 124,
+        "prompt_tokens": 1970,
+        "total_tokens": 2094
+      }
+    },
+    {
+      "ordinal": 18,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 588,
+        "prompt_tokens": 2025,
+        "total_tokens": 2613
+      }
+    },
+    {
+      "ordinal": 19,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 588,
+        "prompt_tokens": 2025,
+        "total_tokens": 2613
+      }
+    },
+    {
+      "ordinal": 20,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 1930,
+        "total_tokens": 2073
+      }
+    },
+    {
+      "ordinal": 21,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 1930,
+        "total_tokens": 2073
+      }
+    },
+    {
+      "ordinal": 22,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 1993,
+        "total_tokens": 2191
+      }
+    },
+    {
+      "ordinal": 23,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 141,
+        "prompt_tokens": 1993,
+        "total_tokens": 2134
+      }
+    },
+    {
+      "ordinal": 24,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 153,
+        "prompt_tokens": 1908,
+        "total_tokens": 2061
+      }
+    },
+    {
+      "ordinal": 25,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 153,
+        "prompt_tokens": 1908,
+        "total_tokens": 2061
+      }
+    },
+    {
+      "ordinal": 26,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 159,
+        "prompt_tokens": 2015,
+        "total_tokens": 2174
+      }
+    },
+    {
+      "ordinal": 27,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 165,
+        "prompt_tokens": 2015,
+        "total_tokens": 2180
+      }
+    },
+    {
+      "ordinal": 28,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 126,
+        "prompt_tokens": 2036,
+        "total_tokens": 2162
+      }
+    },
+    {
+      "ordinal": 29,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 126,
+        "prompt_tokens": 2036,
+        "total_tokens": 2162
+      }
+    },
+    {
+      "ordinal": 30,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 1951,
+        "total_tokens": 2094
+      }
+    },
+    {
+      "ordinal": 31,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 1951,
+        "total_tokens": 2094
+      }
+    },
+    {
+      "ordinal": 32,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 128,
+        "prompt_tokens": 1918,
+        "total_tokens": 2046
+      }
+    },
+    {
+      "ordinal": 33,
+      "model": "gemini-2.5-flash",
+      "usage": {
+        "completion_tokens": 128,
+        "prompt_tokens": 1918,
+        "total_tokens": 2046
+      }
+    }
+  ],
+  "limitations": [
+    "Fictional S0/public_safe corpus only; no real-provider, private-corpus, embedding, default-preset or onboarding proof.",
+    "One sample per arm/question; different outcomes under identical prompts do not establish a branch effect.",
+    "Literal expected-value/citation/gap grades are reported unchanged; all failed questions remain visible.",
+    "No automatic retry or prompt tuning. No model is labelled local."
+  ]
+}

@@ -150,14 +150,6 @@ describe('background page', () => {
     expect(html).toContain('href="/dashboard?setup">Setup</a>');
   });
 
-  test('offers the one link out to the embedding history', () => {
-    const view = fixtureView([scheduledSource({})]);
-
-    const html = renderDashboardBackgroundPage(view, { now: NOW });
-
-    expect(html).toContain('href="/dashboard?embedding-ledger">Embedding decisions &amp; history →</a>');
-  });
-
   test('counts no failures tile, because a count with no disposition is the failures lane', () => {
     const view = fixtureView([failingSource({ label: 'Dropbox' })]);
 

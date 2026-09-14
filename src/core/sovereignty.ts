@@ -363,6 +363,20 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
         ?? 'env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
       purpose: 'embedding',
     };
+  } else if (embeddingProvider === 'venice') {
+    profiles['venice-source-embedding'] = {
+      provider: 'venice',
+      trust: 'encrypted_cloud',
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || 'https://api.venice.ai/api/v1',
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || 'text-embedding-qwen3-8b',
+      secretRef: firstExistingSecretRef(env, [
+        'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
+        'VENICE_API_KEY',
+        'API_KEY_VENICE',
+        'Venice-API-Key',
+      ]) ?? 'env:OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
+      purpose: 'embedding',
+    };
   }
 
   const defaultRoute = cloudEnabled ? ['cloud-openclaw-infer', 'local-source-answer'] : ['local-source-answer'];
@@ -373,7 +387,12 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
       : null;
   const secureEmbeddingProfile = embeddingProvider === 'local-openai-compatible'
     ? 'local-source-embedding'
-    : null;
+    : embeddingProvider === 'venice'
+      ? 'venice-source-embedding'
+      : null;
+  const secureEmbeddingTrust: SovereigntyProfileTrust[] = embeddingProvider === 'venice'
+    ? ['encrypted_cloud']
+    : ['local'];
   const secureAnalystMembers = profiles['venice-private']
     ? ['local-source-answer', 'venice-private']
     : ['local-source-answer'];
@@ -389,7 +408,7 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
       trustDomains: {
         secure_local: {
           minimumExecutionTrust: 'local',
-          allowedEmbeddingTrust: ['local'],
+          allowedEmbeddingTrust: secureEmbeddingTrust,
           embeddingProfile: secureEmbeddingProfile,
           allowCloudQuery: false,
           activationMode: secureEmbeddingProfile ? 'hybrid_shadow' : 'lexical_only',
@@ -703,11 +722,11 @@ function validateRetrievalPolicy(
     if (policy.allowCloudQuery) {
       throw new OperationError('config_error', 'secure_local retrieval cannot allow cloud query.');
     }
-    if (policy.allowedEmbeddingTrust.some((trust) => trust !== 'local')) {
+    if (policy.allowedEmbeddingTrust.some((trust) => trust !== 'local' && trust !== 'encrypted_cloud')) {
       throw new OperationError(
         'config_error',
-        'secure_local embeddings may only use local trust in v1.',
-        'encrypted_cloud embedding remains disallowed until a provider-specific approval exists.',
+        'secure_local embeddings may use local or approved encrypted_cloud trust.',
+        'Use a local profile or a Venice Private embedding profile; standard cloud remains disallowed.',
       );
     }
   }
@@ -716,11 +735,13 @@ function validateRetrievalPolicy(
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError('config_error', `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
-    if (domain === 'secure_local' && resolved.profile.trust !== 'local') {
+    if (domain === 'secure_local'
+      && (resolved.profile.trust !== 'local'
+        && !(resolved.profile.trust === 'encrypted_cloud' && resolved.profile.provider === 'venice'))) {
       throw new OperationError(
         'config_error',
-        'secure_local is never cloud-embedded.',
-        'Use a local embedding profile or leave secure_local lexical/metadata-only.',
+        'secure_local cloud embeddings require a Venice profile.',
+        'Use a local embedding profile or an approved Venice Private embedding profile.',
       );
     }
   }

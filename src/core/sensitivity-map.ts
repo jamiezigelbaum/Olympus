@@ -12,6 +12,8 @@ import {
 export const SENSITIVITY_MAP_SCHEMA_VERSION = 1;
 export const OLYMPUS_SENSITIVITY_MAP_ENV = 'OLYMPUS_SENSITIVITY_MAP_PATH';
 
+// Schema-v1 identifiers: private means Personal; secure means Private.
+// Display names are defined in privacy-language.ts; never rename these keys in place.
 export const USER_FACING_TIER_MAPPING = {
   public: { targetTrustTier: 'S0', targetTrustDomain: 'public_safe' },
   private: { targetTrustTier: 'S3', targetTrustDomain: 'internal' },
@@ -267,7 +269,7 @@ function parseCategory(value: unknown, label: string): SensitivityMapCategory {
   if (targetTierName === 'public' || targetTierName === 'private') {
     throw new OperationError(
       'config_error',
-      `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: public/private downgrade guidance is not supported yet.`,
+      `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`,
     );
   }
 

@@ -524,78 +524,10 @@ export class SqliteSourceIngestionLedgerStore {
       );
       CREATE INDEX IF NOT EXISTS source_dashboard_samples_corpus_time_idx
         ON source_dashboard_samples (corpus_id, sampled_at);
-      CREATE TABLE IF NOT EXISTS source_ingestion_ledger (
-        source_id TEXT PRIMARY KEY,
-        label TEXT NOT NULL,
-        primary_corpus_id TEXT NOT NULL,
-        corpus_ids_json TEXT NOT NULL,
-        family TEXT NOT NULL,
-        trust_domains_json TEXT NOT NULL,
-        configured INTEGER NOT NULL,
-        items INTEGER NOT NULL,
-        content_indexed INTEGER NOT NULL,
-        metadata_only INTEGER NOT NULL,
-        failed INTEGER NOT NULL,
-        coverage_percent REAL NOT NULL DEFAULT 0,
-        stuck_queued INTEGER NOT NULL,
-        stuck_active INTEGER NOT NULL,
-        held_paused INTEGER NOT NULL,
-        broken INTEGER NOT NULL,
-        ingestion_health_json TEXT NOT NULL DEFAULT '{}',
-        freshness_hours REAL,
-        last_sync_at TEXT,
-        attention_json TEXT NOT NULL,
-        failure_breakdown_json TEXT NOT NULL,
-        refreshed_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS source_ingestion_unreadable_content (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        path_display TEXT,
-        status TEXT NOT NULL,
-        extractor_kind TEXT NOT NULL,
-        error_class TEXT,
-        updated_at TEXT NOT NULL,
-        refreshed_at TEXT NOT NULL
-      );
     `);
-    ensureColumn(this.db, 'source_ingestion_ledger', 'coverage_percent', 'REAL NOT NULL DEFAULT 0');
-    ensureColumn(this.db, 'source_ingestion_ledger', 'ingestion_health_json', "TEXT NOT NULL DEFAULT '{}'");
   }
 
   record(snapshot: SourceIngestionLedgerSnapshot): void {
-    const upsert = this.db.query(`
-      INSERT INTO source_ingestion_ledger (
-        source_id, label, primary_corpus_id, corpus_ids_json, family,
-        trust_domains_json, configured, items, content_indexed, metadata_only,
-        failed, coverage_percent, stuck_queued, stuck_active, held_paused, broken,
-        ingestion_health_json, freshness_hours, last_sync_at, attention_json,
-        failure_breakdown_json, refreshed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(source_id) DO UPDATE SET
-        label = excluded.label,
-        primary_corpus_id = excluded.primary_corpus_id,
-        corpus_ids_json = excluded.corpus_ids_json,
-        family = excluded.family,
-        trust_domains_json = excluded.trust_domains_json,
-        configured = excluded.configured,
-        items = excluded.items,
-        content_indexed = excluded.content_indexed,
-        metadata_only = excluded.metadata_only,
-        failed = excluded.failed,
-        coverage_percent = excluded.coverage_percent,
-        stuck_queued = excluded.stuck_queued,
-        stuck_active = excluded.stuck_active,
-        held_paused = excluded.held_paused,
-        broken = excluded.broken,
-        ingestion_health_json = excluded.ingestion_health_json,
-        freshness_hours = excluded.freshness_hours,
-        last_sync_at = excluded.last_sync_at,
-        attention_json = excluded.attention_json,
-        failure_breakdown_json = excluded.failure_breakdown_json,
-        refreshed_at = excluded.refreshed_at
-    `);
     const sample = this.db.query(`
       INSERT INTO source_dashboard_samples (
         source_id, corpus_id, sampled_at, indexed_items, content_ready_items,
@@ -615,38 +547,8 @@ export class SqliteSourceIngestionLedgerStore {
           LIMIT ?
         )
     `);
-    const insertUnreadable = this.db.query(`
-      INSERT INTO source_ingestion_unreadable_content (
-        source_id, name, path_display, status, extractor_kind, error_class,
-        updated_at, refreshed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
     this.db.transaction(() => {
       for (const row of snapshot.rows) {
-        upsert.run(
-          row.source_id,
-          row.label,
-          row.primary_corpus_id,
-          JSON.stringify(row.corpus_ids),
-          row.family,
-          JSON.stringify(row.trust_domains),
-          row.configured ? 1 : 0,
-          row.items,
-          row.content_indexed,
-          row.metadata_only,
-          row.failed,
-          row.coverage_percent,
-          row.stuck.queued,
-          row.stuck.active,
-          row.stuck.held_paused,
-          row.stuck.broken,
-          JSON.stringify(row.ingestion_health),
-          row.freshness_hours ?? null,
-          row.last_sync_at ?? null,
-          JSON.stringify(row.attention),
-          JSON.stringify(row.failure_breakdown ?? []),
-          snapshot.generated_at,
-        );
         sample.run(
           row.source_id,
           row.primary_corpus_id,
@@ -664,19 +566,6 @@ export class SqliteSourceIngestionLedgerStore {
       }
       for (const corpusId of new Set(snapshot.rows.map((row) => row.primary_corpus_id))) {
         trimCorpusSamples.run(corpusId, corpusId, MAX_SAMPLES_PER_CORPUS);
-      }
-      this.db.query('DELETE FROM source_ingestion_unreadable_content').run();
-      for (const item of snapshot.unreadable_content ?? []) {
-        insertUnreadable.run(
-          item.source_id,
-          item.name,
-          item.path_display ?? null,
-          item.status,
-          item.extractor_kind,
-          item.error_class ?? null,
-          item.updated_at,
-          snapshot.generated_at,
-        );
       }
     })();
   }
@@ -1642,12 +1531,6 @@ function sumByStatus(rows: SourceIngestionFailureBreakdown[], status: string): n
   return rows
     .filter((row) => row.status === status)
     .reduce((sum, row) => sum + row.count, 0);
-}
-
-function ensureColumn(db: Database, table: string, column: string, definition: string): void {
-  const columns = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-  if (columns.some((entry) => entry.name === column)) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function dedupe(values: string[]): string[] {

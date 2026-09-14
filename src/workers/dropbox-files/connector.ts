@@ -95,6 +95,16 @@ export interface DropboxSourceConnectorOptions {
   deletedItemIdentityResolver?: DropboxDeletedItemIdentityResolver;
   /** Privacy-safe operational signal; never receives provider data. */
   onPageDigestRestart?: () => void;
+  /** Account-bound explicit folder scope; absent only in isolated tests/tooling. */
+  scope?: DropboxContentScope;
+}
+
+export interface DropboxContentScope {
+  generation: string;
+  revision: string;
+  allowsMetadata(path: string): boolean;
+  allowsContent(path: string): boolean;
+  assertCurrent(): void;
 }
 
 export function createDropboxSourceConnector(options: DropboxSourceConnectorOptions): SourceConnector {
@@ -109,6 +119,24 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
   let cachedSession: CredentialSession | undefined;
   let cachedMetadataClient = options.metadataClient;
   let cachedDownloadClient = options.downloadClient;
+  const contentAllowedByLocalItemId = new Map<string, boolean>();
+
+  const scopedItems = (
+    entries: readonly DropboxMetadataEntry[],
+    fetchedAt: string,
+  ): RawItem[] => entries.flatMap((entry) => {
+    const path = entry.pathLower ?? entry.pathDisplay;
+    if (options.scope) {
+      options.scope.assertCurrent();
+      if (!path || !options.scope.allowsMetadata(path)) return [];
+    }
+    const item = rawItemFromDropboxEntry(entry, account, fetchedAt, options.deletedItemIdentityResolver);
+    contentAllowedByLocalItemId.set(
+      item.identity.localItemId,
+      entry.tag === 'file' && (!options.scope || options.scope.allowsContent(path!)),
+    );
+    return [item];
+  });
 
   const ensureSession = async (): Promise<CredentialSession> => {
     if (cachedSession) return cachedSession;
@@ -236,12 +264,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
               pageDigest: metadataPageDigest(page),
             });
             yield {
-              items: accepted.map((entry) => rawItemFromDropboxEntry(
-                entry,
-                account,
-                nowIso(),
-                options.deletedItemIdentityResolver,
-              )),
+              items: scopedItems(accepted, nowIso()),
               nextCursor: resumeCursor,
               done: false,
               truncated: true,
@@ -249,12 +272,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
             return;
           }
           yield {
-            items: accepted.map((entry) => rawItemFromDropboxEntry(
-              entry,
-              account,
-              nowIso(),
-              options.deletedItemIdentityResolver,
-            )),
+            items: scopedItems(accepted, nowIso()),
             ...(nextCursor ? { nextCursor } : {}),
             done: !hasMore,
           };
@@ -266,7 +284,6 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
 
     async fetchItem(localItemId: string): Promise<RawItem> {
       const providerItemId = providerItemIdFromLocalItemId(localItemId, account);
-      const downloader = await ensureDownloadClient();
       const fetchedAt = nowIso();
       const identity: SourceItemIdentity = {
         family: 'file',
@@ -276,6 +293,19 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
         providerFileId: providerItemId,
         localItemId,
       };
+      if (options.scope) {
+        options.scope.assertCurrent();
+        if (contentAllowedByLocalItemId.get(localItemId) !== true) {
+          return {
+            identity,
+            mimeType: UNKNOWN_MIME_TYPE,
+            content: { kind: 'metadata_only' },
+            metadata: Object.freeze({ scopeContentDenied: true }),
+            fetchedAt,
+          };
+        }
+      }
+      const downloader = await ensureDownloadClient();
       try {
         const downloaded = await downloader.download({
           job: {

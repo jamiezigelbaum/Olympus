@@ -6,7 +6,7 @@ import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src
 import type { SecretStore } from '../src/core/secret-store.ts';
 import type { CredentialOAuth2StateStore } from '../src/workers/credential-broker/index.ts';
 import {
-  connectApiKeySource,
+  connectPublicApiKeySource,
   startExternalOAuthSourceConnection,
 } from '../src/core/connect.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -566,7 +566,7 @@ describe('bounded dashboard Disconnect', () => {
       }));
       await deleteStarted.promise;
       let connectReturned = false;
-      const connect = connectApiKeySource({
+      const connect = connectPublicApiKeySource({
         source: 'readwise',
         apiKey: 'new-token',
         registryPath,
@@ -653,9 +653,9 @@ describe('bounded dashboard Disconnect', () => {
       fetch: async () => new Response('{}', { status: 204 }),
     };
     try {
-      await expect(connectApiKeySource({ ...options, apiKey: 'personal-token', accountRole: 'personal' }))
+      await expect(connectPublicApiKeySource({ ...options, apiKey: 'personal-token', accountRole: 'personal' }))
         .resolves.toMatchObject({ handles: ['readwise.personal'] });
-      await expect(connectApiKeySource({ ...options, apiKey: 'work-token', accountRole: 'work' }))
+      await expect(connectPublicApiKeySource({ ...options, apiKey: 'work-token', accountRole: 'work' }))
         .rejects.toThrow('one connected account per provider');
       expect(await secrets.get('readwise.work.token')).toBeUndefined();
       expect(readConnectedHandleRegistry(registryPath).handles.map((handle) => handle.handle))

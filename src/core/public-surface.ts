@@ -1,10 +1,9 @@
 /**
  * Olympus v0.4 public product surface.
  *
- * Positive lists are the release contract: repository-only and private-ops
- * capabilities may continue to exist in source while they are being moved or
- * deleted, but they cannot become public merely because a registry, directory,
- * or command dispatcher grows.
+ * Positive lists are the release contract. The runtime registry is public-only,
+ * and these lists keep each supported harness from widening merely because a
+ * command dispatcher or package directory grows.
  */
 
 export const V0_4_PUBLIC_NATIVE_TOOLS = [
@@ -155,7 +154,13 @@ export interface PublicDashboardRoute {
 export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'GET', path: '/dashboard' },
   { method: 'GET', path: '/dashboard.json' },
+  { method: 'GET', path: '/dashboard/ui' },
   { method: 'GET', path: '/dashboard/auth-check' },
+  // The standalone opening handoff: a public constant page, a bearer-only
+  // mint, and a ticket-authenticated redeem. See core/dashboard-launch.ts.
+  { method: 'GET', path: '/dashboard/launch' },
+  { method: 'POST', path: '/dashboard/control/launch' },
+  { method: 'POST', path: '/dashboard/control/launch/redeem' },
   { method: 'POST', path: '/dashboard/control/session' },
   { method: 'GET', path: '/dashboard/dispositions' },
   { method: 'GET', path: '/dashboard/dispositions.json' },
@@ -164,6 +169,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/connect/oauth/start' },
   { method: 'POST', path: '/dashboard/connect/oauth/cancel' },
   { method: 'POST', path: '/dashboard/connect/api-key' },
+  { method: 'POST', path: '/dashboard/models/check' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/disconnect' },
@@ -196,6 +202,13 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'bin/olympus',
   'dist/index.js',
   'dist/cli.js',
+  'dist/control-ui/index.js',
+  'scripts/telegram-pair.py',
+  'scripts/telegram-telethon-reader.py',
+  'tools/whatsapp-bridge/main.go',
+  'tools/whatsapp-bridge/go.mod',
+  'tools/whatsapp-bridge/go.sum',
+  'tools/whatsapp-bridge/README.md',
   'skills/manifest.json',
   'skills/ask-argus/SKILL.md',
   'skills/ask-sources/SKILL.md',

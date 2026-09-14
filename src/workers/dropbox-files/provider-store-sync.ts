@@ -10,11 +10,15 @@ import type {
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import {
   createDropboxSourceConnector,
+  type DropboxContentScope,
 } from './connector.ts';
 import {
   isDropboxCursorResetError,
@@ -90,14 +94,15 @@ export interface DropboxProviderStoreSyncHandlerOptions {
   contentBaseUrl?: string;
   /** Kept here so construction rejects an unsafe secure-lane provider early. */
   embeddingProvider?: SourceEmbeddingProvider;
+  scope?: DropboxContentScope;
 }
 
 export function createDropboxProviderStoreSyncHandler(
   options: DropboxProviderStoreSyncHandlerOptions,
 ): DropboxProviderStoreSyncHandler {
   const account = required(options.account, 'Dropbox connector-store account');
-  if (options.embeddingProvider && options.embeddingProvider.backend !== 'local') {
-    throw new Error('Dropbox secure_local embeddings require a local/private embedding provider.');
+  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
+    throw new Error('Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
 
   const connectorIdForScope = (approvedScopeKey: string): string =>
@@ -129,6 +134,7 @@ export function createDropboxProviderStoreSyncHandler(
           ...(options.fetch ? { fetch: options.fetch } : {}),
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.contentBaseUrl ? { contentBaseUrl: options.contentBaseUrl } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
           deletedItemIdentityResolver: options.store,
           onPageDigestRestart: () => {
             pageDigestRestarts += 1;
@@ -136,6 +142,15 @@ export function createDropboxProviderStoreSyncHandler(
         }));
         const sync = await options.store.syncFromConnector(observed.connector, {
           fetchContent: false,
+          ...(options.scope
+            ? {
+                sourceScopeObservation: () => ({
+                  accountGeneration: options.scope!.generation,
+                  scopeRevision: options.scope!.revision,
+                  folderKeys: [],
+                }),
+              }
+            : {}),
           ...(maxItems !== undefined ? { maxItems } : {}),
           ...(cursor ? { cursor } : {}),
         });

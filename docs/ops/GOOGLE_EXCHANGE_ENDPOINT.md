@@ -560,9 +560,7 @@ whole point of this design is that the secret never has to be), and
 directory membership, so it is unaffected by this addition beyond scanning a
 few more files.
 
-This document is added to the canonical documentation allowlist in
-`scripts/private-ops-disposition.ts` (`ALLOWED_DOCS`), which enumerates every
-file under `docs/` by exact path — an unlisted `docs/` file fails
-`bun scripts/private-ops-disposition.ts verify` (exercised by
-`test/private-ops-disposition.test.ts`), so this addition needed that one-line
-allowlist update alongside creating the file.
+The completed private-ops migration originally recorded this document in its
+documentation inventory. This parallel experiment retires that historical
+verifier; the package's positive file inventory and current content scans
+continue to own what is shipped.

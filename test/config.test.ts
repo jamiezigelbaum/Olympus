@@ -44,7 +44,7 @@ describe('config', () => {
       worker: {
         scheduler: {
           enabled: true,
-          sourceIds: ['unknown.source_id'],
+          sourceIds: ['domain_library.agent_library'],
         },
       },
     })).toThrow('sourceIds entries must be one of');
@@ -117,8 +117,6 @@ describe('config', () => {
       freshnessThresholdHours: 26,
     });
     expect(config.sourceIndex.answerDevEnabled).toBe(false);
-    expect(config.fileDelivery.enabled).toBe(false);
-    expect(config.fileDelivery.baseUrl).toBe('http://127.0.0.1:8020/v1');
   });
 
   test('environment overrides lane config', () => {
@@ -136,9 +134,6 @@ describe('config', () => {
       OLYMPUS_EMAIL_ENABLED: 'true',
       OLYMPUS_EMAIL_BASE_URL: 'http://email.test/v1/',
       OLYMPUS_SOURCE_INDEX_ENABLED: 'false',
-      OLYMPUS_FILE_DELIVERY_ENABLED: 'true',
-      OLYMPUS_FILE_DELIVERY_BASE_URL: 'http://xanthos-delivery.test/v1/',
-      OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS: '45',
       OLYMPUS_WORKER_AUTH_TOKEN: ' shared-worker-secret ',
       OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
       OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS: 'x.bookmarks',
@@ -163,9 +158,6 @@ describe('config', () => {
     expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://email.test/v1');
     expect(config.sourceIndex.enabled).toBe(false);
-    expect(config.fileDelivery.enabled).toBe(true);
-    expect(config.fileDelivery.baseUrl).toBe('http://xanthos-delivery.test/v1');
-    expect(config.fileDelivery.requestTimeoutSeconds).toBe(45);
   });
 
   test('normalizes source-worker base URLs at file and env ingest', () => {
@@ -233,11 +225,6 @@ describe('config', () => {
         enabled: false,
         answerDevEnabled: true,
       },
-      fileDelivery: {
-        enabled: true,
-        baseUrl: 'http://xanthos-delivery.test/v1/',
-        requestTimeoutSeconds: 45,
-      },
       worker: {
         authToken: 'plugin-worker-secret',
         scheduler: {
@@ -283,11 +270,6 @@ describe('config', () => {
     });
     expect(config.sourceIndex.enabled).toBe(false);
     expect(config.sourceIndex.answerDevEnabled).toBe(true);
-    expect(config.fileDelivery).toEqual({
-      enabled: true,
-      baseUrl: 'http://xanthos-delivery.test/v1',
-      requestTimeoutSeconds: 45,
-    });
   });
 
   test('normalizes source-worker base URLs from plugin config', () => {

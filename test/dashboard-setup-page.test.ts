@@ -14,6 +14,20 @@ import { renderDashboardSetupPage } from '../src/workers/dashboard/pages/setup.t
 const NOW = new Date('2026-07-02T12:00:00.000Z');
 
 describe('dashboard first-run page', () => {
+  test('Dropbox Setup cards link to source details before and after connecting', () => {
+    for (const state of ['not_connected', 'connected'] as const) {
+      const html = renderDashboardSetupPage(viewWith([card('dropbox.files', 'Dropbox', {
+        connection: connection({ state, label: state, action: { kind: 'oauth', source: 'dropbox', label: 'Connect' } }),
+      })]));
+      if (state === 'not_connected') {
+        expect(html).toContain('data-dashboard-href="/dashboard?source=dropbox.files"');
+        expect(html).toContain('<a class="name" href="/dashboard?source=dropbox.files">Dropbox</a>');
+      } else {
+        expect(html).toContain('rowzone" href="/dashboard?source=dropbox.files"');
+      }
+    }
+  });
+
   test('sorts rows into sections by connection state, attention first', () => {
     const html = renderDashboardSetupPage(viewWith([
       card('gmail.email', 'Gmail', {
@@ -590,9 +604,9 @@ describe('dashboard setup framing and copy', () => {
       controlSessionCsrfToken: 'csrf-fixture',
     });
 
-    expect(locked).toContain('Input token');
-    expect(locked).toContain('Where is my token?');
-    expect(locked).toContain('&lt;rootDir&gt;/bin/olympus dashboard token');
+    expect(locked).toContain('Open dashboard controls');
+    expect(locked).toContain('Get opening link');
+    expect(locked).toContain('&lt;rootDir&gt;/bin/olympus dashboard');
     expect(connected).toContain('Dashboard controls unlocked');
     expect(connected).not.toContain('name="worker_token"');
 

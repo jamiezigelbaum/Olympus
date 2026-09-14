@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   CredentialBrokerError,
+  CREDENTIAL_PROVIDERS,
   StaticCredentialBroker,
   createEnvCredentialBroker,
   safeCredentialSessionAudit,
@@ -17,7 +18,6 @@ import {
   upsertConnectedHandle,
   type ConnectedCredentialHandle,
 } from '../src/workers/credential-broker/connected-handles.ts';
-import { sourceFamilyPostureRegistry } from '../src/core/source-family.ts';
 
 describe('Olympus credential broker', () => {
   test('repairs a dual-owned X registry entry only when local OAuth state is account-matched', async () => {
@@ -415,29 +415,20 @@ describe('Olympus credential broker', () => {
     });
   });
 
-  test('registers active source-family credential handles without claiming ingestion is live', async () => {
+  test('registers all seven public provider handles without claiming credentials are ready', async () => {
     const broker = createEnvCredentialBroker({ env: {}, oauth2StateStore: new MemoryOAuth2StateStore() });
-    const handles = sourceFamilyPostureRegistry
-      .list()
-      .filter((posture) => posture.status !== 'deferred')
-      .flatMap((posture) => posture.credentialHandles ?? []);
-    const statuses = await Promise.all(handles.map((handle) => broker.status?.(handle)));
-
-    expect(handles).toEqual([
+    const handles = [
       'gmail.personal',
-      'gmail.business_ocu',
       'dropbox.personal',
       'telegram.personal',
-      'whatsapp.business',
       'whatsapp.personal_local',
-      'apple_messages.local',
       'x.bookmarks.personal',
       'readwise.personal',
       'google_drive.personal',
-      'reflect.archive',
-      'roam.archive',
-    ]);
+    ];
+    const statuses = await Promise.all(handles.map((handle) => broker.status?.(handle)));
     expect(statuses.map((status) => status?.handle)).toEqual(handles);
+    expect(statuses.map((status) => status?.provider).sort()).toEqual([...CREDENTIAL_PROVIDERS].sort());
     expect(statuses.every((status) => status?.status === 'missing')).toBe(true);
     expect(statuses.every((status) => status?.rawCredentialExposed === false)).toBe(true);
     expect(JSON.stringify(statuses)).not.toContain('OLYMPUS_CREDENTIAL');
@@ -698,10 +689,7 @@ describe('Olympus credential broker', () => {
     const broker = createEnvCredentialBroker({
       env: {
         OLYMPUS_CREDENTIAL_TELEGRAM_PERSONAL_MTPROTO_SESSION_READY: 'true',
-        OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY: 'true',
-        OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY: 'true',
         OLYMPUS_CREDENTIAL_WHATSAPP_PERSONAL_LOCAL_DB_READY: 'true',
-        OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY: 'true',
       },
       now: () => new Date('2026-05-20T12:00:00.000Z'),
     });
@@ -719,28 +707,10 @@ describe('Olympus credential broker', () => {
       capability: 'telegram.messages.sync',
       trustDomain: 'secure_local',
     });
-    const appleMessages = await broker.issueSession({
-      handle: 'apple_messages.local',
-      provider: 'apple_messages',
-      capability: 'apple_messages.messages.sync',
-      trustDomain: 'secure_local',
-    });
     const whatsappLocal = await broker.issueSession({
       handle: 'whatsapp.personal_local',
       provider: 'whatsapp_personal',
       capability: 'whatsapp.personal.messages.sync',
-      trustDomain: 'secure_local',
-    });
-    const reflectArchive = await broker.issueSession({
-      handle: 'reflect.archive',
-      provider: 'reflect',
-      capability: 'reflect.archive.import',
-      trustDomain: 'internal',
-    });
-    const whatsappBusiness = await broker.issueSession({
-      handle: 'whatsapp.business',
-      provider: 'whatsapp_business',
-      capability: 'whatsapp.business.messages.sync',
       trustDomain: 'secure_local',
     });
     expect(telegram).toMatchObject({
@@ -752,41 +722,16 @@ describe('Olympus credential broker', () => {
       expiresAt: '2026-05-20T13:00:00.000Z',
       backendLabel: 'local_private:telegram_telethon_reader',
     });
-    expect(appleMessages).toMatchObject({
-      kind: 'local_app_database',
-      databaseSourceId: 'apple_messages_local',
-      readerWorker: 'apple_messages_reader',
-      databaseRole: 'messages_readonly',
-      scopeLabel: 'local_messages',
-    });
     expect(whatsappLocal).toMatchObject({
       kind: 'local_app_database',
       databaseSourceId: 'whatsapp_personal_local',
       readerWorker: 'whatsapp_local_reader',
       databaseRole: 'messages_readonly',
     });
-    expect(reflectArchive).toMatchObject({
-      kind: 'archive_path',
-      archiveRootAlias: 'reflect_archive',
-      readerWorker: 'archive_import_reader',
-      contentBounds: 'approved_archive_root',
-    });
-    expect(whatsappBusiness).toMatchObject({
-      kind: 'webhook_token',
-      webhookIntegrationId: 'twilio_whatsapp_business',
-      validationMode: 'broker_verified_event',
-      verifierReference: 'twilio_whatsapp_business_verifier',
-      backendLabel: 'twilio:whatsapp_business_gateway',
-    });
     const serialized = JSON.stringify([
       telegram,
-      appleMessages,
       whatsappLocal,
-      reflectArchive,
-      whatsappBusiness,
       safeCredentialSessionAudit(telegram),
-      safeCredentialSessionAudit(appleMessages),
-      safeCredentialSessionAudit(reflectArchive),
     ]);
     expect(serialized).not.toContain('OLYMPUS_CREDENTIAL');
     expect(serialized).not.toContain('/Users/');
@@ -838,33 +783,33 @@ describe('Olympus credential broker', () => {
     const unsafeBroker = createEnvCredentialBroker({
       env: {},
       backendStates: {
-        'reflect.archive': {
-          kind: 'archive_path',
-          archiveRootAlias: '/Users/owner/private/Reflect',
-          readerWorker: 'archive_import_reader',
+        'whatsapp.personal_local': {
+          kind: 'local_app_database',
+          databaseSourceId: '/Users/owner/private/WhatsApp',
+          readerWorker: 'whatsapp_local_reader',
         },
       },
     });
     await expect(unsafeBroker.issueSession({
-      handle: 'reflect.archive',
-      provider: 'reflect',
-      capability: 'reflect.archive.import',
-      trustDomain: 'internal',
+      handle: 'whatsapp.personal_local',
+      provider: 'whatsapp_personal',
+      capability: 'whatsapp.personal.messages.sync',
+      trustDomain: 'secure_local',
     })).rejects.toMatchObject({
       code: 'credential_backend_malformed',
-      handle: 'reflect.archive',
+      handle: 'whatsapp.personal_local',
     });
 
     try {
       await unsafeBroker.issueSession({
-        handle: 'reflect.archive',
-        provider: 'reflect',
-        capability: 'reflect.archive.import',
-        trustDomain: 'internal',
+        handle: 'whatsapp.personal_local',
+        provider: 'whatsapp_personal',
+        capability: 'whatsapp.personal.messages.sync',
+        trustDomain: 'secure_local',
       });
     } catch (error) {
       expect(error).toBeInstanceOf(CredentialBrokerError);
-      expect(String(error)).not.toContain('/Users/owner/private/Reflect');
+      expect(String(error)).not.toContain('/Users/owner/private/WhatsApp');
     }
   });
 
@@ -952,53 +897,53 @@ describe('Olympus credential broker', () => {
 
   test('static broker supports deterministic non-bearer adapter tests', async () => {
     const broker = new StaticCredentialBroker([{
-      handle: 'reflect.test',
-      provider: 'reflect',
-      sessionKind: 'archive_path',
-      allowedCapabilities: ['reflect.archive.import'],
+      handle: 'whatsapp.test',
+      provider: 'whatsapp_personal',
+      sessionKind: 'local_app_database',
+      allowedCapabilities: ['whatsapp.personal.messages.sync'],
       trustDomain: 'internal',
-      accountRole: 'archive',
+      accountRole: 'personal',
       backendState: {
-        kind: 'archive_path',
-        archiveRootAlias: 'reflect_test_archive',
-        readerWorker: 'archive_import_reader',
-        importRunId: 'test_import_run',
-        backendLabel: 'local_private:archive_import',
+        kind: 'local_app_database',
+        databaseSourceId: 'whatsapp_test_database',
+        readerWorker: 'whatsapp_local_reader',
+        databaseRole: 'messages_readonly',
+        backendLabel: 'local_private:whatsapp_local_app_reader',
       },
     }], {
       now: () => new Date('2026-05-20T12:00:00.000Z'),
     });
 
-    const status = await broker.status?.('reflect.test');
+    const status = await broker.status?.('whatsapp.test');
     const session = await broker.issueSession({
-      handle: 'reflect.test',
-      provider: 'reflect',
-      capability: 'reflect.archive.import',
+      handle: 'whatsapp.test',
+      provider: 'whatsapp_personal',
+      capability: 'whatsapp.personal.messages.sync',
       trustDomain: 'internal',
     });
 
     expect(status).toMatchObject({
-      handle: 'reflect.test',
-      provider: 'reflect',
-      sessionKind: 'archive_path',
+      handle: 'whatsapp.test',
+      provider: 'whatsapp_personal',
+      sessionKind: 'local_app_database',
       status: 'available',
       rawCredentialExposed: false,
     });
     expect(session).toMatchObject({
-      kind: 'archive_path',
-      archiveRootAlias: 'reflect_test_archive',
-      readerWorker: 'archive_import_reader',
-      importRunId: 'test_import_run',
+      kind: 'local_app_database',
+      databaseSourceId: 'whatsapp_test_database',
+      readerWorker: 'whatsapp_local_reader',
+      databaseRole: 'messages_readonly',
       audit: {
-        handle: 'reflect.test',
-        provider: 'reflect',
-        capability: 'reflect.archive.import',
-        accountRole: 'archive',
+        handle: 'whatsapp.test',
+        provider: 'whatsapp_personal',
+        capability: 'whatsapp.personal.messages.sync',
+        accountRole: 'personal',
         trustDomain: 'internal',
         scopes: [],
         outcome: 'issued',
         issuedAt: '2026-05-20T12:00:00.000Z',
-        backendLabel: 'local_private:archive_import',
+        backendLabel: 'local_private:whatsapp_local_app_reader',
         rawCredentialExposed: false,
       },
     });
@@ -1009,19 +954,22 @@ describe('Olympus credential broker', () => {
   test('models direct-OAuth Gmail and Drive as bearer handles fed only by environment', async () => {
     const broker = createEnvCredentialBroker({
       env: {
-        OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
-        OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
-        OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
+        OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
+        OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
+        OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
+        OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
+        OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
+        OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
       },
       oauth2StateStore: new MemoryOAuth2StateStore(),
       now: () => new Date('2026-07-28T12:00:00.000Z'),
     });
 
-    const gmailStatus = await broker.status?.('gmail.personal.direct');
+    const gmailStatus = await broker.status?.('gmail.personal');
     const driveStatus = await broker.status?.('google_drive.personal');
 
     expect(gmailStatus).toMatchObject({
-      handle: 'gmail.personal.direct',
+      handle: 'gmail.personal',
       provider: 'gmail',
       sessionKind: 'bearer_token',
       accountRole: 'personal',
@@ -1056,7 +1004,7 @@ describe('Olympus credential broker', () => {
         version: 1,
         handles: [
           {
-            handle: 'gmail.personal.direct',
+            handle: 'gmail.personal',
             provider: 'gmail',
             accountRole: 'personal',
             trustDomain: 'secure_local',
@@ -1080,9 +1028,12 @@ describe('Olympus credential broker', () => {
       const requests: Array<{ url: string; authorization: string | undefined; body: string }> = [];
       const brokerOptions = {
         env: {
-          OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
-          OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
-          OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
+          OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
+          OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID: 'google-client-id-fixture',
+          OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
+          OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET: 'google-client-secret-fixture',
+          OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
+          OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN: 'google-refresh-token-fixture',
         },
         handleRegistryPath: registryPath,
         oauth2StateStore: new MemoryOAuth2StateStore(),
@@ -1105,7 +1056,7 @@ describe('Olympus credential broker', () => {
         ...brokerOptions,
         oauth2CacheNamespace: 'test-google-direct-gmail-merge',
       }).issueSession({
-        handle: 'gmail.personal.direct',
+        handle: 'gmail.personal',
         provider: 'gmail',
         capability: 'gmail.email.sync',
         trustDomain: 'secure_local',
@@ -1122,7 +1073,7 @@ describe('Olympus credential broker', () => {
 
       expect(gmailSession).toMatchObject({
         kind: 'bearer_token',
-        handle: 'gmail.personal.direct',
+        handle: 'gmail.personal',
         provider: 'gmail',
         capability: 'gmail.email.sync',
         token: 'google-access-token-1',
@@ -1157,8 +1108,8 @@ describe('Olympus credential broker', () => {
   test('reports direct-OAuth Google handles as missing when the wrapper exported nothing', async () => {
     const broker = createEnvCredentialBroker({ env: {}, oauth2StateStore: new MemoryOAuth2StateStore() });
 
-    await expect(broker.status?.('gmail.personal.direct')).resolves.toMatchObject({
-      handle: 'gmail.personal.direct',
+    await expect(broker.status?.('gmail.personal')).resolves.toMatchObject({
+      handle: 'gmail.personal',
       status: 'missing',
     });
     await expect(broker.status?.('google_drive.personal')).resolves.toMatchObject({

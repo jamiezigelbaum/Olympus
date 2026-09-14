@@ -26,6 +26,7 @@
  */
 
 import type { RawItem } from '../../core/contracts.ts';
+import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
   SourceSensitivity,
@@ -208,11 +209,20 @@ function metadataForItem(
   const name = ref.name ?? stored.name;
   const merged: Record<string, unknown> = {
     ...(name ? { name } : {}),
-    ...(stored.locatorUri ? { locatorUri: stored.locatorUri } : {}),
     ...(stored.authoredAt ? { authoredAt: stored.authoredAt } : {}),
     ...(stored.updatedAt ? { updatedAt: stored.updatedAt } : {}),
     ...(requested ?? {}),
   };
+  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS) delete merged[key];
+  // The exclusion gate recognizes provider path metadata such as
+  // `pathDisplay`, while the store writes `locatorUri` directly. Publish the
+  // same authoritative stored locator under both names after removing every
+  // extractor-supplied path spelling so synthetic metadata cannot bypass
+  // policy through one the gate reads earlier.
+  if (stored.locatorUri) {
+    merged['locatorUri'] = stored.locatorUri;
+    merged['pathDisplay'] = stored.locatorUri;
+  }
   delete merged['contentHash'];
   return merged;
 }

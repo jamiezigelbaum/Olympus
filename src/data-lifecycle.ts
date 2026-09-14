@@ -286,31 +286,7 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       connectorStorePaths: (context) => [defaultWhatsAppConnectorStoreDbPath(envForContext(context))],
       rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context)),
     },
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    {
-      // Reflect and Roam reach the read path only through the connector-store
-      // mount list, so — unlike every other family — there is no worker helper
-      // to import: the archive-import connectors hand items to the shared store
-      // and never resolve its path. That made them the last two live corpora
-      // belonging to no spec, with the WhatsApp failure above verbatim: both
-      // sit in `~/.local/share/openclaw/olympus`, a known root `delete --all`
-      // removes recursively, while export copied neither and reported neither
-      // as skipped. Apple Messages is deliberately absent: no install mounts
-      // it and its lane is pinned off (identity air-gap), so it owns no store
-      // to lose. If that ever changes, the mount is what the inventory test
-      // reads, and it will fail until an entry exists here.
-      sourceId: 'reflect.notes',
-      label: 'Reflect notes connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), 'reflect-notes.sqlite')],
-    },
-    {
-      sourceId: 'roam.notes',
-      label: 'Roam notes connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), 'roam-notes.sqlite')],
-    },
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+
   ];
 }
 

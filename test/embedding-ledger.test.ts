@@ -2,7 +2,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import {
@@ -22,7 +21,6 @@ import {
   recordEmbeddingLedgerObservations,
   type EmbeddingCorpusObservation,
 } from '../src/workers/embedding-ledger-observer.ts';
-import { renderEmbeddingLedgerPage } from '../src/workers/dashboard/pages/embedding-ledger.ts';
 
 const NOW = new Date('2026-08-24T12:00:00.000Z');
 const QWEN3 = 'secure-local-qwen3-embed';
@@ -476,107 +474,13 @@ describe('scope text', () => {
   });
 });
 
-describe('page', () => {
-  test('renders the backfill newest first, in plain language', async () => {
-    const ledger = await readEmbeddingLedger(tempLedgerPath());
-
-    const page = renderEmbeddingLedgerPage(ledger, { now: NOW });
-
-    expect(page).toContain('Embedding decisions');
-    expect(page).toContain('Model decision');
-    expect(page).toContain('Stored vectors invalidated');
-    expect(page).toContain('Re-embed started');
-    expect(page.indexOf('Model decision')).toBeLessThan(page.indexOf('Stored vectors invalidated'));
-  });
-
-  test('says who approved what, and never launders an unapproved change', async () => {
-    const ledger = await readEmbeddingLedger(tempLedgerPath());
-
-    const page = renderEmbeddingLedgerPage(ledger, { now: NOW });
-
-    expect(page).toContain('Approved in advance by the owner');
-    expect(page).toContain('Not approved — the system did this on its own');
-    expect(page).toContain('Not approved — no decision is on record');
-  });
-
-  test('prints the loopback endpoints in full, because the port is the story', async () => {
-    const ledger = await readEmbeddingLedger(tempLedgerPath());
-
-    const page = renderEmbeddingLedgerPage(ledger, { now: NOW });
-
-    expect(page).toContain('http://127.0.0.1:28090/v1');
-    expect(page).toContain('28011');
-  });
-
-  test('states the date in UTC alongside the relative time', async () => {
-    const ledger = await readEmbeddingLedger(tempLedgerPath());
-
-    const page = renderEmbeddingLedgerPage(ledger, { now: NOW });
-
-    expect(page).toContain('20 Aug 2026');
-    expect(page).toContain('UTC');
-  });
-
-  test('reports skipped lines rather than presenting a damaged record as whole', () => {
-    const page = renderEmbeddingLedgerPage({ entries: [], skipped: 3, path: '/x' }, { now: NOW });
-
-    expect(page).toContain('3 lines');
-    expect(page).toContain('incomplete');
-  });
-
-  test('escapes entry text rather than rendering it as markup', () => {
-    const page = renderEmbeddingLedgerPage({
-      entries: [entry({ what: '<script>alert(1)</script>', why: '<img onerror=x>' })],
-      skipped: 0,
-      path: '/x',
-    }, { now: NOW });
-
-    expect(page).not.toContain('<script>alert(1)</script>');
-    expect(page).toContain('&lt;script&gt;');
-  });
-
-  test('carries the reader token into its one link back', () => {
-    const page = renderEmbeddingLedgerPage({ entries: [], skipped: 0, path: '/x' }, {
-      now: NOW,
-      basePath: '/dashboard?token=dash_abc',
-    });
-
-    expect(page).toContain('/dashboard?token=dash_abc&amp;background');
-  });
-
-  test('an empty ledger says nothing was recorded, not that nothing happened', () => {
-    const page = renderEmbeddingLedgerPage({ entries: [], skipped: 0, path: '/x' }, { now: NOW });
-
-    expect(page).toContain('not that none happened');
-  });
-});
-
 describe('route', () => {
   const AUTH_TOKEN = 'test-worker-auth-token-embedding-ledger';
-  const URL_BASE = 'http://worker.test/dashboard?embedding-ledger';
+  const URL_BASE = 'http://worker.test/dashboard';
 
   function guarded(): (request: Request) => Promise<Response> {
     return withWorkerBearerAuth(createEmailSourceWorker().fetch, { authToken: AUTH_TOKEN });
   }
-
-  test('serves the page to a bearer-token reader', async () => {
-    const response = await guarded()(new Request(URL_BASE, {
-      headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-    }));
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Type')).toContain('text/html');
-    expect(await response.text()).toContain('Embedding decisions');
-  });
-
-  test('serves the page to the read-only dash_ query token, like every dashboard page', async () => {
-    const token = dashboardQueryTokenFromWorkerAuthToken(AUTH_TOKEN)!;
-
-    const response = await guarded()(new Request(`${URL_BASE}&token=${encodeURIComponent(token)}`));
-
-    expect(response.status).toBe(200);
-    expect(await response.text()).toContain('Embedding decisions');
-  });
 
   test('refuses an unauthenticated reader', async () => {
     const response = await guarded()(new Request(URL_BASE));
@@ -595,8 +499,8 @@ describe('route', () => {
     expect(wrongQuery.status).toBe(401);
   });
 
-  test('leaves the ordinary dashboard route alone', async () => {
-    const response = await guarded()(new Request('http://worker.test/dashboard', {
+  test('leaves the ordinary authenticated dashboard route alone', async () => {
+    const response = await guarded()(new Request(URL_BASE, {
       headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
     }));
 

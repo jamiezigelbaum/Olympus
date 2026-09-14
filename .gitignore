@@ -5,6 +5,9 @@ node_modules/.package-lock.json
 dist/*
 !dist/index.js
 !dist/cli.js
+!dist/control-ui/
+dist/control-ui/*
+!dist/control-ui/index.js
 coverage/
 release-artifacts/
 .release/

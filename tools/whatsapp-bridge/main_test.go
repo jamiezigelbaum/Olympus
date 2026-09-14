@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,9 +16,152 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+func TestSDKRotationKeepsOlympusPairingOpenUntilSuccess(t *testing.T) {
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	incoming, overflow, cleanup := pairingEvents(client)
+	defer cleanup()
+	state := pairingQRState{codes: []string{"ref-a,pub,identity,old-secret", "ref-b,pub,identity,old-secret"}}
+	state.next()
+	client.DangerousInternals().DispatchEvent(&events.RotateADVSecret{OldSecret: "old-secret", NewSecret: "new-secret"})
+	select {
+	case raw, open := <-incoming:
+		rotation, ok := raw.(*events.RotateADVSecret)
+		if !open || !ok || !state.rotate(rotation.OldSecret, rotation.NewSecret) {
+			t.Fatal("rotation closed or invalidated pairing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rotation event missing")
+	}
+	if code, _, ok := state.next(); !ok || code != "ref-a,pub,identity,new-secret" {
+		t.Fatal("current QR was not refreshed")
+	}
+	if code, _, ok := state.next(); !ok || code != "ref-b,pub,identity,new-secret" {
+		t.Fatal("remaining QR was not refreshed")
+	}
+	client.DangerousInternals().DispatchEvent(&events.PairSuccess{})
+	select {
+	case raw, open := <-incoming:
+		if _, ok := raw.(*events.PairSuccess); !open || !ok {
+			t.Fatal("success after rotation was lost")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pair success missing")
+	}
+	select {
+	case <-overflow:
+		t.Fatal("unexpected overflow")
+	default:
+	}
+	// Receiving the event alone still does not constitute authentication proof.
+	if pairingReceiptReady(false, nil, nil) {
+		t.Fatal("events must not bypass persisted authentication")
+	}
+}
+
+func TestPairingEventsExcludeMessageContentAndRefuseOverload(t *testing.T) {
+	client := whatsmeow.NewClient(&store.Device{}, waLog.Noop)
+	incoming, overflow, cleanup := pairingEvents(client)
+	defer cleanup()
+	client.DangerousInternals().DispatchEvent(&events.Message{})
+	select {
+	case <-incoming:
+		t.Fatal("message entered pairing queue")
+	default:
+	}
+	for i := 0; i < 17; i++ {
+		client.DangerousInternals().DispatchEvent(&events.QR{})
+	}
+	select {
+	case <-overflow:
+	default:
+		t.Fatal("overload must fail closed")
+	}
+	if pairingEventError(&events.PairPasskeyRequest{}) != "unsupported_passkey_verification" {
+		t.Fatal("passkey requirement was not preserved")
+	}
+}
+
+func TestPairingAuthenticationWaitsThroughExpectedReconnect(t *testing.T) {
+	checks := 0
+	ready := waitForPairingAuthentication(context.Background(), func() bool {
+		checks++
+		// PairSuccess was emitted, then the socket deliberately disconnects,
+		// and only the third observation is the authenticated new socket.
+		return checks >= 3
+	}, time.Second)
+	if !ready || checks != 3 {
+		t.Fatal("normal pairing reconnect was mistaken for failure")
+	}
+}
+
+func TestPairingAuthenticationNeverAcceptsMissingProofOrCancellation(t *testing.T) {
+	if waitForPairingAuthentication(context.Background(), func() bool { return false }, 5*time.Millisecond) {
+		t.Fatal("deadline must not promote missing authentication")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForPairingAuthentication(ctx, func() bool { return true }, time.Second) {
+		t.Fatal("cancelled pairing must not be accepted")
+	}
+}
+
+type terminalBuffer struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (b *terminalBuffer) Close() error { b.closed = true; return nil }
+
+func TestPairingShowsOnlyCurrentQRAndRestoresTerminal(t *testing.T) {
+	writer := &terminalBuffer{}
+	terminal := &pairingTerminal{writer: writer}
+	terminal.showQR("first-fixture", 60*time.Second)
+	before := writer.Len()
+	terminal.showQR("second-fixture", 20*time.Second)
+	update := writer.String()[before:]
+	if !strings.HasPrefix(update, "\033[2J\033[H") || !strings.Contains(update, "current QR 2 (refreshes in 20s)") {
+		t.Fatal("replacement did not clear the previous QR or identify expiry")
+	}
+	terminal.close()
+	terminal.close()
+	if strings.Count(writer.String(), "\033[?1049h") != 1 || strings.Count(writer.String(), "\033[?1049l") != 1 || !writer.closed {
+		t.Fatal("terminal must enter once and restore once")
+	}
+}
+
+func TestPairingDiagnosticsAllowOnlyFixedProtocolIndicators(t *testing.T) {
+	dir := t.TempDir()
+	signals := make(chan string, 1)
+	logger := &pairingDiagnosticLogger{stateDir: dir, unsupported: signals}
+	secret := "fixture-private-provider-payload"
+	logger.Debugf(secret)
+	logger.Debugf("Unhandled notification with type %s", secret)
+	logger.Warnf("Unhandled notification with type %s", "passkey_prologue_request")
+	logger.Errorf("provider error: %s", secret)
+	if _, err := os.Stat(filepath.Join(dir, "pairing-status.json")); !os.IsNotExist(err) {
+		t.Fatal("arbitrary provider logs must produce no diagnostic file")
+	}
+	for _, kind := range []string{"passkey_prologue_request", "companion_reg_refresh"} {
+		logger.Debugf("Unhandled notification with type %s", kind)
+		if <-signals != kind {
+			t.Fatal("missing fixed protocol signal")
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "pairing-status.json"))
+		if err != nil || strings.Contains(string(data), secret) {
+			t.Fatal("invalid private-safe diagnostic")
+		}
+		var result map[string]string
+		if json.Unmarshal(data, &result) != nil || len(result) != 2 || result["step"] != kind || result["status"] != "unsupported_link_step" {
+			t.Fatal("diagnostic must contain only the two allowed fields")
+		}
+	}
+}
 
 func TestOperationalLogsDoNotExposeWhatsAppIdentifiers(t *testing.T) {
 	line := existingSessionConnectedLogLine()
@@ -36,6 +180,72 @@ func TestQRStdoutCanBeDisabledForServiceMode(t *testing.T) {
 	t.Setenv(qrStdoutEnv, "true")
 	if !qrStdoutEnabled() {
 		t.Fatal("QR stdout should remain available for an intentional foreground pairing run")
+	}
+}
+
+func TestPairingQRIsPrivatePNG(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeQRPNG("fixture-pairing-code", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("pairing artifact is not PNG: %x", data[:min(8, len(data))])
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("pairing QR mode = %o, want 0600", info.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(dir, qrFileName)); !os.IsNotExist(err) {
+		t.Fatalf("pair-only PNG writer unexpectedly created ASCII QR: %v", err)
+	}
+}
+
+func TestPairingReceiptRequiresAuthenticatedPersistedMatchingDevice(t *testing.T) {
+	current := types.JID{User: "current", Server: types.DefaultUserServer}
+	persisted := types.JID{User: "current", Server: types.DefaultUserServer}
+	other := types.JID{User: "other", Server: types.DefaultUserServer}
+	if !pairingReceiptReady(true, &current, &persisted) {
+		t.Fatal("matching authenticated current and persisted devices should be ready")
+	}
+	for name, ready := range map[string]bool{
+		"not authenticated": pairingReceiptReady(false, &current, &persisted),
+		"missing current":   pairingReceiptReady(true, nil, &persisted),
+		"missing persisted": pairingReceiptReady(true, &current, nil),
+		"different device":  pairingReceiptReady(true, &current, &other),
+	} {
+		if ready {
+			t.Fatalf("%s unexpectedly produced a ready receipt", name)
+		}
+	}
+}
+
+func TestApprovedCaptureChatsFailClosedAndFilter(t *testing.T) {
+	t.Setenv(allowedChatsEnv, "")
+	if _, err := approvedCaptureChats(true); err == nil || err.Error() != "approved_chat_scope_required" {
+		t.Fatalf("empty explicit approval error = %v", err)
+	}
+	t.Setenv(allowedChatsEnv, "chat-1@s.whatsapp.net, chat-2@g.us")
+	allowed, err := approvedCaptureChats(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chatCaptureAllowed("chat-1@s.whatsapp.net", allowed) {
+		t.Fatal("approved chat was rejected")
+	}
+	if chatCaptureAllowed("other@s.whatsapp.net", allowed) {
+		t.Fatal("unapproved chat was accepted")
+	}
+	t.Setenv(allowedChatsEnv, "not-a-jid")
+	if _, err := approvedCaptureChats(true); err == nil || err.Error() != "invalid_approved_chat_scope" {
+		t.Fatalf("invalid chat approval error = %v", err)
 	}
 }
 

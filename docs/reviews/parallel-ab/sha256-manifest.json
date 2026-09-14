@@ -1,0 +1,15 @@
+{
+  "kind": "olympus_synthetic_ab_fixture_manifest",
+  "version": 1,
+  "description": "Frozen hashes for the explicitly fictional public-safe A/B corpus and held-out question set. No model or provider outcomes are included.",
+  "files": [
+    {
+      "path": "corpus.json",
+      "sha256": "0ff72eb926c9556e8fafa7e334d2221c59dac1e79a968640dc372f6740aafcc8"
+    },
+    {
+      "path": "questions.json",
+      "sha256": "db198b3cc853614648a0ddbdf1258a18bb8294a88b0befed177996300b53da36"
+    }
+  ]
+}

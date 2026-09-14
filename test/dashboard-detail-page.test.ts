@@ -32,6 +32,15 @@ describe('dashboard detail selection summary', () => {
     expect(html).not.toContain('Added to Olympus');
   });
 
+  test('separates selected full-ingestion files from files deferred by standing policy', () => {
+    const html = renderDashboardDetailBody(fixtureCard({
+      ingestion_selection: { metadata_only_files: 556, full_ingestion_files: 3, policy_deferred_files: 1 },
+    }), { now: NOW });
+    expect(html).toContain('<span>Metadata only</span><b>556 files</b>');
+    expect(html).toContain('<span>Full ingestion</span><b>3 files</b>');
+    expect(html).toContain('1 file selected for full ingestion is not being processed because of a separate ingestion policy.');
+  });
+
   test('keeps mechanical failure evidence inside Advanced, never in summary cards', () => {
     const html = renderDashboardDetailBody(fixtureCard({
       schedule: { running: false, consecutive_failures: 3, last_error_kind: 'provider_rate_limited' },

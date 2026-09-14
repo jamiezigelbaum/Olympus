@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writ
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { defaultTelegramCaptureSpoolDir } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 
 const SCRIPT = join(import.meta.dir, '..', 'scripts', 'telegram-telethon-reader.py');
 const ORDINARY_SCOPE = 'telegram.personal:chat:101';
@@ -13,6 +14,24 @@ const PYTHON = Bun.which('python3');
 const pythonTest = test.skipIf(!PYTHON);
 
 describe('long-lived read-only Telethon capture gateway', () => {
+  for (const drainOverride of [false, true]) {
+    pythonTest(`uses the consumer's relocated spool and state paths (drain override: ${drainOverride})`, async () => {
+      const fixture = gatewayFixture();
+      const env = {
+        HOME: join(fixture.root, 'home'), XDG_DATA_HOME: join(fixture.root, 'data'), XDG_STATE_HOME: join(fixture.root, 'xdg-state'),
+        OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: '', OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: '',
+        ...(drainOverride ? { OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR: join(fixture.root, 'drain-spool') } : {}),
+      };
+      try {
+        const result = await runGateway(fixture, env);
+        expect(result.code).toBe(0);
+        expect(readJsonLines(join(defaultTelegramCaptureSpoolDir(env), '2026-07-22.jsonl'))).toHaveLength(3);
+        expect(JSON.parse(readFileSync(join(env.XDG_STATE_HOME, 'olympus/telegram-capture-gateway/state.json'), 'utf8')).forward_cursors)
+          .toMatchObject({ [ORDINARY_SCOPE]: 'min_id:102', [PROTECTED_SCOPE]: 'min_id:202' });
+      } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+    });
+  }
+
   pythonTest('connects once, captures exact approved chats, tags protected records, and keeps forward/backfill cursors separate', async () => {
     const fixture = gatewayFixture();
     try {

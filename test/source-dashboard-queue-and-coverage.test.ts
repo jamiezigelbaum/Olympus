@@ -257,6 +257,46 @@ describe('answer-ready percentage excludes what the system never reads', () => {
     expect(card?.ingestion_selection).toBeUndefined();
   });
 
+  test('uses exact scoped file choices instead of extraction-job dispositions', () => {
+    const card = dropboxCardWithLedger({
+      indexed_items: 559,
+      folders: 40,
+      items_with_text: 0,
+      scope_full_ingestion_files: 3,
+      scope_metadata_only_files: 556,
+      scope_policy_deferred_files: 1,
+      qa_eligible_items: 2,
+      qa_metadata_only_expected: 557,
+    });
+
+    expect(card?.ingestion_selection).toEqual({
+      metadata_only_files: 556,
+      full_ingestion_files: 3,
+      policy_deferred_files: 1,
+    });
+    expect(card?.coverage.answer_ready_eligible_items).toBe(2);
+    expect(card?.coverage.indexed_items).toBe(599);
+  });
+
+  test('metadata sync alone does not prove local extraction or embedding dependencies', () => {
+    const unproven = dropboxCard({ indexed_items: 3, folders: 1, items_with_text: 0 });
+    expect(unproven?.setup?.dependencies).toEqual([
+      expect.objectContaining({ id: 'local_document_extractors', status: 'check_required' }),
+      expect.objectContaining({ id: 'local_embedding_lane', status: 'check_required' }),
+    ]);
+
+    const proven = dropboxCard({
+      indexed_items: 3,
+      folders: 1,
+      items_with_text: 2,
+      items_embedded: 1,
+    });
+    expect(proven?.setup?.dependencies).toEqual([
+      expect.objectContaining({ id: 'local_document_extractors', status: 'ready' }),
+      expect.objectContaining({ id: 'local_embedding_lane', status: 'ready' }),
+    ]);
+  });
+
   test('a corpus where every file is deferred says so instead of claiming 100%', () => {
     const card = dropboxCard({
       files: 500,

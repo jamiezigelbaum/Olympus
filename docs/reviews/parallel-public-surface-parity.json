@@ -1,0 +1,28 @@
+{
+  "kind": "packaged_public_surface_parity",
+  "baseline_commit": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+  "candidate_commit": "03d87c1f47cc99ad73cb7d03487be66c52d7ee89",
+  "native_tools": {
+    "names": [
+      "argus_complete",
+      "argus_list_models",
+      "argus_ping",
+      "olympus_doctor",
+      "source_answer",
+      "source_index_search",
+      "source_index_status",
+      "source_watch_cancel",
+      "source_watch_create",
+      "source_watches"
+    ],
+    "identical": true,
+    "baseline_sha256": "d6ca33b68b2c0825881949e114d2bf8d1e046a1e916c2e755ec88d23b558ccfb",
+    "candidate_sha256": "d6ca33b68b2c0825881949e114d2bf8d1e046a1e916c2e755ec88d23b558ccfb"
+  },
+  "cli_schema": {
+    "identical": true,
+    "baseline_sha256": "ebfa4741ef57dc89738208838ee4d392b2bedb46ce2bd881930b494957f9340d",
+    "candidate_sha256": "ebfa4741ef57dc89738208838ee4d392b2bedb46ce2bd881930b494957f9340d"
+  },
+  "network_access": false
+}

@@ -46,6 +46,7 @@ import {
   V0_4_PUBLIC_SOURCE_CAPABILITIES,
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
+import { createPublicSourceCorpusRegistry } from './source-corpus-registry.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -1312,7 +1313,11 @@ function hasSyncRecord(corpus: Record<string, unknown>): boolean {
 }
 
 function doctorVisibleCorpora(deps: DoctorDeps, corpora: unknown[]): unknown[] {
-  return corpora;
+  const registry = createPublicSourceCorpusRegistry(deps.config.sourceIndex.corpusRegistry);
+  return corpora.filter((entry) => {
+    const corpusId = asRecord(entry).corpus_id;
+    return typeof corpusId === 'string' && registry.has(corpusId, 'status');
+  });
 }
 
 function staleTaskAttempt(task: Record<string, unknown>, deps: DoctorDeps): boolean {

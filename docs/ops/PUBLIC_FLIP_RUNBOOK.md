@@ -143,20 +143,22 @@ Every one of these is already an owner decision recorded in PR #120, #134, or
 
 1. **`LICENSE` copyright line** — exempted in `scannableText()`, so it produces
    no hit at all. Only that exact line, and only in `LICENSE`.
-2. **Embedding-ledger approver enum value** — `src/workers/embedding-ledger.ts`,
+2. **Historical governance corpus references** — the private domain product
+   and its skill have been deleted from this parallel branch. Their former
+   scanner exceptions are retired; this does not rename any live corpus.
+3. **Embedding-ledger approver enum value** — `src/workers/embedding-ledger.ts`,
    `src/workers/embedding-ledger-observer.ts`,
    `src/workers/dashboard/pages/embedding-ledger.ts`,
    `scripts/dashboard-preview.ts`, `test/embedding-ledger.test.ts`, and the
    compiled copies in `dist/cli.js`. It is the value already written into the
    append-only ledger; the rendered string is neutral.
-3. **`config/critical-review.json` reviewer login** — plus
+4. **`config/critical-review.json` reviewer login** — plus
    `test/critical-review-workflow.test.ts`, which pins it. Changing it breaks
    the required `critical-review` context.
-4. **Real GitHub URLs naming the private ops repository** —
-   `config/private-ops-disposition.json`,
-   `config/private-ops-live-attestation.json`,
-   `scripts/private-ops-disposition.ts`, `docs/V0_4_BASELINE.md`. The CI
-   receipts have to stay resolvable.
+5. **Real GitHub URLs naming the private ops repository** — historical
+   evidence remains in `docs/V0_4_BASELINE.md` and Git history. The completed
+   migration verifier and its one-time receipt files are retired in this
+   branch, together with their scanner exceptions.
 
 Four narrower classes are also sanctioned, each row by row: the scanners' own
 ban patterns (a guard has to spell out what it bans), the forbidden-string
@@ -175,10 +177,10 @@ so they could not see these. Two classes:
 
 - **The private host alias**, spread across docs, config, scripts, skills,
   `src/`, and tests.
-- **Real cloud tenant identifiers** — Google Cloud project ids in test
-  fixtures, real GCS bucket names, service-account addresses built on the real
-  project, and Vertex corpus resource names carrying a real project number and
-  corpus id.
+- **Real cloud tenant identifiers** — a Google Cloud project id in
+  `src/core/domain-expert.ts` and in test fixtures, a second project id, real
+  GCS bucket names, service-account addresses built on the real project, and
+  Vertex corpus resource names carrying a real project number and corpus id.
 - **The owner's full name and handle** in `docs/ops/OAUTH_RELAY.md`, which
   arrived with #137 after the three scrubs had run.
 
@@ -535,10 +537,9 @@ are still correct.
 In this repository:
 
 - `config/critical-review.json` — unchanged; the login is the same account.
-- `config/private-ops-disposition.json`,
-  `config/private-ops-live-attestation.json`,
-  `scripts/private-ops-disposition.ts` — unchanged; they point at the private
-  ops repository, which is not being renamed.
+- The completed private-ops migration verifier and its receipt files are
+  retired in this branch. Their baseline Git history remains available; no
+  private operations repository is renamed or changed by this experiment.
 - `docs/V0_4_BASELINE.md` — unchanged for the same reason.
 - `README.md` badges are static shields images with no repository URL, and
   `README.md` / `docs/QUICKSTART.md` are guarded by the

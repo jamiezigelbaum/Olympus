@@ -1,10 +1,14 @@
+import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
+import { olympusPackageRoot } from './core/package-root.ts';
+import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
+import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
+import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
 import {
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
@@ -37,13 +41,6 @@ import {
   type ConnectSource,
 } from './core/connect.ts';
 import {
-  CalendarAgendaError,
-  formatCalendarAgenda,
-  parseCalendarAgendaArgs,
-  runCalendarAgenda,
-} from './core/calendar-agenda.ts';
-import { createEnvCredentialBroker } from './workers/credential-broker/index.ts';
-import {
   handleRegistryPathFromEnv,
   readConnectedHandleRegistry,
   withConnectedHandleGrantCustody,
@@ -53,6 +50,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
@@ -70,34 +68,11 @@ import {
   workerAuthTokenFromSetupEnv,
 } from './core/worker-auth.ts';
 import {
-  collectLocalSourceIngestionLedger,
-  formatSourceIngestionLedger,
-} from './workers/source-ingestion-ledger.ts';
-import {
-  LocalXBookmarksReconcileStateStore,
-  defaultXBookmarksReconcileStateDbPath,
-} from './workers/x-bookmarks/reconcile-state.ts';
-import {
-  LocalSourceSchedulerStateStore,
-  SourceSchedulerUnparkRefusal,
-  type SourceSchedulerUnparkCancellationReceipt,
-  type SourceSchedulerUnparkReceipt,
-} from './workers/source-scheduler-state.ts';
-import {
-  GoogleDailyRequestBudget,
-  GoogleRequestBudgetError,
-  GoogleRequestBudgetRecoveryRefusal,
-  type GoogleRequestBudgetFutureDayRecoveryReceipt,
-} from './workers/google-connectors/request-budget.ts';
-import { defaultGmailRequestBudgetStatePath } from './workers/google-connectors/gmail.ts';
-import { defaultGoogleDriveRequestBudgetStatePath } from './workers/google-connectors/drive.ts';
-import {
   V0_4_PUBLIC_CLI_COMMANDS,
   V0_4_PUBLIC_CLI_GLOBALS,
   V0_4_PACKAGE_INTERNAL_CLI_HELPERS,
   V0_4_PUBLIC_CONNECT_SOURCES,
 } from './core/public-surface.ts';
-import { PUBLIC_RUNTIME_BUILD } from './core/build-flavor.ts';
 
 const PUBLIC_CLI_COMMAND_NAMES = new Set<string>(V0_4_PUBLIC_CLI_COMMANDS);
 const PUBLIC_CLI_HELP_GROUPS = new Set([
@@ -237,89 +212,13 @@ async function main(): Promise<void> {
       console.log(runDashboardTokenCommand());
       return;
     }
-    const result = runDashboardCommand();
-    console.log(JSON.stringify(result, null, 2));
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'calendar' && args[1] === 'agenda') {
     try {
-      const agenda = parseCalendarAgendaArgs(args.slice(2));
-      const result = await runCalendarAgenda({ broker: createEnvCredentialBroker(), agenda });
-      console.log(agenda.json ? JSON.stringify(result, null, 2) : formatCalendarAgenda(result));
-    } catch (error) {
-      if (error instanceof CalendarAgendaError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'source' && args[1] === 'scheduler' && args[2] === 'unpark') {
-    try {
-      const cancelling = args[3] === 'cancel';
-      const options = parseSourceSchedulerUnparkArgs(args.slice(cancelling ? 4 : 3));
-      console.log(JSON.stringify(
-        cancelling
-          ? runSourceSchedulerUnparkCancel(options)
-          : runSourceSchedulerUnpark(options),
-        null,
-        2,
-      ));
-    } catch (error) {
-      if (error instanceof SourceSchedulerUnparkRefusal) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (
-    !PUBLIC_RUNTIME_BUILD
-    && args[0] === 'source'
-    && args[1] === 'request-budget'
-    && args[2] === 'recover-future'
-  ) {
-    try {
-      console.log(JSON.stringify(runGoogleRequestBudgetFutureRecovery(
-        parseGoogleRequestBudgetFutureRecoveryArgs(args.slice(3)),
-      ), null, 2));
-    } catch (error) {
-      if (error instanceof GoogleRequestBudgetRecoveryRefusal) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      if (error instanceof GoogleRequestBudgetError) {
-        console.error(`Error [${error.reason}]: ${error.message}`);
-        process.exit(1);
-      }
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'status') {
-    const json = args.includes('--json');
-    const result = await collectLocalSourceIngestionLedger({ config: loadConfig() });
-    console.log(json ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'requalify') {
-    try {
-      const result = await runTerminalContentRequalify(parseTerminalContentRequalifyArgs(args.slice(2)));
+      // Async because the opening link is MINTED against this install's own
+      // configured worker, with a ticket that only that worker can redeem.
+      const noOpen = args.includes('--no-open');
+      const result = args.includes('--read-only')
+        ? runDashboardReadOnlyCommand({ noOpen })
+        : await runDashboardCommand({ noOpen });
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
@@ -332,83 +231,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'retarget-queued') {
-    try {
-      const result = await runQueuedContentRetarget(parseQueuedContentRetargetArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'export-eval-shard') {
-    try {
-      const result = await runEvalShardExport(parseEvalShardExportArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'apply-tier-overrides') {
-    try {
-      const result = await runOwnerTierOverride(parseOwnerTierOverrideArgs(args.slice(2)));
-      console.log(JSON.stringify(result, null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'x' && args[1] === 'reconcile' && args[2] === 'recover') {
-    try {
-      console.log(JSON.stringify(runXReconcileRecovery(
-        parseXReconcileRecoveryArgs(args.slice(3)),
-      ), null, 2));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
-
-  if (!PUBLIC_RUNTIME_BUILD && args[0] === 'x' && args[1] === 'content' && args[2] === 'recover') {
-    try {
-      const options = parseXContentRecoveryArgs(args.slice(3));
-      console.log(JSON.stringify(
-        await makeContext().email.xBookmarksContentRecovery(options),
-        null,
-        2,
-      ));
-    } catch (error) {
-      if (error instanceof OperationError) {
-        console.error(`Error [${error.code}]: ${error.message}`);
-        process.exit(1);
-      }
-      throw error;
-    }
-    return;
-  }
 
   if (args[0] === 'data') {
     try {
@@ -448,7 +270,7 @@ async function main(): Promise<void> {
       throw new OperationError(
         'invalid_params',
         `Olympus operation is not available on this CLI surface: ${operation.cliHints.name}`,
-        'Enable the appropriate proof gate and, for private/admin email tools, use an approved local/private model surface.',
+        'Enable the matching product configuration for this Olympus surface.',
       );
     }
     const result = await operation.handler(ctx, params);
@@ -622,372 +444,6 @@ function makeContext(): OperationContext {
   };
 }
 
-export interface QueuedContentRetargetCliOptions {
-  account: string;
-  approved_scope_key: string;
-  source_extractor_kind: string;
-  target_extractor_kind: string;
-  target_extractor_version: string;
-  limit?: number;
-  no_limit?: true;
-  dry_run: boolean;
-}
-
-export interface TerminalContentRequalifyCliOptions {
-  account: string;
-  approved_scope_key: string;
-  source_extractor_kind: string;
-  source_extractor_version?: string;
-  source_statuses?: Array<'failed_terminal' | 'metadata_only'>;
-  target_extractor_kind: string;
-  target_extractor_version: string;
-  limit?: number;
-  no_limit?: true;
-  include_superseded?: true;
-  reason?: string;
-  dry_run: boolean;
-}
-
-export function parseTerminalContentRequalifyArgs(args: string[]): TerminalContentRequalifyCliOptions {
-  const values = new Map<string, string>();
-  let noLimit = false;
-  let includeSuperseded = false;
-  let execute = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === '--no-limit') {
-      noLimit = true;
-      continue;
-    }
-    if (arg === '--include-superseded') {
-      includeSuperseded = true;
-      continue;
-    }
-    if (arg === '--execute') {
-      execute = true;
-      continue;
-    }
-    if (arg === '--dry-run') continue;
-    if (!arg.startsWith('--')) throw new OperationError('invalid_params', `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (![
-      'scope',
-      'account',
-      'source-kind',
-      'source-version',
-      'statuses',
-      'target-kind',
-      'target-version',
-      'limit',
-      'reason',
-    ].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown terminal-requalify option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-
-  const scope = values.get('scope')?.trim();
-  const sourceKind = values.get('source-kind')?.trim();
-  const targetKind = values.get('target-kind')?.trim();
-  const targetVersion = values.get('target-version')?.trim();
-  if (!scope) throw new OperationError('invalid_params', 'Terminal requalify requires an explicit --scope.');
-  if (!sourceKind) throw new OperationError('invalid_params', 'Terminal requalify requires --source-kind.');
-  if (!targetKind) throw new OperationError('invalid_params', 'Terminal requalify requires --target-kind.');
-  if (!targetVersion) throw new OperationError('invalid_params', 'Terminal requalify requires --target-version.');
-
-  const account = values.get('account')?.trim() || 'personal';
-  const approvedScopeKey = scope.startsWith('/') ? `dropbox.${account}:${scope}` : scope;
-  const limitValue = values.get('limit');
-  if ((limitValue === undefined) === !noLimit) {
-    throw new OperationError('invalid_params', 'Terminal requalify requires exactly one of --limit N or --no-limit.');
-  }
-  let limit: number | undefined;
-  if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      throw new OperationError('invalid_params', '--limit must be a positive integer.');
-    }
-  }
-  const statusesValue = values.get('statuses');
-  const statuses = statusesValue?.split(',').map((status) => status.trim()).filter(Boolean);
-  const allowedStatuses = new Set(['failed_terminal', 'metadata_only']);
-  if (statusesValue !== undefined && (
-    !statuses
-    || statuses.length === 0
-    || statuses.some((status) => !allowedStatuses.has(status))
-  )) {
-    throw new OperationError('invalid_params', '--statuses must be a comma-separated subset of failed_terminal,metadata_only.');
-  }
-
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    source_extractor_kind: sourceKind,
-    ...(values.get('source-version')?.trim()
-      ? { source_extractor_version: values.get('source-version')!.trim() }
-      : {}),
-    ...(statuses ? { source_statuses: [...new Set(statuses)] as Array<'failed_terminal' | 'metadata_only'> } : {}),
-    target_extractor_kind: targetKind,
-    target_extractor_version: targetVersion,
-    ...(limit !== undefined ? { limit } : {}),
-    ...(noLimit ? { no_limit: true as const } : {}),
-    ...(includeSuperseded ? { include_superseded: true as const } : {}),
-    ...(values.get('reason')?.trim() ? { reason: values.get('reason')!.trim() } : {}),
-    dry_run: !execute,
-  };
-}
-
-async function runTerminalContentRequalify(options: TerminalContentRequalifyCliOptions): Promise<unknown> {
-  const config = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/requalify-terminal`, withWorkerAuthHeader({
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options),
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError(
-      'source_index_error',
-      `Terminal requalify worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`,
-    );
-  }
-  return body ? JSON.parse(body) : {};
-}
-
-export function parseQueuedContentRetargetArgs(args: string[]): QueuedContentRetargetCliOptions {
-  const values = new Map<string, string>();
-  let noLimit = false;
-  let execute = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === '--no-limit') {
-      noLimit = true;
-      continue;
-    }
-    if (arg === '--execute') {
-      execute = true;
-      continue;
-    }
-    if (arg === '--dry-run') continue;
-    if (!arg.startsWith('--')) throw new OperationError('invalid_params', `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!['scope', 'account', 'source-kind', 'target-kind', 'target-version', 'limit'].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown queued-retarget option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-
-  const scope = values.get('scope')?.trim();
-  const sourceKind = values.get('source-kind')?.trim();
-  const targetKind = values.get('target-kind')?.trim();
-  const targetVersion = values.get('target-version')?.trim();
-  if (!scope) throw new OperationError('invalid_params', 'Queued retarget requires an explicit --scope.');
-  if (!sourceKind) throw new OperationError('invalid_params', 'Queued retarget requires --source-kind.');
-  if (!targetKind) throw new OperationError('invalid_params', 'Queued retarget requires --target-kind.');
-  if (!targetVersion) throw new OperationError('invalid_params', 'Queued retarget requires --target-version.');
-
-  const account = values.get('account')?.trim() || 'personal';
-  const approvedScopeKey = scope.startsWith('/') ? `dropbox.${account}:${scope}` : scope;
-  const limitValue = values.get('limit');
-  if ((limitValue === undefined) === !noLimit) {
-    throw new OperationError('invalid_params', 'Queued retarget requires exactly one of --limit N or --no-limit.');
-  }
-  let limit: number | undefined;
-  if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      throw new OperationError('invalid_params', '--limit must be a positive integer.');
-    }
-  }
-
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    source_extractor_kind: sourceKind,
-    target_extractor_kind: targetKind,
-    target_extractor_version: targetVersion,
-    ...(limit !== undefined ? { limit } : {}),
-    ...(noLimit ? { no_limit: true as const } : {}),
-    dry_run: !execute,
-  };
-}
-
-async function runQueuedContentRetarget(options: QueuedContentRetargetCliOptions): Promise<unknown> {
-  const config = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/retarget-queued`, withWorkerAuthHeader({
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options),
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError(
-      'source_index_error',
-      `Queued retarget worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`,
-    );
-  }
-  return body ? JSON.parse(body) : {};
-}
-
-export interface EvalShardExportCliOptions {
-  account: string;
-  approved_scope_key: string;
-  count: number;
-  out_dir: string;
-  doc_types?: string[];
-  dry_run: boolean;
-}
-
-export function parseEvalShardExportArgs(args: string[]): EvalShardExportCliOptions {
-  const values = new Map<string, string>();
-  let execute = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === '--execute') {
-      execute = true;
-      continue;
-    }
-    if (arg === '--dry-run') continue;
-    if (!arg.startsWith('--')) throw new OperationError('invalid_params', `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!['scope', 'account', 'count', 'out', 'doc-types'].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown eval-shard export option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-
-  const scope = values.get('scope')?.trim();
-  if (!scope) throw new OperationError('invalid_params', 'Eval shard export requires an explicit --scope.');
-  const count = Number(values.get('count'));
-  if (!Number.isSafeInteger(count) || count <= 0) {
-    throw new OperationError('invalid_params', 'Eval shard export requires --count N as a positive integer.');
-  }
-  const out = values.get('out')?.trim();
-  if (!out) throw new OperationError('invalid_params', 'Eval shard export requires --out DIR.');
-  const account = values.get('account')?.trim() || 'personal';
-  const approvedScopeKey = scope.startsWith('/') ? `dropbox.${account}:${scope}` : scope;
-  const docTypes = values.get('doc-types')
-    ?.split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (values.has('doc-types') && (!docTypes || docTypes.length === 0)) {
-    throw new OperationError('invalid_params', '--doc-types requires a comma-separated type list.');
-  }
-  return {
-    account,
-    approved_scope_key: approvedScopeKey,
-    count,
-    out_dir: resolve(out),
-    ...(docTypes ? { doc_types: docTypes } : {}),
-    dry_run: !execute,
-  };
-}
-
-async function runEvalShardExport(options: EvalShardExportCliOptions): Promise<unknown> {
-  const config = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/export-eval-shard`, withWorkerAuthHeader({
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options),
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError(
-      'source_index_error',
-      `Eval shard export worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`,
-    );
-  }
-  return body ? JSON.parse(body) : {};
-}
-
-export interface OwnerTierOverrideCliOptions {
-  overrides: Record<string, string>;
-  reason: string;
-  dry_run: boolean;
-}
-
-export function parseOwnerTierOverrideArgs(args: string[]): OwnerTierOverrideCliOptions {
-  const values = new Map<string, string>();
-  let execute = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === '--apply' || arg === '--execute') {
-      execute = true;
-      continue;
-    }
-    if (arg === '--dry-run') continue;
-    if (!arg.startsWith('--')) throw new OperationError('invalid_params', `Unexpected argument: ${arg}.`);
-    const key = arg.slice(2);
-    if (!['input', 'reason'].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown apply-tier-overrides option: ${arg}.`);
-    }
-    const value = args[index + 1];
-    if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${arg} requires a value.`);
-    values.set(key, value);
-    index += 1;
-  }
-
-  const input = values.get('input')?.trim();
-  if (!input) throw new OperationError('invalid_params', 'Owner tier override requires --input <file.json>.');
-  const reason = values.get('reason')?.trim();
-  if (!reason) throw new OperationError('invalid_params', 'Owner tier override requires --reason <string>.');
-
-  let raw: string;
-  try {
-    raw = readFileSync(resolve(input), 'utf8');
-  } catch (error) {
-    throw new OperationError('invalid_params', `Owner tier override --input file could not be read: ${(error as Error).message}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new OperationError('invalid_params', `Owner tier override --input file is not valid JSON: ${(error as Error).message}`);
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new OperationError('invalid_params', 'Owner tier override --input file must be a JSON object mapping review keys to trust tiers.');
-  }
-  const overrides: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof value !== 'string') {
-      throw new OperationError('invalid_params', `Owner tier override --input value for ${JSON.stringify(key)} must be a trust-tier string.`);
-    }
-    overrides[key] = value;
-  }
-
-  return { overrides, reason, dry_run: !execute };
-}
-
-async function runOwnerTierOverride(options: OwnerTierOverrideCliOptions): Promise<unknown> {
-  const config = loadConfig();
-  const authToken = workerAuthTokenFromConfig(config);
-  const response = await fetch(`${config.email.baseUrl}/source/index/dropbox/content/apply-tier-overrides`, withWorkerAuthHeader({
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(options),
-  }, authToken));
-  const body = await response.text();
-  if (!response.ok) {
-    throw new OperationError(
-      'source_index_error',
-      `Owner tier override worker request failed with HTTP ${response.status}: ${body.slice(0, 300)}`,
-    );
-  }
-  return body ? JSON.parse(body) : {};
-}
-
 function toToolsJson(config: OlympusConfig): unknown[] {
   return exposedOperations(operations, { config, surface: 'cli' }).map((operation) => ({
     name: operation.name,
@@ -1011,14 +467,14 @@ function printHelp(): void {
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
-  console.log('  olympus dashboard');
+  console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
-  console.log('  olympus connect telegram|whatsapp --session-path <path>');
-  console.log('  olympus connect venice|readwise --api-key-stdin');
-  console.log('  olympus connect gemini --api-key-stdin');
+  console.log('  olympus connect telegram|whatsapp --pair');
+  console.log('  olympus connect venice|readwise --api-key-prompt');
+  console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
@@ -1044,13 +500,13 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
   'connect dropbox': 'olympus connect dropbox --client-id <id>',
-  'connect telegram': 'olympus connect telegram --session-path <path>',
-  'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
-  'connect venice': 'olympus connect venice --api-key-stdin',
-  'connect readwise': 'olympus connect readwise --api-key-stdin',
-  'connect gemini': 'olympus connect gemini --api-key-stdin',
+  'connect telegram': 'olympus connect telegram --pair',
+  'connect whatsapp': 'olympus connect whatsapp --pair',
+  'connect venice': 'olympus connect venice --api-key-prompt',
+  'connect readwise': 'olympus connect readwise --api-key-prompt',
+  'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
-  dashboard: 'olympus dashboard',
+  dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
@@ -1068,6 +524,9 @@ function printPublicLeafCommandHelp(args: string[]): boolean {
   const usage = PUBLIC_LEAF_USAGE[commandName];
   if (!usage) throw new Error(`Missing public leaf help for ${commandName}.`);
   console.log(`Usage: ${usage}`);
+  if (['connect gemini', 'connect venice', 'connect readwise'].includes(commandName)) {
+    console.log('For an authenticated password-manager pipeline, use --api-key-stdin instead.');
+  }
   return true;
 }
 
@@ -1110,9 +569,9 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]',
     '  olympus connect dropbox --client-id <id>',
-    '  olympus connect telegram|whatsapp --session-path <path>',
-    '  olympus connect venice|readwise --api-key-stdin',
-    '  olympus connect gemini --api-key-stdin',
+    '  olympus connect telegram|whatsapp --pair',
+    '  olympus connect venice|readwise --api-key-prompt',
+    '  olympus connect gemini --api-key-prompt',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1123,93 +582,6 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   ],
 };
 
-export interface XContentRecoveryCliOptions {
-  execute: boolean;
-  limit?: number;
-}
-
-export function parseXContentRecoveryArgs(args: string[]): XContentRecoveryCliOptions {
-  let execute = false;
-  let limit: number | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--execute') execute = true;
-    else if (arg === '--limit') limit = Number(requireOptionValue(args, (index += 1), arg));
-    else if (arg?.startsWith('--limit=')) limit = Number(arg.slice('--limit='.length));
-    else throw new OperationError('invalid_params', `Unknown X content recovery option: ${arg}`);
-  }
-  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
-    throw new OperationError('invalid_params', 'X content recovery limit must be between 1 and 100.');
-  }
-  return { execute, ...(limit !== undefined ? { limit } : {}) };
-}
-
-export interface XReconcileRecoveryCliOptions {
-  account: string;
-  stateDbPath?: string;
-  execute: boolean;
-  expectedStagedDigestSha256?: string;
-}
-
-export function parseXReconcileRecoveryArgs(args: string[]): XReconcileRecoveryCliOptions {
-  let account = 'personal';
-  let stateDbPath: string | undefined;
-  let execute = false;
-  let expectedStagedDigestSha256: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--account') account = requireOptionValue(args, (index += 1), arg);
-    else if (arg?.startsWith('--account=')) account = arg.slice('--account='.length);
-    else if (arg === '--state-db') stateDbPath = requireOptionValue(args, (index += 1), arg);
-    else if (arg?.startsWith('--state-db=')) stateDbPath = arg.slice('--state-db='.length);
-    else if (arg === '--expected-staged-digest') {
-      expectedStagedDigestSha256 = requireOptionValue(args, (index += 1), arg);
-    } else if (arg?.startsWith('--expected-staged-digest=')) {
-      expectedStagedDigestSha256 = arg.slice('--expected-staged-digest='.length);
-    } else if (arg === '--execute') execute = true;
-    else throw new OperationError('invalid_params', `Unknown X reconcile recovery option: ${arg}`);
-  }
-  account = account.trim();
-  if (!account) throw new OperationError('invalid_params', 'X reconcile recovery account must be non-empty.');
-  if (stateDbPath !== undefined && !stateDbPath.trim()) {
-    throw new OperationError('invalid_params', 'X reconcile recovery state DB path must be non-empty.');
-  }
-  if (expectedStagedDigestSha256 !== undefined
-    && !/^[a-f0-9]{64}$/.test(expectedStagedDigestSha256)) {
-    throw new OperationError(
-      'invalid_params',
-      'X reconcile recovery expected staged digest must be lowercase SHA-256.',
-    );
-  }
-  if (execute && !expectedStagedDigestSha256) {
-    throw new OperationError(
-      'invalid_params',
-      'X reconcile recovery --execute requires --expected-staged-digest from a fresh inspection.',
-    );
-  }
-  return {
-    account,
-    ...(stateDbPath ? { stateDbPath: resolve(stateDbPath) } : {}),
-    execute,
-    ...(expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}),
-  };
-}
-
-export function runXReconcileRecovery(options: XReconcileRecoveryCliOptions): unknown {
-  const store = new LocalXBookmarksReconcileStateStore(
-    options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath(),
-  );
-  try {
-    if (!options.execute) return store.stagedRecoveryStatus(options.account);
-    return store.recoverStagedRun({
-      account: options.account,
-      expectedStagedDigestSha256: options.expectedStagedDigestSha256!,
-      mode: 'operator',
-    });
-  } finally {
-    store.close();
-  }
-}
 
 function isHelpFlag(value: string): boolean {
   return value === '--help' || value === '-h';
@@ -1225,184 +597,6 @@ function printCommandGroupHelp(path: string[]): boolean {
   if (!lines) return false;
   console.log(lines.join('\n'));
   return true;
-}
-
-export interface SourceSchedulerUnparkCliOptions {
-  source: string;
-  task: string;
-  expectedNotBefore: string;
-  reason: string;
-}
-
-const SAFE_SOURCE_SCHEDULER_KEY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-const SAFE_SOURCE_SCHEDULER_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-const UTC_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-export function parseSourceSchedulerUnparkArgs(
-  args: string[],
-): SourceSchedulerUnparkCliOptions {
-  const values = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--help' || arg === '-h') {
-      console.log(
-        'Usage: olympus source scheduler unpark --source <source> --task <task> '
-        + '--expected-not-before <ISO> --reason <reason>',
-      );
-      process.exit(0);
-    }
-    if (!arg?.startsWith('--')) {
-      throw new OperationError('invalid_params', `Unexpected source scheduler unpark argument: ${arg}`);
-    }
-    const equals = arg.indexOf('=');
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!['source', 'task', 'expected-not-before', 'reason'].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown source scheduler unpark option: --${key}`);
-    }
-    const value = equals === -1
-      ? requireOptionValue(args, (index += 1), `--${key}`)
-      : arg.slice(equals + 1);
-    if (!value.trim()) {
-      throw new OperationError('invalid_params', `--${key} requires a non-empty value.`);
-    }
-    values.set(key, value.trim());
-  }
-  const source = values.get('source');
-  const task = values.get('task');
-  const expectedNotBefore = values.get('expected-not-before');
-  const reason = values.get('reason');
-  if (!source || !task || !expectedNotBefore || !reason) {
-    throw new OperationError(
-      'invalid_params',
-      'Source scheduler unpark requires --source, --task, --expected-not-before, and --reason.',
-    );
-  }
-  if (!Number.isFinite(Date.parse(expectedNotBefore))) {
-    throw new OperationError('invalid_params', '--expected-not-before must be a valid ISO timestamp.');
-  }
-  if (!SAFE_SOURCE_SCHEDULER_KEY.test(source)) {
-    throw new OperationError('invalid_params', '--source must be a safe scheduler identifier.');
-  }
-  if (!SAFE_SOURCE_SCHEDULER_KEY.test(task)) {
-    throw new OperationError('invalid_params', '--task must be a safe scheduler identifier.');
-  }
-  if (!SAFE_SOURCE_SCHEDULER_TOKEN.test(reason)) {
-    throw new OperationError('invalid_params', '--reason must be a safe categorical token.');
-  }
-  return {
-    source,
-    task,
-    expectedNotBefore,
-    reason,
-  };
-}
-
-export function runSourceSchedulerUnpark(
-  options: SourceSchedulerUnparkCliOptions,
-): SourceSchedulerUnparkReceipt {
-  const store = new LocalSourceSchedulerStateStore();
-  try {
-    return store.requestUnpark({
-      sourceId: options.source,
-      taskId: options.task,
-      expectedNotBeforeAt: options.expectedNotBefore,
-      reason: options.reason,
-      requestedAt: new Date().toISOString(),
-    });
-  } finally {
-    store.close();
-  }
-}
-
-export function runSourceSchedulerUnparkCancel(
-  options: SourceSchedulerUnparkCliOptions,
-): SourceSchedulerUnparkCancellationReceipt {
-  const store = new LocalSourceSchedulerStateStore();
-  try {
-    return store.cancelUnpark({
-      sourceId: options.source,
-      taskId: options.task,
-      expectedNotBeforeAt: options.expectedNotBefore,
-      reason: options.reason,
-      cancelledAt: new Date().toISOString(),
-    });
-  } finally {
-    store.close();
-  }
-}
-
-export interface GoogleRequestBudgetFutureRecoveryCliOptions {
-  provider: 'gmail' | 'google-drive';
-  expectedFutureDay: string;
-  reason: string;
-}
-
-export function parseGoogleRequestBudgetFutureRecoveryArgs(
-  args: string[],
-): GoogleRequestBudgetFutureRecoveryCliOptions {
-  const values = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === '--help' || arg === '-h') {
-      console.log(
-        'Usage: olympus source request-budget recover-future '
-        + '--provider gmail|google-drive --expected-future-day <YYYY-MM-DD> --reason <reason>',
-      );
-      process.exit(0);
-    }
-    if (!arg?.startsWith('--')) {
-      throw new OperationError('invalid_params', `Unexpected request-budget recovery argument: ${arg}`);
-    }
-    const equals = arg.indexOf('=');
-    const key = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!['provider', 'expected-future-day', 'reason'].includes(key)) {
-      throw new OperationError('invalid_params', `Unknown request-budget recovery option: --${key}`);
-    }
-    const value = equals === -1
-      ? requireOptionValue(args, (index += 1), `--${key}`)
-      : arg.slice(equals + 1);
-    values.set(key, value.trim());
-  }
-  const provider = values.get('provider');
-  const expectedFutureDay = values.get('expected-future-day');
-  const reason = values.get('reason');
-  if (
-    (provider !== 'gmail' && provider !== 'google-drive')
-    || !expectedFutureDay
-    || !reason
-  ) {
-    throw new OperationError(
-      'invalid_params',
-      'Request-budget recovery requires --provider gmail|google-drive, --expected-future-day, and --reason.',
-    );
-  }
-  if (
-    !UTC_DAY.test(expectedFutureDay)
-    || new Date(`${expectedFutureDay}T00:00:00.000Z`).toISOString().slice(0, 10) !== expectedFutureDay
-  ) {
-    throw new OperationError('invalid_params', '--expected-future-day must be a valid UTC day.');
-  }
-  if (!SAFE_SOURCE_SCHEDULER_TOKEN.test(reason)) {
-    throw new OperationError('invalid_params', '--reason must be a safe categorical token.');
-  }
-  return { provider, expectedFutureDay, reason };
-}
-
-export function runGoogleRequestBudgetFutureRecovery(
-  options: GoogleRequestBudgetFutureRecoveryCliOptions,
-): GoogleRequestBudgetFutureDayRecoveryReceipt {
-  const gmail = options.provider === 'gmail';
-  const budget = new GoogleDailyRequestBudget({
-    provider: gmail ? 'Gmail' : 'Google Drive',
-    dailyRequestBudget: 1,
-    statePath: gmail
-      ? defaultGmailRequestBudgetStatePath(process.env)
-      : defaultGoogleDriveRequestBudgetStatePath(process.env),
-  });
-  return budget.recoverFutureUtcDay({
-    expectedFutureUtcDay: options.expectedFutureDay,
-    reason: options.reason,
-  });
 }
 
 async function runWorkerCommand(args: string[]): Promise<void> {
@@ -1847,9 +1041,9 @@ async function runConnect(args: string[]): Promise<unknown> {
       usage: [
         'olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
-        'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
-        'olympus connect venice|readwise --api-key-stdin',
-        'olympus connect gemini --api-key-stdin',
+        'olympus connect telegram|whatsapp --pair',
+        'olympus connect venice|readwise --api-key-prompt',
+        'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
       ],
     };
@@ -1880,6 +1074,18 @@ async function runConnect(args: string[]): Promise<unknown> {
   const source = rawSource as ConnectSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.pair && source !== 'telegram' && source !== 'whatsapp') {
+    throw new OperationError('invalid_params', '--pair is supported only for Telegram and WhatsApp.');
+  }
+  if (options.pair && (options.sessionPath || options.sessionReady)) {
+    throw new OperationError('invalid_params', '--pair verifies its own session; do not combine it with session import flags.');
+  }
+  if (options.apiKeyPrompt && options.apiKeyStdin) {
+    throw new OperationError('invalid_params', 'Choose either --api-key-prompt or --api-key-stdin, not both.');
+  }
+  if (options.apiKeyPrompt && source !== 'gemini' && source !== 'venice' && source !== 'readwise') {
+    throw new OperationError('invalid_params', '--api-key-prompt is supported only for Gemini, Venice, and Readwise.');
+  }
   const secretStore = createDefaultSecretStore({
     env: {
       ...process.env,
@@ -1948,6 +1154,7 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'telegram' || source === 'whatsapp') {
+    if (options.pair) return await runMessagingPairing(source, secretStore, options.registryPath);
     if (!options.sessionPath) throw new OperationError('invalid_params', '--session-path is required.');
     return connectGuidedSession({
       source,
@@ -1959,24 +1166,76 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'gemini') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
-    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
+    return connectGeminiApiKey({ apiKey: options.apiKeyPrompt
+      ? await readSecretFromTerminal('Gemini API key (input hidden): ')
+      : await readApiKeyFromStdin() });
   }
   if (source === 'venice' || source === 'readwise') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
     return connectPublicApiKeySource({
       source,
-      apiKey: await readApiKeyFromStdin(),
+      apiKey: options.apiKeyPrompt
+        ? await readSecretFromTerminal(`${source === 'venice' ? 'Venice' : 'Readwise'} API key (input hidden): `)
+        : await readApiKeyFromStdin(),
       ...(options.accountRole ? { accountRole: options.accountRole } : {}),
       ...(options.registryPath ? { registryPath: options.registryPath } : {}),
       secretStore,
     });
   }
   throw new OperationError('invalid_params', `Unsupported connect source: ${source}`);
+}
+
+async function runMessagingPairing(
+  source: 'telegram' | 'whatsapp',
+  secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
+  registryPath?: string,
+): Promise<unknown> {
+  const policy = loadSovereigntyEngine().config;
+  if (policy.routes.secure_local?.mode === 'disabled' || policy.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+    throw new OperationError('invalid_params', 'This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.');
+  }
+  let terminal: number;
+  try { terminal = openSync('/dev/tty', 'r+'); }
+  catch { throw new OperationError('invalid_params', 'Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.'); }
+  const tell = (text: string) => writeSync(terminal, text);
+  try {
+    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    const paired = await pairMessagingSource({
+      source,
+      packageRoot: olympusPackageRoot(),
+      ...(secretStore ? { secretStore } : {}),
+      ...(registryPath ? { registryPath } : {}),
+      whatsappQrMode: 'terminal',
+      requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
+        if (source === 'telegram') {
+          if (chats.length === 0) { tell('No chats were available to select. Nothing will be captured.\n'); return undefined; }
+          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '')}\n`));
+          const answer = await readSecretFromTerminal('Choose chat numbers separated by commas, or type CANCEL (input hidden): ');
+          if (answer.trim().toUpperCase() === 'CANCEL') return undefined;
+          const indices = answer.split(',').map((value) => Number(value.trim()) - 1);
+          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
+            throw new OperationError('invalid_params', 'Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.');
+          }
+          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index]!.chatScope))] };
+        }
+        tell('WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.\n');
+        const answer = await readSecretFromTerminal('Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ');
+        return answer.trim() === 'ALL' ? { source: 'whatsapp', explicitApproval: true, wholeAccount: true } : undefined;
+      },
+    });
+    if (!paired.registered) return paired;
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
+    tell('Pairing and scope verified. Restarting the managed Olympus worker to start capture.\n');
+    const activation = runWorkerLifecycle('restart');
+    return { ...paired, captureStarted: false, captureActivation: activation.ok ? 'requested' : 'needs_attention', next: activation.ok
+      ? 'Open this source in the Olympus dashboard to monitor capture and initial indexing.'
+      : 'Pairing is saved. Ask your agent to repair the managed worker before capture can start.' };
+  } finally { closeSync(terminal); }
 }
 
 function parseConnectOptions(args: string[]): {
@@ -1998,9 +1257,11 @@ function parseConnectOptions(args: string[]): {
   secretStoreKeyPath?: string;
   sessionPath?: string;
   sessionReady: boolean;
+  pair: boolean;
   apiKeyStdin: boolean;
+  apiKeyPrompt: boolean;
 } {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
+  const options = { detach: false, noOpen: false, sessionReady: false, pair: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -2062,8 +1323,14 @@ function parseConnectOptions(args: string[]): {
       case '--session-path':
         options.sessionPath = nextValue();
         break;
+      case '--pair':
+        options.pair = true;
+        break;
       case '--session-ready':
         options.sessionReady = true;
+        break;
+      case '--api-key-prompt':
+        options.apiKeyPrompt = true;
         break;
       case '--api-key-stdin':
         options.apiKeyStdin = true;
@@ -2258,42 +1525,210 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
+type DashboardFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface DashboardCommandDependencies {
+  /** The bearer-mint round trip. Injected by tests; production uses fetch. */
+  fetchImpl?: DashboardFetch;
+  /** The desktop opener. Injected by tests; production uses open/xdg-open. */
+  openImpl?: (url: string) => boolean;
+  /** Mint and return the link without consuming it in a local browser. */
+  noOpen?: boolean;
+}
+
+const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The bounded standalone opening handoff (owner request, 2026-09-13).
+ *
+ * The reader runs one command and gets one link. Everything that used to be
+ * their problem is now this function's: it resolves the worker token the way
+ * `olympus dashboard token` already does (worker.env outranks a stale config),
+ * asks THIS install's OWN configured worker — never a host from a response,
+ * never a redirect — for a 120-second single-use ticket bound to that origin,
+ * and returns a link whose fragment carries only that ticket. The page at
+ * `/dashboard/launch` clears the fragment and redeems it, and the worker
+ * answers with the same origin-bound HttpOnly control cookie a manual unlock
+ * mints. So the reader never finds rootDir, never copies a durable token, and
+ * never pastes a secret into a page.
+ *
+ * There is no fallback on failure. A reader who is handed the old link without
+ * being told is a reader who cannot unlock the controls, which is the exact
+ * confusion this replaces; the error names the worker that refused. The legacy
+ * read-only view link stays available, by name, as `--read-only`.
+ */
+export async function runDashboardCommand(
+  dependencies: DashboardCommandDependencies = {},
+): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
-  // The same resolution `olympus dashboard token` uses, and for the same
-  // reason: this token is minted into a URL the reader is about to open.
+  const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
-  const url = `${base}/dashboard`;
-  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
-  const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
+  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
   let opened = false;
-  try {
-    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    const child = Bun.spawnSync([opener, openUrl], { stdout: 'ignore', stderr: 'ignore' });
-    opened = child.exitCode === 0;
-  } catch {
-    opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
   }
-  // The URL printed is the URL that works. `dash_` is a DERIVED, read-only view
-  // token, not the worker bearer: workers/dashboard/index.ts states it is the
-  // only way a browser reaches this HTML, because a bearer header cannot be
-  // typed into an address bar. workers/http.ts admits it to GET /dashboard and
-  // GET /dashboard.json, and to nothing else — no control route, and no method
-  // but GET. Printing the bare path handed the reader a URL that 401s and no
-  // way to tell why (clean-install rehearsal, 2026-09-05). It carries no
-  // control authority, so it is not the secret the token command exists to hand
-  // over — that one still never appears here.
   return {
     url: openUrl,
     opened,
-    hint: dashboardToken
-      ? 'This URL carries the read-only view token, not the worker token;'
-        + ` unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.`
-      : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then`
-        + ` ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value`
-        + ' (rootDir comes from openclaw plugins inspect olympus --json).',
+    hint: dependencies.noOpen
+      ? 'This fresh single-use 120-second link was not opened locally and is ready to hand to the intended browser.'
+      : 'This link carries a single-use 120-second ticket, not the worker token;'
+        + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
+        + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
+}
+
+/**
+ * The legacy read-only view link: `?token=dash_` on GET /dashboard.
+ *
+ * `dash_` is a DERIVED read token, not the worker bearer: `workers/http.ts`
+ * admits it to GET /dashboard and GET /dashboard.json and to nothing else — no
+ * control route, and no method but GET. It therefore authorizes reading and no
+ * control, which is why it is the right default for a heads-up view and the
+ * wrong one for "open my dashboard and let me act". Printing the bare path
+ * handed the reader a URL that 401s and no way to tell why (clean-install
+ * rehearsal, 2026-09-05), so a URL without a token is never printed.
+ */
+function runDashboardReadOnlyCommand(
+  dependencies: Pick<DashboardCommandDependencies, 'noOpen' | 'openImpl'> = {},
+): { url: string; opened: boolean; hint: string } {
+  const config = loadConfig();
+  const base = workerRootBaseUrl(config.email.baseUrl);
+  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
+  const openUrl = dashboardToken
+    ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}`
+    : '';
+  if (!openUrl) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is no read-only view link to mint.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  let opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
+  }
+  return {
+    url: openUrl,
+    opened,
+    hint: dependencies.noOpen
+      ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
+      : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
+        + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+  };
+}
+
+/** The worker ROOT: the configured base without its /v1 API suffix. */
+function workerRootBaseUrl(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL is not a valid URL.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  if (url.username || url.password) {
+    throw new OperationError('config_error', 'The configured worker URL must not carry embedded credentials.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL must use HTTP or HTTPS.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+  if (path !== '/' && path !== '/v1') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL path must be /v1 or the origin root.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  return url.origin;
+}
+
+/**
+ * Mint the opening ticket from this install's own worker.
+ *
+ * `redirect: 'error'` is the load-bearing part: the bearer travels with this
+ * request, so a worker (or anything answering as one) that tries to redirect
+ * it is refused outright rather than followed to a host the reader never
+ * configured. A refusal, an invalid body, or an unreachable worker is an
+ * error naming that worker — never a silent downgrade to the old link.
+ */
+async function mintDashboardOpeningUrl(
+  base: string,
+  token: string | undefined,
+  dependencies: DashboardCommandDependencies,
+): Promise<string> {
+  if (!token) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is nothing to unlock.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: 'error',
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker did not answer the opening request.',
+      `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`,
+    );
+  }
+  if (!response.ok) {
+    throw new OperationError(
+      'email_unreachable',
+      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
+      `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`,
+    );
+  }
+  let ticket: unknown;
+  try {
+    ticket = (await response.json() as { ticket?: unknown }).ticket;
+  } catch {
+    ticket = undefined;
+  }
+  if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker answered the opening request without a ticket.',
+      'This worker predates the standalone opening handoff; upgrade it, then run this again.',
+    );
+  }
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+}
+
+/** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */
+function openInDesktopBrowser(url: string): boolean {
+  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  return Bun.spawnSync([opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
 }
 
 /**

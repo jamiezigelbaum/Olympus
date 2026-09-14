@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
-import { OperationError, operations, type OperationContext } from '../src/core/operations.ts';
+import { operations, type OperationContext } from '../src/core/operations.ts';
 import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
 
@@ -20,10 +20,15 @@ describe('MCP server surface', () => {
     expect(mcpNames).toContain('source_answer');
     expect(mcpNames).toContain('source_index_status');
     expect(mcpNames).toContain('source_index_search');
-    expect(mcpNames).not.toContain('source_index_sync');
-    expect(mcpNames).not.toContain('source_export');
-    expect(mcpNames).not.toContain('source_transcribe');
-    expect(mcpNames).not.toContain('source_media_ingest');
+    expect(mcpNames).toEqual([
+      'argus_ping',
+      'argus_list_models',
+      'argus_complete',
+      'source_answer',
+      'source_index_status',
+      'source_index_search',
+      'olympus_doctor',
+    ]);
   });
 
   test('uses sanitized operation schemas on the MCP surface', () => {
@@ -49,14 +54,8 @@ describe('MCP server surface', () => {
     expect(builtContext).toBe(false);
   });
 
-  test('rejects hidden tool calls before dispatching to private worker', async () => {
-    const ctx = minimalOperationContext({
-      email: {
-        sourceIndexSync: async () => {
-          throw new Error('hidden MCP operation reached private worker');
-        },
-      } as unknown as OperationContext['email'],
-    });
+  test('rejects removed operations before constructing operation context', async () => {
+    let builtContext = false;
 
     await expect(handleMcpCallTool(
       {
@@ -65,8 +64,13 @@ describe('MCP server surface', () => {
           arguments: { corpus_id: 'secure_local.dropbox.files' },
         },
       },
-      () => ctx,
-    )).rejects.toThrow(OperationError);
+      () => {
+        builtContext = true;
+        return minimalOperationContext();
+      },
+    )).rejects.toThrow('Unknown Olympus operation: source_index_sync');
+
+    expect(builtContext).toBe(false);
   });
 });
 

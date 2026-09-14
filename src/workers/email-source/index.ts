@@ -1,9 +1,10 @@
+import type { ModelSetupView } from '../../core/model-setup.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { assertNoRawEmailFields } from '../../core/email-policy.ts';
-import { PUBLIC_RUNTIME_BUILD } from '../../core/build-flavor.ts';
+
 import { packagedGooglePilotClientId } from '../../core/google-pilot-client.ts';
 import { dropboxPublisherAppKey, googlePublisherWebClientId } from '../../core/publisher-oauth-client.ts';
 import {
@@ -101,22 +102,16 @@ import {
   DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC,
-  DropboxSourceExportDestinationError,
-  DropboxSourceExportRequestError,
-  type DropboxEvalShardExportHandler,
-  type DropboxEvalShardExportRequest,
-  type DropboxEvalShardManifest,
-  type DropboxSourceExportHandler,
-  type DropboxSourceExportItemRequest,
-  type DropboxSourceExportRequest,
-  type DropboxSourceExportResult,
 } from '../dropbox-files/index.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   isTelegramMessagesCorpusId,
 } from '../telegram-messages/index.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import type { SourceScheduler, SourceSchedulerSource } from '../source-scheduler.ts';
 import type { SovereigntyEngine } from '../../core/sovereignty.ts';
 import type {
@@ -135,12 +130,19 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
 } from '../google-connectors/corpora.ts';
-import { renderDashboardHtmlRoute } from '../dashboard/index.ts';
-import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER } from '../http.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { renderEmbeddingLedgerPage } from '../dashboard/pages/embedding-ledger.ts';
-import { readEmbeddingLedger, resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+import { renderDashboardControlUi, renderDashboardHtmlRoute } from '../dashboard/index.ts';
+import {
+  OLYMPUS_DASHBOARD_VIEWS,
+  type OlympusFolderScopeBrowseResult,
+  type OlympusFolderScopeSourceId,
+  type OlympusSourceScopeSelection,
+  type OlympusDashboardReadParams,
+} from '../../control-ui-contract.ts';
+import {
+  DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+} from '../http.ts';
 import {
   readEmbeddingRuntime,
   resolveEmbeddingOverridePath,
@@ -164,11 +166,13 @@ import {
 } from '../credential-health.ts';
 import {
   buildSourceDispositionsView,
+  renderSourceDispositionsControlUi,
   renderSourceDispositionsHtml,
   resolveSourceIngestionExclusionsPath,
   readSourceIngestionExclusionsFile,
   saveSourceDispositions,
   type SourceDispositionsSource,
+  type SourceFolderScopeSummary,
 } from '../source-dispositions.ts';
 import type { SourceDispositionEdit, SourceDispositionState } from '../../core/source-disposition-tree.ts';
 import type { SourceExclusionCriterionKind } from '../../core/source-ingestion-exclusions.ts';
@@ -204,6 +208,7 @@ import {
   unsupportedConnectorStoreFilterFields,
   type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreResultProjector,
+  type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
@@ -359,8 +364,6 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
-  dropboxEvalShardExport?: DropboxEvalShardExportHandler;
-  dropboxSourceExport?: DropboxSourceExportHandler;
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
@@ -372,6 +375,16 @@ export interface EmailSourceWorkerOptions {
   connectorStorePrincipals?: ReadonlyMap<string, ConnectorStoreDeclaredPrincipal>;
   /** Test/integration override; shipped declarations use the module registry above. */
   connectorStoreFilterCapabilities?: ConnectorStoreFilterCapabilityRegistry;
+  /** Mandatory account-bound retrieval scope for mounted file corpora. */
+  connectorStoreReadScope?: (
+    store: LocalConnectorStore,
+  ) => { allowed: false } | {
+    allowed: true;
+    accountScope?: string;
+    filters?: ConnectorStoreSearchFilters;
+    contentAllowed?: boolean;
+    contentFilters?: ConnectorStoreSearchFilters;
+  };
   sourceScheduler?: SourceScheduler;
   sourceWatch?: {
     store: LocalSourceWatchStore;
@@ -392,6 +405,10 @@ export interface EmailSourceWorkerOptions {
     oauthFetch?: OAuthFetch;
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
+    modelSetup?: () => ModelSetupView;
+    checkModelSetup?: () => Promise<ModelSetupView>;
+    connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
+    stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
      * The sources `triggerSourceSync` actually serves.
@@ -447,6 +464,22 @@ export interface EmailSourceWorkerOptions {
      * tree that reads as "you have no folders".
      */
     ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    fileSourceScopes?: {
+      summaries(): SourceFolderScopeSummary[];
+      browse(input: {
+        sourceId: OlympusFolderScopeSourceId;
+        parentKey?: string;
+        cursor?: string;
+      }): Promise<OlympusFolderScopeBrowseResult>;
+      approveAndStart(input: {
+        sourceId: OlympusFolderScopeSourceId;
+        accountGeneration: string;
+        expectedRevision: string;
+        selections: OlympusSourceScopeSelection[];
+        wholeAccount: boolean;
+        explicitWholeAccountConfirmation: boolean;
+      }): Promise<Record<string, unknown>>;
+    };
   };
   credentialDegradations?: () => WorkerCredentialDegradation[];
   recheckCredentials?: () => WorkerCredentialDegradation[];
@@ -585,8 +618,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
   const fileExtraction = options.fileExtraction;
-  const dropboxEvalShardExport = options.dropboxEvalShardExport;
-  const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
   const connectorStoresByCorpusId = new Map(connectorStores.map((store) => [store.corpusId, store]));
@@ -595,6 +626,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map();
   const connectorStoreFilterCapabilities = options.connectorStoreFilterCapabilities
     ?? CONNECTOR_STORE_FILTER_CAPABILITIES;
+  const connectorStoreReadScope = options.connectorStoreReadScope;
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
@@ -650,6 +682,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // rebuild and apply after close() returned. A closed worker must do no
   // further scheduler work, so the flag is re-checked at every await boundary.
   let dashboardWorkerClosed = false;
+  const dashboardPostConnectRuns = new Map<DashboardConnectSource, Promise<void>>();
   if (options.sourceScheduler && options.sourceDashboard?.refreshSchedulerSources) {
     const intervalMs = options.sourceDashboard.registryAdoptionIntervalMs ?? 30_000;
     if (intervalMs > 0) {
@@ -682,6 +715,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (dashboardNamespace && !isV04PublicDashboardRoute(request.method, url.pathname)) {
           return new Response('Not Found', { status: 404 });
         }
+        const dashboardUi = request.method === 'GET' && url.pathname === '/dashboard/ui'
+          ? parseDashboardControlUiRequest(url, request.headers)
+          : undefined;
 
         // The family-scoped extraction paths are aliases of the generic
         // `/source/index/files/*` ones, and the rewrite below is what makes the
@@ -744,32 +780,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               throw error;
             }
           });
-        }
-
-        if (request.method === 'POST' && url.pathname === `${basePath}/source/export`) {
-          if (!dropboxSourceExport) {
-            throw new EmailSourceWorkerError(
-              501,
-              'source_export_not_supported',
-              'Private source worker does not support source export.',
-              'Set OLYMPUS_SOURCE_EXPORT_ENABLED=true with a configured Dropbox files index and OLYMPUS_SOURCE_EXPORT_DROPBOX_ROOTS before requesting source exports.',
-            );
-          }
-          const exportRequest = await parseDropboxSourceExportRequest(request);
-          let result: DropboxSourceExportResult;
-          try {
-            result = await dropboxSourceExport.export(exportRequest);
-          } catch (error) {
-            if (error instanceof DropboxSourceExportDestinationError) {
-              throw new EmailSourceWorkerError(403, 'source_export_destination_not_allowed', error.message);
-            }
-            if (error instanceof DropboxSourceExportRequestError) {
-              throw new EmailSourceWorkerError(400, 'invalid_request', error.message);
-            }
-            throw error;
-          }
-          assertNoRawEmailFields(result);
-          return json(result);
         }
 
         if ((request.method === 'GET' || request.method === 'POST') && url.pathname === `${basePath}/source/index/status`) {
@@ -867,7 +877,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // an authorized fetch, so the strong credential is the only way in.
         if ((request.method === 'GET'
           && (url.pathname === '/dashboard/dispositions' || url.pathname === '/dashboard/dispositions.json'))
-          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')) {
+          || (request.method === 'POST' && url.pathname === '/dashboard/dispositions')
+          || dashboardUi?.params.view === 'dispositions') {
           if (!sourceDashboard?.ingestionDispositions) {
             throw new EmailSourceWorkerError(
               501,
@@ -875,11 +886,61 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the ingestion-dispositions picker configured.',
             );
           }
+          const nativeBrowse = dashboardUi?.params.view === 'dispositions'
+            && 'action' in dashboardUi.params
+            && dashboardUi.params.action === 'browse_folder_scope'
+            ? dashboardUi.params
+            : undefined;
+          const postBody = request.method === 'POST' ? await parseObjectBody(request) : undefined;
+          if (nativeBrowse || postBody?.action === 'browse_folder_scope') {
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope browsing is not configured.');
+            }
+            const input = nativeBrowse ?? postBody!;
+            const sourceId = parseFolderScopeSourceId(input.source_id);
+            const parentKey = asOptionalString(input.parent_key);
+            const cursor = asOptionalString(input.cursor);
+            const scopeBrowser = await sourceDashboard.fileSourceScopes.browse({
+              sourceId,
+              ...(parentKey ? { parentKey } : {}),
+              ...(cursor ? { cursor } : {}),
+            });
+            return json({
+              status: 200,
+              title: 'Olympus / Choose folders',
+              body: '<main></main>',
+              controller: 'dispositions',
+              can_write: true,
+              signature: scopeBrowser.scope_revision,
+              poll_interval_ms: 15_000,
+              scope_browser: scopeBrowser,
+            });
+          }
+          if (postBody?.action === 'approve_source_scope_and_start') {
+            assertDashboardModelsReady();
+            if (!sourceDashboard.fileSourceScopes) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Folder scope approval is not configured.');
+            }
+            const sourceId = parseFolderScopeSourceId(postBody.source_id);
+            const accountGeneration = asOptionalString(postBody.account_generation);
+            const expectedRevision = asOptionalString(postBody.expected_scope_revision);
+            if (!accountGeneration || !expectedRevision) {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'account_generation and expected_scope_revision are required.');
+            }
+            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
+              sourceId,
+              accountGeneration,
+              expectedRevision,
+              selections: parseSourceScopeSelections(postBody.selections),
+              wholeAccount: postBody.whole_account === true,
+              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true,
+            }));
+          }
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
             if (request.method === 'POST') {
-              const body = await parseObjectBody(request);
+              const body = postBody ?? await parseObjectBody(request);
               const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(body, runtime.sources));
               return json({
                 ok: true,
@@ -902,12 +963,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const file = readSourceIngestionExclusionsFile(rulesPath);
             const view = buildSourceDispositionsView({
               sources: runtime.sources,
+              folderScopes: sourceDashboard.fileSourceScopes?.summaries() ?? [],
               document: file.document,
               rulesPath,
               rulesPresent: file.present,
             });
+            if (dashboardUi?.params.view === 'dispositions') {
+              return json(renderSourceDispositionsControlUi(view, dashboardUi.canWrite, dashboardUi.params.source_id));
+            }
             if (url.pathname === '/dashboard/dispositions.json') return json(view);
             return html(renderSourceDispositionsHtml(view, {
+              selectedSourceId: url.searchParams.get('source_id') ?? undefined,
               csrfToken: request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined,
             }));
           } finally {
@@ -915,32 +981,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
         }
 
-        // The embedding decision ledger. A query parameter on /dashboard rather
-        // than a path of its own, for the same reason ?background is one: the
-        // read-only dash_ token is allowlisted by PATHNAME in workers/http.ts,
-        // so a /dashboard/embedding-ledger path would 401 for exactly the
-        // reader this page is for. Sitting on /dashboard gives it the same auth
-        // as every other dashboard page with no auth code of its own.
-        //
-        // It is matched ahead of the /dashboard block below and returns without
-        // falling through, because it needs none of what that block builds — no
-        // view model, no registry, no secret store, no OAuth pruning. This page
-        // reads one file. It also stays reachable when the source dashboard is
-        // not configured at all, which matters: "what happened to the
-        // embeddings" is a question that outlives any particular worker's setup.
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
         if (request.method === 'GET'
-          && url.pathname === '/dashboard'
-          && url.searchParams.has(DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM)) {
-          const ledger = await readEmbeddingLedger(resolveEmbeddingLedgerPath(process.env));
-          const ledgerBasePath = embeddingLedgerBasePath(url);
-          return html(renderEmbeddingLedgerPage(ledger, {
-            ...(ledgerBasePath === undefined ? {} : { basePath: ledgerBasePath }),
-          }));
-        }
-        // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-
-        if (request.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json')) {
+          && (url.pathname === '/dashboard' || url.pathname === '/dashboard.json' || url.pathname === '/dashboard/ui')) {
           if (!sourceIndexStatus || !sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -958,6 +1000,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const registry = registryRead.registry;
           const secretStore = dashboardSecretStore(sourceDashboard);
           const dashboardOAuthOrigin = dashboardOAuthRedirectOrigin(url, request.headers);
+          const nativeDashboardOAuthOrigin = dashboardUi?.nativeOAuthAvailable === false
+            ? undefined
+            : dashboardOAuthOrigin;
           const dashboardClientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           const googleCloudProjectId = dashboardGoogleCloudProjectId();
           const sourceIndexDashboardStatus = withCredentialDegradations(
@@ -1008,6 +1053,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }),
             ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
             sovereigntyEngine: sourceDashboard.sovereigntyEngine,
+            ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
             ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
             ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
             connectedHandleRegistry: registry,
@@ -1021,12 +1067,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             oauthClientSecretAvailability: await dashboardOAuthClientSecretAvailability(secretStore),
             ...(googleCloudProjectId ? { googleCloudProjectId } : {}),
             googlePilotClientConfigured: dashboardGooglePilotClientConfigured(),
-            oauthRedirectBaseUrl: dashboardOAuthOrigin,
+            ...(nativeDashboardOAuthOrigin ? { oauthRedirectBaseUrl: nativeDashboardOAuthOrigin } : {}),
             // Which sources connect through Olympus's own app, so their card can
             // offer one Connect button instead of a walkthrough for an app the
             // owner does not have to register. Names sources only — no client
             // id, no relay URL, no state: this rides on the read-only surface.
-            publisherOAuthSources: dashboardPublisherOAuthSources(dashboardOAuthOrigin, dashboardClientIdSets.own),
+            publisherOAuthSources: nativeDashboardOAuthOrigin
+              ? dashboardPublisherOAuthSources(nativeDashboardOAuthOrigin, dashboardClientIdSets.own)
+              : [],
             apiKeyAvailability: await dashboardApiKeyAvailability(secretStore),
             pendingConnects: dashboardPendingConnects(dashboardOAuthAttempts),
             contentExtractionStallThresholdHours: dropboxContentExtractionStallHours(process.env),
@@ -1034,6 +1082,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // The dispatch chain is this worker's to know. Without it the card
             // offered Sync now for a source nothing here can sync.
             syncNowAvailable: dashboardSourceSyncAvailable,
+            ...(sourceDashboard.fileSourceScopes
+              ? {
+                  fileSourceScopeStatus: Object.fromEntries(
+                    sourceDashboard.fileSourceScopes.summaries()
+                      .map((scope) => [scope.source_id, scope.status]),
+                  ),
+                  fileSourceScopeIngestionEnabled: Object.fromEntries(
+                    sourceDashboard.fileSourceScopes.summaries().map((scope) => [
+                      scope.source_id,
+                      scope.status === 'approved' && (
+                        scope.whole_account_selected === true
+                        || scope.selections?.some((selection) => selection.state !== 'exclude') === true
+                      ),
+                    ]),
+                  ),
+                }
+              : {}),
             ...(sensitivityMap ? { sensitivityMap } : {}),
           });
           assertNoRawEmailFields(view);
@@ -1055,7 +1120,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             embeddingRuntime,
             backgroundRuntime,
             ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+            ...(dashboardUi ? { nativeOAuthAvailable: dashboardUi.nativeOAuthAvailable } : {}),
           };
+          if (dashboardUi) {
+            return json(renderDashboardControlUi({
+              params: dashboardUi.params,
+              view,
+              canWrite: dashboardUi.canWrite,
+              options,
+            }));
+          }
           const page = renderDashboardHtmlRoute({ url, view, options });
           return html(page.html, page.status);
         }
@@ -1214,10 +1288,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               await attempt.pending.completeCallback({ state, code });
               clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
               markDashboardSourceConnected(source, dashboardDisconnectedSources);
-              await triggerDashboardPostConnectSync({
-                source,
-                reason: 'post_connect',
-              });
+              // Folder-capable sources stop at connected + scope_pending.
+              // OAuth consent is credential consent, not corpus consent.
+              if (source !== 'google-drive' && source !== 'dropbox') {
+                await triggerDashboardPostConnectSync({
+                  source,
+                  reason: 'post_connect',
+                });
+              }
             });
           } catch (error) {
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
@@ -1257,6 +1335,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const record = await parseObjectBody(request);
           const source = parseDashboardOAuthSource(record.source);
+          assertDashboardModelsReady();
           const secretStore = dashboardSecretStore(sourceDashboard);
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
@@ -1282,8 +1361,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
           // Resolved after the client id, because which stored secret may be
-          // sent depends on which client this flow is going out with.
-          const clientSecret = await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record.client_secret), clientId);
+          // sent depends on which client this flow is going out with. The
+          // publisher Google Web client's secret exists only at the publisher
+          // exchange, so this path does not even probe local secret namespaces:
+          // an old local value must never accompany the Web client, reach the
+          // exchange request, or be persisted again.
+          const clientSecret = publisher && dashboardGoogleOAuthSource(source)
+            ? undefined
+            : await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record.client_secret), clientId);
           if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
             throw new EmailSourceWorkerError(409, 'oauth_client_secret_missing', `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
           }
@@ -1408,6 +1493,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/check') {
+          if (!sourceDashboard?.checkModelSetup) {
+            throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support model setup checks.');
+          }
+          // Synthetic model checks are explicit operator work, never dashboard polling.
+          // Return promptly; the authoritative Models card receives their result.
+          void sourceDashboard.checkModelSetup().catch(() => undefined);
+          return json({ ok: true, status_message: 'Readiness check requested. See the Models cards above for the result.' });
+        }
+
         if (request.method === 'POST' && url.pathname === '/dashboard/connect/api-key') {
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
@@ -1420,6 +1515,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const record = await parseObjectBody(request);
           const source = parseDashboardApiKeySource(record.source);
           if (source === 'readwise') {
+            assertDashboardModelsReady();
             assertDashboardAccountCardinality(
               readConnectedHandleRegistry(sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               source,
@@ -1427,6 +1523,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const apiKey = asOptionalString(record.api_key);
           if (!apiKey) throw new EmailSourceWorkerError(400, 'invalid_request', 'api_key is required.');
+          if (source === 'gemini' || (source === 'venice' && sourceDashboard.connectModelKey)) {
+            if (!sourceDashboard.connectModelKey) {
+              throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
+            }
+            try { await sourceDashboard.connectModelKey(source, apiKey); }
+            catch { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', 'The model key could not be validated or applied. Check the Models card and retry.'); }
+            const modelSetup = sourceDashboard.modelSetup?.();
+            return json({ ok: true, source, status_message: modelSetup?.ready
+              ? 'Model connection ready.'
+              : 'Key saved. Finish the remaining model requirements; Olympus applies the keys automatically.' });
+          }
           const connectApiKey = sourceDashboard.connectApiKey ?? connectPublicApiKeySource;
           let result: Awaited<ReturnType<typeof connectPublicApiKeySource>>;
           try {
@@ -1469,6 +1576,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json({
             ok: true,
             source,
+            status_message: source === 'readwise' ? 'Connected. Initial sync requested.' : 'Key connected.',
             handles: result.handles.filter((handle) => knownHandles.includes(handle)),
             policy: {
               raw_runtime_secrets_exposed: false,
@@ -1557,6 +1665,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // a later delete fails, the source is safely parked and retrying
                 // Disconnect can finish; no stale scheduled definition survives.
                 sourceScheduler.updateSources(nextSources);
+              }
+              if (sourceDashboard.stopMessagingCapture) {
+                for (const [id, source] of [['telegram.messages', 'telegram'], ['whatsapp.personal.messages', 'whatsapp']] as const) {
+                  if (!plan.sourceIds.has(id)) continue;
+                  try { await sourceDashboard.stopMessagingCapture(source); }
+                  catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Credentials were retained; retry Disconnect.'); }
+                }
               }
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
@@ -1765,6 +1880,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 registryPath,
               );
               for (const unpairedSource of selectedSourceIds) dashboardUnpairedSources.add(unpairedSource);
+              if (sourceDashboard.stopMessagingCapture) {
+                try { await sourceDashboard.stopMessagingCapture(sourceId === 'telegram.messages' ? 'telegram' : 'whatsapp'); }
+                catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.'); }
+              }
+
               const removedSessionPaths: string[] = [];
               const unremovedSessionPaths: string[] = [];
               for (const target of removalPlan.plan.targets) {
@@ -2002,6 +2122,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(400, 'invalid_request', 'corpus_id is required for source sync.');
           }
           const schedulerSourceId = sourceSchedulerSourceIdForCorpus(corpusId);
+          assertFileSourceSyncApproved(schedulerSourceId);
           const schedulerHasSource = schedulerSourceId !== undefined
             && sourceScheduler?.status().sources.some((source) => source.source_id === schedulerSourceId) === true;
           if (schedulerSourceId && schedulerHasSource && corpusId !== X_BOOKMARKS_CORPUS_ID) {
@@ -2252,26 +2373,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json(body);
         }
 
-        if (request.method === 'POST' && url.pathname === `${basePath}/source/index/dropbox/content/export-eval-shard`) {
-          if (!dropboxEvalShardExport) {
-            throw new EmailSourceWorkerError(
-              501,
-              'dropbox_eval_shard_export_not_supported',
-              'Private source worker does not support Dropbox eval shard export.',
-            );
-          }
-          const exportRequest = await parseDropboxEvalShardExportRequest(request);
-          const result: DropboxEvalShardManifest = await dropboxEvalShardExport.export(exportRequest);
-          assertNoRawEmailFields(result);
-          return json(result);
-        }
-
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
           const record = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
+            const mandatoryScope = connectorStoreReadScope?.(connectorStore);
+            if (mandatoryScope?.allowed === false) {
+              throw new EmailSourceWorkerError(
+                403,
+                'source_index_policy_violation',
+                'This file source is unavailable until its folder scope is approved for the connected account.',
+              );
+            }
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
               record,
               connectorStore,
@@ -2284,14 +2399,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
             const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
               ?? sourceIndexEmbeddingProvider;
+            const combinedFilters = searchRequest.filters || mandatoryScope?.filters
+              ? normalizeConnectorStoreSearchFilters({
+                  ...searchRequest.filters,
+                  ...mandatoryScope?.filters,
+                })
+              : undefined;
             const adapter = createConnectorStoreCorpusAdapter({
               store: connectorStore,
               retrievalMode: searchRequest.retrievalMode,
-              ...(searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
-              ...(searchRequest.filters ? { filters: searchRequest.filters } : {}),
+              ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
+                ? { accountScope: mandatoryScope.accountScope }
+                : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
+              ...(combinedFilters ? { filters: combinedFilters } : {}),
               ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
               ...(connectorStoreEmbeddingProvider
-                && (connectorStore.trustDomain !== 'secure_local' || connectorStoreEmbeddingProvider.backend === 'local')
+                && (connectorStore.trustDomain !== 'secure_local'
+                  || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
                 ? { embeddingProvider: connectorStoreEmbeddingProvider }
                 : {}),
             });
@@ -2481,6 +2605,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     },
   };
 
+  function assertDashboardModelsReady(): void {
+    if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
+      throw new EmailSourceWorkerError(409, 'model_setup_required', 'Finish model setup at the top of Setup before connecting sources or starting ingestion.');
+    }
+  }
+
   async function withDashboardGrantMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const previous = dashboardGrantMutationTail;
     let release!: () => void;
@@ -2495,8 +2625,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     }
   }
 
+  function assertFileSourceSyncApproved(sourceId: string | undefined): void {
+    if (sourceId === 'google_drive.docs' || sourceId === 'dropbox.files') {
+      const scope = sourceDashboard?.fileSourceScopes?.summaries()
+        .find((candidate) => candidate.source_id === sourceId);
+      const hasSelectedFolders = scope?.whole_account_selected === true
+        || scope?.selections?.some((selection) => selection.state !== 'exclude') === true;
+      if (!scope || scope.status !== 'approved' || !scope.connected || !hasSelectedFolders) {
+        throw new OperationError(
+          'source_index_policy_violation',
+          'Choose and approve this file source scope before starting ingestion.',
+        );
+      }
+    }
+  }
+
   async function runDashboardSourceSync(request: DashboardSourceSyncRequest): Promise<unknown> {
+    assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
     await refreshDashboardSchedulerSources();
+    if (dashboardWorkerClosed) throw new EmailSourceWorkerError(503, 'worker_stopping', 'The worker is restarting.');
     const schedulerSourceId = dashboardSchedulerSourceId(request.source);
     if (schedulerSourceId) {
       const schedulerStatus = sourceScheduler?.status();
@@ -2617,13 +2764,29 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   async function triggerDashboardPostConnectSync(request: DashboardSourceSyncRequest): Promise<void> {
-    if (!isDashboardSyncSource(request.source)) return;
-    if (!dashboardSourceSyncAvailable(request.source)) return;
-    try {
-      await runDashboardSourceSync(request);
-    } catch (error) {
-      console.warn(`Olympus post-connect first sync did not start for ${request.source}: ${scrubSourceWorkerLogMessage(error instanceof Error ? error.message : error)}`);
+    if (!isDashboardSyncSource(request.source) || dashboardWorkerClosed) return;
+    // A newly connected account was absent from the startup scheduler. Adopt
+    // it before deciding whether its initial sync is available.
+    try { await refreshDashboardSchedulerSources(); }
+    catch {
+      console.warn('Olympus connected the source; scheduler adoption will retry on its next tick.');
+      return;
     }
+    if (!dashboardSourceSyncAvailable(request.source) || dashboardPostConnectRuns.has(request.source)) return;
+    try {
+      assertDashboardModelsReady();
+      assertFileSourceSyncApproved(dashboardSchedulerSourceId(request.source));
+    } catch { return; } // File-source scope remains an explicit next step.
+    const work = Promise.resolve().then(async () => {
+      if (dashboardWorkerClosed) return;
+      if (sourceDashboard) assertDashboardSourceMayRead(request.source, sourceDashboard, dashboardDisconnectedSources);
+      await runDashboardSourceSync(request);
+    }).catch((error) => {
+      if (!dashboardWorkerClosed) console.warn(`Olympus initial sync needs attention for ${request.source}: ${scrubSourceWorkerLogMessage(error instanceof Error ? error.message : error)}`);
+    }).finally(() => { dashboardPostConnectRuns.delete(request.source); });
+    dashboardPostConnectRuns.set(request.source, work);
+    // The HTTP connection acknowledgment must not wait for a whole library
+    // import. Scheduler execution, budgets and failures stay authoritative.
   }
 
   /**
@@ -2637,6 +2800,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   function dashboardSourceSyncAvailable(source: DashboardConnectSource): boolean {
+    const schedulerId = dashboardSchedulerSourceId(source);
+    if (schedulerId && sourceScheduler?.status().sources.some((candidate) => candidate.source_id === schedulerId || candidate.corpus_id === schedulerId)) return true;
+
     if (source === 'gmail') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'gmail.email' || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true
@@ -3016,11 +3182,6 @@ function recordFromSearchParams(params: URLSearchParams): Record<string, unknown
   return record;
 }
 
-
-
-
-
-
 function xBookmarksLiveAdminResult(
   mode: 'head' | 'reconcile' | 'window_diagnostic',
   result: XBookmarksLiveSyncResult,
@@ -3191,20 +3352,11 @@ function xBookmarksLiveAdminResult(
   };
 }
 
-
-
-
 function assertSourceIndexSearchQuery(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'query must be a non-empty string.');
   }
 }
-
-
-
-
-
-
 
 function parseConnectorStoreIndexSearchRequestRecord(
   record: Record<string, unknown>,
@@ -3519,109 +3671,6 @@ function sourceIndexStatusCorpusIds(connectorStores: readonly LocalConnectorStor
   ];
 }
 
-
-
-
-async function parseDropboxSourceExportRequest(request: Request): Promise<DropboxSourceExportRequest> {
-  const record = await parseObjectBody(request);
-  const corpusId = asOptionalString(record.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const destinationRoot = asOptionalString(record.destination_root);
-  if (!destinationRoot) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'destination_root must be a non-empty Dropbox folder path.');
-  }
-  if (!Array.isArray(record.items) || record.items.length === 0) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'items must be a non-empty array of export items.');
-  }
-  const items = record.items.map((item, index) => parseDropboxSourceExportItem(item, index));
-  const account = asOptionalString(record.account);
-  const dryRun = asOptionalBoolean(record.dry_run);
-  return {
-    ...(account !== undefined ? { account } : {}),
-    destination_root: destinationRoot,
-    items,
-    ...(dryRun !== undefined ? { dry_run: dryRun } : {}),
-  };
-}
-
-function parseDropboxSourceExportItem(value: unknown, index: number): DropboxSourceExportItemRequest {
-  if (typeof value === 'string' && value.trim()) {
-    return { path: value.trim() };
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `items.${index} must be a path string or an object with a path.`);
-  }
-  const record = value as Record<string, unknown>;
-  const path = asOptionalString(record.path);
-  if (!path) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `items.${index}.path must be a non-empty string.`);
-  }
-  const destSubfolder = asOptionalString(record.dest_subfolder);
-  return {
-    path,
-    ...(destSubfolder !== undefined ? { dest_subfolder: destSubfolder } : {}),
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-async function parseDropboxEvalShardExportRequest(request: Request): Promise<DropboxEvalShardExportRequest> {
-  const record = await parseObjectBody(request);
-  const corpusId = asOptionalString(record.corpus_id);
-  if (corpusId !== undefined && corpusId !== DROPBOX_FILES_CORPUS_ID) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', `corpus_id must be ${DROPBOX_FILES_CORPUS_ID} when provided.`);
-  }
-  const approvedScopeKey = asOptionalString(record.approved_scope_key);
-  const count = asOptionalNumber(record.count);
-  const outDir = asOptionalString(record.out_dir);
-  if (!approvedScopeKey || count === undefined || !outDir) {
-    throw new EmailSourceWorkerError(
-      400,
-      'invalid_request',
-      'approved_scope_key, count, and out_dir are required for Dropbox eval shard export.',
-    );
-  }
-  const account = asOptionalString(record.account);
-  const dryRun = asOptionalBoolean(record.dry_run);
-  const docTypes = asOptionalStringArray(record.doc_types, 'doc_types');
-  return {
-    ...(account !== undefined ? { account } : {}),
-    approved_scope_key: approvedScopeKey,
-    count,
-    out_dir: outDir,
-    ...(docTypes !== undefined ? { doc_types: docTypes } : {}),
-    ...(dryRun !== undefined ? { dry_run: dryRun } : {}),
-  };
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const SOURCE_DISPOSITION_STATES: readonly SourceDispositionState[] = ['ingest', 'metadata_only', 'exclude'];
 
 /**
@@ -3774,12 +3823,7 @@ interface FileExtractionRouteAlias {
  * caller never had to name — the two things the generic route needs that the
  * family-scoped one carried in its path instead of its body.
  *
- * Four family-scoped extraction paths have NO generic twin here on purpose:
- * `retarget-queued`, `requalify-terminal` and `retire-jobs` are operations the
- * factory's job store does not implement, and `on-demand-media`,
- * `apply-tier-overrides`, `export-eval-shard` and the promotion routes were
- * already out of scope for the factory. Aliasing a path onto an operation that
- * does not exist would be worse than leaving it legacy.
+ * Only paths with an equivalent shared factory operation are retained.
  */
 const FILE_EXTRACTION_ROUTE_ALIASES: ReadonlyMap<string, FileExtractionRouteAlias> = new Map([
   ['/source/index/dropbox/content/extract', {
@@ -4075,8 +4119,6 @@ function sourceWatchNotSupported(): EmailSourceWorkerError {
   );
 }
 
-
-
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
@@ -4137,16 +4179,47 @@ function parseDashboardOAuthSource(value: unknown): DashboardOAuthSource {
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be google, gmail, google-drive, dropbox, or x.');
 }
 
-function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource {
+function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'gemini' {
   const source = asOptionalString(value);
-  if (source === 'venice' || source === 'readwise') return source;
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be venice or readwise.');
+  if (source === 'gemini' || source === 'venice' || source === 'readwise') return source;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gemini, venice, or readwise.');
 }
 
 function parseDashboardSyncSource(value: unknown): DashboardConnectSource {
   const source = asOptionalString(value);
   if (source && isDashboardSyncSource(source)) return source;
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gmail, google-drive, dropbox, x, or readwise.');
+}
+
+function parseFolderScopeSourceId(value: unknown): OlympusFolderScopeSourceId {
+  if (value === 'google_drive.docs' || value === 'dropbox.files') return value;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must name a folder-capable source.');
+}
+
+function parseSourceScopeSelections(value: unknown): OlympusSourceScopeSelection[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'selections must be an array of at most 100 folders.');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Every scope selection must be an object.');
+    }
+    const record = entry as Record<string, unknown>;
+    const key = asOptionalString(record.key);
+    if (!key || !['ingest', 'metadata_only', 'exclude'].includes(String(record.state))) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Every scope selection requires a folder key and disposition.');
+    }
+    const ancestorKeys = record.ancestor_keys === undefined
+      ? undefined
+      : Array.isArray(record.ancestor_keys)
+        ? record.ancestor_keys.map((ancestor) => asOptionalString(ancestor)).filter((ancestor): ancestor is string => Boolean(ancestor))
+        : undefined;
+    return {
+      key,
+      state: record.state as OlympusSourceScopeSelection['state'],
+      ...(ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}),
+    };
+  });
 }
 
 function parseDashboardDisconnectSource(value: unknown): V04PublicSourceId {
@@ -4494,18 +4567,14 @@ function createDashboardOAuthCallbackRateLimiter(): (key: string, now: number) =
 }
 
 /**
- * `<source>:<caller address>` — the finest granularity this route can trust.
- * `X-Forwarded-For`'s first hop is the ordinary shape a reverse proxy sets
- * (the same convention `dashboardForwardedProto` already reads for the
- * origin scheme), used opportunistically rather than as a security boundary:
- * a caller that can spoof it can already reach this unauthenticated route
- * directly, and the limiter's job is to bound an accidental or scripted flood,
- * not to authenticate anyone. Absent the header, every caller for a source
- * shares one bucket — coarser, never wrong.
+ * `<source>:<caller address>`. The callback peer header is injected only by
+ * `withWorkerBearerAuth` after verifying the Gateway's HMAC, so a direct
+ * callback or a caller-supplied copy cannot choose a bucket. Direct callers
+ * share the conservative `unknown` bucket.
  */
 function dashboardOAuthCallbackRateLimitKey(source: DashboardOAuthSource, headers: Headers): string {
-  const forwardedFor = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return `${source}:${forwardedFor || 'unknown'}`;
+  const peer = headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)?.trim();
+  return `${source}:${peer || 'unknown'}`;
 }
 
 const DASHBOARD_UNPAIR_SOURCE_IDS: DashboardUnpairSource[] = [
@@ -4839,6 +4908,51 @@ function dashboardReturnTo(): string {
   return '/dashboard';
 }
 
+function parseDashboardControlUiRequest(
+  url: URL,
+  headers: Headers,
+): {
+  params: OlympusDashboardReadParams;
+  canWrite: boolean;
+  nativeOAuthAvailable: boolean;
+} {
+  const allowed = new Set(['native', 'view', 'can_write', 'source_id']);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request contains an unknown or repeated field.');
+    }
+  }
+  if (url.searchParams.get('native') !== '1') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard requests must declare native=1.');
+  }
+  const requestedView = url.searchParams.get('view');
+  if (!requestedView || !OLYMPUS_DASHBOARD_VIEWS.includes(requestedView as never)) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request names an unknown view.');
+  }
+  const view = requestedView as OlympusDashboardReadParams['view'];
+  const writeValue = url.searchParams.get('can_write');
+  if (writeValue !== '0' && writeValue !== '1') {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard request must declare can_write=0 or can_write=1.');
+  }
+  const sourceId = url.searchParams.get('source_id')?.trim() || undefined;
+  if (sourceId && (sourceId.length > 256 || sourceId.includes('\0'))) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native dashboard source_id is invalid.');
+  }
+  if (view === 'source' && !sourceId) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source view requires source_id.');
+  }
+  if (view !== 'source' && view !== 'dispositions' && sourceId) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'Native source_id is allowed only for the source or dispositions view.');
+  }
+  return {
+    params: { view, ...(sourceId ? { source_id: sourceId } : {}) },
+    canWrite: writeValue === '1',
+    // workers/http.ts has already stripped any untrusted value and restores
+    // this header only beside a valid worker bearer.
+    nativeOAuthAvailable: headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER),
+  };
+}
+
 function dashboardSecretStore(sourceDashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>): SecretStore {
   return sourceDashboard.secretStore ?? createDefaultSecretStore();
 }
@@ -5138,12 +5252,13 @@ function dashboardOAuthClientIdSourceKeyFromClientIdKey(clientIdKey: string): st
  *   that matches a CURRENT publisher key). Reading "is a client_id present"
  *   instead stuck a completed publisher connection in bring-your-own the
  *   moment it needed reauthentication (Codex round 3 on e75598f7).
- * - **Google on an HTTP loopback dashboard keeps the loopback redirect.** The
- *   pilot client is a Desktop app client and a Desktop client cannot register
- *   an HTTPS redirect URI. An HTTPS loopback dashboard therefore uses the
- *   publisher Web client and the relay, just like any other HTTPS origin.
- * - **Everything else goes through the relay** with `redirect_uri` = the one
- *   registered relay URL and a signed state naming this dashboard's origin.
+ * - **Publisher Google always uses the Web client and relay.** This includes
+ *   HTTP and HTTPS loopback dashboards: one publisher client, one registered
+ *   relay redirect, and one publisher-side exchange keep the confidential Web
+ *   client secret out of every Olympus install.
+ * - **Publisher Dropbox also goes through the relay** with `redirect_uri` =
+ *   the one registered relay URL and a signed state naming this dashboard's
+ *   origin.
  *
  * The Dropbox default ships filled in (the owner's "Olympus-Plugin" app,
  * created 2026-09-03), as does the Google Web client default (the owner's
@@ -5166,14 +5281,6 @@ function dashboardPublisherOAuthFlow(
   if (source === 'x') return undefined;
   if (ownClientId) return undefined;
   if (dashboardGoogleOAuthSource(source)) {
-    const pilotClientId = dashboardGooglePilotClientId();
-    if (pilotClientId && dashboardLoopbackOrigin(dashboardOrigin)) {
-      return {
-        clientId: pilotClientId,
-        redirectUri: `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`,
-        relay: false,
-      };
-    }
     const webClientId = googlePublisherWebClientId();
     return webClientId ? { clientId: webClientId, redirectUri: oauthRelayUrl(), relay: true } : undefined;
   }
@@ -5192,17 +5299,6 @@ function dashboardPublisherOAuthSources(
     dashboardOrigin,
     dashboardOAuthClientIdForSource(source, ownClientIds),
   ) !== undefined);
-}
-
-/** Whether an origin this worker derived for itself is a loopback one. */
-function dashboardLoopbackOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== 'http:') return false;
-    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
-  } catch {
-    return false;
-  }
 }
 
 async function dashboardOAuthClientSecretAvailability(
@@ -5330,6 +5426,28 @@ function dashboardOAuthClientSecretRequired(source: DashboardOAuthSource | 'goog
  * never point a callback at another origin.
  */
 function dashboardOAuthRedirectOrigin(url: URL, headers?: Headers): string {
+  const gatewayPublicOrigin = headers?.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
+  if (gatewayPublicOrigin) {
+    // workers/http.ts strips this internal context from every inbound request
+    // and restores a normalized value only for the holder of the worker
+    // bearer. Re-parse here as a final fail-closed check because this function
+    // also has direct unit-test callers that can bypass the HTTP wrapper.
+    try {
+      const gateway = new URL(gatewayPublicOrigin);
+      const loopbackHttp = gateway.protocol === 'http:'
+        && (gateway.hostname === 'localhost' || gateway.hostname === '127.0.0.1' || gateway.hostname === '[::1]');
+      if (
+        !gateway.username
+        && !gateway.password
+        && gateway.pathname === '/'
+        && !gateway.search
+        && !gateway.hash
+        && (gateway.protocol === 'https:' || loopbackHttp)
+      ) return gateway.origin;
+    } catch {
+      // Fall through to the standalone dashboard's request origin.
+    }
+  }
   if (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]')) {
     return `http://127.0.0.1${url.port ? `:${url.port}` : ''}`;
   }
@@ -5378,8 +5496,7 @@ function dashboardOAuthClientIdForSource(
 }
 
 async function dashboardApiKeyAvailability(secretStore: SecretStore): Promise<Partial<Record<DashboardApiKeySource, boolean>>> {
-  const readwiseToken = await secretStore.get('readwise.personal.token')
-    ?? (PUBLIC_RUNTIME_BUILD ? undefined : await secretStore.get('readwise.castor_runtime.token'));
+  const readwiseToken = await secretStore.get('readwise.personal.token');
   return {
     venice: Boolean(await secretStore.get('venice.api_key')),
     readwise: Boolean(readwiseToken),
@@ -5520,14 +5637,12 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-
 function asOptionalNumber(value: unknown, name = 'numeric field'): number | undefined {
   if (value === undefined || value === null) return undefined;
   const number = typeof value === 'number' ? value : Number(value);
   if (Number.isFinite(number)) return number;
   throw new EmailSourceWorkerError(400, 'invalid_request', `${name} must be numeric when provided.`);
 }
-
 
 function asOptionalBoolean(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
@@ -5670,9 +5785,6 @@ function asOptionalAnalystModel(
   return normalized;
 }
 
-
-
-
 function normalizeBasePath(basePath: string): string {
   const trimmed = basePath.replace(/\/+$/, '');
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
@@ -5774,28 +5886,9 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-/** ?embedding-ledger serves the embedding decision ledger. Same path, same auth. */
-const DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = 'embedding-ledger';
-
-/**
- * The prefix the ledger page builds its own links from.
- *
- * A browser reaches this page with a dash_ token in the query string, because
- * an address bar cannot send an Authorization header. Its one link — back to
- * Background — has to carry that token or the first click dead-ends on a 401.
- * This mirrors withTokenBasePath in dashboard/index.ts, which does the same job
- * for the pages that route through there; undefined means no token was
- * presented, and the page falls back to a bare /dashboard prefix.
- */
-function embeddingLedgerBasePath(url: URL): string | undefined {
-  const token = url.searchParams.get('token');
-  if (token === null || token === '') return undefined;
-  return `/dashboard?token=${encodeURIComponent(token)}`;
-}
-
 /**
  * The one place this worker emits HTML: the dashboard pages, the dispositions
- * page, the embedding ledger, and both OAuth landing pages.
+ * page, and both OAuth landing pages.
  *
  * The framing refusal is stated LAST so no caller can drop it by passing its
  * own header map. `SameSite=Strict` on the control cookie stops a cross-SITE

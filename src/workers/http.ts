@@ -1,5 +1,14 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
+import {
+  DASHBOARD_LAUNCH_MINT_PATH,
+  DASHBOARD_LAUNCH_PAGE_HTML,
+  DASHBOARD_LAUNCH_PAGE_PATH,
+  DASHBOARD_LAUNCH_REDEEM_PATH,
+  DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+  DashboardLaunchTickets,
+  dashboardLaunchPageHeaders,
+} from '../core/dashboard-launch.ts';
 
 export const DEFAULT_WORKER_BIND_HOST = '127.0.0.1';
 
@@ -8,6 +17,11 @@ export interface WorkerBearerAuthOptions {
   basePath?: string;
   /** Test seam for bounded control-session expiry. */
   now?: () => number;
+  /**
+   * Test seam and process singleton for bounded opening tickets. Defaults to one
+   * store per wrapper, which is one per worker process.
+   */
+  launchTickets?: DashboardLaunchTickets;
 }
 
 /**
@@ -26,6 +40,17 @@ export interface WorkerBearerAuthOptions {
  */
 export const DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-CSRF';
+/**
+ * Internal context carried from the native Gateway bridge to the worker.
+ *
+ * The auth wrapper strips any caller-supplied value and restores it only when
+ * the same request presents the worker bearer. That lets OAuth use the
+ * Gateway's configured public origin without trusting a browser Host header.
+ */
+export const DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = 'X-Olympus-Gateway-Public-Origin';
+/** Authenticated context minted by the Gateway for an OAuth callback relay. */
+export const DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = 'X-Olympus-Gateway-Callback-Peer';
+const DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = 'olympus-dashboard-callback-peer-v1';
 const DASHBOARD_CONTROL_COOKIE = 'olympus_dashboard_control';
 const DASHBOARD_CONTROL_SIGNATURE_CONTEXT = 'olympus-dashboard-control-session-v3';
 const DASHBOARD_CONTROL_CSRF_CONTEXT = 'olympus-dashboard-control-csrf-v2';
@@ -65,13 +90,52 @@ export function withWorkerBearerAuth(
   const authToken = normalizeWorkerAuthToken(options.authToken);
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
   const now = options.now ?? Date.now;
+  const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
   return async (request: Request): Promise<Response> => {
-    request = withoutDashboardControlContextHeader(request);
+    const presentedAuthorization = request.headers.get('Authorization');
+    const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+    const presentedGatewayCallbackPeer = request.headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
+    request = withoutDashboardInternalContextHeaders(request);
     if (isUnauthenticatedHealthRequest(request, basePath)) {
       return fetchHandler(request);
     }
+    if (isDashboardLaunchPageRequest(request)) {
+      // Public by construction: a constant page with no install fact in it,
+      // reached so the opening ticket can travel in the URL fragment, which no
+      // browser sends to a server, and be cleared before any fetch is made.
+      return new Response(DASHBOARD_LAUNCH_PAGE_HTML, {
+        status: 200,
+        headers: dashboardLaunchPageHeaders(),
+      });
+    }
     if (!authToken) {
       return workerAuthRequiredResponse();
+    }
+    if (isDashboardLaunchMintRequest(request)) {
+      // Bearer only, and only the bearer: never the derived dash_ view token,
+      // never a live control cookie. The origin check is the same one every
+      // control POST already proves, so the browser in the URL is the browser
+      // the page will be opened in.
+      if (!hasValidWorkerBearerToken(presentedAuthorization, authToken)) return unauthorizedWorkerResponse();
+      const origin = sameRequestOrigin(request);
+      if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
+      return dashboardLaunchMintedResponse(launchTickets.mint(origin));
+    }
+    if (isDashboardLaunchRedeemRequest(request)) {
+      // No bearer and no cookie: the proof is the ticket itself, bound to the
+      // origin that minted it, unexpired, and consumed atomically. A ticket
+      // that arrives from anywhere else is refused with the same answer a
+      // spent one gets, so a cross-origin page learns nothing from its probe.
+      const origin = sameRequestOrigin(request);
+      if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
+      const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
+      if (consumed.status === 'ok') {
+        // The existing control session, minted the same way the manual unlock
+        // mints it: HttpOnly, SameSite=Strict, origin-tagged, 30 days.
+        const minted = mintDashboardControlSession(authToken, origin, now());
+        return dashboardLaunchRedeemedResponse(minted, now());
+      }
+      return dashboardLaunchRefusedResponse(consumed.status);
     }
     if (isDashboardControlLockRequest(request)) {
       // Lock this browser: proven the same way any control is (cookie, same
@@ -107,7 +171,13 @@ export function withWorkerBearerAuth(
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
-      return fetchHandler(request);
+      return fetchHandler(withAuthenticatedGatewayPublicOrigin(
+        request,
+        presentedAuthorization,
+        authToken,
+        presentedGatewayPublicOrigin,
+        presentedGatewayCallbackPeer,
+      ));
     }
     if (isDashboardQueryTokenRequest(request, authToken)) {
       // The dash_ token authorizes reading. A separately minted HttpOnly
@@ -122,8 +192,10 @@ export function withWorkerBearerAuth(
       }
       return fetchHandler(request);
     }
-    if (hasValidWorkerBearerToken(request.headers.get('Authorization'), authToken)) {
-      return fetchHandler(request);
+    if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
+      return fetchHandler(isGatewayPublicOriginContextRoute(request)
+        ? withGatewayPublicOriginContext(request, presentedGatewayPublicOrigin)
+        : request);
     }
     if (isDashboardControlReadRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, authToken, now(), false);
@@ -189,6 +261,115 @@ function isDashboardControlSessionRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === '/dashboard/control/session';
 }
 
+function isDashboardLaunchPageRequest(request: Request): boolean {
+  return request.method === 'GET' && new URL(request.url).pathname === DASHBOARD_LAUNCH_PAGE_PATH;
+}
+
+function isDashboardLaunchMintRequest(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LAUNCH_MINT_PATH;
+}
+
+function isDashboardLaunchRedeemRequest(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_LAUNCH_REDEEM_PATH;
+}
+
+/**
+ * The ticket the page POSTs.
+ *
+ * Bounded rather than trusted: a body that is not a small JSON object with a
+ * string ticket is simply no ticket, which the caller already handles as an
+ * unknown one. Reading the body at all is safe here because this route's
+ * authorization is the ticket, not anything the body could name.
+ */
+async function dashboardLaunchTicketFromBody(request: Request): Promise<string | undefined> {
+  if (request.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') return undefined;
+  const reader = request.body?.getReader();
+  if (!reader) return undefined;
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 5000);
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > 4096) { void reader.cancel().catch(() => {}); return undefined; }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+  if (timedOut || bytes === 0) return undefined;
+  const buffer = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  const text = new TextDecoder().decode(buffer);
+  try {
+    const parsed = JSON.parse(text) as { ticket?: unknown };
+    return typeof parsed?.ticket === 'string' ? parsed.ticket : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function dashboardLaunchMintedResponse(ticket: string): Response {
+  return new Response(JSON.stringify({
+    ok: true,
+    // The ticket and its lifetime, never the worker token and never a session.
+    ticket,
+    expires_in_seconds: DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
+    policy: {
+      single_use: true,
+      origin_bound: true,
+      durable_secret_in_url: false,
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
+function dashboardLaunchRedeemedResponse(session: AuthorizedDashboardControlSession, nowMs: number): Response {
+  return new Response(JSON.stringify({
+    ok: true,
+    csrf_token: session.csrfToken,
+    next: '/dashboard',
+    policy: {
+      http_only_cookie: true,
+      csrf_required: true,
+      origin_bound: true,
+    },
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'Set-Cookie': dashboardControlSessionCookie(
+        session.sessionId,
+        remainingSessionSeconds(session.expiresAtMs, nowMs),
+      ),
+    },
+  });
+}
+
+function dashboardLaunchRefusedResponse(status: 'unknown' | 'expired' | 'origin_mismatch'): Response {
+  return new Response(JSON.stringify({
+    error: {
+      code: status === 'origin_mismatch' ? 'dashboard_launch_origin_mismatch' : 'dashboard_launch_ticket_invalid',
+      status: 403,
+      message: 'This opening link is no longer valid. Run the dashboard command again for a fresh one.',
+    },
+    policy: { single_use: true, origin_bound: true, durable_secret_in_url: false },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+}
+
 function isDashboardControlLockRequest(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === '/dashboard/control/session/lock';
 }
@@ -211,6 +392,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/connect/oauth/start',
     '/dashboard/connect/oauth/cancel',
     '/dashboard/connect/api-key',
+    '/dashboard/models/check',
     '/dashboard/sync-now',
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',
@@ -433,17 +615,95 @@ function requestTargetOrigin(request: Request): string {
     : url.origin;
 }
 
-function withoutDashboardControlContextHeader(request: Request): Request {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)) return request;
-  const headers = new Headers(request.headers);
-  headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return new Request(request, { headers });
+function withoutDashboardInternalContextHeaders(request: Request): Request {
+  if (
+    !request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)
+    && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
+    && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)
+  ) return request;
+  // Mutate the request Headers directly. Bun 1.3 keeps the original headers
+  // when `new Request(existing, { headers })` is used, so a copy-and-delete
+  // looks correct but leaves a forged internal header in place.
+  request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
+  request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
+  request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
+  return request;
+}
+
+function withAuthenticatedGatewayPublicOrigin(
+  request: Request,
+  authorization: string | null,
+  authToken: string,
+  origin: string | null,
+  callbackPeer: string | null,
+): Request {
+  if (!hasValidWorkerBearerToken(authorization, authToken)) return request;
+  const withOrigin = withGatewayPublicOriginContext(request, origin);
+  const peer = verifyGatewayCallbackPeerHeader(callbackPeer, authToken);
+  if (peer) withOrigin.headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, peer);
+  return withOrigin;
+}
+
+export function createGatewayCallbackPeerHeader(peer: string, authToken: string): string {
+  const normalized = normalizeGatewayCallbackPeer(peer);
+  const signature = createHmac('sha256', authToken)
+    .update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`)
+    .digest('base64url');
+  return `${normalized}.${signature}`;
+}
+
+function verifyGatewayCallbackPeerHeader(value: string | null, authToken: string): string | undefined {
+  if (!value) return undefined;
+  const separator = value.lastIndexOf('.');
+  if (separator <= 0 || separator === value.length - 1) return undefined;
+  const peer = normalizeGatewayCallbackPeer(value.slice(0, separator));
+  const presented = value.slice(separator + 1);
+  const expected = createHmac('sha256', authToken)
+    .update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${peer}`)
+    .digest('base64url');
+  const presentedBytes = Buffer.from(presented, 'ascii');
+  const expectedBytes = Buffer.from(expected, 'ascii');
+  if (presentedBytes.length !== expectedBytes.length || !timingSafeEqual(presentedBytes, expectedBytes)) return undefined;
+  return peer;
+}
+
+function normalizeGatewayCallbackPeer(value: string): string {
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : 'unknown';
+}
+
+function isGatewayPublicOriginContextRoute(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return (request.method === 'GET' && path === '/dashboard/ui')
+    || (request.method === 'POST' && path === '/dashboard/connect/oauth/start');
+}
+
+function withGatewayPublicOriginContext(request: Request, origin: string | null): Request {
+  const normalized = normalizeGatewayPublicOrigin(origin);
+  if (!normalized) return request;
+  request.headers.set(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER, normalized);
+  return request;
+}
+
+/** Same public-origin contract OpenClaw applies to gateway.publicOrigin. */
+function normalizeGatewayPublicOrigin(value: string | null): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return undefined;
+    if (url.protocol === 'https:') return url.origin;
+    if (url.protocol !== 'http:') return undefined;
+    const host = url.hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function withDashboardControlContextHeader(request: Request, csrfToken: string): Request {
-  const headers = new Headers(request.headers);
-  headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
-  return new Request(request, { headers });
+  request.headers.set(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, csrfToken);
+  return request;
 }
 
 function cookieValue(header: string | null, name: string): string | undefined {

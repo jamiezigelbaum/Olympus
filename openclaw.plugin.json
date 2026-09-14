@@ -2,6 +2,9 @@
   "id": "olympus",
   "name": "Olympus",
   "version": "0.4.0",
+  "controlUi": {
+    "entry": "./dist/control-ui/index.js"
+  },
   "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",
@@ -699,7 +702,7 @@
       "help": "Versioned model-routing and retrieval policy. Config files use secret references, never inline keys."
     },
     "email": {
-      "label": "Private Email Lane",
+      "label": "Email source worker",
       "help": "Gateway-local private email source worker. OAuth and raw email access must stay outside ordinary cloud-model context."
     },
     "sourceIndex": {

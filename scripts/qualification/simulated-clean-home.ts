@@ -9,6 +9,10 @@ import { workerServicePaths } from '../../src/core/worker-service.ts';
 import { verifyQualificationArtifact } from './artifact.ts';
 import { pinWorkerReadinessPort, startSimulatedReadinessServer, waitForSimulatedReadiness } from './readiness-stub.ts';
 
+const fixtureMode = process.argv.includes('--fixture');
+if (process.argv.includes('--plan') && !fixtureMode) {
+  throw new Error('A custom simulation plan requires --fixture; it does not qualify the committed release plan.');
+}
 const artifact = requiredPath('--artifact');
 const previousArtifact = requiredPath('--previous-artifact');
 const hostOs = required('--host-os');
@@ -16,13 +20,18 @@ const output = requiredPath('--output');
 if (hostOs !== 'darwin_arm64' && hostOs !== 'linux_x64_ubuntu_lts') throw new Error('--host-os is unsupported.');
 const platform = hostOs === 'darwin_arm64' ? 'darwin' : 'linux';
 const startedAt = new Date().toISOString();
-const plan = JSON.parse(readFileSync(resolve(import.meta.dir, '../../config/release-qualification-plan.json'), 'utf8')) as {
+const planPath = process.argv.includes('--plan')
+  ? requiredPath('--plan')
+  : resolve(import.meta.dir, '../../config/release-qualification-plan.json');
+const planBytes = readFileSync(planPath);
+const planSha = createHash('sha256').update(planBytes).digest('hex');
+const plan = JSON.parse(planBytes.toString('utf8')) as {
   assertion_contracts: Record<string, string[]>;
   candidate_artifact: { artifact_sha256: string; artifact_bytes: number };
-  rollback_baseline: { artifact_sha256: string; artifact_bytes: number };
+  rollback_baseline: { artifact_sha256: string; artifact_bytes: number; package_files: string[] };
 };
 const candidateIdentity = verifyQualificationArtifact(artifact, plan.candidate_artifact);
-const previousIdentity = verifyQualificationArtifact(previousArtifact, plan.rollback_baseline);
+const previousIdentity = verifyQualificationArtifact(previousArtifact, plan.rollback_baseline, plan.rollback_baseline.package_files);
 const scratch = mkdtempSync(join(tmpdir(), 'olympus-release-qualification-'));
 try {
   const packageRoot = join(scratch, 'package');
@@ -133,7 +142,7 @@ try {
   }
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, `${receipts.map((receipt) => JSON.stringify(receipt)).join('\n')}\n`, { mode: 0o600 });
-  console.log(JSON.stringify({ kind: 'olympus_simulated_clean_home_proof', schema_version: 1, host_os: hostOs, artifact_sha256: artifactSha, previous_artifact_sha256: previousSha, cells: receipts.length, content_free: true }));
+  console.log(JSON.stringify({ kind: 'olympus_simulated_clean_home_proof', schema_version: 1, host_os: hostOs, fixture_mode: fixtureMode, plan_sha256: planSha, artifact_sha256: artifactSha, previous_artifact_sha256: previousSha, cells: receipts.length, content_free: true }));
 } finally {
   Bun.spawnSync(['chmod', '-R', 'u+rwX', scratch], { stdout: 'ignore', stderr: 'ignore' });
   rmSync(scratch, { recursive: true, force: true });

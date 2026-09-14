@@ -38,7 +38,6 @@ const SLICE_2_ACTIVE_SURFACE_GLOBS = [
   'package.json',
 ];
 const SLICE_2_RECEIPT_ONLY_LEDGERS = new Set([
-  'config/private-ops-disposition.json',
   'config/slice2-deleted-paths.json',
 ]);
 
@@ -86,6 +85,8 @@ const EXPERT_SUBSYSTEM_GUARD_FILE = 'test/architecture-guard.test.ts';
 const EXPERT_SUBSYSTEM_ALLOWED_NAMED_KEY_FILES = new Set<string>([
   EXPERT_SUBSYSTEM_GUARD_FILE,
   'test/public-runtime-config-defaults.test.ts',
+  // The candidate's public-runtime absence assertions live in this consolidated test.
+  'test/public-runtime.test.ts',
 ]);
 
 // These connector files retain persisted credential role and capability

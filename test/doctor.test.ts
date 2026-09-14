@@ -833,7 +833,7 @@ describe('runDoctor', () => {
     expect(prerequisites.ok).toBe(false);
     expect(prerequisites.detail).toContain('venice.api_key');
     expect(prerequisites.detail).not.toContain('127.0.0.1:8000/v1');
-    expect(prerequisites.hint).toContain('olympus connect venice --api-key-stdin');
+    expect(prerequisites.hint).toContain('olympus connect venice --api-key-prompt');
   });
 
   test('reads the sovereignty policy setup wrote at the default path, without an explicit config path', async () => {
@@ -1193,6 +1193,7 @@ describe('runDoctor', () => {
           corpusReport('secure_local.whatsapp.messages', { family: 'chat', trust_domain: 'secure_local' }),
           corpusReport('internal.readwise.library', { family: 'readwise', trust_domain: 'internal' }),
           dropboxCorpusReport(),
+          corpusReport('internal.solon.governance-library', { family: 'file' }),
         ],
       },
     });
@@ -1209,6 +1210,10 @@ describe('runDoctor', () => {
 
     expect(result.ok).toBe(true);
     expect(result.checks.filter((check) => !check.ok)).toEqual([]);
+    const output = result.checks.map((check) => `${check.name} ${check.detail}`).join('\n');
+    expect(output).not.toContain('Solon');
+    expect(output).not.toContain('solon');
+    expect(output).not.toContain('governance');
     const sourceIndex = checkByName(result.checks, 'source_index_status');
     expect(sourceIndex.detail).toContain('internal.email not connected');
     expect(sourceIndex.detail).toContain('internal.drive.docs not connected');
@@ -1246,6 +1251,86 @@ describe('runDoctor', () => {
     expect(sourceIndex.ok).toBe(true);
     expect(sourceIndex.detail).toContain('secure_local.dropbox.files: connector store, 12 chunks, 12 embedded');
     expect(sourceIndex.detail).not.toContain('extraction jobs failed');
+  });
+
+  test('ignores corpus reports outside the configured public registry', async () => {
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [{
+          corpus_id: 'internal.solon.governance-library',
+          family: 'file',
+          trust_domain: 'internal',
+          configured: true,
+          counts: {},
+        }, {
+          corpus_id: 'internal.unregistered-project',
+          family: 'file',
+          trust_domain: 'internal',
+          configured: true,
+          counts: {},
+        }],
+      },
+    });
+
+    const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), fetchImpl }));
+
+    expect(result.ok).toBe(true);
+    const output = result.checks.map((check) => `${check.name} ${check.detail}`).join('\n');
+    expect(output).not.toContain('Solon');
+    expect(output).not.toContain('solon');
+    expect(output).not.toContain('governance');
+    expect(output).not.toContain('unregistered-project');
+    expect(checkByName(result.checks, 'source_index_status').detail)
+      .toContain('healthy across 0 corpus reports');
+  });
+
+  test('respects configured public corpus status eligibility', async () => {
+    const config = enabledEmailConfig();
+    config.sourceIndex.corpusRegistry.corpora = [{
+      corpusId: 'internal.readwise.library',
+      sourceId: 'readwise.library',
+      provider: 'readwise',
+      family: 'readwise',
+      trustDomain: 'internal',
+      capabilities: ['answer', 'status', 'search'],
+    }, {
+      corpusId: 'internal.email',
+      sourceId: 'gmail.email',
+      provider: 'gmail',
+      family: 'email',
+      trustDomain: 'internal',
+      capabilities: ['answer'],
+    }, {
+      corpusId: 'secure_local.dropbox.files',
+      sourceId: 'dropbox.files',
+      provider: 'dropbox',
+      family: 'file',
+      trustDomain: 'secure_local',
+      enabled: false,
+      capabilities: ['status'],
+    }];
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [
+          corpusReport('internal.readwise.library', { family: 'readwise' }),
+          corpusReport('internal.email', { family: 'email' }),
+          dropboxCorpusReport(),
+          corpusReport('internal.unregistered-project', { family: 'file' }),
+        ],
+      },
+    });
+    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
+    const status = checkByName(result.checks, 'source_index_status');
+    expect(status.ok).toBe(true);
+    expect(status.detail).toContain('healthy across 1 corpus report');
+    expect(status.detail).toContain('internal.readwise.library');
+    expect(status.detail).not.toContain('internal.email');
+    expect(status.detail).not.toContain('secure_local.dropbox.files');
+    expect(status.detail).not.toContain('unregistered-project');
   });
 
   test('flags scheduler stalls from the worker scheduler feed', async () => {

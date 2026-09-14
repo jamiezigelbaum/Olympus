@@ -18,7 +18,6 @@ import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-
 import { activeCredentialHandle, sourceIndexLaneEnabled } from '../src/workers/email-source/server.ts';
 import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
-import { OLYMPUS_SOURCE_FAMILY_POSTURES } from '../src/core/source-family.ts';
 import { defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
 import type { OlympusConfig } from '../src/core/config.ts';
 
@@ -129,7 +128,6 @@ describe('scheduler source id binding', () => {
     // build caught that, because every unit test built its scheduler without an
     // allowlist, where the filter is a no-op.
     const knownSourceIds = new Set([
-      ...OLYMPUS_SOURCE_FAMILY_POSTURES.map((posture) => posture.sourceId),
       ...defaultSourceCorpusRegistryConfig().corpora.map((corpus) => corpus.sourceId),
     ]);
     const constructed = [

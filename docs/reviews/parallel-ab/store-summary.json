@@ -1,0 +1,72 @@
+{
+  "status": "PARITY_PASS",
+  "scope": "Real SQLite + process-kill/restart/resume + synthetic SourceConnector input; no provider or model calls",
+  "revisions": {
+    "main": "911caf3f834433f3547049ca07a7bb8d8d268ee7",
+    "parallel": "7aac1040d7235574925ddf94002dd1b42f8591ed"
+  },
+  "corpusSha256": "0ff72eb926c9556e8fafa7e334d2221c59dac1e79a968640dc372f6740aafcc8",
+  "expectedSha256": "9c8930a5bbe65e548b5232e3e4c6e04d7dd1ac39bd1a15559ce1f2fa5f22ff29",
+  "recordCount": 32,
+  "providerCount": 7,
+  "titleQueriesPerArm": 32,
+  "unreadableRecords": [
+    "dropbox-atlas-addendum-unreadable",
+    "dropbox-beacon-invoice-unreadable"
+  ],
+  "normalization": "Omit generated sync-run IDs, wall-clock sync timestamps and query latency; compare identity/citation/chunk coordinates, keyword hit order/scores and hydrated content exactly.",
+  "checks": {
+    "committedFirstBatchPerProvider": 2,
+    "resumedAtPersistedOffsetPerProvider": 2,
+    "finalIdsPerArm": 32,
+    "duplicateIdsPerArm": 0,
+    "textBearingItemsPerArm": 30,
+    "unreadableItemsPerArm": 2,
+    "keywordQueriesPerArm": 32,
+    "rankedHitsAndProvenanceAndContentEqual": true,
+    "networkFetchAttemptsPerArm": 0,
+    "modelCallsPerArm": 0,
+    "mainTrackedStateUnchanged": true
+  },
+  "replayChangedItems": {
+    "main": {
+      "gmail": 0,
+      "google_drive": 0,
+      "dropbox": 2,
+      "telegram": 0,
+      "whatsapp_personal": 0,
+      "x": 0,
+      "readwise": 0
+    },
+    "parallel": {
+      "gmail": 0,
+      "google_drive": 0,
+      "dropbox": 2,
+      "telegram": 0,
+      "whatsapp_personal": 0,
+      "x": 0,
+      "readwise": 0
+    }
+  },
+  "performanceCaveat": "Process durations are observations from a single local run, not a statistically controlled performance benchmark.",
+  "scriptSha256": {
+    "run.ts": "204c579d493acd4898090d3c6c2cd5fa981911ef739f55d72eca435f53875b88",
+    "child.ts": "86badeba620e976d18783d5cbfa213d6bccf84baa3a9d77859b21dd41a073cbe",
+    "run.initial.ts": "6e7b8a22ccdf06f8136698cf3cab26e200ca957024ff5ba08a06a007fcde7035",
+    "child.initial.ts": "0fa4ae8508fbb0afa1a6ef4ff154ff5c02c5f1b2e6bc29688ff7901d5a93ad59"
+  },
+  "normalizedProjectionSha256": {
+    "main": "e89d055d2a78e9c3c26196c7f87d09b2d6ffba952d1d07279dae2e837c0dcb78",
+    "parallel": "e89d055d2a78e9c3c26196c7f87d09b2d6ffba952d1d07279dae2e837c0dcb78"
+  },
+  "correctnessCaveat": "The initial zero-changed-on-identical-replay expectation failed for two unreadable Dropbox records in both revisions. IDs/counts/content/coverage remained stable. The shared empty-content path unconditionally reports ftsContentChanged:true; the caller counts that as itemsChanged. This is a pre-existing observability defect, not evidence of useful progress or an alternative-branch regression.",
+  "rootCause": {
+    "identicalGitBlob": "d716298386db487461ca83cd7f05dee1f12cc4d9",
+    "file": "src/workers/connector-store/local-index.ts",
+    "metricContractLine": 654,
+    "counterAggregationLine": 4412,
+    "emptyContentLine": 5200,
+    "readableEqualityLine": 5233,
+    "disposition": "Retain and report; no code changes during comparison."
+  }
+}

@@ -21,6 +21,36 @@ import type { WorkerCredentialDegradation } from '../src/workers/credential-degr
 const NOW = new Date('2026-07-02T12:00:00.000Z');
 
 describe('phase model units', () => {
+  test('a bounded completed pass is not treated as a completed provider traversal', () => {
+    const source = settledCard({
+      last_run: {
+        status: 'completed',
+        items_seen: 200,
+        items_indexed: 200,
+        traversal_complete: false,
+      },
+    });
+    const progress = dashboardSourceProgress(source);
+    expect(progress.settled).toBe(false);
+    expect(progress.phases[0]?.scope).toBe('corpus');
+  });
+
+  test('pending and explicitly empty scopes never present retained corpus work as active', () => {
+    const pending = dashboardSourceProgress(settledCard({
+      scope_selection: { required: true, connected: true, status: 'scope_pending', ingestion_enabled: false },
+    }));
+    expect(pending.settled).toBe(false);
+    expect(pending.phases.every((phase) => phase.state === 'waiting')).toBe(true);
+    expect(pending.phases.every((phase) => phase.measure.kind === 'indeterminate')).toBe(true);
+
+    const disabled = dashboardSourceProgress(settledCard({
+      scope_selection: { required: true, connected: true, status: 'approved', ingestion_enabled: false },
+    }));
+    expect(disabled.settled).toBe(false);
+    expect(disabled.phases.map((phase) => phase.state_words))
+      .toEqual(['Waiting · ingestion is off', 'Waiting · ingestion is off', 'Waiting · ingestion is off']);
+  });
+
   test('counts each phase in its own unit and never folds one into another', () => {
     const progress = dashboardSourceProgress(settledPassCard({
       metadata_sync: {
@@ -357,6 +387,15 @@ describe('phase state words', () => {
     const extraction = progress.phases.find((phase) => phase.id === 'extraction');
     expect(extraction?.state).toBe('stalled');
     expect(extraction?.state_words).toBe('Stalled · nothing moved for 1d 6h · lane reports running');
+  });
+
+  test('a completed metadata traversal stays complete while the next check is scheduled', () => {
+    const progress = dashboardSourceProgress(settledPassCard({
+      last_run: { status: 'completed', traversal_complete: true, items_seen: 4806, items_indexed: 4806 },
+      schedule: { running: false, consecutive_failures: 0, next_run_at: new Date(NOW.getTime() + 29 * 60_000).toISOString() },
+    }), { now: NOW });
+    expect(progress.phases[0]?.state).toBe('done');
+    expect(progress.phases[0]?.state_words).toBe('Complete · next check in 29m');
   });
 
   test('a sync scheduled inside the hour is waiting, not stalled', () => {

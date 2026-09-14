@@ -13,8 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Secure search remains lexical-only in `private-cloud-only`');
-    expect(docs).toContain('local presets configure local secure embeddings');
+    expect(docs).toContain('Private search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Existing lexical-only installations require an approved');
+    expect(docs).toContain('Local presets configure local Private embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -22,9 +23,9 @@ describe('first-run docs', () => {
     expect(docs).toContain('olympus setup --preset no-sensitive --yes --dry-run');
     expect(docs).toContain('olympus sensitivity validate');
     expect(docs).toContain('olympus connect google --client-id <google-oauth-client-id>');
-    expect(docs).toContain('olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready');
+    expect(docs).toContain('olympus connect telegram --pair');
     expect(docs).toContain("printf '%s' \"$VENICE_API_KEY\" | olympus connect venice --api-key-stdin");
-    expect(docs).toContain('secure answers are served by the approved Venice');
+    expect(docs).toContain('Private answers are served by the approved Venice');
     expect(docs).not.toContain('E2EE secure-answer ids remain gated until');
     expect(docs).toContain('raise-only guidance');
 
@@ -41,11 +42,11 @@ describe('first-run docs', () => {
 
     const normalizedInstall = install.replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(normalizedInstall).toContain('So tell me about your data: what do you want your assistant to know about, and what are you protective of?');
-    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your secure data?'));
+    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
     expect(install).toContain('Gmail already lives on Google\'s servers');
-    expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
+    expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
-    expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
+    expect(install).toContain('Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).');
     expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
     expect(install).not.toContain('Ask which sources they want now');
     expect(install).toContain('Keep the selected Olympus dashboard open as the operator-facing progress view.');
@@ -76,7 +77,7 @@ describe('first-run docs', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const scripts = [
       ["> Olympus is installed. Quick proof:", 'd3f1f9fddd7d6b9a376a7ffcfa81ad841ca87524f8298a58d8a1df62934a9aab'],
-      ["> Here's how Olympus treats your data", '6572236609c7e45c9f11f3f2974605f752f98dddda33dc47d7c2a4fb7966f5ad'],
+      ["> Here's how Olympus treats your data", '2767c6bb05e4026fbd7dad2d0f6882ab00c15661279b87e27cfa161304e167d9'],
     ];
     for (const [start, digest] of scripts) {
       const from = install.indexOf(start!);
@@ -95,8 +96,8 @@ describe('first-run docs', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
     for (const [doc, steps] of [
-      [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Optional source setup', '## Step 7 — Verify the chosen source']],
-      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Optionally connect a source', '## 6. Verify a cited answer']],
+      [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Finish installation: dashboard handoff', '## Step 7 — Verify the chosen source']],
+      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Open your dashboard and optionally connect sources', '## 6. Verify a cited answer']],
     ] as const) {
       const positions = steps.map((step) => doc.indexOf(step));
       expect(positions.every((position) => position > 0)).toBe(true);
@@ -122,19 +123,20 @@ describe('first-run docs', () => {
       expect(doc).toContain('op://vault/item/field');
       expect(doc).toContain('authenticated `op` access');
       expect(doc).toMatch(/No password-manager desktop app or CLI is required|requires no password-manager desktop app or CLI/);
-      expect(doc).toContain('silent terminal input');
+      expect(doc).toMatch(/silent terminal input|built-in masked terminal prompt/);
+      expect(doc).toContain('--api-key-prompt');
     }
   });
 
-  test('private cloud only distinguishes secure search from ordinary embeddings', () => {
+  test('Venice option distinguishes Private search from Public and Personal embeddings', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const posture = install.slice(install.indexOf('> 3. **Private cloud only**'), install.indexOf('> 4. **Do not add'))
+    const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Don't ingest Private data**"))
       .replace(/>\s*/g, '').replace(/\s+/g, ' ');
-    expect(posture).toContain('Secure content goes only to Venice');
-    expect(posture).toContain('public and ordinary-private search indexing');
-    expect(posture).toContain('keyword search');
-    expect(posture).toContain('secure content never goes to Gemini');
-    expect(posture).toContain('“Only” describes secure-data handling');
+    expect(posture).toContain('Private content goes only to Venice');
+    expect(posture).toContain('Gemini indexes only your Public and Personal data');
+    expect(posture).toContain('separately approved Private embedding model for Private search');
+    expect(posture).toContain('Private content never goes to Gemini');
+    expect(posture).not.toContain('Private cloud only');
   });
 
   test('native dashboard guidance checks artifact support and preserves standalone authentication', () => {
@@ -149,6 +151,24 @@ describe('first-run docs', () => {
     expect(install).toContain('gateway.publicOrigin');
     expect(install).toContain('never paste it into chat');
     expect(install).toContain('`dash_` token is not the worker token');
+  });
+
+  test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
+    const dashboardStep = quickstart.indexOf('## 5. Open your dashboard and optionally connect sources');
+
+    expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
+    expect(dashboardStep).toBeGreaterThan(0);
+    for (const check of ['olympus worker status', 'openclaw config validate', 'openclaw doctor --lint']) {
+      expect(quickstart.indexOf(check)).toBeGreaterThan(0);
+      expect(quickstart.indexOf(check)).toBeLessThan(dashboardStep);
+    }
+    expect(quickstart.indexOf('openclaw config validate')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw doctor --lint')).toBeLessThan(quickstart.indexOf('openclaw gateway restart'));
+    expect(quickstart.indexOf('openclaw gateway restart')).toBeLessThan(dashboardStep);
+    expect(readme).toContain('treat plugin install/enable, gateway');
+    expect(readme).toMatch(/repo docs and commands should never require raw edits to\s+OpenClaw runtime config/);
   });
 
   test('active top-level docs use resolvable relative links', () => {
@@ -189,6 +209,8 @@ function relativeMarkdownLinks(markdown: string): Array<{ href: string; path: st
   const links: Array<{ href: string; path: string }> = [];
   for (const match of markdown.matchAll(/!?\[[^\]\n]*\]\(([^)\n]+)\)/g)) {
     const href = match[1]!.trim();
+    // This required response template is replaced with a verified URL at handoff.
+    if (href === '<verified-dashboard-url>') continue;
     if (isExternalOrAnchorHref(href)) continue;
     links.push({ href, path: href.split('#')[0]! });
   }
