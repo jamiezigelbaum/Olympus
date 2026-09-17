@@ -93,7 +93,7 @@ describe('secure analyst pool', () => {
       sloMs: 60_000,
       reserveMs: 1_000,
       trustedAnalystTimeoutMs: 20_000,
-      localAnalystTimeoutMs: 240_000,
+      localAnalystTimeoutMs: 600_000,
     });
 
     expect([...budgets.values()].every((budget) => budget > 0)).toBe(true);
@@ -117,7 +117,7 @@ describe('secure analyst pool', () => {
       'not-a-timeout',
     ]) {
       expect(() => parseSecureAnalystPoolLastLegTimeoutMs(invalid)).toThrow(
-        'OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS must be an integer from 30000 through 240000 milliseconds.',
+        `OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS must be an integer from ${MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS} through ${MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS} milliseconds.`,
       );
     }
   }, 1_000);

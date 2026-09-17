@@ -14,8 +14,17 @@ import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.t
 export type EmailFetch = (url: string, init: RequestInit) => Promise<Response>;
 type TelegramMessagesTrustDomain = Extract<SourceTrustDomain, 'internal' | 'secure_local'>;
 
+export interface EmailTransportRequestOptions {
+  /**
+   * Caller-declared wait budget for this one request. It can only extend the
+   * configured lane timeout, never shorten it, so a slow-but-finishing local
+   * analyst is not cut off by a lane default the caller already out-waited.
+   */
+  timeoutMs?: number;
+}
+
 export interface EmailTransport {
-  requestJson(url: string, init: RequestInit): Promise<unknown>;
+  requestJson(url: string, init: RequestInit, options?: EmailTransportRequestOptions): Promise<unknown>;
 }
 
 const MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
@@ -987,7 +996,7 @@ export class EmailClient {
         ...(options.internalContentMaxBytes !== undefined ? { internal_content_max_bytes: options.internalContentMaxBytes } : {}),
         ...(options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}),
       }),
-    });
+    }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
 
     const data = asRecord(response);
     assertNoRawEmailFields(data);
@@ -1536,6 +1545,16 @@ export function createEmailTransport(config: OlympusConfig): EmailTransport {
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
 
+// The configured lane timeout is the floor. A caller that declares a longer
+// wait (the OpenClaw tool watchdog budget, e.g. 600s) raises the lane fetch to
+// match; a shorter caller value never trims the configured lane budget. A
+// configured value of 0 means "no lane timeout" and stays that way.
+export function effectiveEmailRequestTimeoutMs(configuredMs: number, requestedMs: number | undefined): number {
+  if (!(configuredMs > 0)) return configuredMs;
+  if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs) return configuredMs;
+  return Math.floor(requestedMs);
+}
+
 export class DirectHttpEmailTransport implements EmailTransport {
   private fetchImpl: EmailFetch;
   private authToken: string | undefined;
@@ -1547,15 +1566,16 @@ export class DirectHttpEmailTransport implements EmailTransport {
     this.timeoutMs = timeoutMs;
   }
 
-  async requestJson(url: string, init: RequestInit): Promise<unknown> {
+  async requestJson(url: string, init: RequestInit, options?: EmailTransportRequestOptions): Promise<unknown> {
+    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
     let response: Response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
+      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), timeoutMs);
     } catch (error) {
       if (isAbortError(error)) {
         throw new OperationError(
           'email_unreachable',
-          `Private email lane timed out at ${url} after ${this.timeoutMs}ms.`,
+          `Private email lane timed out at ${url} after ${timeoutMs}ms.`,
           'The private source worker did not answer within the configured request budget; check worker health before retrying.',
         );
       }
