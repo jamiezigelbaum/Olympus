@@ -2767,7 +2767,7 @@ var init_config = __esm(() => {
     email: {
       enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
-      requestTimeoutSeconds: 180,
+      requestTimeoutSeconds: 600,
       localPacketsDevEnabled: false,
       indexAdminDevEnabled: false,
       requireLocalActiveModelForPrivateTools: false
@@ -10359,7 +10359,7 @@ class EmailClient {
         ...options.internalContentMaxBytes !== undefined ? { internal_content_max_bytes: options.internalContentMaxBytes } : {},
         ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}
       })
-    });
+    }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
     const data = asRecord5(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -10736,6 +10736,13 @@ class EmailClient {
 function createEmailTransport(config) {
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
+function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
+  if (!(configuredMs > 0))
+    return configuredMs;
+  if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs)
+    return configuredMs;
+  return Math.floor(requestedMs);
+}
 
 class DirectHttpEmailTransport {
   fetchImpl;
@@ -10746,13 +10753,14 @@ class DirectHttpEmailTransport {
     this.authToken = authToken;
     this.timeoutMs = timeoutMs;
   }
-  async requestJson(url, init) {
+  async requestJson(url, init, options) {
+    const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
     let response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
+      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), timeoutMs);
     } catch (error) {
       if (isAbortError2(error)) {
-        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${this.timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
+        throw new OperationError("email_unreachable", `Private email lane timed out at ${url} after ${timeoutMs}ms.`, "The private source worker did not answer within the configured request budget; check worker health before retrying.");
       }
       throw new OperationError("email_unreachable", `Private email lane is unreachable at ${url}.`, error instanceof Error ? error.message : "Check that the Gateway-side private email source worker is running.");
     }
@@ -13523,7 +13531,7 @@ var SOURCE_ANSWER_PARAMS = {
   include_internal: { type: "boolean", description: "Whether the bridge may search internal corpora. Defaults true." },
   include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
   internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
-  timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora." }
+  timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, so a slow local analyst finishes instead of timing out." }
 };
 var operations = [
   {
@@ -13647,7 +13655,8 @@ var operations = [
       "This bridge may search approved source lanes and can return relevant OPSEC-scanned internal passages, limited only by the per-call context budget.",
       "It never returns source packets, vectors, OAuth material, or raw secure-local file content; secure-local answers release only as OPSEC-scanned bounded derivatives.",
       "For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.",
-      "The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit."
+      "The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.",
+      "Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000."
     ].join(" "),
     params: SOURCE_ANSWER_PARAMS,
     mutating: false,

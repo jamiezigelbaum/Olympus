@@ -42,6 +42,7 @@ Good private email-capable request shape:
 - `include_secure_local_content: true` for bounded derivative answers
 - `include_internal: true`
 - `timeoutMs: 600000` for slow private/local reasoning
+- one `source_answer` call at a time; never run two concurrently (the local analyst is single-lane and later calls time out)
 
 Good examples:
 

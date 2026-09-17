@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
-import { DirectHttpEmailTransport } from '../src/core/email.ts';
+import { DirectHttpEmailTransport, effectiveEmailRequestTimeoutMs } from '../src/core/email.ts';
 import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 
 interface WorkerTransport {
@@ -8,6 +8,20 @@ interface WorkerTransport {
 }
 
 describe('direct worker HTTP transport timeouts', () => {
+  test('a caller-declared budget raises the email lane timeout but never lowers it', async () => {
+    expect(effectiveEmailRequestTimeoutMs(180_000, 600_000)).toBe(600_000);
+    expect(effectiveEmailRequestTimeoutMs(180_000, 30_000)).toBe(180_000);
+    expect(effectiveEmailRequestTimeoutMs(180_000, undefined)).toBe(180_000);
+    expect(effectiveEmailRequestTimeoutMs(0, 600_000)).toBe(0);
+    expect(effectiveEmailRequestTimeoutMs(180_000, Number.NaN)).toBe(180_000);
+
+    const transport = new DirectHttpEmailTransport(hangingFetch('email'), 'worker-secret', 10);
+    await expect(transport.requestJson('http://email.test/v1/source/answer', {
+      method: 'POST',
+      body: '{}',
+    }, { timeoutMs: 40 })).rejects.toThrow('Private email lane timed out at http://email.test/v1/source/answer after 40ms.');
+  });
+
   test('abort hung worker fetches with product-specific timeout errors', async () => {
     const timeoutMs = 10;
     const cases: Array<{

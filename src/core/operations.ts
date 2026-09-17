@@ -149,7 +149,7 @@ const SOURCE_ANSWER_PARAMS = {
   include_internal: { type: 'boolean', description: 'Whether the bridge may search internal corpora. Defaults true.' },
   include_internal_content: { type: 'boolean', description: 'Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true.' },
   internal_content_max_bytes: { type: 'number', description: 'Max internal context bytes; worker-capped.' },
-  timeoutMs: { type: 'number', description: 'OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora.' },
+  timeoutMs: { type: 'number', description: 'OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, so a slow local analyst finishes instead of timing out.' },
 } satisfies Record<string, ParamDef>;
 
 export const operations: Operation[] = [
@@ -277,6 +277,7 @@ export const operations: Operation[] = [
       'It never returns source packets, vectors, OAuth material, or raw secure-local file content; secure-local answers release only as OPSEC-scanned bounded derivatives.',
       'For Dropbox documents with incomplete local extraction, audit.self_heal reports whether Olympus forced a local re-ingest inline or left one queued for retry.',
       'The returned answer field is already the calling-assistant-safe answer; when it answers the user, pass it through with citations/coverage notes instead of re-reasoning over the audit.',
+      'Call it one at a time: the local analyst is a single-lane model, so concurrent source_answer calls queue behind each other and the later ones time out. Slow is fine; wait for each answer before issuing the next, and pass timeoutMs 600000.',
     ].join(' '),
     params: SOURCE_ANSWER_PARAMS,
     mutating: false,

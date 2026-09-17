@@ -241,7 +241,7 @@ const DEFAULT_CONFIG: OlympusConfig = {
     // OLYMPUS_EMAIL_ENABLED=false remains the explicit opt-out.
     enabled: true,
     baseUrl: 'http://127.0.0.1:8010/v1',
-    requestTimeoutSeconds: 180,
+    requestTimeoutSeconds: 600,
     localPacketsDevEnabled: false,
     indexAdminDevEnabled: false,
     requireLocalActiveModelForPrivateTools: false,

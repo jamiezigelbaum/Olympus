@@ -182,7 +182,7 @@ const DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20_000;
 // (which the skill passes as request.timeout_ms, e.g. 600s): local reasoning
 // gets its own honest budget so a wedged local model fails cleanly instead of
 // masquerading as a watchdog kill. Slow-but-useful local work stays allowed.
-const DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 240_000;
+const DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600_000;
 // Matches what every cloud transport already enforces for itself, so making it
 // the handler's bound changes no timing — it makes the bound interruptible,
 // abort-aware, and honest in the trace.

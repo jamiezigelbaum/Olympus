@@ -72,7 +72,14 @@ Use Olympus source tools, not raw stores.
   secure-local corpora, or multi-source Analyst synthesis, set
   `timeoutMs: 600000`. This is an OpenClaw tool-call watchdog budget, not a
   worker routing knob, and lets Olympus return its normal audited result instead
-  of being cut off by the generic 90-second dynamic-tool default.
+  of being cut off by the generic 90-second dynamic-tool default. Olympus also
+  raises its private-lane request budget to match it.
+- Issue `source_answer` calls one at a time. Never run two `source_answer`
+  calls concurrently, and never fan a question out into parallel per-corpus
+  calls: the local analyst is a single-lane model, so concurrent calls queue
+  behind each other and the later ones time out or fail with worker errors
+  for no real reason. Wait for each answer before issuing the next. Slow is
+  acceptable; a lost answer is not.
 - For S0-S3/internal or public-safe questions, keep `include_secure_local:false`
   unless the user asks for private/personal material or provides a secure-local
   corpus, approved scope, or selected item. This keeps routine internal answers
