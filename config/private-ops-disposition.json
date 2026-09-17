@@ -53,7 +53,7 @@
       "source_sha256": "cd82e16a858bb422a8504baa837ad04a219268217db1eb7aaa0e2402231c3137",
       "replacement_sha256": "cd82e16a858bb422a8504baa837ad04a219268217db1eb7aaa0e2402231c3137",
       "disposition": "retained_product_or_governance",
-      "public_sha256": "85270e4fe6ddce019e8c3a178ac6a4d9ad7689fc815ac7b34133381300998a8a"
+      "public_sha256": "6d7f14d91f5d965d340ed9c28d43a3e8d04d37ec31c70556f3a1d9af0375c29b"
     },
     {
       "path_sha256": "852a95fdf05267da0c1bbec2d0e52f97ba3ed1aa8069413a2bd5a92aa91b4b01",
@@ -2084,8 +2084,7 @@
       "path": "scripts/ops/openclaw-safe-restart.sh",
       "source_sha256": "d7cef085793e19a1a49ec3a4a1f3f918cd6347b764e8248bc5cee21fa1bf2741",
       "replacement_sha256": "d7cef085793e19a1a49ec3a4a1f3f918cd6347b764e8248bc5cee21fa1bf2741",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "1069c41087e1984c5d059762b390355170400ed5ab60e5c1cf5b5cbbcf8a0bfd"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path_sha256": "4f7d19b35081c03c0df170f6978baf800704334a8ff774ee0eb5bb5f5886bc8e",
@@ -2427,8 +2426,7 @@
       "path": "test/openclaw-safe-restart.test.ts",
       "source_sha256": "0d2f15443b7d3ca62281f1509cb5ba9ac94378d4e46b62a6b55eb4eff7361b7a",
       "replacement_sha256": "0d2f15443b7d3ca62281f1509cb5ba9ac94378d4e46b62a6b55eb4eff7361b7a",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "b780681121383768b50669cda2bb404b63484da00a02489b7fb6fb044e93133b"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path_sha256": "34d450cf9c5173a73514dd9676b954d05efaa4ae68bbad5e0965a1f31a2e014f",
@@ -2589,8 +2587,8 @@
   ],
   "counts": {
     "already_absent": 13,
-    "delete_after_live_proof": 395,
-    "retained_product_or_governance": 19
+    "delete_after_live_proof": 397,
+    "retained_product_or_governance": 17
   },
   "live_proof": {
     "status": "passed",

@@ -27,12 +27,15 @@ match the repo change.
 
 ## Live-System Change Protocol
 
-Canonical owner: `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo
-(packaged at `../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` relative to this
-skill). Read it before every live change. If it is unavailable, stop: do not
-mutate the live system from a remembered digest.
-
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
+This skill carries the Olympus contract toward the Gateway (source:
+`docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo). It is generic and
+names only native OpenClaw commands. Host-specific procedure — secrets
+provider, quota, backups, restart proof — belongs to the deployment owner's
+operator protocol; read that first on the host you are changing (on Jamie's
+hosts: `~/Code/Castor-Maintenance/docs/OPENCLAW_CHANGE_PROTOCOL.md`). If the
+deployment names one and it cannot be read, stop: do not restart or update.
+Custom gates around these commands were retired by the owner on 2026-09-17; do
+not reintroduce them.
 
 Before touching live OpenClaw config, secrets, plugins, skills, cron, services,
 gateway state, install state, or workspace context, follow this order:

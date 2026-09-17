@@ -87,12 +87,10 @@ files, or messages.
 | A source tool chooses the wrong lane because live assistant context may be stale | `skills/update-openclaw-runtime/SKILL.md` |
 
 Before any live runtime config, secret, workspace, service, gateway, or plugin
-install mutation, the update skill must use the OpenClaw system-change protocol:
-read canonical `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` first (packaged relative
-to the update skill at `../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md`). If the
-canonical file is missing, fail closed.
-
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
+install mutation, the update skill follows the OpenClaw system-change contract
+it carries (source: `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo).
+Host-specific procedure belongs to the deployment owner's operator protocol;
+when the deployment names one and it cannot be read, do not restart or update.
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or

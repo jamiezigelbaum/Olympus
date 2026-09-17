@@ -41,10 +41,11 @@ context when dependencies or unresolved questions require it.
 
 ## OpenClaw system-change protocol (non-negotiable)
 
-Canonical: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
-— read it BEFORE any change to a live OpenClaw system.
-
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
+Contract: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
+— read it BEFORE any change to a live OpenClaw system. Host-specific operator
+procedure belongs to the deployment owner, not this repo; on Jamie's hosts that
+is `docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private Castor-Maintenance repo
+(`~/Code/Castor-Maintenance`), which wins on host specifics.
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or
