@@ -90,52 +90,26 @@ Before any live runtime config, secret, workspace, service, gateway, or plugin
 install mutation, the update skill must use the OpenClaw system-change protocol:
 read canonical `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` first (packaged relative
 to the update skill at `../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md`). If the
-canonical file or the sanctioned restart wrapper is missing, fail closed.
+canonical file is missing, fail closed.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9559da364606d3bd06475b7b66fd139b7ebbe12174836380fc13b35d6cd024b7 -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
 
-Use `openclaw docs <query>` and/or gateway `config.schema.lookup` first; mutate
-config only through `openclaw config set|unset` or gateway `config.patch`;
-validate with
-`openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`;
-run `openclaw secrets audit --check --allow-exec` when secrets/providers
-changed; restart only through `scripts/ops/openclaw-safe-restart.sh`; accept
-boot proof only when systemd supplies a complete active MainPID / InvocationID /
-ActiveEnterTimestamp identity, the Gateway HTTP port returns a successful
-status to a bounded loopback request, and any exact
-`[gateway] http server listening (N plugins…)` line
-exists in that InvocationID's journal. Journal text is corroboration, not the
-load-bearing verdict; in-process code can duplicate it, so no ordering or
-timestamp selection proves boot. Olympus runtime resume performs this check
-read-only and delegates Gateway recovery to the platform lane. It is
-single-owner, always excludes canonical `openclaw-gateway.service`, and fails
-closed when abort identity is unavailable. Binding the successful loopback
-responder to the unit is operational corroboration, not socket attestation.
-Abort publication linearizes at its durable no-clobber generation link before
-a bounded commit-barrier wait (one second by default, validated maximum five);
-the refresh crash-durably publishes systemd hold conditions before lifecycle
-mutation and daemon-reload, including parent fsyncs for every component of a
-new user-unit path, so the link immediately refuses new activation jobs while
-an absent or empty hold directory remains activation-safe. One shared activity
-classifier trusts only `active`/0, `inactive`/3, or `failed`/3; abort cleanup
-separately requires stop success and a trusted-inactive result. Timeout leaves
-the hold published.
-Successful removal of the empty hold directory is resume's commit point when no
-newer generation exists, but a success verdict also requires its
-parent-directory fsync. Commit-ready means the recorded unit set was fully
-processed even if a lifecycle call failed. A commit-ready crash recovery is
-cleanup-only and never repeats lifecycle calls. A newer unclaimed generation
-cannot gate old cleanup: it remains untouched for the next invocation while
-the current one refuses with exit 75. Marker, record, lock, recovery-link, and
-temporary-file custody stays on the private host's local ext4 filesystem. The Gateway
-proof is operational corroboration, not socket
-attestation (gateway boot only — the plugin list names HTTP-route plugins;
-verify a specific plugin with
-`openclaw plugins inspect <name>` → `Status: loaded`).
-On failure, collect `openclaw gateway stability --bundle latest` and
-recover values from the `config set` `.bak.*` rotation through blessed config
-operations. Never substitute a direct gateway/systemd restart or automated
-doctor repair. Test one real item before any batch.
+Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
+never from memory) → blessed pathways only (`openclaw config set|unset` or
+`config.patch`, never raw openclaw.json) → validate with
+`openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`,
+plus `openclaw secrets audit --check --allow-exec` when secrets/providers
+changed → restart natively with `openclaw gateway restart`, then
+`openclaw gateway status` and one real turn; the
+`[gateway] http server listening (N plugins…)` journal line proves the Gateway
+only, and `openclaw plugins inspect <name>` → `Status: loaded` proves a plugin.
+Core updates: copy `state/openclaw.sqlite`, check `npm view openclaw engines`,
+then plain `openclaw update` (it owns its restart and verifies the version);
+never `openclaw update repair`. On failure use
+`openclaw gateway stability --bundle latest` and the `config set` `.bak.*` rotation.
+Test before bulk. Never ask for or store raw secrets; secrets changes are owned
+by the 1P workstream. Custom gates around these commands were retired by the
+owner on 2026-09-17; do not reintroduce them.
 
 ## Disambiguation
 
