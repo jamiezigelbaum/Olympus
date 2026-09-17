@@ -32,7 +32,7 @@ Canonical owner: `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo
 skill). Read it before every live change. If it is unavailable, stop: do not
 mutate the live system from a remembered digest.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9559da364606d3bd06475b7b66fd139b7ebbe12174836380fc13b35d6cd024b7 -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
 
 Before touching live OpenClaw config, secrets, plugins, skills, cron, services,
 gateway state, install state, or workspace context, follow this order:
@@ -48,54 +48,19 @@ gateway state, install state, or workspace context, follow this order:
    `openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`.
    If secrets or providers changed, also run
    `openclaw secrets audit --check --allow-exec`.
-4. Restart the gateway only through
-   `scripts/ops/openclaw-safe-restart.sh`. It owns quota preflight, validation,
-   one restart, and post-restart functional proof. If the wrapper is absent, stop
-   and ask the operator to run the change from the Olympus source repo; do not
-   substitute a direct gateway or systemd restart. Boot proof requires all
-   three: complete active `MainPID` / `InvocationID` /
-   `ActiveEnterTimestamp` identity from systemd, a bounded successful loopback
-   HTTP response, and any exact `[gateway] http server listening (N plugins…)`
-   line from that InvocationID's journal. Journal text is corroboration, never
-   the load-bearing verdict: in-process code can emit a duplicate, so no
-   ordering or timestamp rule distinguishes the real server. The operator
-   verdict quotes the matching line. The line proves nothing per-plugin: it
-   names only HTTP-route plugins, and providers or middleware load without
-   appearing there. To claim a specific plugin
-   loaded, use `openclaw plugins inspect <name>` → `Status: loaded`.
-   Olympus runtime resume is read-only at this boundary: it never calls the
-   wrapper or a Gateway lifecycle verb and refuses Olympus unit starts until
-   the platform lane restores a different post-abort InvocationID that passes
-   the same functional proof. Resume is single-owner, excludes the canonical
-   `openclaw-gateway.service` even when a test override is present, and fails
-   closed when the abort generation could not capture Gateway identity. The
-   loopback responder-to-unit binding is an operational assumption supported
-   by the systemd identity and journal corroboration, not direct socket
-   attestation. Abort publication linearizes at its durable no-clobber
-   generation link before a commit-barrier wait (one second by default,
-   validated maximum five); the refresh crash-durably publishes every systemd
-   hold condition before its first lifecycle mutation and daemon-reload,
-   including parent fsyncs for every component of a new user-unit path, so the
-   link immediately refuses new activation jobs while an absent or empty
-   directory remains activation-safe. One shared activity classifier trusts
-   only `active`/0, `inactive`/3, or `failed`/3; abort cleanup separately
-   requires stop success and a trusted-inactive result. Timeout leaves the hold
-   safely published.
-   Successful removal of the empty hold directory is resume's commit point when
-   no newer generation exists, but a success verdict also requires its
-   parent-directory fsync; a removal or fsync failure is cleanup-only refusal.
-   Commit-ready means the recorded unit set was fully processed, even when a
-   lifecycle call failed and exit 79 must be preserved. Commit-ready crash recovery is
-   cleanup-only and never repeats lifecycle calls. A newer unclaimed generation
-   cannot gate old cleanup: it stays untouched for the next invocation while
-   the current invocation refuses with exit 75. Marker, record, lock,
-   recovery-link, and temporary-file custody must remain together on the private host's
-   local ext4 filesystem.
+4. Restart natively: `openclaw gateway restart`, then `openclaw gateway status`
+   and one real agent turn. The `[gateway] http server listening (N plugins…)`
+   journal line proves the Gateway booted, nothing per plugin; to claim a
+   specific plugin loaded use `openclaw plugins inspect <name>` → `Status: loaded`.
+   Core updates: copy `state/openclaw.sqlite`, check `npm view openclaw engines`
+   against the managed Node, then plain `openclaw update`; never
+   `openclaw update repair`. One change per restart; Olympus never issues a
+   Gateway lifecycle verb itself — it requests the restart from the platform lane.
 5. If boot fails, collect `openclaw gateway stability --bundle latest` and use
    the `config set` `.bak.*` rotation as the recovery source through blessed
    config operations. Automated doctor repair is not a last-known-good undo.
 6. Test one real item, inspect it, and only then enable or run the batch. Every
-   incident must become a gate, subtraction, or deletion when possible.
+   incident gets an explicit disposition (fix, subtract, observe, gate, accept).
 
 ## Checklist
 
@@ -117,8 +82,8 @@ gateway state, install state, or workspace context, follow this order:
    - refresh the installed Olympus extension;
    - refresh any long-running worker source code touched by the change;
    - restart `olympus-email-source.service` when source-worker code changed;
-   - when tool/skill/runtime docs changed, restart the OpenClaw gateway only
-     through `scripts/ops/openclaw-safe-restart.sh` and retain its boot proof.
+   - when tool/skill/runtime docs changed, ask the platform lane for one
+     `openclaw gateway restart` and confirm with `openclaw gateway status`.
 10. Inspect and update the OpenClaw workspace docs that are read into assistant
     context, especially `~/.openclaw/workspace/AGENTS.md` and
     `~/.openclaw/workspace/TOOLS.md`, when they contain stale routing guidance.

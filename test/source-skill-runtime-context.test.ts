@@ -90,7 +90,9 @@ describe('source skill runtime context', () => {
       'config.schema.lookup',
       'openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive',
       'openclaw secrets audit --check --allow-exec',
-      'scripts/ops/openclaw-safe-restart.sh',
+      '`openclaw gateway restart`',
+      '`openclaw update`',
+      'openclaw plugins inspect <name>',
       '[gateway] http server listening (N plugins…)',
       'openclaw gateway stability --bundle latest',
       'config set` `.bak.*` rotation',
@@ -105,31 +107,19 @@ describe('source skill runtime context', () => {
     expect(skill).toContain('Validate before restart');
     expect(skill).toContain('../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md');
     expect(resolver).toContain('Before any live runtime config');
-    expect(agents).toContain('requires all three legs');
-    expect(agents).toContain('Runtime-hold flock/link custody stays on one local ext4 filesystem');
-    expect(skill).toContain('Commit-ready crash recovery is');
-    expect(resolver).toMatch(/commit-ready crash recovery is\s+cleanup-only/);
-    for (const text of [
-      'crash-durably publishes',
-      '`inactive`/3',
-      '`failed`/3',
-      'parent-directory fsync',
-    ]) {
-      expect(skill).toContain(text);
-      expect(resolver).toContain(text);
-      expect(agents).toContain(text);
-      expect(canonical).toContain(text);
-    }
+    expect(canonical).toContain('native OpenClaw processes only');
 
-    for (const staleOrUnsafeGuidance of [
-      '`openclaw doctor --lint`',
-      '`openclaw gateway restart`',
-      'openclaw doctor --fix',
-      '`systemctl restart',
+    // Retired 2026-09-17 by the owner: custom gates must not creep back into the digests.
+    for (const retiredGuidance of [
+      'restart ONLY via',
+      'Restart ONLY via',
+      'install-approvals',
+      '--no-restart',
+      'openclaw update repair --yes',
     ]) {
-      expect(skill).not.toContain(staleOrUnsafeGuidance);
-      expect(resolver).not.toContain(staleOrUnsafeGuidance);
-      expect(agents).not.toContain(staleOrUnsafeGuidance);
+      expect(skill).not.toContain(retiredGuidance);
+      expect(resolver).not.toContain(retiredGuidance);
+      expect(agents).not.toContain(retiredGuidance);
     }
   });
 });

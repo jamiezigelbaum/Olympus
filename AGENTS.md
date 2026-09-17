@@ -44,32 +44,24 @@ context when dependencies or unresolved questions require it.
 Canonical: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
 — read it BEFORE any change to a live OpenClaw system.
 
-<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 9559da364606d3bd06475b7b66fd139b7ebbe12174836380fc13b35d6cd024b7 -->
+<!-- OPENCLAW_PROTOCOL_NORMATIVE_SHA256: 7d7a371c3518df437765a960faff0086bff1d1f5b016a23369cdd37556cbd384 -->
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or
 `config.patch`, never raw openclaw.json) → validate with
 `openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`,
-plus `openclaw secrets audit --check --allow-exec` when
-needed → restart ONLY via `scripts/ops/openclaw-safe-restart.sh`. Boot proof
-requires all three legs: complete active MainPID/InvocationID/
-ActiveEnterTimestamp identity, a bounded successful loopback HTTP response,
-and an exact `[gateway] http server listening (N plugins…)` line from that
-InvocationID; the journal line is corroboration, not the verdict. On failure,
-use `openclaw gateway stability --bundle latest` and the `config set` `.bak.*` rotation.
-Runtime-hold flock/link custody stays on one local ext4 filesystem.
-Refresh crash-durably publishes every systemd hold condition before lifecycle
-mutation and daemon-reload, including ancestor-parent fsyncs for a newly
-created user-unit path; the durable generation link then blocks new activation
-jobs immediately. One shared activity classifier trusts only `active`/0,
-`inactive`/3, or `failed`/3; abort cleanup separately requires stop success and
-a trusted-inactive result. A completed lifecycle loop records `commit-ready`
-before reporting failed units. Its cleanup is never gated by a newer unclaimed
-generation, which stays untouched for the next invocation; non-commit-ready
-records still refuse. Removal of the empty hold directory is the ordinary
-resume commit point, but success also requires the parent-directory fsync.
+plus `openclaw secrets audit --check --allow-exec` when secrets/providers
+changed → restart natively with `openclaw gateway restart`, then
+`openclaw gateway status` and one real turn; the
+`[gateway] http server listening (N plugins…)` journal line proves the Gateway
+only, and `openclaw plugins inspect <name>` → `Status: loaded` proves a plugin.
+Core updates: copy `state/openclaw.sqlite`, check `npm view openclaw engines`,
+then plain `openclaw update` (it owns its restart and verifies the version);
+never `openclaw update repair`. On failure use
+`openclaw gateway stability --bundle latest` and the `config set` `.bak.*` rotation.
 Test before bulk. Never ask for or store raw secrets; secrets changes are owned
-by the 1P workstream. Give every incident an explicit root-cause disposition;
+by the 1P workstream. Custom gates around these commands were retired by the
+owner on 2026-09-17; do not reintroduce them. Give every incident an explicit root-cause disposition;
 add a blocking gate only when the criteria in `docs/ENGINEERING_PROCESS.md`
 are met.
 
