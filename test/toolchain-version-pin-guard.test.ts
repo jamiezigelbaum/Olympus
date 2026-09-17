@@ -94,7 +94,7 @@ describe('runtime artifacts resolve their toolchain by a version-stable path', (
     // which actually resolve a toolchain — would make the assertion below
     // vacuously green.
     expect(artifacts.length).toBeGreaterThan(0);
-    for (const anchor of ['bin/olympus', 'scripts/ops/openclaw-safe-restart.sh']) {
+    for (const anchor of ['bin/olympus', 'scripts/ops/lib/gateway-runtime-proof.sh']) {
       expect(artifacts).toContain(anchor);
     }
 

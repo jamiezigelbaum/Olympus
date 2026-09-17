@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -82,8 +81,6 @@ describe('source skill runtime context', () => {
     const resolver = readFileSync(join(ROOT, 'skills', 'RESOLVER.md'), 'utf8');
     const agents = readFileSync(join(ROOT, 'AGENTS.md'), 'utf8');
     const canonical = readFileSync(join(ROOT, 'docs', 'ops', 'OPENCLAW_CHANGE_PROTOCOL.md'), 'utf8');
-    const normativeProtocol = canonical.split('\n## Known sharp edges')[0]!.trim().replace(/\r\n/g, '\n');
-    const protocolPin = createHash('sha256').update(normativeProtocol).digest('hex');
 
     for (const text of [
       'openclaw docs <query>',
@@ -96,7 +93,6 @@ describe('source skill runtime context', () => {
       '[gateway] http server listening (N plugins…)',
       'openclaw gateway stability --bundle latest',
       'config set` `.bak.*` rotation',
-      `OPENCLAW_PROTOCOL_NORMATIVE_SHA256: ${protocolPin}`,
     ]) {
       expect(skill).toContain(text);
       expect(resolver).toContain(text);
@@ -105,9 +101,14 @@ describe('source skill runtime context', () => {
     expect(skill).toContain('openclaw config set|unset');
     expect(skill).toContain('config.patch');
     expect(skill).toContain('Validate before restart');
-    expect(skill).toContain('../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md');
+    // The packaged skill is self-contained: the release artifact does not ship
+    // docs/ops, so the skill must not point at a relative copy of it.
+    expect(skill).not.toContain('../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md');
+    expect(skill).toContain('Castor-Maintenance/docs/OPENCLAW_CHANGE_PROTOCOL.md');
     expect(resolver).toContain('Before any live runtime config');
     expect(canonical).toContain('native OpenClaw processes only');
+    expect(canonical).toContain('Castor-Maintenance');
+    expect(canonical).not.toContain('openclaw-safe-restart');
 
     // Retired 2026-09-17 by the owner: custom gates must not creep back into the digests.
     for (const retiredGuidance of [
@@ -116,6 +117,8 @@ describe('source skill runtime context', () => {
       'install-approvals',
       '--no-restart',
       'openclaw update repair --yes',
+      'openclaw-safe-restart',
+      'OPENCLAW_PROTOCOL_NORMATIVE_SHA256',
     ]) {
       expect(skill).not.toContain(retiredGuidance);
       expect(resolver).not.toContain(retiredGuidance);
