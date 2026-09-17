@@ -186,7 +186,8 @@
           "requestTimeoutSeconds": {
             "type": "number",
             "minimum": 1,
-            "description": "Request timeout for private email lane calls."
+            "maximum": 600,
+            "description": "Request timeout for private email lane calls. Keep at or below 600: a longer lane timer inside the OpenClaw Gateway fails every Olympus tool call with \"Async work scope is closed\" (observed on OpenClaw 2026.9.4)."
           }
         }
       },

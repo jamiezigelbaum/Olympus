@@ -2590,6 +2590,9 @@ function validateConfig(config) {
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
   }
+  if (config.email.requestTimeoutSeconds > 600) {
+    throw new OperationError("config_error", "email.requestTimeoutSeconds must be at most 600.", 'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).');
+  }
   if (typeof config.fileDelivery.requestTimeoutSeconds !== "number" || !Number.isFinite(config.fileDelivery.requestTimeoutSeconds) || config.fileDelivery.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "fileDelivery.requestTimeoutSeconds must be greater than zero.");
   }
@@ -10736,12 +10739,13 @@ class EmailClient {
 function createEmailTransport(config) {
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
+var MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000;
 function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
   if (!(configuredMs > 0))
     return configuredMs;
   if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs)
     return configuredMs;
-  return Math.floor(requestedMs);
+  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, MAX_EMAIL_REQUEST_TIMEOUT_MS));
 }
 
 class DirectHttpEmailTransport {

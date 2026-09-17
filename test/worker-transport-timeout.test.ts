@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
-import { DirectHttpEmailTransport, effectiveEmailRequestTimeoutMs } from '../src/core/email.ts';
+import { DirectHttpEmailTransport, MAX_EMAIL_REQUEST_TIMEOUT_MS, effectiveEmailRequestTimeoutMs } from '../src/core/email.ts';
 import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 
 interface WorkerTransport {
@@ -14,6 +14,8 @@ describe('direct worker HTTP transport timeouts', () => {
     expect(effectiveEmailRequestTimeoutMs(180_000, undefined)).toBe(180_000);
     expect(effectiveEmailRequestTimeoutMs(0, 600_000)).toBe(0);
     expect(effectiveEmailRequestTimeoutMs(180_000, Number.NaN)).toBe(180_000);
+    expect(effectiveEmailRequestTimeoutMs(180_000, 900_000)).toBe(MAX_EMAIL_REQUEST_TIMEOUT_MS);
+    expect(effectiveEmailRequestTimeoutMs(600_000, 1_800_000)).toBe(600_000);
 
     const transport = new DirectHttpEmailTransport(hangingFetch('email'), 'worker-secret', 10);
     await expect(transport.requestJson('http://email.test/v1/source/answer', {
