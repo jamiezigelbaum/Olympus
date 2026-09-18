@@ -3192,6 +3192,9 @@ function validateConfig(config) {
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
   }
+  if (config.email.requestTimeoutSeconds > 600) {
+    throw new OperationError("config_error", "email.requestTimeoutSeconds must be at most 600.", 'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).');
+  }
   if (typeof config.fileDelivery.requestTimeoutSeconds !== "number" || !Number.isFinite(config.fileDelivery.requestTimeoutSeconds) || config.fileDelivery.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "fileDelivery.requestTimeoutSeconds must be greater than zero.");
   }
@@ -33053,7 +33056,7 @@ function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
     return configuredMs;
   if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs)
     return configuredMs;
-  return Math.floor(requestedMs);
+  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, MAX_EMAIL_REQUEST_TIMEOUT_MS));
 }
 
 class DirectHttpEmailTransport {
@@ -34035,7 +34038,7 @@ async function safeText2(response) {
     return "";
   }
 }
-var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
+var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
 var init_email = __esm(() => {
   init_config();
   init_email_policy();
@@ -41408,7 +41411,7 @@ var init_operations = __esm(() => {
     include_internal: { type: "boolean", description: "Whether the bridge may search internal corpora. Defaults true." },
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
     internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
-    timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, so a slow local analyst finishes instead of timing out." }
+    timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out." }
   };
   operations = [
     {

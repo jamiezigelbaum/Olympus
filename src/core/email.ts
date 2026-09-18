@@ -1545,14 +1545,22 @@ export function createEmailTransport(config: OlympusConfig): EmailTransport {
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
 
+// Ceiling for the private-lane fetch timer inside the OpenClaw Gateway. On
+// OpenClaw 2026.9.4 (sparta, 2026-09-17) a lane timer of 900s made every
+// Olympus tool call fail at the Gateway MCP bridge with "Async work scope is
+// closed"; 600s (the tool watchdog budget callers pass) works. Never arm a
+// longer lane timer from inside the Gateway.
+export const MAX_EMAIL_REQUEST_TIMEOUT_MS = 600_000;
+
 // The configured lane timeout is the floor. A caller that declares a longer
 // wait (the OpenClaw tool watchdog budget, e.g. 600s) raises the lane fetch to
-// match; a shorter caller value never trims the configured lane budget. A
-// configured value of 0 means "no lane timeout" and stays that way.
+// match, up to MAX_EMAIL_REQUEST_TIMEOUT_MS; a shorter caller value never trims
+// the configured lane budget. A configured value of 0 means "no lane timeout"
+// and stays that way.
 export function effectiveEmailRequestTimeoutMs(configuredMs: number, requestedMs: number | undefined): number {
   if (!(configuredMs > 0)) return configuredMs;
   if (requestedMs === undefined || !Number.isFinite(requestedMs) || requestedMs <= configuredMs) return configuredMs;
-  return Math.floor(requestedMs);
+  return Math.min(Math.floor(requestedMs), Math.max(configuredMs, MAX_EMAIL_REQUEST_TIMEOUT_MS));
 }
 
 export class DirectHttpEmailTransport implements EmailTransport {

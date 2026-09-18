@@ -1027,6 +1027,13 @@ function validateConfig(config: OlympusConfig): void {
   ) {
     throw new OperationError('config_error', 'email.requestTimeoutSeconds must be greater than zero.');
   }
+  if (config.email.requestTimeoutSeconds > 600) {
+    throw new OperationError(
+      'config_error',
+      'email.requestTimeoutSeconds must be at most 600.',
+      'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).',
+    );
+  }
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
   if (
     typeof config.fileDelivery.requestTimeoutSeconds !== 'number'

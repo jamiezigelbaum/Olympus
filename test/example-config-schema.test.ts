@@ -13,7 +13,7 @@
  * The validator below covers the JSON Schema subset the manifest actually uses
  * rather than pulling in a dependency: $ref/$defs, type, properties,
  * additionalProperties, required, items, uniqueItems, enum, const, oneOf, and
- * minimum. An unsupported keyword is a hard error, so extending the manifest
+ * minimum/maximum. An unsupported keyword is a hard error, so extending the manifest
  * with a construct this gate cannot check fails loudly instead of silently
  * passing everything.
  */
@@ -40,6 +40,7 @@ const SUPPORTED_KEYWORDS = new Set([
   'const',
   'oneOf',
   'minimum',
+  'maximum',
   'description',
 ]);
 
@@ -137,6 +138,9 @@ function validate(value: unknown, rawSchema: Schema, defs: Defs, path: string, e
     }
     if (typeof schema.minimum === 'number' && value < schema.minimum) {
       errors.push(`${path}: ${value} is below the minimum ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === 'number' && value > schema.maximum) {
+      errors.push(`${path}: ${value} is above the maximum ${schema.maximum}`);
     }
   }
 }
