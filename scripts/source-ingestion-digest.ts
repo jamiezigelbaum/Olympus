@@ -151,7 +151,7 @@ export function buildSourceIngestionDigest(input: {
 
   if ((totals.oldest_stuck_age_hours ?? 0) >= INGESTION_STUCK_ERROR_HOURS && totals.queued_retryable > 0) {
     redItems.push(`queued/retryable work oldest ${formatHours(totals.oldest_stuck_age_hours)} across ${totals.queued_retryable} item(s)`);
-    nextActions.push('Run the source-processing janitor/supervisor lane for the affected source and check provider health before increasing batch size.');
+    nextActions.push('Check provider health for the affected source before increasing batch size.');
   } else if ((totals.oldest_stuck_age_hours ?? 0) >= INGESTION_STUCK_WARNING_HOURS && totals.queued_retryable > 0) {
     yellowItems.push(`queued/retryable work oldest ${formatHours(totals.oldest_stuck_age_hours)} across ${totals.queued_retryable} item(s)`);
   }

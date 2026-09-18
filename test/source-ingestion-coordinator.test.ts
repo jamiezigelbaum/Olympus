@@ -8,25 +8,6 @@ describe('source ingestion coordinator', () => {
   test('summarizes only canonical shared processing lanes without raw content', () => {
     const dir = temporaryDirectory('canonical');
     try {
-      writeJson(join(dir, 'current.json'), {
-        kind: 'source_processing_supervisor_report',
-        generated_at: '2026-06-27T10:01:00.000Z',
-        updated_at: '2026-06-27T10:08:00.000Z',
-        status: 'idle',
-        run_state: 'complete',
-        active_phase: 'complete',
-        summary: {
-          jobs_leased: 0,
-          jobs_planned: 3,
-          jobs_existing: 1,
-          terminal_progress_jobs: 0,
-          failed_retryable_jobs: 0,
-          queued_after: 4,
-          provider_backpressure_jobs: 0,
-          qa_visible_gaps_after: 5,
-        },
-        private_file_name: 'Private Contract.pdf',
-      });
       writeJson(join(dir, 'source-embedding-drain-current.json'), {
         kind: 'source_embedding_drain_report',
         generated_at: '2026-06-27T10:02:00.000Z',
@@ -37,6 +18,7 @@ describe('source ingestion coordinator', () => {
         chunks_seen: 8,
         chunks_embedded: 8,
         active_scope_key_hash: 'fedcba0987654321',
+        private_file_name: 'Private Contract.pdf',
       });
       writeJson(join(dir, 'venice-credit-status.json'), {
         kind: 'venice_credit_status',
@@ -71,11 +53,9 @@ describe('source ingestion coordinator', () => {
       expect(report.active_lanes).toEqual([]);
       expect(report.stale_lanes).toEqual([]);
       expect(report.attention_lanes).toEqual([]);
-      expect(lane(report, 'source_processing_supervisor').counts.qa_visible_gaps_after).toBe(5);
       expect(lane(report, 'embedding_drain').counts.chunks_embedded).toBe(8);
       expect(lane(report, 'venice_credit').counts.balance_usd).toBe(12.5);
       expect(report.lanes.map((entry) => entry.id)).toEqual([
-        'source_processing_supervisor',
         'embedding_drain',
         'venice_credit',
         'venice_provider_pause',
@@ -98,7 +78,6 @@ describe('source ingestion coordinator', () => {
       expect(report.lanes.every((entry) => entry.report_state === 'missing')).toBe(true);
       expect(report.attention_lanes).toEqual([]);
       expect(report.recommended_next_actions).toEqual([
-        'source_processing:enable_shadow_report',
         'embedding:enable_shadow_report',
       ]);
     } finally {
@@ -139,18 +118,18 @@ describe('source ingestion coordinator', () => {
   test('hashes invalid JSON errors without returning the source path', () => {
     const dir = temporaryDirectory('invalid');
     try {
-      writeFileSync(join(dir, 'current.json'), '{"secret_path": "/private/source"');
+      writeFileSync(join(dir, 'source-embedding-drain-current.json'), '{"secret_path": "/private/source"');
       const report = runSourceIngestionCoordinator({ reportDir: dir });
-      const processing = lane(report, 'source_processing_supervisor');
-      expect(processing).toMatchObject({
+      const drain = lane(report, 'embedding_drain');
+      expect(drain).toMatchObject({
         status: 'invalid',
         report_state: 'invalid',
         attention: true,
         action_labels: ['report_json_invalid'],
       });
-      expect(processing.hashes.parse_error_hash).toMatch(/^[a-f0-9]{16}$/);
+      expect(drain.hashes.parse_error_hash).toMatch(/^[a-f0-9]{16}$/);
       expect(report.recommended_next_actions).toContain(
-        'source_processing_supervisor:repair_invalid_report_json',
+        'embedding_drain:repair_invalid_report_json',
       );
       expect(JSON.stringify(report)).not.toContain('/private/source');
     } finally {
@@ -161,20 +140,20 @@ describe('source ingestion coordinator', () => {
   test('treats invalid canonical report timestamps as attention', () => {
     const dir = temporaryDirectory('bad-time');
     try {
-      writeJson(join(dir, 'current.json'), {
+      writeJson(join(dir, 'source-embedding-drain-current.json'), {
         generated_at: 'not-a-date',
         updated_at: 'still-not-a-date',
         status: 'progress',
         run_state: 'running',
-        active_phase: 'extracting',
-        summary: { jobs_leased: 1 },
+        active_phase: 'embedding',
+        chunks_embedded: 0,
       });
       const report = runSourceIngestionCoordinator({ reportDir: dir });
-      expect(lane(report, 'source_processing_supervisor')).toMatchObject({
+      expect(lane(report, 'embedding_drain')).toMatchObject({
         status: 'invalid',
         report_state: 'invalid',
         attention: true,
-        action_labels: ['report_timestamp_invalid'],
+        action_labels: ['embedding_idle', 'report_timestamp_invalid'],
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

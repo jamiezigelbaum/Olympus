@@ -645,7 +645,7 @@ function dropboxLedgerRow(): SourceIngestionLedgerRow {
       not_read_by_policy_items: 17_000,
       metadata_only_by_policy_items: 17_000,
       stuck_work: { queued: 19, failed_retryable: 0, failed_terminal: 0, by_class: [] },
-      drain: { state: 'held', unit: 'olympus-source-processing-supervisor-vlm-pdf.timer' },
+      drain: { state: 'held', unit: 'olympus-source-extraction-drain.timer' },
     },
     last_sync_at: '2026-07-02T11:20:00.000Z',
     attention: ['19 VLM extraction job(s) queued/paused'],

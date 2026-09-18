@@ -3771,13 +3771,7 @@ except Exception as exc:
 
 try:
     named_units = [
-        "olympus-source-processing-supervisor.service",
-        "olympus-source-processing-supervisor-local-ocr.service",
-        "olympus-source-processing-supervisor-local-vlm-visual-repair.service",
         "olympus-source-embedding-drain.service",
-        "olympus-source-processing-supervisor-venice-grok43.service",
-        "olympus-source-processing-supervisor-venice-grok43-areas.service",
-        "olympus-source-processing-supervisor-venice-grok43-resources.service",
     ]
     states = {}
     named_details = []
@@ -4309,12 +4303,6 @@ function normalizeDrainUnitServices(rows: RawDrainUnitDetail[] | undefined): Dra
 
 function serviceLabel(unit: string): string {
   if (unit === 'olympus-source-embedding-drain.service') return 'Embedding drain';
-  if (unit === 'olympus-source-processing-supervisor.service') return 'Default supervisor';
-  if (unit === 'olympus-source-processing-supervisor-local-ocr.service') return 'Local OCR supervisor';
-  if (unit === 'olympus-source-processing-supervisor-local-vlm-visual-repair.service') return 'Local VLM repair supervisor';
-  if (unit === 'olympus-source-processing-supervisor-venice-grok43.service') return 'Venice/Grok supervisor';
-  if (unit === 'olympus-source-processing-supervisor-venice-grok43-areas.service') return 'Venice/Grok Areas supervisor';
-  if (unit === 'olympus-source-processing-supervisor-venice-grok43-resources.service') return 'Venice/Grok Resources supervisor';
   return unit.replace(/^olympus-source-/, '').replace(/\.service$/, '').replace(/-/g, ' ');
 }
 

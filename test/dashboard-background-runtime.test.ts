@@ -3,9 +3,8 @@
  *
  * Every field name asserted here was read off the writer rather than guessed:
  * chunks_embedded and the shared heartbeat_seq / updated_at / run_state /
- * active_phase from scripts/source-embedding-drain.ts and its siblings, the
- * guard's `paused <unit>: <reason>` action lines from the guard installer, and
- * provider_pause from the retired source-processing supervisor lane.
+ * active_phase from scripts/source-embedding-drain.ts and its siblings, and the
+ * guard's `paused <unit>: <reason>` action lines from the guard installer.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -144,49 +143,6 @@ describe('reading the lanes', () => {
     expect(facts.lanes.find((entry) => entry.id === 'embedding-drain')?.reportsLive).toBe(false);
   });
 
-  test('reads the supervisor own counters and its queued remainder', () => {
-    const { env, reportDir } = host();
-    write(reportDir, 'current.json', {
-      kind: 'source_processing_supervisor_report',
-      updated_at: NOW.toISOString(),
-      run_state: 'running',
-      active_phase: 'extracting',
-      heartbeat_seq: 9,
-      status: 'progress',
-      summary: { terminal_progress_jobs: 220, queued_after: 41 },
-    });
-
-    const facts = readBackgroundRuntime({ env, now: NOW, sampleStore: new LaneSampleStore() });
-    const lane = facts.lanes.find((entry) => entry.id === 'processing-supervisor');
-
-    expect(lane?.samples[0]?.count).toBe(220);
-    expect(lane?.remaining).toBe(41);
-    expect(lane?.reportsLive).toBe(true);
-  });
-
-  test('takes a provider pause as that lane own governing condition, verbatim', () => {
-    const { env, reportDir } = host();
-    write(reportDir, 'current.json', {
-      kind: 'source_processing_supervisor_report',
-      updated_at: NOW.toISOString(),
-      run_state: 'running',
-      active_phase: 'paused',
-      status: 'parked',
-      summary: { terminal_progress_jobs: 0, queued_after: 12 },
-      provider_pause: {
-        active: true,
-        kind: 'venice_credit',
-        reason: 'venice_credit_exhausted',
-        message: 'Venice credit is exhausted, so extraction is parked.',
-      },
-    });
-
-    const facts = readBackgroundRuntime({ env, now: NOW, sampleStore: new LaneSampleStore() });
-    const lane = facts.lanes.find((entry) => entry.id === 'processing-supervisor');
-
-    expect(lane?.governing?.text).toBe('Venice credit is exhausted, so extraction is parked.');
-    expect(lane?.governing?.decidedBy).toBe('the source-processing supervisor');
-  });
 });
 
 describe('guard arbitration', () => {

@@ -6,7 +6,7 @@
  * opens a file or resolves a path — nothing here composes a sentence for the
  * reader, and nothing here decides whether a lane is stuck.
  *
- * WHERE THE FILES COME FROM. Every retained drain and supervisor writes a
+ * WHERE THE FILES COME FROM. Every retained drain writes a
  * `*-current.json` into one directory (the installers' shared REPORT_DIR,
  * /tmp/olympus-source-processing-supervisor by default) and rewrites it on every
  * heartbeat. They share four keys by construction — `updated_at`, `run_state`,
@@ -61,10 +61,9 @@ const SAMPLE_RING_LIMIT = 80;
 /**
  * One lane's report file and how to read it.
  *
- * `counterKey` is the cumulative counter a rate is measured from, and every one
+ * `counterKey` is the cumulative counter a rate is measured from, and the one
  * below was read off the writer's own report type rather than inferred from a
- * sibling lane: chunks_embedded (scripts/source-embedding-drain.ts) and
- * summary.terminal_progress_jobs (the retired source-processing supervisor).
+ * sibling lane: chunks_embedded (scripts/source-embedding-drain.ts).
  *
  * `livePhases` likewise: each drain publishes its OWN phase vocabulary, and the
  * embedding lane's tuple famously does not contain `syncing`. Copying one
@@ -100,18 +99,6 @@ const LANE_REPORTS: readonly LaneReportSpec[] = [
     counterKey: 'chunks_embedded',
     livePhases: ['starting', 'embedding', 'sleeping', 'backoff'],
     guardUnit: 'olympus-source-embedding-drain.service',
-  },
-  {
-    id: 'processing-supervisor',
-    name: 'Source processing',
-    unit: 'jobs',
-    file: 'current.json',
-    counterKey: 'summary.terminal_progress_jobs',
-    remainingKey: 'summary.queued_after',
-    // `paused` and `complete` are both absent: the first is the provider-pause
-    // state, which is a WAITING reason and not work, and the second is a pass
-    // that ended.
-    livePhases: ['starting', 'status_before', 'planning', 'extracting', 'embedding', 'status_after'],
   },
   {
     id: 'whatsapp-transcribe-drain',
@@ -307,33 +294,6 @@ function guardGoverning(
   return undefined;
 }
 
-/**
- * A provider pause the supervisor recorded, which is that lane's own arbiter.
- *
- * `message` is the supervisor's already-written sentence; `reason` is its
- * token. The message is preferred and the token is the fallback, so the reader
- * gets prose where prose exists and a real word where it does not.
- */
-function providerPauseGoverning(
-  record: Record<string, unknown>,
-): DashboardLaneGoverningCondition | undefined {
-  const pause = asRecord(record.provider_pause);
-  if (pause === undefined || pause.active !== true) return undefined;
-  const message = typeof pause.message === 'string' && pause.message.trim() !== ''
-    ? pause.message.trim()
-    : undefined;
-  const reason = typeof pause.reason === 'string' && pause.reason.trim() !== ''
-    ? pause.reason.trim()
-    : undefined;
-  const text = message ?? reason;
-  if (text === undefined) return undefined;
-  return {
-    text,
-    decidedBy: 'the source-processing supervisor',
-    ...(readStamp(pause.created_at) === undefined ? {} : { at: readStamp(pause.created_at)! }),
-  };
-}
-
 /* ------------------------------------------------------------ assembly -- */
 
 /** One lane, as read. Nothing here is a sentence and nothing is a verdict. */
@@ -400,7 +360,7 @@ export function readBackgroundRuntime(options: BackgroundRuntimeOptions = {}): B
         ...(heartbeatSeq === undefined ? {} : { heartbeatSeq }),
       }, now);
     const remaining = spec.remainingKey === undefined ? undefined : readNumber(record, spec.remainingKey);
-    const governing = providerPauseGoverning(record) ?? guardGoverning(spec, guard);
+    const governing = guardGoverning(spec, guard);
     lanes.push({
       id: spec.id,
       name: spec.name,

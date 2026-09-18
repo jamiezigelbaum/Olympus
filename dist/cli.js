@@ -38502,9 +38502,7 @@ function applyDropboxBreakdown(rows, breakdown, now) {
     row.ingestion_health.drain = {
       ...row.ingestion_health.drain,
       state: "held",
-      unit: "olympus-source-processing-supervisor-vlm-pdf.timer",
-      hold_marker: "~/.local/state/olympus/source-supervisor-holds/vlm-pdf.hold",
-      hint: "Start or unhold olympus-source-processing-supervisor-vlm-pdf.timer so queued VLM extraction jobs drain."
+      hint: "Queued VLM extraction jobs are held; resume the extraction drain on this host so they finish."
     };
   }
   const failed = breakdown.filter((item) => item.status === "failed_retryable" || item.status === "failed_terminal").reduce((sum2, item) => sum2 + item.count, 0);
@@ -67045,21 +67043,6 @@ function guardGoverning(spec, guard) {
   }
   return;
 }
-function providerPauseGoverning(record3) {
-  const pause = asRecord12(record3.provider_pause);
-  if (pause === undefined || pause.active !== true)
-    return;
-  const message = typeof pause.message === "string" && pause.message.trim() !== "" ? pause.message.trim() : undefined;
-  const reason = typeof pause.reason === "string" && pause.reason.trim() !== "" ? pause.reason.trim() : undefined;
-  const text = message ?? reason;
-  if (text === undefined)
-    return;
-  return {
-    text,
-    decidedBy: "the source-processing supervisor",
-    ...readStamp(pause.created_at) === undefined ? {} : { at: readStamp(pause.created_at) }
-  };
-}
 function readBackgroundRuntime(options = {}) {
   const env = options.env ?? process.env;
   const now = options.now ?? new Date;
@@ -67081,7 +67064,7 @@ function readBackgroundRuntime(options = {}) {
       ...heartbeatSeq === undefined ? {} : { heartbeatSeq }
     }, now);
     const remaining = spec.remainingKey === undefined ? undefined : readNumber(record3, spec.remainingKey);
-    const governing = providerPauseGoverning(record3) ?? guardGoverning(spec, guard);
+    const governing = guardGoverning(spec, guard);
     lanes.push({
       id: spec.id,
       name: spec.name,
@@ -67113,15 +67096,6 @@ var init_background_runtime = __esm(() => {
       counterKey: "chunks_embedded",
       livePhases: ["starting", "embedding", "sleeping", "backoff"],
       guardUnit: "olympus-source-embedding-drain.service"
-    },
-    {
-      id: "processing-supervisor",
-      name: "Source processing",
-      unit: "jobs",
-      file: "current.json",
-      counterKey: "summary.terminal_progress_jobs",
-      remainingKey: "summary.queued_after",
-      livePhases: ["starting", "status_before", "planning", "extracting", "embedding", "status_after"]
     },
     {
       id: "whatsapp-transcribe-drain",

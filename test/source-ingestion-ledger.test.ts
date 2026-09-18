@@ -103,7 +103,6 @@ describe('source ingestion ledger', () => {
         },
         drain: {
           state: 'held',
-          unit: 'olympus-source-processing-supervisor-vlm-pdf.timer',
           last_activity_hours: 0.5,
         },
       },
