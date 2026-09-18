@@ -5,7 +5,7 @@
  * chunks_embedded and the shared heartbeat_seq / updated_at / run_state /
  * active_phase from scripts/source-embedding-drain.ts and its siblings, the
  * guard's `paused <unit>: <reason>` action lines from the guard installer, and
- * provider_pause from scripts/source-processing-supervisor.ts.
+ * provider_pause from the retired source-processing supervisor lane.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

@@ -9,8 +9,9 @@ It is not an operator runbook. Host-specific procedure — secrets provider,
 credential quota, backups, restart proof, upgrade rehearsal, incident history —
 belongs to the deployment owner and lives with the deployment, not in this
 product repository. On Jamie's hosts the canonical operator protocol is
-`docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private `Castor-Maintenance`
-repository (checked out at `~/Code/Castor-Maintenance` on each machine); it
+`docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private `openclaw-ops`
+repository (checked out at `~/Code/openclaw-ops` on each machine; renamed from
+`Castor-Maintenance` on 2026-09-18, and GitHub redirects the old name); it
 governs every live change there and wins on host specifics. Other harnesses'
 instruction files carry at most a short digest plus a pointer.
 

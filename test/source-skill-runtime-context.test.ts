@@ -95,7 +95,7 @@ describe('source skill runtime context', () => {
       expect(agents).toContain(text);
     }
     expect(canonical).toContain('native OpenClaw processes only');
-    expect(canonical).toContain('Castor-Maintenance');
+    expect(canonical).toContain('openclaw-ops');
     expect(canonical).not.toContain('openclaw-safe-restart');
     expect(existsSync(join(ROOT, 'skills', 'update-openclaw-runtime'))).toBe(false);
 

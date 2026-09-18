@@ -44,9 +44,9 @@ context when dependencies or unresolved questions require it.
 Contract: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOCOL.md)
 — read it BEFORE any change to a live OpenClaw system. Host-specific operator
 procedure belongs to the deployment owner, not this repo; on Jamie's hosts that
-is `docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private Castor-Maintenance repo
-(`~/Code/Castor-Maintenance`, being renamed `openclaw-ops`), which wins on host
-specifics.
+is `docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private `openclaw-ops` repo
+(`~/Code/openclaw-ops`; renamed from `Castor-Maintenance` on 2026-09-18, with
+GitHub redirecting the old name), which wins on host specifics.
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or

@@ -104,7 +104,7 @@
     },
     {
       "path": "src/workers/file-extraction/http-types.ts",
-      "reason": "Reached only by a repository script that the package does not ship. scripts/source-processing-supervisor.ts and scripts/dropbox-venice-extraction-proof.ts.",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/dropbox-venice-extraction-proof.ts.",
       "retire_when": "The script moves to the ops repository or is deleted."
     },
     {

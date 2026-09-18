@@ -64,7 +64,7 @@ const SAMPLE_RING_LIMIT = 80;
  * `counterKey` is the cumulative counter a rate is measured from, and every one
  * below was read off the writer's own report type rather than inferred from a
  * sibling lane: chunks_embedded (scripts/source-embedding-drain.ts) and
- * summary.terminal_progress_jobs (source-processing-supervisor.ts).
+ * summary.terminal_progress_jobs (the retired source-processing supervisor).
  *
  * `livePhases` likewise: each drain publishes its OWN phase vocabulary, and the
  * embedding lane's tuple famously does not contain `syncing`. Copying one
