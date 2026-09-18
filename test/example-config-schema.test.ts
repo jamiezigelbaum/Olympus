@@ -40,6 +40,7 @@ const SUPPORTED_KEYWORDS = new Set([
   'const',
   'oneOf',
   'minimum',
+  'maximum',
   'description',
 ]);
 
@@ -137,6 +138,9 @@ function validate(value: unknown, rawSchema: Schema, defs: Defs, path: string, e
     }
     if (typeof schema.minimum === 'number' && value < schema.minimum) {
       errors.push(`${path}: ${value} is below the minimum ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === 'number' && value > schema.maximum) {
+      errors.push(`${path}: ${value} is above the maximum ${schema.maximum}`);
     }
   }
 }
