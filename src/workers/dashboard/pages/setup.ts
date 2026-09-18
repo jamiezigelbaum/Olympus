@@ -40,7 +40,7 @@ import { DASHBOARD_NAV_CSS, renderDashboardNav } from '../nav.ts';
 const CONNECTOR_SHEET_ID = 'connector-sheet';
 
 const CONNECTOR_SHEET_HEADING = 'Build a connector with your agent';
-// The playbook the prompt names is a repo-development skill: it is deliberately
+// The playbook the prompt names is a contributor guide: it is deliberately
 // outside the published package, so an install alone cannot satisfy the
 // prompt's own first clause. The sheet says that here rather than letting the
 // agent go looking for a file the managed plugin root does not contain.
@@ -57,7 +57,7 @@ const CONNECTOR_ROW_BUTTON_LABEL = 'Build a connector';
 const CONNECTOR_PROMPT = [
   'I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.',
   '',
-  'Read skills/create-connector/SKILL.md and follow it exactly. Start by asking me its Leg 0 '
+  'Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 '
   + 'identity questions, then build leg by leg — connector contract, corpus registry, store mount, '
   + 'scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive '
   + 'connectors as reference stampings. The one rule: SourceConnector is the only per-source code; '

@@ -165,7 +165,7 @@ describe('dashboard first-run page', () => {
     expect(html).toContain('>Something else</span>');
     expect(html).toContain('data-sheet-toggle="#connector-sheet"');
     expect(html).toContain('>Build a connector</button>');
-    expect(html).toContain('Read skills/create-connector/SKILL.md and follow it exactly.');
+    expect(html).toContain('Read docs/CREATE_CONNECTOR.md and follow it exactly.');
     expect(html).toContain('I’m working in my Olympus checkout. I want to add a new source connector for &lt;SOURCE&gt;.');
     expect(html).toContain('Keep the required CI check green.');
     expect(html).toContain('data-copy-target="#connector-sheet-prompt"');
@@ -572,12 +572,12 @@ describe('dashboard setup framing and copy', () => {
   });
 
   test('says the connector prompt needs a source checkout the package does not carry', () => {
-    // The prompt tells the agent to read skills/create-connector/SKILL.md, and
+    // The prompt tells the agent to read docs/CREATE_CONNECTOR.md, and
     // that playbook is deliberately outside the public package, so the sheet
     // has to state the precondition and where a checkout comes from.
     const html = renderDashboardSetupPage(realView(), { now: NOW });
 
-    expect(html).toContain('Read skills/create-connector/SKILL.md and follow it exactly.');
+    expect(html).toContain('Read docs/CREATE_CONNECTOR.md and follow it exactly.');
     expect(html).toContain('source checkout');
     expect(html).toContain('CONTRIBUTING.md');
   });

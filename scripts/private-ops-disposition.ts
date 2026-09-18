@@ -32,6 +32,12 @@ const RETAINED_PATHS = new Set([
 
 const ALLOWED_DOCS = new Set([
   'docs/CONTRACTS.md',
+  'docs/CREATE_CONNECTOR.md',
+  'docs/connector-templates/connector.test.ts.template',
+  'docs/connector-templates/connector.ts.template',
+  'docs/connector-templates/live-control.ts.template',
+  'docs/connector-templates/live-sync.ts.template',
+  'docs/connector-templates/scheduler-source.ts.template',
   'docs/ENGINEERING_PROCESS.md',
   'docs/QUICKSTART.md',
   'docs/SOURCE_CAPABILITIES.md',

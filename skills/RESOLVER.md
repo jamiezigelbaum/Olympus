@@ -52,37 +52,6 @@ Never create page-native tasks when an external task system is authoritative,
 and never classify content as restricted merely because it came from email,
 files, or messages.
 
-## OpenClaw Runtime Updates
-
-| Trigger | Skill |
-| --- | --- |
-| User asks to update OpenClaw behavior, Castor routing, installed Olympus, source-tool behavior, a skill, or the resolver | `skills/update-openclaw-runtime/SKILL.md` |
-| A live Castor/Argus result differs from local repo expectations | `skills/update-openclaw-runtime/SKILL.md` |
-| A source tool chooses the wrong lane because live assistant context may be stale | `skills/update-openclaw-runtime/SKILL.md` |
-
-Before any live runtime config, secret, workspace, service, gateway, or plugin
-install mutation, the update skill follows the OpenClaw system-change contract
-it carries (source: `docs/ops/OPENCLAW_CHANGE_PROTOCOL.md` in the Olympus repo).
-Host-specific procedure belongs to the deployment owner's operator protocol;
-when the deployment names one and it cannot be read, do not restart or update.
-
-Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
-never from memory) → blessed pathways only (`openclaw config set|unset` or
-`config.patch`, never raw openclaw.json) → validate with
-`openclaw config validate && openclaw doctor --lint --severity-min error --non-interactive`,
-plus `openclaw secrets audit --check --allow-exec` when secrets/providers
-changed → restart natively with `openclaw gateway restart`, then
-`openclaw gateway status` and one real turn; the
-`[gateway] http server listening (N plugins…)` journal line proves the Gateway
-only, and `openclaw plugins inspect <name>` → `Status: loaded` proves a plugin.
-Core updates: copy `state/openclaw.sqlite`, check `npm view openclaw engines`,
-then plain `openclaw update` (it owns its restart and verifies the version);
-never `openclaw update repair`. On failure use
-`openclaw gateway stability --bundle latest` and the `config set` `.bak.*` rotation.
-Test before bulk. Never ask for or store raw secrets; secrets changes are owned
-by the 1P workstream. Custom gates around these commands were retired by the
-owner on 2026-09-17; do not reintroduce them.
-
 ## Disambiguation
 
 - Default to ordinary calling-assistant reasoning unless a trigger fires.
@@ -119,6 +88,6 @@ owner on 2026-09-17; do not reintroduce them.
   post reads/searches or explicit current-account X actions. Do not use
   `xurl read` to enrich bookmark candidates unless the user explicitly asks to
   inspect a specific public X URL or post ID they provide.
-- When changing any OpenClaw-facing behavior, update the resolver, skill body,
-  manifest, live installed extension, workspace `AGENTS.md`/`TOOLS.md` context,
-  and run a natural OpenClaw agent smoke before declaring the live issue fixed.
+- When changing any OpenClaw-facing behavior, update the resolver, the skill
+  body, and `skills/manifest.json` together; a deployment's live runtime is
+  updated by its own operator procedure, not from this repository.

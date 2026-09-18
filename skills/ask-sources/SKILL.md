@@ -136,8 +136,8 @@ Telegram chat:
 ## Email
 
 For email, Gmail, Google Mail, mail threads, senders, inbox commitments, or
-private correspondence, use `source_answer`. Do not switch to `email_answer` or
-raw Gmail/browser/shell tools for ordinary source questions.
+private correspondence, use `source_answer`. There is no separate email tool;
+do not switch to raw Gmail/browser/shell tools for ordinary source questions.
 
 Good private email-capable request shape:
 

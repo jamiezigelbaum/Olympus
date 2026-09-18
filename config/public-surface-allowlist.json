@@ -108,59 +108,19 @@
       "retire_when": "The script moves to the ops repository or is deleted."
     },
     {
-      "path": "src/core/google-bootstrap.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/core/source-index/custodial-supersets.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/core/source-index/eval.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/core/source-index/index.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
       "path": "src/workers/classification/delphi-scorer.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
+      "reason": "No runtime importer in src or scripts. Retained because the private-ops disposition ledger pins test/delphi-scorer.test.ts as retained_product_or_governance at an exact digest, and that test imports this subtree.",
+      "retire_when": "The disposition ledger releases test/delphi-scorer.test.ts, then the subtree is deleted."
     },
     {
       "path": "src/workers/classification/index.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
+      "reason": "No runtime importer in src or scripts. Retained because the private-ops disposition ledger pins test/delphi-scorer.test.ts as retained_product_or_governance at an exact digest, and that test imports this subtree.",
+      "retire_when": "The disposition ledger releases test/delphi-scorer.test.ts, then the subtree is deleted."
     },
     {
       "path": "src/workers/classification/policy.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/workers/connector-store/content-repair.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/workers/dropbox-files/metadata-scope-policy.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/workers/dropbox-files/readability-gaps.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
-    },
-    {
-      "path": "src/workers/x-bookmarks/live-scheduler-dropin.ts",
-      "reason": "No runtime importer in src or scripts; only tests reference it.",
-      "retire_when": "Deleted in the next disposition PR."
+      "reason": "No runtime importer in src or scripts. Retained because the private-ops disposition ledger pins test/delphi-scorer.test.ts as retained_product_or_governance at an exact digest, and that test imports this subtree.",
+      "retire_when": "The disposition ledger releases test/delphi-scorer.test.ts, then the subtree is deleted."
     },
     {
       "path": "src/core/connect-gcp.ts",
@@ -168,103 +128,12 @@
       "retire_when": "The persisted grants are re-keyed, then the module is deleted."
     }
   ],
-  "operations": [
-    {
-      "name": "email_ping",
-      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "email_answer",
-      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "email_search",
-      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "email_index_search",
-      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "email_index_sync",
-      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
-      "retire_when": "Deleted, or re-homed as CLI subcommands."
-    },
-    {
-      "name": "email_index_embed",
-      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
-      "retire_when": "Deleted, or re-homed as CLI subcommands."
-    },
-    {
-      "name": "source_index_sync",
-      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
-      "retire_when": "Deleted, or re-homed as CLI subcommands."
-    },
-    {
-      "name": "source_export",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_transcribe",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_media_ingest",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_index_promotion_candidates",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_index_promotion_propose",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_index_promotion_proposals",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_index_promotion_proposal",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    },
-    {
-      "name": "source_index_promotion_decide",
-      "reason": "Unqualified workflow never admitted to the public surface.",
-      "retire_when": "Designed and published, or deleted."
-    }
-  ],
+  "operations": [],
   "skills": [
-    {
-      "path": "skills/ask-email-local",
-      "reason": "Pre-v0.4 email lane skill.",
-      "retire_when": "Deleted with the email lane operations."
-    },
     {
       "path": "skills/pkm-doctrine",
       "reason": "Phase-2 PKM doctrine, not yet public.",
       "retire_when": "Published on the public skill list, or moved to the owner's workspace."
-    },
-    {
-      "path": "skills/update-openclaw-runtime",
-      "reason": "Operator and contributor skills, not end-user skills.",
-      "retire_when": "Moved to the ops repository or contributor docs, or published."
-    },
-    {
-      "path": "skills/create-connector",
-      "reason": "Operator and contributor skills, not end-user skills.",
-      "retire_when": "Moved to the ops repository or contributor docs, or published."
     }
   ]
 }

@@ -90,24 +90,22 @@ describe('built plugin bundles', () => {
     expect(() => assertStagedEntrypointsAreSynchronouslyLoadable(clean)).not.toThrow();
   });
 
-  test('the staged-manifest gate refuses a private overlay manifest', () => {
+  test('the staged-manifest gate refuses a manifest that is not a JSON object', () => {
+    // It also refused `olympus.privateExtensions` until 2026-09-18. The overlay
+    // seam is gone, so no tree can produce that manifest and the case with it.
     const publicManifest = JSON.stringify({ id: 'olympus', configSchema: { properties: {} } });
     expect(() => assertStagedManifestIsPublic(
       stagingFixture({ 'openclaw.plugin.json': publicManifest }),
     )).not.toThrow();
 
-    for (const namespace of [
-      { privateExtensions: { required: true, contractVersion: 1, module: 'private-extensions.cjs' } },
-      { privateExtensions: false },
-      'private',
-      null,
-    ]) {
-      const staged = stagingFixture({
-        'openclaw.plugin.json': JSON.stringify({ id: 'olympus', configSchema: {}, olympus: namespace }),
-      });
-      expect(() => assertStagedManifestIsPublic(staged), JSON.stringify(namespace))
-        .toThrow(/privateExtensions|not a JSON object/);
+    for (const body of ['[]', 'null', '"olympus"', '42']) {
+      const staged = stagingFixture({ 'openclaw.plugin.json': body });
+      expect(() => assertStagedManifestIsPublic(staged), body)
+        .toThrow(/is not a JSON object/);
     }
+    expect(() => assertStagedManifestIsPublic(
+      stagingFixture({ 'openclaw.plugin.json': '{ truncated' }),
+    )).toThrow(/could not be parsed/);
   });
 
   test('the release builder actually calls both staged gates on the staging directory', () => {

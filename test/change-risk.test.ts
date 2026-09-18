@@ -86,14 +86,12 @@ describe('change risk', () => {
     expect(classifyChange(selfProtecting, config).criticalFiles).toEqual(selfProtecting.sort());
   });
 
-  test('the plugin entry point, its contract, and the host-loadability guards are critical', () => {
+  test('the plugin entry point and the host-loadability guards are critical', () => {
     const entryPoints = [
       'openclaw.plugin.json',
       'src/native-plugin.ts',
-      'src/private-extension-contract.ts',
       'scripts/public-manifest-guard.ts',
       'scripts/top-level-await-scan.ts',
-      'test/private-extension-loader-probes.test.ts',
       'test/plugin-bundle-no-top-level-await.test.ts',
       'test/plugin-host-loader-compatibility.test.ts',
     ];

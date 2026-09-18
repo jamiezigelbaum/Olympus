@@ -31,18 +31,15 @@ describe('source skill runtime context', () => {
     expect(discoveredSkillDirs.length).toBeGreaterThan(0);
     expect(manifestSkillDirs).toEqual(discoveredSkillDirs);
     expect([...plugin.skills].sort()).toEqual(discoveredSkillDirs);
-    expect(plugin.skills).not.toContain('skills/update-openclaw-runtime');
   });
 
   test('ask-sources discovery and resolver carry the no-shell source-tool rule', () => {
     const skill = readFileSync(join(ROOT, 'skills', 'ask-sources', 'SKILL.md'), 'utf8');
-    const emailSkill = readFileSync(join(ROOT, 'skills', 'ask-email-local', 'SKILL.md'), 'utf8');
     const resolver = readFileSync(join(ROOT, 'skills', 'RESOLVER.md'), 'utf8');
     const manifest = JSON.parse(readFileSync(join(ROOT, 'skills', 'manifest.json'), 'utf8')) as {
       skills: Array<{ name: string; path: string; description: string }>;
     };
     const askSources = manifest.skills.find((entry) => entry.name === 'ask-sources');
-    const askEmailLocal = manifest.skills.find((entry) => entry.name === 'ask-email-local');
 
     expect(askSources).toBeDefined();
     expect(askSources?.path).toBe('skills/ask-sources/SKILL.md');
@@ -51,7 +48,9 @@ describe('source skill runtime context', () => {
     expect(askSources?.description).toContain('Never use bash');
     expect(askSources?.description).toContain('skill-file inspection');
     expect(askSources?.description).toContain('omit corpus_id unless intentionally force-narrowing');
-    expect(askEmailLocal).toBeUndefined();
+    // skills/ask-email-local was deleted with the pre-v0.4 email tools on
+    // 2026-09-18; the only email route left is source_answer over ask-sources.
+    expect(manifest.skills.map((entry) => entry.name)).not.toContain('ask-email-local');
     expect(skill).toContain('tools:\n  - source_answer\n  - source_index_search');
     expect(skill).toContain('preserve the citation markers returned');
     expect(skill).toContain('concrete query built from those titles');
@@ -65,10 +64,6 @@ describe('source skill runtime context', () => {
     expect(skill).toContain('web search, or web browsing');
     expect(skill).toContain('legacy `sourceItem`');
     expect(skill).toContain('tools are unavailable, fail clearly');
-    expect(emailSkill).toContain('compatibility shim');
-    expect(emailSkill).toContain('use `skills/ask-sources/SKILL.md`');
-    expect(emailSkill).toContain('Omit `corpus_id` on the first private ask');
-    expect(emailSkill).toContain('Do not call `email_answer`');
     expect(resolver).toContain('| User asks to search Telegram, X/Twitter bookmarks, saved/bookmarked tweets/posts, Readwise, Drive/Docs, Dropbox, or another Olympus-indexed source | `skills/ask-sources/SKILL.md` |');
     expect(resolver).toContain('| User asks to search, summarize, inspect, or answer questions about Gmail/email | `skills/ask-sources/SKILL.md` |');
     expect(resolver).toContain('use one `source_answer` call with');
@@ -76,8 +71,11 @@ describe('source skill runtime context', () => {
     expect(resolver).toContain('do not fall back to raw shell');
   });
 
-  test('runtime update skill carries the OpenClaw live-system protocol', () => {
-    const skill = readFileSync(join(ROOT, 'skills', 'update-openclaw-runtime', 'SKILL.md'), 'utf8');
+  test('the canonical OpenClaw change protocol stays the live-system contract', () => {
+    // skills/update-openclaw-runtime was deleted on 2026-09-18: updating a live
+    // OpenClaw deployment is the deployment owner's procedure, not a skill this
+    // repository ships. AGENTS.md and docs/ops/OPENCLAW_CHANGE_PROTOCOL.md are
+    // what still have to carry the contract for anyone working in this tree.
     const resolver = readFileSync(join(ROOT, 'skills', 'RESOLVER.md'), 'utf8');
     const agents = readFileSync(join(ROOT, 'AGENTS.md'), 'utf8');
     const canonical = readFileSync(join(ROOT, 'docs', 'ops', 'OPENCLAW_CHANGE_PROTOCOL.md'), 'utf8');
@@ -94,21 +92,12 @@ describe('source skill runtime context', () => {
       'openclaw gateway stability --bundle latest',
       'config set` `.bak.*` rotation',
     ]) {
-      expect(skill).toContain(text);
-      expect(resolver).toContain(text);
       expect(agents).toContain(text);
     }
-    expect(skill).toContain('openclaw config set|unset');
-    expect(skill).toContain('config.patch');
-    expect(skill).toContain('Validate before restart');
-    // The packaged skill is self-contained: the release artifact does not ship
-    // docs/ops, so the skill must not point at a relative copy of it.
-    expect(skill).not.toContain('../../docs/ops/OPENCLAW_CHANGE_PROTOCOL.md');
-    expect(skill).toContain('Castor-Maintenance/docs/OPENCLAW_CHANGE_PROTOCOL.md');
-    expect(resolver).toContain('Before any live runtime config');
     expect(canonical).toContain('native OpenClaw processes only');
     expect(canonical).toContain('Castor-Maintenance');
     expect(canonical).not.toContain('openclaw-safe-restart');
+    expect(existsSync(join(ROOT, 'skills', 'update-openclaw-runtime'))).toBe(false);
 
     // Retired 2026-09-17 by the owner: custom gates must not creep back into the digests.
     for (const retiredGuidance of [
@@ -120,7 +109,6 @@ describe('source skill runtime context', () => {
       'openclaw-safe-restart',
       'OPENCLAW_PROTOCOL_NORMATIVE_SHA256',
     ]) {
-      expect(skill).not.toContain(retiredGuidance);
       expect(resolver).not.toContain(retiredGuidance);
       expect(agents).not.toContain(retiredGuidance);
     }

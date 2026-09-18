@@ -1234,7 +1234,7 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED,
     'OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED',
   );
-  const sourceIndexReadEnabled = olympusConfig.sourceIndex.enabled || olympusConfig.sourceIndex.answerDevEnabled || sourceIndexAnswerEnabled;
+  const sourceIndexReadEnabled = olympusConfig.sourceIndex.enabled || sourceIndexAnswerEnabled;
   const sourceIndexAccount = process.env.OLYMPUS_SOURCE_INDEX_ACCOUNT
     ?? process.env.OLYMPUS_EMAIL_SOURCE_ACCOUNT;
   const dropboxFilesAccount =

@@ -93,13 +93,9 @@ export interface OlympusConfig {
     enabled: boolean;
     baseUrl: string;
     requestTimeoutSeconds: number;
-    localPacketsDevEnabled: boolean;
-    indexAdminDevEnabled: boolean;
-    requireLocalActiveModelForPrivateTools: boolean;
   };
   sourceIndex: {
     enabled: boolean;
-    answerDevEnabled: boolean;
     corpusRegistry: SourceCorpusRegistryConfig;
     ingestionPolicies: {
       dropboxPersonal?: {
@@ -222,13 +218,9 @@ const DEFAULT_CONFIG: OlympusConfig = {
     enabled: true,
     baseUrl: 'http://127.0.0.1:8010/v1',
     requestTimeoutSeconds: 600,
-    localPacketsDevEnabled: false,
-    indexAdminDevEnabled: false,
-    requireLocalActiveModelForPrivateTools: false,
   },
   sourceIndex: {
     enabled: true,
-    answerDevEnabled: false,
     corpusRegistry: defaultSourceCorpusRegistryConfig(),
     ingestionPolicies: {},
   },
@@ -383,34 +375,10 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
       'OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS',
     );
   }
-  if (env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV) {
-    config.email.localPacketsDevEnabled = parseBoolean(
-      env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV,
-      'OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV',
-    );
-  }
-  if (env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV) {
-    config.email.indexAdminDevEnabled = parseBoolean(
-      env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV,
-      'OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV',
-    );
-  }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(
-      env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS,
-      'OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS',
-    );
-  }
   if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
     config.sourceIndex.enabled = parseBoolean(
       env.OLYMPUS_SOURCE_INDEX_ENABLED,
       'OLYMPUS_SOURCE_INDEX_ENABLED',
-    );
-  }
-  if (env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED) {
-    config.sourceIndex.answerDevEnabled = parseBoolean(
-      env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED,
-      'OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED',
     );
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
@@ -545,18 +513,6 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
   if (typeof email?.requestTimeoutSeconds === 'number') {
     config.email.requestTimeoutSeconds = email.requestTimeoutSeconds;
   }
-  if (typeof email?.localPacketsDevEnabled === 'boolean') {
-    config.email.localPacketsDevEnabled = email.localPacketsDevEnabled;
-  }
-  if (typeof email?.indexAdminDevEnabled === 'boolean') {
-    config.email.indexAdminDevEnabled = email.indexAdminDevEnabled;
-  }
-  if (typeof email?.requireLocalActiveModelForPrivateTools === 'boolean') {
-    config.email.requireLocalActiveModelForPrivateTools = email.requireLocalActiveModelForPrivateTools;
-  }
-  if (typeof sourceIndex?.answerDevEnabled === 'boolean') {
-    config.sourceIndex.answerDevEnabled = sourceIndex.answerDevEnabled;
-  }
   if (typeof sourceIndex?.enabled === 'boolean') {
     config.sourceIndex.enabled = sourceIndex.enabled;
   }
@@ -612,7 +568,7 @@ export function resolveLane(config: OlympusConfig, lane?: unknown): ArgusLane {
 }
 
 export function isSourceIndexReadSurfaceEnabled(config: OlympusConfig): boolean {
-  return config.sourceIndex.enabled || config.sourceIndex.answerDevEnabled;
+  return config.sourceIndex.enabled;
 }
 
 export function resolveModelProfile(
@@ -878,11 +834,7 @@ function validateConfig(config: OlympusConfig): void {
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
   }
   assertBoolean(config.email.enabled, 'email.enabled');
-  assertBoolean(config.email.localPacketsDevEnabled, 'email.localPacketsDevEnabled');
-  assertBoolean(config.email.indexAdminDevEnabled, 'email.indexAdminDevEnabled');
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, 'email.requireLocalActiveModelForPrivateTools');
   assertBoolean(config.sourceIndex.enabled, 'sourceIndex.enabled');
-  assertBoolean(config.sourceIndex.answerDevEnabled, 'sourceIndex.answerDevEnabled');
   config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
     const policyPath = config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath.trim();

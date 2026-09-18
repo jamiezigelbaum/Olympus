@@ -357,7 +357,11 @@ describe('native OpenClaw plugin adapter', () => {
     ]);
   });
 
-  test('can disable promoted source-index read tools while preserving legacy proof compatibility', () => {
+  test('can disable the promoted source-index read tools', () => {
+    // sourceIndex.enabled is the only switch left: the legacy
+    // sourceIndex.answerDevEnabled proof gate was deleted on 2026-09-18 with
+    // the tools it opened, so an install that turns the read surface off is
+    // left with Argus and the doctor.
     const disabled = registeredToolNames({
       sourceIndex: {
         enabled: false,
@@ -366,216 +370,29 @@ describe('native OpenClaw plugin adapter', () => {
     expect(disabled).not.toContain('source_answer');
     expect(disabled).not.toContain('source_index_status');
     expect(disabled).not.toContain('source_index_search');
-
-    const names = registeredToolNames({
-      sourceIndex: {
-        enabled: false,
-        answerDevEnabled: true,
-      },
-    });
-
-    expect(names).toContain('source_answer');
-    expect(names).toContain('source_index_status');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_answer');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
+    expect(disabled).toEqual([
+      'argus_ping',
+      'argus_list_models',
+      'argus_complete',
+      'olympus_doctor',
+    ]);
   });
 
-  test('keeps private email packet tools outside the public surface', () => {
-    const names = registeredToolNames({
-      email: {
-        localPacketsDevEnabled: true,
-      },
-    });
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-  });
-
-  test('keeps email index admin tools outside the public surface', () => {
-    const names = registeredToolNames({
-      email: {
-        indexAdminDevEnabled: true,
-      },
-    });
-
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-  });
-
-  test('does not let dev toggles widen the public surface', () => {
-    const names = registeredToolNames({
-      email: {
-        localPacketsDevEnabled: true,
-        indexAdminDevEnabled: true,
-      },
-    });
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
-  });
-
-  test('hides private and admin tools when active-model guard is enabled without metadata', () => {
-    const names = registeredToolNames({
-      email: {
-        localPacketsDevEnabled: true,
-        indexAdminDevEnabled: true,
-        requireLocalActiveModelForPrivateTools: true,
-      },
-    });
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
-  });
-
-  test('hides private and admin tools for cloud active model metadata', () => {
-    const names = registeredToolNames(
-      {
-        email: {
-          localPacketsDevEnabled: true,
-          indexAdminDevEnabled: true,
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        activeModel: {
-          provider: 'openai-codex',
-          modelId: 'gpt-5.5',
-        },
-      },
-    );
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
-  });
-
-  test('does not let local-model metadata widen the public surface', () => {
-    const names = registeredToolNames(
-      {
-        argus: {
-          lanes: {
-            fast: {
-              model: 'local-qwen-fast',
-            },
-          },
-        },
-        email: {
-          localPacketsDevEnabled: true,
-          indexAdminDevEnabled: true,
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        context: {
-          activeModel: {
-            provider: 'olympus-local',
-            modelId: 'local-qwen-fast',
-          },
-        },
-      },
-    );
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
-  });
-
-  test('accepts future active model metadata from a second registration argument', () => {
-    const names: string[] = [];
-    plugin.register(
-      {
-        pluginConfig: {
-          argus: {
-            lanes: {
-              deep: {
-                model: 'local-qwen-deep',
-              },
-            },
-          },
-          email: {
-            localPacketsDevEnabled: true,
-            requireLocalActiveModelForPrivateTools: true,
-          },
-        },
-        registerTool(tool: NativeTool) {
-          names.push(materializeTool(tool).name);
-        },
-      },
-      {
-        activeModel: {
-          providerId: 'olympus-local',
-          modelId: 'local-qwen-deep',
-        },
-      },
-    );
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
-  });
-
-  test('accepts provider-qualified local model refs without separate provider metadata', () => {
-    const names = registeredToolNames(
-      {
-        argus: {
-          lanes: {
-            fast: {
-              model: 'local-qwen-fast',
-            },
-          },
-        },
-        email: {
-          localPacketsDevEnabled: true,
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        toolContext: {
-          activeModel: {
-            modelRef: 'olympus-local/local-qwen-fast',
-          },
-        },
-      },
-    );
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_answer');
+  test('the registered roster does not vary with host-supplied context', () => {
+    // Olympus once gated private tools on the host's active-model metadata.
+    // Those tools and the gate were deleted on 2026-09-18, so the roster is a
+    // function of config alone: whatever extra shapes a host hands `register`,
+    // the public tools are what get registered.
+    const hostShapes: Array<Record<string, unknown>> = [
+      {},
+      { activeModel: { provider: 'openai-codex', modelId: 'gpt-5.5' } },
+      { context: { activeModel: { provider: 'olympus-local', modelId: 'local-qwen-fast' } } },
+      { toolContext: { activeModel: { modelRef: 'olympus-local/local-qwen-fast' } } },
+    ];
+    for (const shape of hostShapes) {
+      expect(registeredToolNames({ argus: { lanes: { fast: { model: 'local-qwen-fast' } } } }, shape))
+        .toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+    }
   });
 
   test('uses nested argus plugin config for tool execution', async () => {
@@ -702,9 +519,6 @@ describe('native OpenClaw plugin adapter', () => {
         email: {
           enabled: true,
           baseUrl: 'http://source-worker.test',
-        },
-        sourceIndex: {
-          answerDevEnabled: true,
         },
       },
       registerTool(tool: NativeTool) {

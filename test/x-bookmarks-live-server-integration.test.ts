@@ -2,9 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultConfig } from '../src/core/config.ts';
-import { EmailClient, type EmailTransport } from '../src/core/email.ts';
-import { operations, type OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createXBookmarksConnectorStoreRuntime } from '../src/workers/email-source/server.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
@@ -176,62 +173,6 @@ describe('X bookmarks live server integration', () => {
       corpus_id: X_BOOKMARKS_CORPUS_ID,
     }, 501);
     expect(noMode.error.code).toBe('source_index_sync_not_supported');
-  });
-
-  test('carries X mode through the operation and private EmailClient transport', async () => {
-    const operation = operations.find((candidate) => candidate.name === 'source_index_sync')!;
-    expect(operation.nativeExposure).toBe('emailIndexAdminDevOnly');
-    expect(operation.params.mode).toMatchObject({
-      enum: ['head', 'reconcile', 'window_diagnostic', 'folder_facet_refresh', 'preservation-reattest'],
-    });
-    const delegated: unknown[] = [];
-    const context = {
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {
-        sourceIndexSync: async (request: unknown) => {
-          delegated.push(request);
-          return { status: 'idle', counts: { api_requests: 1 } };
-        },
-      } as unknown as OperationContext['email'],
-    } satisfies OperationContext;
-    await operation.handler(context, {
-      corpus_id: X_BOOKMARKS_CORPUS_ID,
-      mode: 'head',
-    });
-    expect(delegated).toEqual([{ corpusId: X_BOOKMARKS_CORPUS_ID, mode: 'head' }]);
-    await expect(operation.handler(context, {
-      corpus_id: 'internal.drive.docs',
-      mode: 'head',
-    })).rejects.toThrow('mode is supported only for internal.x.bookmarks');
-
-    const config = defaultConfig();
-    config.email.enabled = true;
-    config.email.indexAdminDevEnabled = true;
-    let body: Record<string, unknown> | undefined;
-    const transport: EmailTransport = {
-      async requestJson(_url, init) {
-        body = JSON.parse(String(init.body)) as Record<string, unknown>;
-        return {
-          mode: 'head',
-          status: 'idle',
-          counts: { api_requests: 1 },
-          policy: {
-            counts_only: true,
-            raw_source_exposed: false,
-            source_text_returned: false,
-            resource_ids_exposed: false,
-            provider_cursor_exposed: false,
-            sync_ids_exposed: false,
-          },
-        };
-      },
-    };
-    await new EmailClient(config, transport).sourceIndexSync({
-      corpusId: X_BOOKMARKS_CORPUS_ID,
-      mode: 'head',
-    });
-    expect(body).toEqual({ corpus_id: X_BOOKMARKS_CORPUS_ID, mode: 'head' });
   });
 
   test('connector-store read authority scopes direct search to the principal account and X embedding provider', async () => {

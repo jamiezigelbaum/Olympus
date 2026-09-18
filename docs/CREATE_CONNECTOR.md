@@ -1,18 +1,9 @@
----
-name: create-connector
-version: 0.1.0
-status: draft
-audience: repo-development
-description: Add a new source connector to Olympus (Box, Notion, Linear, ...) without violating the frozen contracts. Walks an implementer through contract implementation, corpus definition, store mount, scheduler tasks, request budget, tests, and host enablement, using the shapes the repo has already stamped for Readwise, X, Drive, Dropbox, Reflect, and Roam.
-triggers:
-  - a new source/provider must be ingested into Olympus
-  - someone is about to write a new local index or a per-source answer path
-  - a connector exists but has no store, scheduler task, budget, or host enablement
-tools: []
-mutating: true
----
-
 # Create a Source Connector
+
+> Contributor guide. This was `skills/create-connector` until 2026-09-18, when
+> the source tree was reduced to the public product: it is a guide for people
+> working in this repository, not a skill an install loads. Templates live in
+> [`connector-templates/`](connector-templates/).
 
 > **DRAFT — pending CTO review.** This distills what the repo does today; it is
 > not yet ratified policy. Where the repo is ambiguous, this file says so in
@@ -33,18 +24,20 @@ mutating: true
 ## Who this is for
 
 An engineer or AI working **inside an Olympus checkout**, adding a new source.
-This is a repo-development skill, not an OpenClaw runtime skill; it is
-deliberately not registered in `skills/manifest.json` or `openclaw.plugin.json`
-(see open question 1).
+This is a contributor guide, not something an install loads: it lives in `docs/`
+and is not in `skills/manifest.json`, `skills/RESOLVER.md`,
+`openclaw.plugin.json`, or the published package. A user who installs Olympus
+never sees it; you need a checkout, which `CONTRIBUTING.md` explains how to
+get.
 
 ## Read first, in this order
 
-1. [`docs/CONTRACTS.md`](../../docs/CONTRACTS.md) — the frozen contracts and the
+1. [`docs/CONTRACTS.md`](CONTRACTS.md) — the frozen contracts and the
    freeze rule.
-2. [`src/core/contracts.ts`](../../src/core/contracts.ts) — the three interfaces.
+2. [`src/core/contracts.ts`](../src/core/contracts.ts) — the three interfaces.
    139 lines. Read all of them.
-3. [`AGENTS.md`](../../AGENTS.md), "Architecture (frozen)".
-4. [`test/architecture-guard.test.ts`](../../test/architecture-guard.test.ts) —
+3. [`AGENTS.md`](../AGENTS.md), "Architecture (frozen)".
+4. [`test/architecture-guard.test.ts`](../test/architecture-guard.test.ts) —
    the mechanical half. It is not advisory.
 
 ## The one rule
@@ -121,7 +114,7 @@ Also decide, and state the reasoning:
 ## Leg 1 — Implement Contract 1
 
 Create `src/workers/<source>/connector.ts` from
-[`templates/connector.ts.template`](templates/connector.ts.template).
+[`connector.ts.template`](connector-templates/connector.ts.template).
 
 ### Checklist
 
@@ -304,8 +297,8 @@ Do not write your own ingest loop.
 Create `src/workers/<source>/live-control.ts` (cadence and bounds) and
 `live-sync.ts` (the handler), then register a scheduler source in
 `src/workers/source-scheduler.ts`. Templates:
-[`live-control.ts.template`](templates/live-control.ts.template),
-[`live-sync.ts.template`](templates/live-sync.ts.template).
+[`live-control.ts.template`](connector-templates/live-control.ts.template),
+[`live-sync.ts.template`](connector-templates/live-sync.ts.template).
 
 **Two tasks, always.** `reconcileFullSnapshot` only acts when
 `cursor === undefined && maxItems === undefined && sawDonePage` — a cursored
@@ -402,7 +395,7 @@ function <source>SchedulerFailure(error: unknown): SourceSchedulerTaskFailure | 
 ## Leg 6 — Tests
 
 Mirror `test/readwise-connector.test.ts` and `test/readwise-store-scheduler.test.ts`.
-Skeleton: [`connector.test.ts.template`](templates/connector.test.ts.template).
+Skeleton: [`connector.test.ts.template`](connector-templates/connector.test.ts.template).
 
 Fixtures: `StaticCredentialBroker`
 (`src/workers/credential-broker/`) and `DeterministicSourceEmbeddingProvider`
@@ -528,11 +521,12 @@ Practical consequences:
 These are places the repo does not currently give one answer. This draft
 describes both options rather than picking.
 
-1. **Skill registration.** `create-connector` is a repo-development skill, not
-   an OpenClaw runtime skill, so it is deliberately absent from
+1. **Skill registration — resolved 2026-09-18.** It was a repo-development
+   skill (`skills/create-connector/`) deliberately absent from
    `skills/manifest.json`, `skills/RESOLVER.md`, and `openclaw.plugin.json`.
-   No test enforces either way. Confirm — or say where build-time skills should
-   live instead (a `docs/` playbook? a separate tree?).
+   The answer was "a `docs/` playbook": it is now this file, with its templates
+   in `docs/connector-templates/`, linked from `CONTRIBUTING.md`, and `skills/`
+   holds only what an install actually loads.
 2. **Budget duplication.** The day-counter now exists twice:
    `ReadwiseDailyRequestBudget` in `src/workers/readwise/connector.ts` and the
    provider-parameterized `GoogleDailyRequestBudget` in

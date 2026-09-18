@@ -14,6 +14,11 @@ everything, run it, break it, and tell us how it went.
 3. The maintainer reviews and merges. There is no direct push access —
    every change lands through a PR.
 
+Adding a new source connector? Start with
+[docs/CREATE_CONNECTOR.md](docs/CREATE_CONNECTOR.md): it walks the frozen
+contracts, corpus definition, store mount, scheduler tasks, request budget, and
+tests, with copyable templates in `docs/connector-templates/`.
+
 Bug reports and rough edges are as valuable as patches — open an issue
 with what you saw, what you expected, and (if it's the install/onboarding
 flow) what your agent said.

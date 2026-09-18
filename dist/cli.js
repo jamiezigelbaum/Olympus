@@ -2934,20 +2934,8 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
     config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
   }
-  if (env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV) {
-    config.email.localPacketsDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV, "OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV");
-  }
-  if (env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV) {
-    config.email.indexAdminDevEnabled = parseBoolean(env.OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV, "OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV");
-  }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
-  }
   if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
-  }
-  if (env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED) {
-    config.sourceIndex.answerDevEnabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
     config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync5(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
@@ -2966,7 +2954,7 @@ function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
 }
 function isSourceIndexReadSurfaceEnabled(config) {
-  return config.sourceIndex.enabled || config.sourceIndex.answerDevEnabled;
+  return config.sourceIndex.enabled;
 }
 function resolveModelProfile(config, profile) {
   return profile === undefined || profile === null || profile === "" ? config.argus.defaultProfile : parseModelProfile(String(profile));
@@ -3135,11 +3123,7 @@ function validateConfig(config) {
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
-  assertBoolean(config.email.localPacketsDevEnabled, "email.localPacketsDevEnabled");
-  assertBoolean(config.email.indexAdminDevEnabled, "email.indexAdminDevEnabled");
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, "email.requireLocalActiveModelForPrivateTools");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
-  assertBoolean(config.sourceIndex.answerDevEnabled, "sourceIndex.answerDevEnabled");
   config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
     const policyPath = config.sourceIndex.ingestionPolicies.dropboxPersonal.policyPath.trim();
@@ -3328,14 +3312,10 @@ var init_config = __esm(() => {
     email: {
       enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
-      requestTimeoutSeconds: 600,
-      localPacketsDevEnabled: false,
-      indexAdminDevEnabled: false,
-      requireLocalActiveModelForPrivateTools: false
+      requestTimeoutSeconds: 600
     },
     sourceIndex: {
       enabled: true,
-      answerDevEnabled: false,
       corpusRegistry: defaultSourceCorpusRegistryConfig(),
       ingestionPolicies: {}
     }
@@ -32436,162 +32416,9 @@ class EmailClient {
     this.config = config;
     this.transport = transport;
   }
-  async ping() {
-    if (!this.config.email.enabled) {
-      return {
-        reachable: false,
-        configured: false,
-        base_url: this.config.email.baseUrl,
-        raw_email_exposed: false,
-        detail: "Email lane is disabled. Run olympus setup, then olympus worker install, to bring up the private source worker."
-      };
-    }
-    const startedAt = performance.now();
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/health`, {
-      method: "GET"
-    });
-    const data = asRecord8(response);
-    const connector = typeof data.connector === "string" ? data.connector : undefined;
-    const configured = typeof data.configured === "boolean" ? data.configured : true;
-    const detail = typeof data.detail === "string" ? data.detail : undefined;
-    return {
-      reachable: true,
-      configured,
-      base_url: this.config.email.baseUrl,
-      latency_ms: Math.round(performance.now() - startedAt),
-      raw_email_exposed: false,
-      ...connector !== undefined ? { connector } : {},
-      ...detail !== undefined ? { detail } : {}
-    };
-  }
-  async answer(options) {
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Run olympus setup, then olympus worker install, to bring up the private source worker that owns OAuth and message fetch and reasons over an approved local/private model lane.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: options.question,
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    if (typeof data.answer !== "string" || data.answer.length === 0) {
-      throw new OperationError("email_error", "Email answer response did not include a non-empty answer.");
-    }
-    return {
-      answer: data.answer,
-      ...data.evidence !== undefined ? { evidence: data.evidence } : {},
-      ...data.audit !== undefined ? { audit: parseEmailAudit(data.audit) } : {},
-      policy: {
-        raw_email_exposed: false,
-        reasoning_lane: "delphi_local"
-      }
-    };
-  }
-  async search(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email source packets require an approved local/private session.", "OpenClaw native tools do not currently provide trustworthy active model/provider metadata to Olympus. Keep source packets disabled unless using the explicit local development proof gate.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before using local-only email source packets.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.question ? { question: options.question } : {},
-        ...options.query ? { query: options.query } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.includeSanitizedText !== undefined ? { include_sanitized_text: options.includeSanitizedText } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
-  async indexSync(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before syncing the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.newerThanDays !== undefined ? { newer_than_days: options.newerThanDays } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.query ? { query: options.query } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexEmbed(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("email_index_admin_required", "Email index embedding requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded local proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before embedding the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.modelId ? { model_id: options.modelId } : {},
-        ...options.force !== undefined ? { force: options.force } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return data;
-  }
-  async indexSearch(options) {
-    if (!this.config.email.localPacketsDevEnabled) {
-      throw new OperationError("email_local_session_required", "Email index source packets require an approved local/private session.", "Keep local email index packets disabled unless the active caller is an approved Olympus local model session.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Email lane is disabled.", "Configure a private email source worker before searching the local email index.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/index/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.from ? { from: options.from } : {},
-        ...options.to ? { to: options.to } : {},
-        ...options.label ? { label: options.label } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    return parseEmailSourcePacketResult(data);
-  }
   async sourceAnswer(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
-      throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
+      throw new OperationError("source_index_not_enabled", "Source index answers are disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using routed source answers.");
@@ -32632,7 +32459,7 @@ class EmailClient {
   }
   async sourceIndexStatus(options = {}) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
-      throw new OperationError("source_index_not_enabled", "Source index status is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
+      throw new OperationError("source_index_not_enabled", "Source index status is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index status.");
@@ -32672,41 +32499,6 @@ class EmailClient {
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexStatusResult(data);
   }
-  async sourceIndexSync(options) {
-    if (!this.config.email.indexAdminDevEnabled) {
-      throw new OperationError("source_index_admin_required", "Source-index sync requires the explicit developer/admin proof gate.", "Set OLYMPUS_ENABLE_EMAIL_INDEX_ADMIN_FOR_DEV=true only for a bounded source-index proof run.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index sync.");
-    }
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        corpus_id: corpusId,
-        ...options.mode ? { mode: options.mode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.folderPath ? { folder_path: options.folderPath } : {},
-        ...options.folderId ? { folder_id: options.folderId } : {},
-        ...options.recursive !== undefined ? { recursive: options.recursive } : {},
-        ...options.maxEntries !== undefined ? { max_entries: options.maxEntries } : {},
-        ...options.maxPages !== undefined ? { max_pages: options.maxPages } : {},
-        ...options.chatScope ? { chat_scope: options.chatScope } : {},
-        ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
-        ...options.maxMessages !== undefined ? { max_messages: options.maxMessages } : {},
-        ...options.providerCursor ? { provider_cursor: options.providerCursor } : {},
-        ...options.syncDirection ? { sync_direction: options.syncDirection } : {},
-        ...options.coverageStart ? { coverage_start: options.coverageStart } : {},
-        ...options.coverageEnd ? { coverage_end: options.coverageEnd } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
   async xBookmarksContentRecovery(options = {}) {
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before recovering X bookmark content.");
@@ -32725,7 +32517,7 @@ class EmailClient {
   }
   async sourceIndexSearch(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
-      throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled for the product read surface, or sourceIndex.answerDevEnabled for a legacy proof runtime.");
+      throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
@@ -32766,189 +32558,6 @@ class EmailClient {
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
-  }
-  async sourceExport(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source export requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source export.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        destination_root: options.destinationRoot,
-        items: options.items.map((item) => ({
-          path: item.path,
-          ...item.destSubfolder ? { dest_subfolder: item.destSubfolder } : {}
-        })),
-        ...options.account ? { account: options.account } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
-  async sourceTranscribe(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source transcription requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source transcription.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/transcribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        approved_scope_key: options.approvedScopeKey,
-        ...options.mode ? { mode: options.mode } : {},
-        ...options.items ? { items: options.items } : {},
-        ...options.includePathPrefixes ? { include_path_prefixes: options.includePathPrefixes } : {},
-        ...options.limit !== undefined ? { limit: options.limit } : {},
-        ...options.account ? { account: options.account } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
-  async sourceMediaIngest(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "On-demand media ingestion requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using on-demand media ingestion.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/on-demand-media`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        approved_scope_key: options.approvedScopeKey,
-        ...options.items ? { items: options.items } : {},
-        ...options.includePathPrefixes ? { include_path_prefixes: options.includePathPrefixes } : {},
-        ...options.limit !== undefined ? { limit: options.limit } : {},
-        ...options.maxBytesPerFile !== undefined ? { max_bytes_per_file: options.maxBytesPerFile } : {},
-        ...options.account ? { account: options.account } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return data;
-  }
-  async sourceIndexPromotionCandidates(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion candidates require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion candidates.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-candidates`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.corpusId ? { corpus_id: options.corpusId } : {},
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionCandidatesResult(data);
-  }
-  async sourceIndexPromotionProposal(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposals require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposals.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        approved_scope_key: options.approvedScopeKey,
-        classification_ids: options.classificationIds,
-        canonical_type: options.canonicalType,
-        target_surface: options.targetSurface,
-        reason_code: options.reasonCode,
-        ...options.proposedBy ? { proposed_by: options.proposedBy } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalResult(data);
-  }
-  async sourceIndexPromotionProposals(options = {}) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal listing requires the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal listing.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/list`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...options.account ? { account: options.account } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.status ? { status: options.status } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalsResult(data);
-  }
-  async sourceIndexPromotionProposalDetail(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion proposal details require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion proposal details.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-proposals/get`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionProposalDetailResult(data);
-  }
-  async sourceIndexPromotionDecision(options) {
-    if (!this.config.sourceIndex.answerDevEnabled) {
-      throw new OperationError("source_index_answer_dev_required", "Source-index promotion decisions require the explicit source-index proof gate.", "Enable sourceIndex.answerDevEnabled only for bounded calling-assistant-safe source-index proof tools.");
-    }
-    if (!this.config.email.enabled) {
-      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index promotion decisions.");
-    }
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/dropbox/content/promotion-decisions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: options.proposalId,
-        decision: options.decision,
-        ...options.decidedBy ? { decided_by: options.decidedBy } : {},
-        ...options.reasonCode ? { reason_code: options.reasonCode } : {}
-      })
-    });
-    const data = asRecord8(response);
-    assertNoRawEmailFields(data);
-    assertNoSourceIndexOperationalLeakFields(data);
-    return parseSourceIndexPromotionDecisionResult(data);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -33192,36 +32801,6 @@ function asRecord8(value) {
   }
   return value;
 }
-function parseEmailAudit(value) {
-  const audit = asRecord8(value);
-  const parsed = {
-    request_id: requiredString4(audit.request_id, "audit.request_id"),
-    queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-    metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-    evidence_count: requiredNumber(audit.evidence_count, "audit.evidence_count"),
-    reasoner_ms: requiredNumber(audit.reasoner_ms, "audit.reasoner_ms"),
-    fallback_used: requiredBoolean(audit.fallback_used, "audit.fallback_used")
-  };
-  if (audit.planner_used !== undefined) {
-    parsed.planner_used = requiredBoolean(audit.planner_used, "audit.planner_used");
-  }
-  if (audit.planner_fallback_used !== undefined) {
-    parsed.planner_fallback_used = requiredBoolean(audit.planner_fallback_used, "audit.planner_fallback_used");
-  }
-  if (audit.planned_search_count !== undefined) {
-    parsed.planned_search_count = requiredNumber(audit.planned_search_count, "audit.planned_search_count");
-  }
-  if (audit.planner_failure_reason !== undefined) {
-    parsed.planner_failure_reason = requiredPlannerFailureReason(audit.planner_failure_reason);
-  }
-  if (audit.retrieval_searches_attempted !== undefined) {
-    parsed.retrieval_searches_attempted = requiredNumber(audit.retrieval_searches_attempted, "audit.retrieval_searches_attempted");
-  }
-  if (audit.retrieval_search_summaries !== undefined) {
-    parsed.retrieval_search_summaries = parseRetrievalSearchSummaries(audit.retrieval_search_summaries);
-  }
-  return parsed;
-}
 function requiredString4(value, name) {
   if (typeof value !== "string" || value.length === 0) {
     throw new OperationError("email_error", `${name} must be a non-empty string.`);
@@ -33240,121 +32819,6 @@ function requiredNonNegativeNumber(value, name) {
     throw new OperationError("email_error", `${name} must be non-negative.`);
   }
   return number;
-}
-function requiredBoolean(value, name) {
-  if (typeof value !== "boolean") {
-    throw new OperationError("email_error", `${name} must be a boolean.`);
-  }
-  return value;
-}
-function requiredPlannerFailureReason(value) {
-  if (value === "timeout" || value === "http_error" || value === "invalid_json" || value === "invalid_plan" || value === "empty_plan" || value === "error") {
-    return value;
-  }
-  throw new OperationError("email_error", "audit.planner_failure_reason must be a known safe planner failure reason.");
-}
-function parseRetrievalSearchSummaries(value) {
-  if (!Array.isArray(value)) {
-    throw new OperationError("email_error", "audit.retrieval_search_summaries must be an array.");
-  }
-  return value.map((item, index) => {
-    const summary = asRecord8(item);
-    const source = summary.source;
-    if (source !== "baseline" && source !== "planner") {
-      throw new OperationError("email_error", `audit.retrieval_search_summaries.${index}.source must be safe.`);
-    }
-    return {
-      source,
-      index: requiredNumber(summary.index, `audit.retrieval_search_summaries.${index}.index`),
-      hits: requiredNumber(summary.hits, `audit.retrieval_search_summaries.${index}.hits`),
-      new_candidates_after_dedupe: requiredNumber(summary.new_candidates_after_dedupe, `audit.retrieval_search_summaries.${index}.new_candidates_after_dedupe`),
-      capped: requiredBoolean(summary.capped, `audit.retrieval_search_summaries.${index}.capped`)
-    };
-  });
-}
-function parseEmailSourcePacketResult(value) {
-  const packet = asRecord8(value.packet);
-  const audit = asRecord8(value.audit);
-  const policy = asRecord8(value.policy);
-  if (packet.kind !== "email_source_packet") {
-    throw new OperationError("email_error", "email_search response packet.kind must be email_source_packet.");
-  }
-  if (packet.source !== "gmail") {
-    throw new OperationError("email_error", "email_search response packet.source must be gmail.");
-  }
-  if (!Array.isArray(packet.items)) {
-    throw new OperationError("email_error", "email_search response packet.items must be an array.");
-  }
-  if (policy.raw_email_exposed !== false || policy.local_only !== true || policy.requires_local_session !== true) {
-    throw new OperationError("email_error", "email_search response policy must be local-only and raw-email-safe.");
-  }
-  if (audit.local_packet !== true || audit.raw_email_exposed !== false) {
-    throw new OperationError("email_error", "email_search response audit must be local packet and raw-email-safe.");
-  }
-  return {
-    packet: {
-      kind: "email_source_packet",
-      packet_id: requiredString4(packet.packet_id, "packet.packet_id"),
-      source: "gmail",
-      ...typeof packet.account === "string" ? { account: packet.account } : {},
-      items: packet.items.map(parseEmailSourcePacketItem)
-    },
-    audit: {
-      request_id: requiredString4(audit.request_id, "audit.request_id"),
-      queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
-      metadata_hits: requiredNumber(audit.metadata_hits, "audit.metadata_hits"),
-      items_returned: requiredNumber(audit.items_returned, "audit.items_returned"),
-      sanitized_reads_attempted: requiredNumber(audit.sanitized_reads_attempted, "audit.sanitized_reads_attempted"),
-      sanitized_reads_succeeded: requiredNumber(audit.sanitized_reads_succeeded, "audit.sanitized_reads_succeeded"),
-      truncated: requiredBoolean(audit.truncated, "audit.truncated"),
-      local_packet: true,
-      raw_email_exposed: false,
-      ...audit.retrieval_source === "local_index" ? { retrieval_source: "local_index" } : {},
-      ...audit.retrieval_mode === "keyword" || audit.retrieval_mode === "hybrid" ? { retrieval_mode: audit.retrieval_mode } : {},
-      ...audit.requested_retrieval_mode === "keyword" || audit.requested_retrieval_mode === "hybrid" ? { requested_retrieval_mode: audit.requested_retrieval_mode } : {},
-      ...typeof audit.keyword_candidates === "number" ? { keyword_candidates: audit.keyword_candidates } : {},
-      ...typeof audit.vector_candidates === "number" ? { vector_candidates: audit.vector_candidates } : {},
-      ...typeof audit.fused_candidates === "number" ? { fused_candidates: audit.fused_candidates } : {},
-      ...typeof audit.semantic_skipped_reason === "string" ? { semantic_skipped_reason: audit.semantic_skipped_reason } : {},
-      ...typeof audit.embedding_model_id === "string" ? { embedding_model_id: audit.embedding_model_id } : {},
-      ...audit.vector_backend === "exact_scan" ? { vector_backend: "exact_scan" } : {},
-      ...typeof audit.latency_ms === "number" ? { latency_ms: audit.latency_ms } : {},
-      ...typeof audit.threads_returned === "number" ? { threads_returned: audit.threads_returned } : {}
-    },
-    policy: {
-      raw_email_exposed: false,
-      local_only: true,
-      requires_local_session: true
-    }
-  };
-}
-function parseEmailSourcePacketItem(value) {
-  const item = asRecord8(value);
-  const provenance = asRecord8(item.provenance);
-  if (provenance.source !== "gmail" && provenance.provider !== "gmail") {
-    throw new OperationError("email_error", "packet item provenance provider/source must be gmail.");
-  }
-  return {
-    ...typeof item.item_id === "string" ? { item_id: item.item_id } : {},
-    ...typeof item.thread_id === "string" ? { thread_id: item.thread_id } : {},
-    ...typeof item.subject === "string" ? { subject: item.subject } : {},
-    ...typeof item.from === "string" ? { from: item.from } : {},
-    ...typeof item.to === "string" ? { to: item.to } : {},
-    ...typeof item.date === "string" ? { date: item.date } : {},
-    ...typeof item.sanitized_text === "string" ? { sanitized_text: item.sanitized_text } : {},
-    provenance: {
-      ...provenance.source === "gmail" ? { source: "gmail" } : {},
-      ...provenance.provider === "gmail" ? { provider: "gmail" } : {},
-      ...typeof provenance.account === "string" ? { account: provenance.account } : {},
-      ...typeof provenance.message_id === "string" ? { message_id: provenance.message_id } : {},
-      ...typeof provenance.thread_id === "string" ? { thread_id: provenance.thread_id } : {},
-      ...typeof provenance.local_message_id === "string" ? { local_message_id: provenance.local_message_id } : {},
-      ...Array.isArray(provenance.chunk_ids) ? { chunk_ids: provenance.chunk_ids.filter((id) => typeof id === "string") } : {},
-      ...typeof provenance.sync_run_id === "string" ? { sync_run_id: provenance.sync_run_id } : {},
-      ...typeof provenance.checkpoint_id === "string" ? { checkpoint_id: provenance.checkpoint_id } : {},
-      ...typeof provenance.source_version === "string" ? { source_version: provenance.source_version } : {}
-    }
-  };
 }
 function parseSourceIndexAnswerResult(value) {
   const answer = requiredString4(value.answer, "answer");
@@ -33654,212 +33118,6 @@ function parseSourceWatchResult(value, kind) {
     policy: safePolicy
   };
 }
-function parseSourceIndexPromotionCandidatesResult(value) {
-  if (value.kind !== "dropbox_content_promotion_candidates") {
-    throw new OperationError("email_error", "source index promotion candidates result must have kind=dropbox_content_promotion_candidates.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion candidates returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.candidates)) {
-    throw new OperationError("email_error", "source index promotion candidates must include a candidates array.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.promotion_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion candidates policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_candidates",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString4(value.account, "account"),
-    scope_key_hash: requiredString4(value.scope_key_hash, "scope_key_hash"),
-    candidates: value.candidates,
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      promotion_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal") {
-    throw new OperationError("email_error", "source index promotion proposal result must have kind=dropbox_content_promotion_proposal.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal returned an unsupported corpus.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.proposal_only !== true) {
-    throw new OperationError("email_error", "source index promotion proposal policy must describe a local proposal-only write.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    account: requiredString4(value.account, "account"),
-    scope_key_hash: requiredString4(value.scope_key_hash, "scope_key_hash"),
-    proposal_id: requiredString4(value.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString4(value.proposal_revision_id, "proposal_revision_id"),
-    status: "proposed",
-    canonical_type: requiredString4(value.canonical_type, "canonical_type"),
-    target_surface: requiredString4(value.target_surface, "target_surface"),
-    reason_code: requiredString4(value.reason_code, "reason_code"),
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    trust_domain: "secure_local",
-    trust_tiers: Array.isArray(value.trust_tiers) ? value.trust_tiers.map(String) : [],
-    policy_decisions: Array.isArray(value.policy_decisions) ? value.policy_decisions.map(String) : [],
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      proposal_only: true
-    }
-  };
-}
-function parseSourceIndexPromotionProposalsResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposals") {
-    throw new OperationError("email_error", "source index promotion proposals result must have kind=dropbox_content_promotion_proposals.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposals returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.proposals)) {
-    throw new OperationError("email_error", "source index promotion proposals must include a proposals array.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposals policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposals",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposals: value.proposals.map((proposal) => parseSourceIndexPromotionProposalSummary(asRecord8(proposal))),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalDetailResult(value) {
-  if (value.kind !== "dropbox_content_promotion_proposal_detail") {
-    throw new OperationError("email_error", "source index promotion proposal detail result must have kind=dropbox_content_promotion_proposal_detail.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion proposal detail returned an unsupported corpus.");
-  }
-  if (!Array.isArray(value.evidence) || !Array.isArray(value.decisions)) {
-    throw new OperationError("email_error", "source index promotion proposal detail must include evidence and decisions arrays.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal detail policy must describe read-only secure-local review metadata.");
-  }
-  return {
-    kind: "dropbox_content_promotion_proposal_detail",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal: parseSourceIndexPromotionProposalSummary(asRecord8(value.proposal)),
-    evidence: value.evidence.map((item) => {
-      const record = asRecord8(item);
-      return {
-        classification_id: requiredString4(record.classification_id, "classification_id"),
-        evidence_ordinal: requiredNumber(record.evidence_ordinal, "evidence_ordinal"),
-        target_kind: requiredString4(record.target_kind, "target_kind"),
-        source_content_hash: requiredString4(record.source_content_hash, "source_content_hash"),
-        provider_file_id_hash: requiredString4(record.provider_file_id_hash, "provider_file_id_hash"),
-        ...record.revision_hash !== undefined ? { revision_hash: requiredString4(record.revision_hash, "revision_hash") } : {},
-        ...record.content_hash !== undefined ? { content_hash: requiredString4(record.content_hash, "content_hash") } : {},
-        ...record.structural_ref_hash !== undefined ? { structural_ref_hash: requiredString4(record.structural_ref_hash, "structural_ref_hash") } : {},
-        trust_tier: requiredString4(record.trust_tier, "trust_tier"),
-        trust_domain: "secure_local",
-        policy_decision: requiredString4(record.policy_decision, "policy_decision"),
-        review_status_at_proposal: requiredString4(record.review_status_at_proposal, "review_status_at_proposal"),
-        finding_count: requiredNumber(record.finding_count, "finding_count")
-      };
-    }),
-    decisions: value.decisions.map((item) => {
-      const record = asRecord8(item);
-      if (record.resource_write_performed !== false || record.execution_performed !== false) {
-        throw new OperationError("email_error", "source index promotion decisions must not report external writes or executions.");
-      }
-      return {
-        decision_id: requiredString4(record.decision_id, "decision_id"),
-        decision: requiredString4(record.decision, "decision"),
-        ...record.reason_code !== undefined ? { reason_code: requiredString4(record.reason_code, "reason_code") } : {},
-        decided_at: requiredString4(record.decided_at, "decided_at"),
-        resource_write_performed: false,
-        execution_performed: false
-      };
-    }),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false
-    }
-  };
-}
-function parseSourceIndexPromotionProposalSummary(record) {
-  if (record.resource_write_performed !== false) {
-    throw new OperationError("email_error", "source index promotion proposal summaries must not report external resource writes.");
-  }
-  return {
-    proposal_id: requiredString4(record.proposal_id, "proposal_id"),
-    proposal_revision_id: requiredString4(record.proposal_revision_id, "proposal_revision_id"),
-    account: requiredString4(record.account, "account"),
-    scope_key_hash: requiredString4(record.scope_key_hash, "scope_key_hash"),
-    canonical_type: requiredString4(record.canonical_type, "canonical_type"),
-    target_surface: requiredString4(record.target_surface, "target_surface"),
-    reason_code: requiredString4(record.reason_code, "reason_code"),
-    status: requiredString4(record.status, "status"),
-    evidence_count: requiredNumber(record.evidence_count, "evidence_count"),
-    decision_count: requiredNumber(record.decision_count, "decision_count"),
-    resource_write_performed: false,
-    created_at: requiredString4(record.created_at, "created_at"),
-    updated_at: requiredString4(record.updated_at, "updated_at")
-  };
-}
-function parseSourceIndexPromotionDecisionResult(value) {
-  if (value.kind !== "dropbox_content_promotion_decision") {
-    throw new OperationError("email_error", "source index promotion decision result must have kind=dropbox_content_promotion_decision.");
-  }
-  if (value.corpus_id !== "secure_local.dropbox.files" || value.provider !== "dropbox") {
-    throw new OperationError("email_error", "source index promotion decision returned an unsupported corpus.");
-  }
-  const policy = asRecord8(value.policy);
-  if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.local_only !== true || policy.trust_domain !== "secure_local" || policy.resource_write_performed !== false || policy.execution_performed !== false) {
-    throw new OperationError("email_error", "source index promotion decision policy must describe a local review-ledger write only.");
-  }
-  const decision = requiredString4(value.decision, "decision");
-  return {
-    kind: "dropbox_content_promotion_decision",
-    corpus_id: "secure_local.dropbox.files",
-    provider: "dropbox",
-    proposal_id: requiredString4(value.proposal_id, "proposal_id"),
-    decision_id: requiredString4(value.decision_id, "decision_id"),
-    decision,
-    status: decision,
-    evidence_count: requiredNumber(value.evidence_count, "evidence_count"),
-    policy: {
-      raw_source_exposed: false,
-      source_text_returned: false,
-      local_only: true,
-      trust_domain: "secure_local",
-      resource_write_performed: false,
-      execution_performed: false
-    }
-  };
-}
 function optionalRetrievalMode(value) {
   return value === "keyword" || value === "hybrid" ? value : undefined;
 }
@@ -34052,9 +33310,6 @@ function shouldExposeOperation(operation, context) {
   }
   if (operation.requiresOpenClawSessionRoute && context.surface !== "native") {
     return false;
-  }
-  if (operation.nativeExposure === "sourceIndexAnswerDevOnly") {
-    return context.config.sourceIndex.answerDevEnabled;
   }
   if (operation.nativeExposure === "sourceIndexEnabledOnly") {
     return isSourceIndexReadSurfaceEnabled(context.config);
@@ -40822,19 +40077,9 @@ function optionalSourceIndexStatusCorpusId(value, config) {
     return;
   return publicSourceCorpusRegistry(config).require(corpusId, "status");
 }
-function asSourceIndexSyncCorpusId(value, config) {
-  const corpusId = asString(value, "corpus_id");
-  return sourceCorpusRegistry(config).require(corpusId, "sync");
-}
 function asSourceIndexSearchCorpusId(value, config) {
   const corpusId = asString(value, "corpus_id");
   return publicSourceCorpusRegistry(config).require(corpusId, "search");
-}
-function optionalSourceIndexPromotionCandidateCorpusId(value, config) {
-  const corpusId = optionalString9(value);
-  if (corpusId === undefined)
-    return;
-  return sourceCorpusRegistry(config).require(corpusId, "promotion_candidates");
 }
 function optionalSourceWatchMode(value) {
   const mode = optionalString9(value);
@@ -40847,137 +40092,6 @@ function requireSourceWatchRoute(ctx) {
     throw new OperationError("source_index_policy_violation", "Durable watch management requires an authenticated OpenClaw owner and delivery route.", "Create and manage watches from an owner-authenticated OpenClaw channel session.");
   }
   return ctx.sourceWatchRoute;
-}
-function asPromotionCanonicalType(value) {
-  const canonicalType = asString(value, "canonical_type");
-  if (includesString(SOURCE_INDEX_PROMOTION_CANONICAL_TYPES, canonicalType))
-    return canonicalType;
-  throw new OperationError("invalid_params", "canonical_type is not supported.");
-}
-function asPromotionTargetSurface(value) {
-  const targetSurface = asString(value, "target_surface");
-  if (includesString(SOURCE_INDEX_PROMOTION_TARGET_SURFACES, targetSurface))
-    return targetSurface;
-  throw new OperationError("invalid_params", "target_surface is not supported.");
-}
-function asPromotionReasonCode(value) {
-  const reasonCode = asString(value, "reason_code");
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionReasonCode(value) {
-  const reasonCode = optionalString9(value);
-  if (reasonCode === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_REASON_CODES, reasonCode))
-    return reasonCode;
-  throw new OperationError("invalid_params", "reason_code is not supported.");
-}
-function optionalPromotionProposalStatus(value) {
-  const status = optionalString9(value);
-  if (status === undefined)
-    return;
-  if (includesString(SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES, status))
-    return status;
-  throw new OperationError("invalid_params", "status is not supported.");
-}
-function asPromotionDecision(value) {
-  const decision = asString(value, "decision");
-  if (includesString(SOURCE_INDEX_PROMOTION_DECISIONS, decision))
-    return decision;
-  throw new OperationError("invalid_params", "decision is not supported.");
-}
-function includesString(values, value) {
-  return values.includes(value);
-}
-function optionalSourceTranscribeMode(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "enqueue" || value === "status")
-    return value;
-  throw new OperationError("invalid_params", "mode must be enqueue or status.");
-}
-function asSourceTranscribeItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString9(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox audio file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox audio file path.");
-  }
-  return items;
-}
-function asSourceMediaIngestItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => {
-    if (typeof entry === "string" && entry.trim())
-      return entry.trim();
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const path = optionalString9(entry.path);
-      if (path)
-        return path;
-    }
-    throw new OperationError("invalid_params", `items.${index} must be a Dropbox image file path string.`);
-  });
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one Dropbox image file path.");
-  }
-  return items;
-}
-function asSourceExportItems(value) {
-  const entries = sourceExportItemEntries(value);
-  const items = entries.map((entry, index) => sourceExportItemFromEntry(entry, index));
-  if (items.length === 0) {
-    throw new OperationError("invalid_params", "items must include at least one export item.");
-  }
-  return items;
-}
-function sourceExportItemEntries(value) {
-  if (Array.isArray(value))
-    return value;
-  if (typeof value === "string" && value.trim()) {
-    const text = value.trim();
-    if (text.startsWith("[")) {
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        throw new OperationError("invalid_params", "items must be valid JSON when passed as a JSON array string.");
-      }
-      if (!Array.isArray(parsed)) {
-        throw new OperationError("invalid_params", "items must be a JSON array of export items.");
-      }
-      return parsed;
-    }
-    return text.split(",").map((item) => item.trim()).filter(Boolean);
-  }
-  throw new OperationError("invalid_params", "items must be a JSON array of export items or a comma-separated list of source paths.");
-}
-function sourceExportItemFromEntry(entry, index) {
-  if (typeof entry === "string" && entry.trim()) {
-    return { path: entry.trim() };
-  }
-  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-    const record = entry;
-    const path = optionalString9(record.path);
-    if (!path) {
-      throw new OperationError("invalid_params", `items.${index}.path must be a non-empty string.`);
-    }
-    const destSubfolder = optionalString9(record.dest_subfolder);
-    return {
-      path,
-      ...destSubfolder !== undefined ? { destSubfolder } : {}
-    };
-  }
-  throw new OperationError("invalid_params", `items.${index} must be a source path string or an object with a path.`);
 }
 function findOperationByCliName(cliName) {
   return operations.find((operation) => operation.cliHints.name === cliName);
@@ -41028,14 +40142,10 @@ function sourceCorpusCapabilityForParameter(operationName, paramName) {
     return "answer";
   if (operationName === "source_index_status")
     return "status";
-  if (operationName === "source_index_sync")
-    return "sync";
   if (operationName === "source_index_search")
     return "search";
   if (operationName === "source_watch_create")
     return "search";
-  if (operationName === "source_index_promotion_candidates")
-    return "promotion_candidates";
   return;
 }
 function sourceCorpusRegistry(config) {
@@ -41231,30 +40341,6 @@ function optionalAnalystModel(value, name, analystProvider) {
   }
   return normalized;
 }
-function optionalTelegramTrustDomain(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "internal" || value === "secure_local")
-    return value;
-  throw new OperationError("invalid_params", "trust_domain must be internal or secure_local.");
-}
-function optionalTelegramSyncDirection(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "forward" || value === "backfill")
-    return value;
-  throw new OperationError("invalid_params", "sync_direction must be forward or backfill.");
-}
-function optionalXBookmarksSyncMode(value, corpusId) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (corpusId !== "internal.x.bookmarks") {
-    throw new OperationError("invalid_params", "mode is supported only for internal.x.bookmarks source-index sync.");
-  }
-  if (value === "head" || value === "reconcile" || value === "folder_facet_refresh" || value === "window_diagnostic" || value === "preservation-reattest")
-    return value;
-  throw new OperationError("invalid_params", "mode must be head, reconcile, window_diagnostic, folder_facet_refresh, or preservation-reattest for X bookmarks source-index sync.");
-}
 function optionalAttachmentType(value) {
   if (value === undefined || value === null || value === "")
     return;
@@ -41262,7 +40348,7 @@ function optionalAttachmentType(value) {
     return value;
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
-var SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS, SOURCE_INDEX_PROMOTION_CANONICAL_TYPES, SOURCE_INDEX_PROMOTION_TARGET_SURFACES, SOURCE_INDEX_PROMOTION_REASON_CODES, SOURCE_INDEX_PROMOTION_DECISIONS, SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES, ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, operations;
 var init_operations = __esm(() => {
   init_doctor();
   init_config();
@@ -41272,12 +40358,6 @@ var init_operations = __esm(() => {
   init_source_corpus_registry();
   init_venice_models();
   init_public_surface();
-  SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS = ["secure_local.dropbox.files"];
-  SOURCE_INDEX_PROMOTION_CANONICAL_TYPES = ["project", "project_work_item", "area", "person", "organization", "resource", "topic", "fact", "secure_companion", "resource_wiki_page"];
-  SOURCE_INDEX_PROMOTION_TARGET_SURFACES = ["review_queue", "source_index", "secure_companion", "obsidian", "resource_wiki"];
-  SOURCE_INDEX_PROMOTION_REASON_CODES = ["manual_review", "high_signal", "recurring_reference", "project_material", "decision_evidence", "resource_candidate"];
-  SOURCE_INDEX_PROMOTION_DECISIONS = ["approved", "rejected", "deferred", "needs_changes"];
-  SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES = ["proposed", ...SOURCE_INDEX_PROMOTION_DECISIONS];
   ARGUS_PROFILE_ENUM = [
     "default_chat",
     "source_answer",
@@ -41408,47 +40488,6 @@ var init_operations = __esm(() => {
           ...maxTokens !== undefined ? { maxTokens } : {}
         };
         return ctx.delphi.complete(completeOptions);
-      }
-    },
-    {
-      name: "email_ping",
-      description: "Check whether the private email source worker is configured and reachable.",
-      params: {},
-      mutating: false,
-      cliHints: { name: "email ping" },
-      handler: async (ctx) => ctx.email.ping()
-    },
-    {
-      name: "email_answer",
-      description: "Ask the configured local/private model lane a bounded question about email without returning raw messages.",
-      params: {
-        question: { type: "string", required: true, description: "Bounded question to answer over email inside the private lane." },
-        account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-        after: { type: "string", description: "Optional lower date/time bound." },
-        before: { type: "string", description: "Optional upper date/time bound." },
-        from: { type: "string", description: "Optional sender constraint." },
-        to: { type: "string", description: "Optional recipient constraint." },
-        max_messages: { type: "number", description: "Optional maximum messages the private lane may inspect." }
-      },
-      mutating: false,
-      cliHints: { name: "email answer", positional: ["question"], stdin: "question" },
-      handler: async (ctx, params) => {
-        const question = asString(params.question, "question");
-        const account = optionalString9(params.account);
-        const after = optionalString9(params.after);
-        const before = optionalString9(params.before);
-        const from = optionalString9(params.from);
-        const to = optionalString9(params.to);
-        const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-        return ctx.email.answer({
-          question,
-          ...account !== undefined ? { account } : {},
-          ...after !== undefined ? { after } : {},
-          ...before !== undefined ? { before } : {},
-          ...from !== undefined ? { from } : {},
-          ...to !== undefined ? { to } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {}
-        });
       }
     },
     {
@@ -41594,72 +40633,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [{
-      name: "source_index_sync",
-      description: [
-        "Run a deliberate bounded source-index sync through the private source worker.",
-        "Dropbox sync requires an approved folder/root scope; Telegram sync requires an approved chat scope.",
-        "X bookmarks supports a lightweight head check, complete reconciliation, a bounded content-free window diagnostic, folder-facet representation refresh, or read-only preservation re-attestation through mode.",
-        "This does not browse raw files or perform provider writes."
-      ].join(" "),
-      params: {
-        corpus_id: { type: "string", required: true, description: "Source-index corpus to sync." },
-        mode: { type: "string", enum: ["head", "reconcile", "window_diagnostic", "folder_facet_refresh", "preservation-reattest"], description: "X bookmarks only: run the bounded incremental head check, complete daily reconciliation, the four-probe content-free window diagnostic, folder-facet representation refresh, or post-reconcile read-only preservation re-attestation." },
-        account: { type: "string", description: "Optional source account identity. For Dropbox, omit unless deliberately narrowing to personal; do not pass credential handles such as dropbox.personal or aliases such as dropbox.primary." },
-        approved_scope_key: { type: "string", description: "Dropbox approved folder/root scope key, for example dropbox.personal:/Approved." },
-        folder_path: { type: "string", description: "Approved Dropbox folder path for metadata sync." },
-        folder_id: { type: "string", description: "Approved Dropbox folder id for metadata sync." },
-        recursive: { type: "boolean", description: "Whether Dropbox metadata sync should recurse. Defaults true in the private worker." },
-        max_entries: { type: "number", description: "Maximum Dropbox metadata entries to observe; capped by the private worker." },
-        max_pages: { type: "number", description: "Maximum Dropbox metadata pages to read; capped by the private worker." },
-        chat_scope: { type: "string", description: "Telegram approved chat scope for bounded read sync." },
-        trust_domain: { type: "string", enum: ["internal", "secure_local"], description: "Optional Telegram chat classification for the sync batch. Ordinary approved chats default internal; protected chats must use secure_local." },
-        max_messages: { type: "number", description: "Maximum Telegram messages to read; capped by the private worker." },
-        provider_cursor: { type: "string", description: "Opaque provider cursor for continuation. The worker stores/returns only safe cursor hashes." },
-        sync_direction: { type: "string", enum: ["forward", "backfill"], description: "Telegram sync direction. Defaults to forward freshness; use backfill only for explicit historical drain work." },
-        coverage_start: { type: "string", description: "Optional Telegram coverage start timestamp for currentness tracking." },
-        coverage_end: { type: "string", description: "Optional Telegram coverage end timestamp for currentness tracking." }
-      },
-      mutating: true,
-      nativeExposure: "emailIndexAdminDevOnly",
-      cliHints: { name: "source index sync" },
-      handler: async (ctx, params) => {
-        const corpusId = asSourceIndexSyncCorpusId(params.corpus_id, ctx.config);
-        const mode = optionalXBookmarksSyncMode(params.mode, corpusId);
-        const account = optionalSourceAccount(params.account, corpusId);
-        const approvedScopeKey = optionalString9(params.approved_scope_key);
-        const folderPath = optionalString9(params.folder_path);
-        const folderId = optionalString9(params.folder_id);
-        const recursive = optionalBoolean2(params.recursive, "recursive");
-        const maxEntries = optionalNumber4(params.max_entries, "max_entries");
-        const maxPages = optionalNumber4(params.max_pages, "max_pages");
-        const chatScope = optionalString9(params.chat_scope);
-        const trustDomain = optionalTelegramTrustDomain(params.trust_domain);
-        const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-        const providerCursor = optionalString9(params.provider_cursor);
-        const syncDirection = optionalTelegramSyncDirection(params.sync_direction);
-        const coverageStart = optionalString9(params.coverage_start);
-        const coverageEnd = optionalString9(params.coverage_end);
-        return ctx.email.sourceIndexSync({
-          corpusId,
-          ...mode !== undefined ? { mode } : {},
-          ...account !== undefined ? { account } : {},
-          ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-          ...folderPath !== undefined ? { folderPath } : {},
-          ...folderId !== undefined ? { folderId } : {},
-          ...recursive !== undefined ? { recursive } : {},
-          ...maxEntries !== undefined ? { maxEntries } : {},
-          ...maxPages !== undefined ? { maxPages } : {},
-          ...chatScope !== undefined ? { chatScope } : {},
-          ...trustDomain !== undefined ? { trustDomain } : {},
-          ...maxMessages !== undefined ? { maxMessages } : {},
-          ...providerCursor !== undefined ? { providerCursor } : {},
-          ...syncDirection !== undefined ? { syncDirection } : {},
-          ...coverageStart !== undefined ? { coverageStart } : {},
-          ...coverageEnd !== undefined ? { coverageEnd } : {}
-        });
-      }
-    }],
     {
       name: "source_index_search",
       description: [
@@ -41720,250 +40693,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        name: "source_export",
-        description: [
-          "Materialize already-cited Dropbox source items into a user-owned Dropbox destination folder via a verified server-side provider copy.",
-          "Pass locators (paths) exactly as returned in source citations plus a destination root; the private worker verifies each path against the local Dropbox index and copies inside the user's own Dropbox, so file bytes never leave Dropbox and content never enters any model context.",
-          "Destinations are restricted to the approved export allowlist, S5-classified items are always skipped, existing destination files are skipped rather than overwritten, and the result returns path-level statuses and counts only."
-        ].join(" "),
-        params: {
-          destination_root: { type: "string", required: true, description: "Destination Dropbox folder path, for example /Olympus Exports/Otter Transcripts. Must fall under an allowed export root." },
-          items: { type: "string", required: true, description: 'JSON array of export items. Each item is a source Dropbox path string or an object like {"path":"/2 Areas/Otter/Standup.txt","dest_subfolder":"Standups"}. Paths must be locators already returned by source citations.' },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." },
-          dry_run: { type: "boolean", description: "Validate the destination and per-item statuses without performing any copy." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source export", positional: ["destination_root"] },
-        handler: async (ctx, params) => {
-          const destinationRoot = asString(params.destination_root, "destination_root");
-          const items = asSourceExportItems(params.items);
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const dryRun = optionalBoolean2(params.dry_run, "dry_run");
-          return ctx.email.sourceExport({
-            destinationRoot,
-            items,
-            ...account !== undefined ? { account } : {},
-            ...dryRun !== undefined ? { dryRun } : {}
-          });
-        }
-      },
-      {
-        name: "source_transcribe",
-        description: [
-          "Queue indexed Dropbox audio files (voice memos, brainstorms, meeting recordings) for LOCAL transcription so their transcripts become searchable through the normal source pipeline.",
-          "Pass items with explicit Dropbox path locators to transcribe exactly those files, or omit items to let the planner queue untranscribed audio under the approved scope; mode=status returns calling-assistant-safe job counts without queueing anything.",
-          "Transcription runs on local infrastructure only via a separate drain worker — no audio bytes or transcript text are returned here, and curated exclude fences always apply. The result carries counts and path-level statuses only."
-        ].join(" "),
-        params: {
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-          items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox audio file paths (locators as returned by source search/citations). When given, exactly those paths are queued." },
-          include_path_prefixes: { type: "string", description: "Optional comma-separated path prefixes to narrow the planner to one subtree, for example /2 Areas/Brainstorms." },
-          limit: { type: "number", description: "Maximum audio files the planner may queue in this call. Capped by the private source worker." },
-          mode: { type: "string", enum: ["enqueue", "status"], description: "enqueue (default) queues transcription jobs; status returns calling-assistant-safe transcription job counts without mutating anything." },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source transcribe" },
-        handler: async (ctx, params) => {
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const mode = optionalSourceTranscribeMode(params.mode);
-          const items = params.items !== undefined ? asSourceTranscribeItems(params.items) : undefined;
-          const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-          const limit = optionalNumber4(params.limit, "limit");
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          return ctx.email.sourceTranscribe({
-            approvedScopeKey,
-            ...mode !== undefined ? { mode } : {},
-            ...items !== undefined ? { items } : {},
-            ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-            ...limit !== undefined ? { limit } : {},
-            ...account !== undefined ? { account } : {}
-          });
-        }
-      },
-      {
-        name: "source_media_ingest",
-        description: [
-          "Queue explicitly requested Dropbox photos or image folders for local VLM extraction.",
-          "This is the deliberate on-demand media lane: ordinary broad Dropbox photos/videos stay metadata-only by default, while passed items or include_path_prefixes queue image-like files for local processing.",
-          "No file bytes or extracted text are returned here; the result returns calling-assistant-safe counts plus path-level statuses for explicit items."
-        ].join(" "),
-        params: {
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key, for example dropbox.personal:/2 Areas. The worker stores and returns only a scope hash." },
-          items: { type: "string", description: "Optional JSON array or comma-separated list of Dropbox image file paths. When given, exactly those paths are queued." },
-          include_path_prefixes: { type: "string", description: "Optional comma-separated Dropbox folder/path prefixes; image-like files under those prefixes are queued." },
-          limit: { type: "number", description: "Maximum image files the planner may queue in this call. Capped by the private source worker." },
-          max_bytes_per_file: { type: "number", description: "Optional per-file byte cap for local VLM extraction." },
-          account: { type: "string", description: "Optional source account identity. Omit or use personal; do not pass credential handles such as dropbox.personal." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source media ingest" },
-        handler: async (ctx, params) => {
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const items = params.items !== undefined ? asSourceMediaIngestItems(params.items) : undefined;
-          const includePathPrefixes = params.include_path_prefixes !== undefined ? asStringList(params.include_path_prefixes, "include_path_prefixes") : undefined;
-          if ((items?.length ?? 0) === 0 && (includePathPrefixes?.length ?? 0) === 0) {
-            throw new OperationError("invalid_params", "source_media_ingest requires items or include_path_prefixes.");
-          }
-          const limit = optionalNumber4(params.limit, "limit");
-          const maxBytesPerFile = optionalNumber4(params.max_bytes_per_file, "max_bytes_per_file");
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          return ctx.email.sourceMediaIngest({
-            approvedScopeKey,
-            ...items !== undefined ? { items } : {},
-            ...includePathPrefixes !== undefined ? { includePathPrefixes } : {},
-            ...limit !== undefined ? { limit } : {},
-            ...maxBytesPerFile !== undefined ? { maxBytesPerFile } : {},
-            ...account !== undefined ? { account } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_candidates",
-        description: [
-          "List safe Dropbox evidence candidates for promotion/review without writing to Obsidian or Resource Wiki.",
-          "This returns hashed provenance and review metadata only: no file paths, raw text, source packets, scope keys, vectors, or credentials."
-        ].join(" "),
-        params: {
-          corpus_id: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS], description: "Promotion-candidate corpus. Currently only secure_local.dropbox.files." },
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-          max_results: { type: "number", description: "Maximum safe candidate rows to return. Capped by the private source worker." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion candidates" },
-        handler: async (ctx, params) => {
-          const corpusId = optionalSourceIndexPromotionCandidateCorpusId(params.corpus_id, ctx.config);
-          const account = optionalSourceAccount(params.account, corpusId);
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const maxResults = optionalNumber4(params.max_results, "max_results");
-          return ctx.email.sourceIndexPromotionCandidates({
-            ...corpusId !== undefined ? { corpusId } : {},
-            ...account !== undefined ? { account } : {},
-            approvedScopeKey,
-            ...maxResults !== undefined ? { maxResults } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_propose",
-        description: [
-          "Create a local Dropbox promotion proposal from safe candidate handles without exposing source text or writing Resource Wiki/Obsidian.",
-          "This records append-only review intent over hashed evidence provenance only."
-        ].join(" "),
-        params: {
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", required: true, description: "Dropbox approved folder/root scope key. The worker stores and returns only a scope hash." },
-          classification_ids: { type: "string", required: true, description: "Comma-separated or JSON-array candidate classification handles returned by source_index_promotion_candidates." },
-          canonical_type: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_CANONICAL_TYPES], description: "Typed destination shape for the proposed durable knowledge." },
-          target_surface: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_TARGET_SURFACES], description: "Intended review/write surface. This operation records intent only and performs no surface write." },
-          reason_code: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Typed reason this evidence is being proposed." },
-          proposed_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion propose" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const approvedScopeKey = asString(params.approved_scope_key, "approved_scope_key");
-          const classificationIds = asStringList(params.classification_ids, "classification_ids");
-          const canonicalType = asPromotionCanonicalType(params.canonical_type);
-          const targetSurface = asPromotionTargetSurface(params.target_surface);
-          const reasonCode = asPromotionReasonCode(params.reason_code);
-          const proposedBy = optionalString9(params.proposed_by);
-          return ctx.email.sourceIndexPromotionProposal({
-            ...account !== undefined ? { account } : {},
-            approvedScopeKey,
-            classificationIds,
-            canonicalType,
-            targetSurface,
-            reasonCode,
-            ...proposedBy !== undefined ? { proposedBy } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_proposals",
-        description: [
-          "List local Dropbox promotion proposals for review without exposing source text or writing Resource Wiki/Obsidian.",
-          "This returns proposal metadata and hashed scope only."
-        ].join(" "),
-        params: {
-          account: { type: "string", description: "Optional account scope." },
-          approved_scope_key: { type: "string", description: "Optional Dropbox approved folder/root scope key. The worker returns only a scope hash." },
-          status: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_PROPOSAL_STATUSES], description: "Optional proposal status filter." },
-          max_results: { type: "number", description: "Maximum safe proposal rows to return. Capped by the private source worker." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion proposals" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const approvedScopeKey = optionalString9(params.approved_scope_key);
-          const status = optionalPromotionProposalStatus(params.status);
-          const maxResults = optionalNumber4(params.max_results, "max_results");
-          return ctx.email.sourceIndexPromotionProposals({
-            ...account !== undefined ? { account } : {},
-            ...approvedScopeKey !== undefined ? { approvedScopeKey } : {},
-            ...status !== undefined ? { status } : {},
-            ...maxResults !== undefined ? { maxResults } : {}
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_proposal",
-        description: [
-          "Read one local Dropbox promotion proposal detail without exposing source text or writing Resource Wiki/Obsidian.",
-          "This returns hashed evidence metadata and local review decisions only."
-        ].join(" "),
-        params: {
-          proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose or source_index_promotion_proposals." }
-        },
-        mutating: false,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion proposal" },
-        handler: async (ctx, params) => {
-          const proposalId = asString(params.proposal_id, "proposal_id");
-          return ctx.email.sourceIndexPromotionProposalDetail({
-            proposalId
-          });
-        }
-      },
-      {
-        name: "source_index_promotion_decide",
-        description: [
-          "Record a local review decision on a Dropbox promotion proposal without executing any Resource Wiki, Obsidian, or Dropbox write.",
-          "This is a review-ledger mutation only."
-        ].join(" "),
-        params: {
-          proposal_id: { type: "string", required: true, description: "Promotion proposal id returned by source_index_promotion_propose." },
-          decision: { type: "string", required: true, enum: [...SOURCE_INDEX_PROMOTION_DECISIONS], description: "Review decision to record." },
-          decided_by: { type: "string", description: "Optional reviewer/agent label, stored only as a hash." },
-          reason_code: { type: "string", enum: [...SOURCE_INDEX_PROMOTION_REASON_CODES], description: "Optional typed reason for the decision." }
-        },
-        mutating: true,
-        nativeExposure: "sourceIndexAnswerDevOnly",
-        cliHints: { name: "source index promotion decide" },
-        handler: async (ctx, params) => {
-          const proposalId = asString(params.proposal_id, "proposal_id");
-          const decision = asPromotionDecision(params.decision);
-          const decidedBy = optionalString9(params.decided_by);
-          const reasonCode = optionalPromotionReasonCode(params.reason_code);
-          return ctx.email.sourceIndexPromotionDecision({
-            proposalId,
-            decision,
-            ...decidedBy !== undefined ? { decidedBy } : {},
-            ...reasonCode !== undefined ? { reasonCode } : {}
-          });
-        }
-      }
-    ],
     {
       name: "source_watch_create",
       description: [
@@ -42035,142 +40764,6 @@ var init_operations = __esm(() => {
         });
       }
     },
-    ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        name: "email_search",
-        description: [
-          "Search private email and return a sanitized local-only source packet for approved local/private sessions.",
-          "Use query for Gmail search syntax when possible. Answer from returned packet items and cite safe provenance by subject/from/date/message_id.",
-          "Do not request raw Gmail payloads."
-        ].join(" "),
-        params: {
-          question: { type: "string", description: "Optional natural-language question for audit/context. It is not converted into required Gmail terms." },
-          query: { type: "string", description: "Optional Gmail query string chosen by the local model or user." },
-          account: { type: "string", description: "Optional Google account or mailbox label to scope the request." },
-          after: { type: "string", description: "Optional lower date/time bound." },
-          before: { type: "string", description: "Optional upper date/time bound." },
-          from: { type: "string", description: "Optional sender constraint." },
-          to: { type: "string", description: "Optional recipient constraint." },
-          max_messages: { type: "number", description: "Optional maximum messages to retrieve; capped by the private worker." },
-          include_sanitized_text: { type: "boolean", description: "Whether to include sanitized message text. Defaults true for the local packet path." }
-        },
-        mutating: false,
-        nativeExposure: "localEmailPacketsDevOnly",
-        cliHints: { name: "email search", positional: ["query"], stdin: "query" },
-        handler: async (ctx, params) => {
-          const question = optionalString9(params.question);
-          const query = optionalString9(params.query);
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const after = optionalString9(params.after);
-          const before = optionalString9(params.before);
-          const from = optionalString9(params.from);
-          const to = optionalString9(params.to);
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          const includeSanitizedText = optionalBoolean2(params.include_sanitized_text, "include_sanitized_text");
-          return ctx.email.search({
-            ...question !== undefined ? { question } : {},
-            ...query !== undefined ? { query } : {},
-            ...account !== undefined ? { account } : {},
-            ...after !== undefined ? { after } : {},
-            ...before !== undefined ? { before } : {},
-            ...from !== undefined ? { from } : {},
-            ...to !== undefined ? { to } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {},
-            ...includeSanitizedText !== undefined ? { includeSanitizedText } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_sync",
-        description: "Explicitly seed or rescan the bounded local Gmail source index without returning private content.",
-        params: {
-          account: { type: "string", description: "Optional Google account to scope the bounded seed." },
-          newer_than_days: { type: "number", description: "Bounded recency window. Defaults to 14 days." },
-          max_messages: { type: "number", description: "Maximum Gmail messages to index; capped by the private worker." },
-          query: { type: "string", description: "Optional Gmail query for a bounded proof seed." }
-        },
-        mutating: true,
-        nativeExposure: "emailIndexAdminDevOnly",
-        cliHints: { name: "email index sync" },
-        handler: async (ctx, params) => {
-          const account = optionalSourceAccount(params.account, "secure_local.dropbox.files");
-          const newerThanDays = optionalNumber4(params.newer_than_days, "newer_than_days");
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          const query = optionalString9(params.query);
-          return ctx.email.indexSync({
-            ...account !== undefined ? { account } : {},
-            ...newerThanDays !== undefined ? { newerThanDays } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {},
-            ...query !== undefined ? { query } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_embed",
-        description: "Explicitly build local/private embedding artifacts for the bounded Gmail source index without returning private content or vectors.",
-        params: {
-          account: { type: "string", description: "Optional account filter for the embedding build." },
-          model_id: { type: "string", description: "Optional local embedding model ID to require from the configured worker provider." },
-          force: { type: "boolean", description: "Rebuild embeddings even when chunk content hashes are unchanged." }
-        },
-        mutating: true,
-        nativeExposure: "emailIndexAdminDevOnly",
-        cliHints: { name: "email index embed" },
-        handler: async (ctx, params) => {
-          const account = optionalString9(params.account);
-          const modelId = optionalString9(params.model_id);
-          const force = optionalBoolean2(params.force, "force");
-          return ctx.email.indexEmbed({
-            ...account !== undefined ? { account } : {},
-            ...modelId !== undefined ? { modelId } : {},
-            ...force !== undefined ? { force } : {}
-          });
-        }
-      },
-      {
-        name: "email_index_search",
-        description: [
-          "Search the local private email source index and return an Argus-only sanitized source packet with row and provider provenance.",
-          "Use retrieval_mode=hybrid for conceptual aliases when local/private semantic artifacts are available; keyword remains the default exact/FTS path."
-        ].join(" "),
-        params: {
-          query: { type: "string", required: true, description: "Keyword/FTS query for the local email index." },
-          retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Retrieval mode. Defaults to keyword unless hybrid is explicitly requested and semantic artifacts/config are available." },
-          account: { type: "string", description: "Optional account filter." },
-          after: { type: "string", description: "Optional lower date/time bound." },
-          before: { type: "string", description: "Optional upper date/time bound." },
-          from: { type: "string", description: "Optional sender filter." },
-          to: { type: "string", description: "Optional recipient filter." },
-          label: { type: "string", description: "Optional Gmail label filter." },
-          max_messages: { type: "number", description: "Maximum packet items to return; capped by the private worker." }
-        },
-        mutating: false,
-        nativeExposure: "localEmailPacketsDevOnly",
-        cliHints: { name: "email index search", positional: ["query"], stdin: "query" },
-        handler: async (ctx, params) => {
-          const query = asString(params.query, "query");
-          const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
-          const account = optionalString9(params.account);
-          const after = optionalString9(params.after);
-          const before = optionalString9(params.before);
-          const from = optionalString9(params.from);
-          const to = optionalString9(params.to);
-          const label = optionalString9(params.label);
-          const maxMessages = optionalNumber4(params.max_messages, "max_messages");
-          return ctx.email.indexSearch({
-            query,
-            ...retrievalMode !== undefined ? { retrievalMode } : {},
-            ...account !== undefined ? { account } : {},
-            ...after !== undefined ? { after } : {},
-            ...before !== undefined ? { before } : {},
-            ...from !== undefined ? { from } : {},
-            ...to !== undefined ? { to } : {},
-            ...label !== undefined ? { label } : {},
-            ...maxMessages !== undefined ? { maxMessages } : {}
-          });
-        }
-      }
-    ],
     {
       name: "olympus_doctor",
       description: [
@@ -67164,7 +65757,7 @@ var init_setup = __esm(() => {
   CONNECTOR_PROMPT = [
     "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
     "",
-    "Read skills/create-connector/SKILL.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
+    "Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
   ].join(`
 `);
   SETUP_GROUPS = [
@@ -75771,7 +74364,7 @@ async function main() {
   });
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
-  const sourceIndexReadEnabled = olympusConfig.sourceIndex.enabled || olympusConfig.sourceIndex.answerDevEnabled || sourceIndexAnswerEnabled;
+  const sourceIndexReadEnabled = olympusConfig.sourceIndex.enabled || sourceIndexAnswerEnabled;
   const sourceIndexAccount = process.env.OLYMPUS_SOURCE_INDEX_ACCOUNT ?? process.env.OLYMPUS_EMAIL_SOURCE_ACCOUNT;
   const dropboxFilesAccount = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT?.trim() || accountFromDropboxCredentialHandle(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE);
   const connectedHandles = readActiveConnectedHandles(process.env);

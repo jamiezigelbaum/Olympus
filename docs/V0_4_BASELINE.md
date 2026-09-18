@@ -1,5 +1,10 @@
 # Olympus 0.4 Slice 0 baseline evidence
 
+> Historical as of 2026-09-18. It records the tree at baseline commit
+> `32f0cefa` and is not edited to follow the product; tool names and
+> subsystems it describes may since have been removed. For what is true now,
+> read [`V0_4_RELEASE.md`](V0_4_RELEASE.md).
+
 This is evidence for Slice 0 of [`V0_4_RELEASE.md`](V0_4_RELEASE.md), not a
 second plan. It records what was found at baseline commit `32f0cefa`, what can
 be proved without private-data access, and the content-free receipts from the

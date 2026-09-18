@@ -606,7 +606,7 @@ describe('connectorSheet', () => {
       id: 'connector-sheet',
       heading: 'Build a connector with your AI',
       intro: 'Copy this prompt and paste it into your AI coding tool.',
-      promptText: 'Read skills/create-connector/SKILL.md and follow it exactly.',
+      promptText: 'Read docs/CREATE_CONNECTOR.md and follow it exactly.',
       copyButtonLabel: 'Copy prompt',
     });
     expect(html).toContain('id="connector-sheet"');

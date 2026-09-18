@@ -30,6 +30,14 @@ interface AllowlistEntry {
   readonly retire_when: string;
 }
 
+/**
+ * The operation list is empty: every registered operation is now public. Its
+ * JSON type is therefore `never[]`, so the shape the guard still enforces is
+ * spelled out here rather than inferred — an entry added back has to satisfy
+ * it, and the guard keeps failing on any entry that is no longer a leftover.
+ */
+const allowlistOperations = allowlist.operations as readonly (AllowlistEntry & { readonly name: string })[];
+
 function assertJustified(kind: string, key: string, entry: AllowlistEntry): void {
   expect(entry.reason.trim().length, `${kind} ${key} needs a reason`).toBeGreaterThan(0);
   expect(entry.retire_when.trim().length, `${kind} ${key} needs a retirement condition`).toBeGreaterThan(0);
@@ -69,11 +77,11 @@ describe('public-surface guard', () => {
   test('every registered operation is on the public tool lists or allowlisted with a reason', () => {
     const publicTools = new Set<string>([...V0_4_PUBLIC_NATIVE_TOOLS, ...V0_4_PUBLIC_MCP_TOOLS]);
     const nonPublic = operations.map((operation) => operation.name).filter((name) => !publicTools.has(name));
-    for (const entry of allowlist.operations) assertJustified('operation', entry.name, entry);
+    for (const entry of allowlistOperations) assertJustified('operation', entry.name, entry);
     ratchet(
       'operations',
       nonPublic,
-      allowlist.operations.map((entry) => entry.name),
+      allowlistOperations.map((entry) => entry.name),
       'delete the operation, add it to src/core/public-surface.ts, or add an entry to config/public-surface-allowlist.json',
     );
   });

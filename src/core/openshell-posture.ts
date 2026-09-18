@@ -117,7 +117,7 @@ export function createReferenceOpenShellPostureProof(): OpenShellPostureProof {
       surface: 'normal agent reaches Olympus bounded source tools through Gateway/worker endpoints',
       expectation: 'allow',
       observation: 'allowed',
-      evidence: 'approved product path uses bounded Olympus tools such as source_answer and email_answer',
+      evidence: 'approved product path uses bounded Olympus tools such as source_answer and source_index_search',
     },
     {
       id: 'approved_model_provider',

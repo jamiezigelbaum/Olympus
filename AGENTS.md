@@ -45,7 +45,8 @@ Contract: [docs/ops/OPENCLAW_CHANGE_PROTOCOL.md](docs/ops/OPENCLAW_CHANGE_PROTOC
 — read it BEFORE any change to a live OpenClaw system. Host-specific operator
 procedure belongs to the deployment owner, not this repo; on Jamie's hosts that
 is `docs/OPENCLAW_CHANGE_PROTOCOL.md` in the private Castor-Maintenance repo
-(`~/Code/Castor-Maintenance`), which wins on host specifics.
+(`~/Code/Castor-Maintenance`, being renamed `openclaw-ops`), which wins on host
+specifics.
 
 Digest: contract first (`openclaw docs <query>` / `config.schema.lookup`,
 never from memory) → blessed pathways only (`openclaw config set|unset` or
@@ -117,6 +118,14 @@ Enforcement is mechanical, so this survives any thread or tool:
 - `test/architecture-guard.test.ts` fails the build if the deleted template
   path reappears or if template/regex answer code appears anywhere in src.
   Do not weaken the guard to make a change pass.
+- `test/public-surface-guard.test.ts` holds the source tree equal to the public
+  product, or makes it say why not: every `src/**` module the public
+  entrypoints do not reach, every registered operation off the public tool
+  lists, and every skill directory off the public skill list must be named in
+  `config/public-surface-allowlist.json` with a reason and a retirement
+  condition. An entry that is no longer a leftover fails too, so the list only
+  shrinks. Do not add an entry to make a change pass — delete the leftover, or
+  put it on the public surface.
 - GitHub Actions runs every test in parallel on every push; branch protection
   requires the substantive static, fast, deploy-shard, Go, and critical-review
   contexts directly, without a billed aggregate runner job.

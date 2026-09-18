@@ -107,7 +107,6 @@ describe('config', () => {
     // "private source worker is disabled" and no command to fix it.
     expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://127.0.0.1:8010/v1');
-    expect(config.email.requireLocalActiveModelForPrivateTools).toBe(false);
     expect(config.worker.authToken).toBeUndefined();
     expect(config.sourceIndex.enabled).toBe(true);
     expect(config.worker.scheduler).toMatchObject({
@@ -116,7 +115,6 @@ describe('config', () => {
       maxTransientRetries: 3,
       freshnessThresholdHours: 26,
     });
-    expect(config.sourceIndex.answerDevEnabled).toBe(false);
   });
 
   test('environment overrides lane config', () => {
@@ -219,11 +217,9 @@ describe('config', () => {
         enabled: true,
         baseUrl: 'http://email-lane.test/v1/',
         requestTimeoutSeconds: 60,
-        requireLocalActiveModelForPrivateTools: true,
       },
       sourceIndex: {
         enabled: false,
-        answerDevEnabled: true,
       },
       worker: {
         authToken: 'plugin-worker-secret',
@@ -264,12 +260,8 @@ describe('config', () => {
       enabled: true,
       baseUrl: 'http://email-lane.test/v1',
       requestTimeoutSeconds: 60,
-      localPacketsDevEnabled: false,
-      indexAdminDevEnabled: false,
-      requireLocalActiveModelForPrivateTools: true,
     });
     expect(config.sourceIndex.enabled).toBe(false);
-    expect(config.sourceIndex.answerDevEnabled).toBe(true);
   });
 
   test('rejects a private-lane timeout above the 600s Gateway ceiling', () => {
@@ -294,44 +286,18 @@ describe('config', () => {
     }).email.baseUrl).toBe('http://source-worker.test/custom');
   });
 
-  test('keeps local email source packets disabled unless explicitly gated', () => {
-    const config = loadConfig({
-      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_ENABLE_UNGUARDED_LOCAL_EMAIL_PACKETS_FOR_DEV: 'true',
-    });
-
-    expect(config.email.localPacketsDevEnabled).toBe(true);
-  });
-
-  test('loads the private native tool active-model guard from env', () => {
-    const config = loadConfig({
-      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS: 'true',
-    });
-
-    expect(config.email.requireLocalActiveModelForPrivateTools).toBe(true);
-  });
-
-  test('loads source-index answer dev gate from env', () => {
-    const config = loadConfig({
-      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_SOURCE_INDEX_ANSWER_DEV_ENABLED: 'true',
-    });
-
-    expect(config.sourceIndex.answerDevEnabled).toBe(true);
-  });
-
-  test('rejects non-boolean JSON proof gates instead of treating string false as enabled', () => {
+  test('rejects a non-boolean JSON toggle instead of treating string false as enabled', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-config-test-'));
     const path = join(dir, 'config.json');
     try {
       writeFileSync(path, JSON.stringify({
         email: {
-          localPacketsDevEnabled: 'false',
+          enabled: 'false',
         },
       }));
 
-      expect(() => loadConfig({ OLYMPUS_CONFIG: path })).toThrow('email.localPacketsDevEnabled must be a boolean');
+      expect(() => loadConfig({ OLYMPUS_CONFIG: path }))
+        .toThrow('email.enabled must be a boolean');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

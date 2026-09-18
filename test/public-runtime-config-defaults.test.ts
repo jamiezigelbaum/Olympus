@@ -95,14 +95,14 @@ describe('public runtime config defaults', () => {
     expect(readFileSync(join(ROOT, CONFIG_MODULE), 'utf8')).not.toContain(START_MARKER);
   });
 
-  test('the private dev toggles default off and a defaults-only load still validates', () => {
-    // The private surface the public build still carries is three dev toggles.
-    // Each must be off by default, and a load with no config file and no env
-    // must produce exactly the defaults — the validation path included.
+  test('a defaults-only load still validates', () => {
+    // The three private dev toggles (email.localPacketsDevEnabled,
+    // email.indexAdminDevEnabled, sourceIndex.answerDevEnabled) were deleted
+    // on 2026-09-18 with the tools they gated, so there is no private config
+    // surface left to default off. What still has to hold is that a load with
+    // no config file and no env produces exactly the defaults — the
+    // validation path included.
     const defaults = defaultConfig();
-    expect(defaults.email.localPacketsDevEnabled).toBe(false);
-    expect(defaults.email.indexAdminDevEnabled).toBe(false);
-    expect(defaults.sourceIndex.answerDevEnabled).toBe(false);
     expect(loadConfig({ OLYMPUS_CONFIG: join(ROOT, 'absent-config.json') })).toEqual(defaults);
   });
 

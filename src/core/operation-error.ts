@@ -9,11 +9,7 @@ export type OperationErrorCode =
   | 'unsupported_filter'
   | 'invalid_request'
   | 'email_policy_violation'
-  | 'email_local_session_required'
-  | 'email_index_admin_required'
   | 'source_index_not_enabled'
-  | 'source_index_answer_dev_required'
-  | 'source_index_admin_required'
   | 'source_index_policy_violation'
   | 'source_index_error';
 
