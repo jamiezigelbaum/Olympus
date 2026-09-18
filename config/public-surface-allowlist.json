@@ -1,0 +1,415 @@
+{
+  "schema_version": 1,
+  "purpose": "Everything in src/, the operation registry, and skills/ that the public product does not reach, each with a reason and the condition under which the entry goes away. test/public-surface-guard.test.ts fails on any unlisted leftover and on any entry that is no longer a leftover, so this file only shrinks.",
+  "modules": [
+    {
+      "path": "src/workers/hire-broker/a2a.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/broker.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/client.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/identity.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/index.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/ledger.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/membrane.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/payment.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/registry.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/release.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/secure-files.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/server.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/hire-broker/types.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/core/castor-workspace.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/castor-workspace/index.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/castor-workspace/server.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/core/file-delivery.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/file-delivery/index.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/file-delivery/server.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/core/domain-library-registry.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/domain-library/connector.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/workers/domain-library/index.ts",
+      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "src/core/source-family.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/apple-messages/connector.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/apple-messages/index.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/reflect/connector.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/reflect/index.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/roam/connector.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/workers/roam/index.ts",
+      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
+      "retire_when": "Wired into the public source roster, or deleted."
+    },
+    {
+      "path": "src/core/resource-wiki.ts",
+      "reason": "Phase-2 PKM feature, not yet on the public surface.",
+      "retire_when": "Published on the public surface, or deleted."
+    },
+    {
+      "path": "src/core/contracts.ts",
+      "reason": "Type-only module: product code imports it with `import type`, so the bundler erases it.",
+      "retire_when": "Never; drop this entry only when the module is deleted."
+    },
+    {
+      "path": "src/workers/file-extraction/types.ts",
+      "reason": "Type-only module: product code imports it with `import type`, so the bundler erases it.",
+      "retire_when": "Never; drop this entry only when the module is deleted."
+    },
+    {
+      "path": "src/workers/source-index/answer-types.ts",
+      "reason": "Type-only module: product code imports it with `import type`, so the bundler erases it.",
+      "retire_when": "Never; drop this entry only when the module is deleted."
+    },
+    {
+      "path": "src/workers/embedding-ledger.ts",
+      "reason": "Reached only from OLYMPUS_PUBLIC_RUNTIME_EXCLUDE spans: private-runtime code the public build strips.",
+      "retire_when": "The private runtime is retired, or the feature is promoted to the public surface."
+    },
+    {
+      "path": "src/workers/dashboard/pages/embedding-ledger.ts",
+      "reason": "Reached only from OLYMPUS_PUBLIC_RUNTIME_EXCLUDE spans: private-runtime code the public build strips.",
+      "retire_when": "The private runtime is retired, or the feature is promoted to the public surface."
+    },
+    {
+      "path": "src/core/openshell-posture.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/openshell-posture-proof.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/core/release-qualification.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/release-qualification-harness.ts and scripts/qualification/*.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/source-index/embedding-identity-repair.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/embedding-identity-repair.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/connector-store/local-index.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/embedding-identity-repair.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/dropbox-files/extraction-readiness.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/source-ingestion-live-dashboard.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/dropbox-files/content-scope-policy.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/source-ingestion-live-dashboard.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/embedding-ledger-observer.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/source-embedding-drain.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/workers/file-extraction/http-types.ts",
+      "reason": "Reached only by a repository script that the package does not ship. scripts/source-processing-supervisor.ts and scripts/dropbox-venice-extraction-proof.ts.",
+      "retire_when": "The script moves to the ops repository or is deleted."
+    },
+    {
+      "path": "src/core/google-bootstrap.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/core/source-index/custodial-supersets.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/core/source-index/eval.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/core/source-index/index.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/classification/delphi-scorer.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/classification/index.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/classification/policy.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/connector-store/content-repair.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/dropbox-files/metadata-scope-policy.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/dropbox-files/readability-gaps.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/workers/x-bookmarks/live-scheduler-dropin.ts",
+      "reason": "No runtime importer in src or scripts; only tests reference it.",
+      "retire_when": "Deleted in the next disposition PR."
+    },
+    {
+      "path": "src/core/connect-gcp.ts",
+      "reason": "Legacy credential role strings that persisted secret-store keys still name; see EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_FILES in test/architecture-guard.test.ts.",
+      "retire_when": "The persisted grants are re-keyed, then the module is deleted."
+    }
+  ],
+  "operations": [
+    {
+      "name": "expert_hire",
+      "reason": "Hire Broker operations; retiring with the Hire Broker.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "expert_report",
+      "reason": "Hire Broker operations; retiring with the Hire Broker.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "xanthos_file_deliver",
+      "reason": "Private lane operations; retiring in favour of native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "castor_workspace",
+      "reason": "Private lane operations; retiring in favour of native OpenClaw file transfer.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "email_ping",
+      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "email_answer",
+      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "email_search",
+      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "email_index_search",
+      "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
+      "retire_when": "Deleted."
+    },
+    {
+      "name": "email_index_sync",
+      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
+      "retire_when": "Deleted, or re-homed as CLI subcommands."
+    },
+    {
+      "name": "email_index_embed",
+      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
+      "retire_when": "Deleted, or re-homed as CLI subcommands."
+    },
+    {
+      "name": "source_index_sync",
+      "reason": "Index administration exposed as agent tools; the CLI and worker scheduler own these actions.",
+      "retire_when": "Deleted, or re-homed as CLI subcommands."
+    },
+    {
+      "name": "source_export",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_transcribe",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_media_ingest",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_index_promotion_candidates",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_index_promotion_propose",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_index_promotion_proposals",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_index_promotion_proposal",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    },
+    {
+      "name": "source_index_promotion_decide",
+      "reason": "Unqualified workflow never admitted to the public surface.",
+      "retire_when": "Designed and published, or deleted."
+    }
+  ],
+  "skills": [
+    {
+      "path": "skills/hire-expert",
+      "reason": "Hire Broker skill; retiring with the Hire Broker.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "skills/deliver-files",
+      "reason": "Private lane skills; retiring with the lanes.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "skills/castor-workspace",
+      "reason": "Private lane skills; retiring with the lanes.",
+      "retire_when": "Deleted."
+    },
+    {
+      "path": "skills/ask-email-local",
+      "reason": "Pre-v0.4 email lane skill.",
+      "retire_when": "Deleted with the email lane operations."
+    },
+    {
+      "path": "skills/pkm-doctrine",
+      "reason": "Phase-2 PKM doctrine, not yet public.",
+      "retire_when": "Published on the public skill list, or moved to the owner's workspace."
+    },
+    {
+      "path": "skills/update-openclaw-runtime",
+      "reason": "Operator and contributor skills, not end-user skills.",
+      "retire_when": "Moved to the ops repository or contributor docs, or published."
+    },
+    {
+      "path": "skills/create-connector",
+      "reason": "Operator and contributor skills, not end-user skills.",
+      "retire_when": "Moved to the ops repository or contributor docs, or published."
+    }
+  ]
+}
