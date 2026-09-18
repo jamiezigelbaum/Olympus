@@ -53,8 +53,6 @@
     "embedding-identity:repair": "bun scripts/embedding-identity-repair.ts",
     "source-exclusions:purge": "bun scripts/source-exclusion-purge.ts",
     "source-exclusions:resolve-folder": "bun scripts/source-exclusion-resolve-folder.ts",
-    "source-processing:supervise": "bun scripts/source-processing-supervisor.ts",
-    "source-processing:janitor": "bun scripts/source-processing-supervisor.ts --janitor",
     "venice:credit-status": "bun scripts/venice-credit-status.ts",
     "dropbox-venice:extraction-proof": "bun scripts/dropbox-venice-extraction-proof.ts",
     "dropbox-venice:extraction-proof:qwen3vl235b": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_qwen3vl235b_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-qwen3vl235b-proof bun scripts/dropbox-venice-extraction-proof.ts",

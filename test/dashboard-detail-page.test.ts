@@ -416,13 +416,13 @@ describe('dashboard detail verdict tip', () => {
         stuck_count: 12,
         oldest_stuck_age_hours: 3.1,
         drain_state: 'held',
-        drain_unit: 'olympus-source-processing-supervisor-vlm-pdf.timer',
+        drain_unit: 'olympus-source-extraction-drain.timer',
         label: '87.4% covered; 12 stuck; oldest 3.1h; content extraction stalled for 26h',
       },
     }), { now: NOW });
 
     expect(html).toContain('[STUCK_ITEMS] (12) == 0 — 87.4% covered; 12 stuck');
-    expect(html).toContain('[EXTRACTION_DRAIN] (held) == enabled — olympus-source-processing-supervisor-vlm-pdf.timer');
+    expect(html).toContain('[EXTRACTION_DRAIN] (held) == enabled — olympus-source-extraction-drain.timer');
   });
 
   test('escapes the comparison operator and any markup in a card label', () => {

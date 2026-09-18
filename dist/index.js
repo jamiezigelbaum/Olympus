@@ -9360,9 +9360,7 @@ function applyDropboxBreakdown(rows, breakdown, now) {
     row.ingestion_health.drain = {
       ...row.ingestion_health.drain,
       state: "held",
-      unit: "olympus-source-processing-supervisor-vlm-pdf.timer",
-      hold_marker: "~/.local/state/olympus/source-supervisor-holds/vlm-pdf.hold",
-      hint: "Start or unhold olympus-source-processing-supervisor-vlm-pdf.timer so queued VLM extraction jobs drain."
+      hint: "Queued VLM extraction jobs are held; resume the extraction drain on this host so they finish."
     };
   }
   const failed = breakdown.filter((item) => item.status === "failed_retryable" || item.status === "failed_terminal").reduce((sum, item) => sum + item.count, 0);

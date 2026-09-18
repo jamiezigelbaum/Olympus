@@ -810,7 +810,7 @@ function drainingSource(overrides: Partial<DashboardSourceCard>): DashboardSourc
       oldest_stuck_age_hours: 3.1,
       last_drain_activity_hours: 0.4,
       drain_state: 'held',
-      drain_unit: 'olympus-source-processing-supervisor-vlm-pdf.timer',
+      drain_unit: 'olympus-source-extraction-drain.timer',
       label: '87.4% covered; 12 stuck; oldest 3.1h; last drain 0.4h ago',
     },
     vlm_extraction_queued: 4,

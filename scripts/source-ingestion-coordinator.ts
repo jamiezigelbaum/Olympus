@@ -126,14 +126,6 @@ export function runSourceIngestionCoordinator(
 function laneDefinitions(): LaneDefinition[] {
   return [
     {
-      id: 'source_processing_supervisor',
-      label: 'Source processing supervisor',
-      fileName: 'current.json',
-      fallbackStatus: 'missing',
-      missingAction: 'source_processing_report_missing',
-      normalize: normalizeSourceProcessingSupervisor,
-    },
-    {
       id: 'embedding_drain',
       label: 'Embedding drain',
       fileName: 'source-embedding-drain-current.json',
@@ -264,43 +256,6 @@ function missingLane(definition: LaneDefinition): SourceIngestionCoordinatorLane
   };
 }
 
-function normalizeSourceProcessingSupervisor(raw: unknown): LaneSnapshot {
-  const object = record(raw);
-  const summary = record(object.summary);
-  const status = statusValue(object.status);
-  return {
-    generatedAt: stringValue(object.generated_at),
-    updatedAt: stringValue(object.updated_at),
-    status,
-    runState: stringValue(object.run_state),
-    activePhase: stringValue(object.active_phase),
-    counts: {
-      ...pickNumbers(object, ['cycles_run', 'heartbeat_seq']),
-      ...pickNumbers(summary, [
-        'jobs_leased',
-        'jobs_planned',
-        'jobs_existing',
-        'terminal_progress_jobs',
-        'failed_retryable_jobs',
-        'queued_before',
-        'queued_after',
-        'leased_before',
-        'leased_after',
-        'provider_backpressure_jobs',
-        'qa_visible_gaps_after',
-        'qa_low_confidence_candidate_for_venice_after',
-      ]),
-    },
-    hashes: pickHashes(object, ['active_scope_hash']),
-    actionLabels: actionLabels([
-      [status === 'attention', 'source_processing_attention'],
-      [status === 'parked' || object.provider_pause !== undefined, 'provider_pause_active'],
-      [numberOrZero(summary.provider_backpressure_jobs) > 0, 'provider_backpressure_detected'],
-      [numberOrZero(summary.qa_visible_gaps_after) > 0, 'qa_visible_gaps_remain'],
-    ]),
-  };
-}
-
 function normalizeEmbeddingDrain(raw: unknown): LaneSnapshot {
   const object = record(raw);
   const status = statusValue(object.status);
@@ -379,7 +334,6 @@ function recommendedActions(lanes: SourceIngestionCoordinatorLane[]): string[] {
     if (lane.stale) actions.push(`${lane.id}:refresh_stale_report`);
     if (lane.attention && !lane.stale && lane.report_state === 'present') actions.push(`${lane.id}:inspect_attention_state`);
   }
-  if (byId.get('source_processing_supervisor')?.status === 'missing') actions.push('source_processing:enable_shadow_report');
   if (byId.get('embedding_drain')?.status === 'missing') actions.push('embedding:enable_shadow_report');
   if (byId.get('venice_credit')?.attention) actions.push('venice:hold_or_repair_credit_lane');
   if (byId.get('venice_provider_pause')?.attention) actions.push('venice:respect_provider_pause_marker');

@@ -629,23 +629,26 @@ describe('source ingestion live dashboard', () => {
         'inactive/dead': 197,
       },
       drain_unit_details: [
-        { unit: 'olympus-source-processing-supervisor.service', active_state: 'active', sub_state: 'running' },
-        { unit: 'olympus-source-processing-supervisor-local-ocr.service', active_state: 'active', sub_state: 'running' },
         { unit: 'olympus-source-embedding-drain.service', active_state: 'active', sub_state: 'running' },
-        { unit: 'olympus-source-processing-supervisor-local-vlm-visual-repair.service', active_state: 'inactive', sub_state: 'dead' },
-        { unit: 'olympus-source-processing-supervisor-venice-grok43.service', active_state: 'inactive', sub_state: 'dead' },
+        { unit: 'olympus-source-dropbox-metadata-sync.service', active_state: 'active', sub_state: 'running' },
+        { unit: 'olympus-source-whatsapp-transcribe-drain.service', active_state: 'active', sub_state: 'running' },
+        { unit: 'olympus-source-vlm-pdf-drain.service', active_state: 'inactive', sub_state: 'dead' },
+        { unit: 'olympus-source-telegram-capture.service', active_state: 'inactive', sub_state: 'dead' },
       ],
     });
 
     expect(latest.drainWorkers.active).toBe(3);
     expect(latest.drainWorkers.inactive).toBe(2);
     expect(latest.drainWorkers.total).toBe(5);
+    // The embedding drain is the one unit with a written label; every other
+    // drain unit the host reports falls back to its own name, unprettified
+    // beyond dropping the shared prefix.
     expect(latest.drainWorkers.services).toEqual([
-      expect.objectContaining({ label: 'Default supervisor', activeState: 'active', subState: 'running', health: 'healthy' }),
-      expect.objectContaining({ label: 'Local OCR supervisor', activeState: 'active', subState: 'running', health: 'healthy' }),
       expect.objectContaining({ label: 'Embedding drain', activeState: 'active', subState: 'running', health: 'healthy' }),
-      expect.objectContaining({ label: 'Local VLM repair supervisor', activeState: 'inactive', subState: 'dead', health: 'unknown' }),
-      expect.objectContaining({ label: 'Venice/Grok supervisor', activeState: 'inactive', subState: 'dead', health: 'unknown' }),
+      expect.objectContaining({ label: 'dropbox metadata sync', activeState: 'active', subState: 'running', health: 'healthy' }),
+      expect.objectContaining({ label: 'whatsapp transcribe drain', activeState: 'active', subState: 'running', health: 'healthy' }),
+      expect.objectContaining({ label: 'vlm pdf drain', activeState: 'inactive', subState: 'dead', health: 'unknown' }),
+      expect.objectContaining({ label: 'telegram capture', activeState: 'inactive', subState: 'dead', health: 'unknown' }),
     ]);
   });
 
