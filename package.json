@@ -60,7 +60,6 @@
     "dropbox-venice:extraction-proof:qwen3vl235b": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_qwen3vl235b_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-qwen3vl235b-proof bun scripts/dropbox-venice-extraction-proof.ts",
     "dropbox-venice:extraction-proof:grok43": "OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_KIND=venice_grok43_document OLYMPUS_DROPBOX_VENICE_PROOF_EXTRACTOR_VERSION=2026-06-22-grok43-proof bun scripts/dropbox-venice-extraction-proof.ts",
     "x-oauth2:seed-state": "bun scripts/x-oauth2-seed-state.ts",
-    "domain-library:sync": "bun scripts/domain-library-sync.ts",
     "whatsapp:live-sync": "bun scripts/whatsapp-live-sync.ts",
     "whatsapp:identity-backfill": "bun scripts/whatsapp-identity-backfill.ts",
     "connector-store:embed": "bun scripts/connector-store-embed.ts",

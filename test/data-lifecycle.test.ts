@@ -257,14 +257,14 @@ describe('Olympus data lifecycle', () => {
       const legacyLaunchAgent = join(homeDir, 'Library', 'LaunchAgents', 'org.openclaw.olympus.worker.plist');
       const systemdUnit = workerServicePaths('linux', homeDir).unitPath;
       const whatsappStore = join(homeDir, '.local', 'share', 'olympus', 'whatsapp-live', 'connector-store.db');
-      const domainLibraryStore = join(homeDir, '.local', 'share', 'olympus', 'domain-library', 'connector-store.db');
+      const extraStore = join(homeDir, '.local', 'share', 'olympus', 'extra-store', 'connector-store.db');
       const linuxWorkerLog = join(homeDir, '.local', 'state', 'olympus', 'worker', 'worker.log');
       const macWorkerLog = join(homeDir, 'Library', 'Logs', 'Olympus', 'worker.log');
       for (const root of knownOlympusDataRoots({ homeDir })) {
         mkdirSync(root, { recursive: true });
         writeFileSync(join(root, 'owned-file'), 'owned');
       }
-      for (const path of [whatsappStore, domainLibraryStore, linuxWorkerLog, macWorkerLog]) {
+      for (const path of [whatsappStore, extraStore, linuxWorkerLog, macWorkerLog]) {
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, 'private local state');
       }
@@ -279,7 +279,7 @@ describe('Olympus data lifecycle', () => {
       expect(dryRun.removed).toContain(join(homeDir, '.local', 'state', 'olympus'));
       expect(dryRun.removed).toContain(join(homeDir, 'Library', 'Logs', 'Olympus'));
       expect(existsSync(whatsappStore)).toBe(true);
-      expect(existsSync(domainLibraryStore)).toBe(true);
+      expect(existsSync(extraStore)).toBe(true);
       expect(existsSync(linuxWorkerLog)).toBe(true);
       expect(existsSync(macWorkerLog)).toBe(true);
 
@@ -289,7 +289,7 @@ describe('Olympus data lifecycle', () => {
       expect(result.removed).toContain(installedWorker.unit_path);
       expect(knownOlympusDataRoots({ homeDir }).filter(existsSync)).toEqual([]);
       expect(existsSync(whatsappStore)).toBe(false);
-      expect(existsSync(domainLibraryStore)).toBe(false);
+      expect(existsSync(extraStore)).toBe(false);
       expect(existsSync(linuxWorkerLog)).toBe(false);
       expect(existsSync(macWorkerLog)).toBe(false);
       expect(existsSync(installedWorker.unit_path)).toBe(false);

@@ -2745,7 +2745,7 @@ function agentLibraryCorpus(indexedItems: number): SourceIndexStatusResult['corp
     activation_mode: 'lexical_only',
     embedding_policy: 'cloud_allowed_by_policy',
     configured: true,
-    provider: 'domain_library',
+    provider: 'fixture_library',
     counts: {
       indexed_items: indexedItems,
       chunks: indexedItems,
