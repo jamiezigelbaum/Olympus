@@ -2196,9 +2196,6 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
     config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
   }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
-  }
   if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
@@ -2324,9 +2321,6 @@ function configFromPluginConfig(pluginConfig) {
   }
   if (typeof email?.requestTimeoutSeconds === "number") {
     config.email.requestTimeoutSeconds = email.requestTimeoutSeconds;
-  }
-  if (typeof email?.requireLocalActiveModelForPrivateTools === "boolean") {
-    config.email.requireLocalActiveModelForPrivateTools = email.requireLocalActiveModelForPrivateTools;
   }
   if (typeof sourceIndex?.enabled === "boolean") {
     config.sourceIndex.enabled = sourceIndex.enabled;
@@ -2501,7 +2495,6 @@ function validateConfig(config) {
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, "email.requireLocalActiveModelForPrivateTools");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
   config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
@@ -2695,8 +2688,7 @@ var init_config = __esm(() => {
     email: {
       enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
-      requestTimeoutSeconds: 600,
-      requireLocalActiveModelForPrivateTools: false
+      requestTimeoutSeconds: 600
     },
     sourceIndex: {
       enabled: true,
@@ -13191,9 +13183,8 @@ var plugin = {
   id: "olympus",
   name: "Olympus",
   description: "Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.",
-  register(api, registrationContext) {
+  register(api) {
     const config = configFromPluginConfig(api.pluginConfig);
-    const activeModel = activeModelFromNativeContext(api, registrationContext);
     const ctx = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
@@ -13201,11 +13192,7 @@ var plugin = {
     };
     registerSourceWatchDeliveryRoute(api, config);
     for (const operation of operations) {
-      if (!shouldExposeOperation(operation, {
-        config,
-        surface: "native",
-        activeModel
-      }))
+      if (!shouldExposeOperation(operation, { config, surface: "native" }))
         continue;
       if (isSourceWatchOperation(operation)) {
         api.registerTool((toolContext) => {
@@ -13461,9 +13448,6 @@ function sourceWatchRouteFromToolContext(context) {
     };
   }
   return;
-}
-function activeModelFromNativeContext(api, registrationContext) {
-  return api.activeModel ?? api.context?.activeModel ?? api.toolContext?.activeModel ?? registrationContext?.activeModel;
 }
 var native_plugin_default = plugin;
 export {

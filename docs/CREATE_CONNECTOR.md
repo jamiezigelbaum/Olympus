@@ -24,9 +24,11 @@
 ## Who this is for
 
 An engineer or AI working **inside an Olympus checkout**, adding a new source.
-This is a repo-development skill, not an OpenClaw runtime skill; it is
-deliberately not registered in `skills/manifest.json` or `openclaw.plugin.json`
-(see open question 1).
+This is a contributor guide, not something an install loads: it lives in `docs/`
+and is not in `skills/manifest.json`, `skills/RESOLVER.md`,
+`openclaw.plugin.json`, or the published package. A user who installs Olympus
+never sees it; you need a checkout, which `CONTRIBUTING.md` explains how to
+get.
 
 ## Read first, in this order
 
@@ -519,11 +521,12 @@ Practical consequences:
 These are places the repo does not currently give one answer. This draft
 describes both options rather than picking.
 
-1. **Skill registration.** `create-connector` is a repo-development skill, not
-   an OpenClaw runtime skill, so it is deliberately absent from
+1. **Skill registration — resolved 2026-09-18.** It was a repo-development
+   skill (`skills/create-connector/`) deliberately absent from
    `skills/manifest.json`, `skills/RESOLVER.md`, and `openclaw.plugin.json`.
-   No test enforces either way. Confirm — or say where build-time skills should
-   live instead (a `docs/` playbook? a separate tree?).
+   The answer was "a `docs/` playbook": it is now this file, with its templates
+   in `docs/connector-templates/`, linked from `CONTRIBUTING.md`, and `skills/`
+   holds only what an install actually loads.
 2. **Budget duplication.** The day-counter now exists twice:
    `ReadwiseDailyRequestBudget` in `src/workers/readwise/connector.ts` and the
    provider-parameterized `GoogleDailyRequestBudget` in

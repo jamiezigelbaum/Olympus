@@ -93,7 +93,6 @@ export interface OlympusConfig {
     enabled: boolean;
     baseUrl: string;
     requestTimeoutSeconds: number;
-    requireLocalActiveModelForPrivateTools: boolean;
   };
   sourceIndex: {
     enabled: boolean;
@@ -219,7 +218,6 @@ const DEFAULT_CONFIG: OlympusConfig = {
     enabled: true,
     baseUrl: 'http://127.0.0.1:8010/v1',
     requestTimeoutSeconds: 600,
-    requireLocalActiveModelForPrivateTools: false,
   },
   sourceIndex: {
     enabled: true,
@@ -377,12 +375,6 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
       'OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS',
     );
   }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(
-      env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS,
-      'OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS',
-    );
-  }
   if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
     config.sourceIndex.enabled = parseBoolean(
       env.OLYMPUS_SOURCE_INDEX_ENABLED,
@@ -520,9 +512,6 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
   }
   if (typeof email?.requestTimeoutSeconds === 'number') {
     config.email.requestTimeoutSeconds = email.requestTimeoutSeconds;
-  }
-  if (typeof email?.requireLocalActiveModelForPrivateTools === 'boolean') {
-    config.email.requireLocalActiveModelForPrivateTools = email.requireLocalActiveModelForPrivateTools;
   }
   if (typeof sourceIndex?.enabled === 'boolean') {
     config.sourceIndex.enabled = sourceIndex.enabled;
@@ -845,7 +834,6 @@ function validateConfig(config: OlympusConfig): void {
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
   }
   assertBoolean(config.email.enabled, 'email.enabled');
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, 'email.requireLocalActiveModelForPrivateTools');
   assertBoolean(config.sourceIndex.enabled, 'sourceIndex.enabled');
   config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {

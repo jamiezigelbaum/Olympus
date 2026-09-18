@@ -34,9 +34,6 @@ import {
 interface OpenClawPluginApi {
   pluginConfig?: unknown;
   config?: unknown;
-  activeModel?: unknown;
-  context?: { activeModel?: unknown };
-  toolContext?: { activeModel?: unknown };
   registerTool(tool: NativeTool): void;
   registerHttpRoute?(route: {
     path: string;
@@ -58,10 +55,6 @@ interface OpenClawPluginToolContext {
     to?: string;
     accountId?: string;
   };
-}
-
-interface NativeRegistrationContext {
-  activeModel?: unknown;
 }
 
 interface NativeTool {
@@ -212,9 +205,8 @@ const plugin = {
   id: 'olympus',
   name: 'Olympus',
   description: 'Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.',
-  register(api: OpenClawPluginApi, registrationContext?: NativeRegistrationContext) {
+  register(api: OpenClawPluginApi) {
     const config = configFromPluginConfig(api.pluginConfig);
-    const activeModel = activeModelFromNativeContext(api, registrationContext);
     const ctx: OperationContext = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
@@ -224,11 +216,7 @@ const plugin = {
     registerSourceWatchDeliveryRoute(api, config);
 
     for (const operation of operations) {
-      if (!shouldExposeOperation(operation, {
-        config,
-        surface: 'native',
-        activeModel,
-      })) continue;
+      if (!shouldExposeOperation(operation, { config, surface: 'native' })) continue;
       if (isSourceWatchOperation(operation)) {
         api.registerTool(((toolContext: OpenClawPluginToolContext) => {
           const sourceWatchRoute = sourceWatchRouteFromToolContext(toolContext);
@@ -536,18 +524,6 @@ export function sourceWatchRouteFromToolContext(
     };
   }
   return undefined;
-}
-
-function activeModelFromNativeContext(
-  api: OpenClawPluginApi,
-  registrationContext?: NativeRegistrationContext,
-): unknown {
-  return (
-    api.activeModel
-    ?? api.context?.activeModel
-    ?? api.toolContext?.activeModel
-    ?? registrationContext?.activeModel
-  );
 }
 
 export default plugin;

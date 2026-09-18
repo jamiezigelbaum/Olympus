@@ -12,7 +12,6 @@ export type OperationSurface = 'native' | 'mcp' | 'cli';
 export interface OperationExposureContext {
   config: OlympusConfig;
   surface: OperationSurface;
-  activeModel?: unknown;
 }
 
 export function exposedOperations(

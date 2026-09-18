@@ -3,20 +3,12 @@ import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
 
-function exposedNames(config = defaultConfig(), activeModel?: unknown): string[] {
-  return surfaceNames('native', config, activeModel);
+function exposedNames(config = defaultConfig()): string[] {
+  return surfaceNames('native', config);
 }
 
-function surfaceNames(
-  surface: OperationSurface,
-  config = defaultConfig(),
-  activeModel?: unknown,
-): string[] {
-  return exposedOperations(operations, {
-    config,
-    surface,
-    activeModel,
-  }).map((operation) => operation.name);
+function surfaceNames(surface: OperationSurface, config = defaultConfig()): string[] {
+  return exposedOperations(operations, { config, surface }).map((operation) => operation.name);
 }
 
 describe('operation exposure policy', () => {
@@ -91,17 +83,5 @@ describe('operation exposure policy', () => {
       'source_index_promotion_proposal',
       'source_index_promotion_decide',
     ]) expect(registered.has(name), `${name} is still registered`).toBe(false);
-  });
-
-  test('the active-model guard does not change the public roster', () => {
-    // It survives the private-tool retirement as a configuration flag with no
-    // gated tools left; nothing it can hide is on the public lists.
-    const config = defaultConfig();
-    config.argus.lanes.fast.model = 'local-qwen-fast';
-    config.email.requireLocalActiveModelForPrivateTools = true;
-
-    expect(exposedNames(config)).toEqual(exposedNames());
-    expect(exposedNames(config, { provider: 'olympus-local', modelId: 'local-qwen-fast' }))
-      .toEqual(exposedNames());
   });
 });

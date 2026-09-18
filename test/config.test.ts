@@ -107,7 +107,6 @@ describe('config', () => {
     // "private source worker is disabled" and no command to fix it.
     expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://127.0.0.1:8010/v1');
-    expect(config.email.requireLocalActiveModelForPrivateTools).toBe(false);
     expect(config.worker.authToken).toBeUndefined();
     expect(config.sourceIndex.enabled).toBe(true);
     expect(config.worker.scheduler).toMatchObject({
@@ -218,7 +217,6 @@ describe('config', () => {
         enabled: true,
         baseUrl: 'http://email-lane.test/v1/',
         requestTimeoutSeconds: 60,
-        requireLocalActiveModelForPrivateTools: true,
       },
       sourceIndex: {
         enabled: false,
@@ -262,7 +260,6 @@ describe('config', () => {
       enabled: true,
       baseUrl: 'http://email-lane.test/v1',
       requestTimeoutSeconds: 60,
-      requireLocalActiveModelForPrivateTools: true,
     });
     expect(config.sourceIndex.enabled).toBe(false);
   });
@@ -289,27 +286,18 @@ describe('config', () => {
     }).email.baseUrl).toBe('http://source-worker.test/custom');
   });
 
-  test('loads the private native tool active-model guard from env', () => {
-    const config = loadConfig({
-      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
-      OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS: 'true',
-    });
-
-    expect(config.email.requireLocalActiveModelForPrivateTools).toBe(true);
-  });
-
   test('rejects a non-boolean JSON toggle instead of treating string false as enabled', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-config-test-'));
     const path = join(dir, 'config.json');
     try {
       writeFileSync(path, JSON.stringify({
         email: {
-          requireLocalActiveModelForPrivateTools: 'false',
+          enabled: 'false',
         },
       }));
 
       expect(() => loadConfig({ OLYMPUS_CONFIG: path }))
-        .toThrow('email.requireLocalActiveModelForPrivateTools must be a boolean');
+        .toThrow('email.enabled must be a boolean');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

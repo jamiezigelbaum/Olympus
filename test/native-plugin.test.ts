@@ -378,116 +378,21 @@ describe('native OpenClaw plugin adapter', () => {
     ]);
   });
 
-  test('the active-model guard leaves the public roster intact without metadata', () => {
-    const names = registeredToolNames({
-      email: {
-        requireLocalActiveModelForPrivateTools: true,
-      },
-    });
-
-    expect(names).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-  });
-
-  test('cloud active-model metadata does not change the public roster', () => {
-    const names = registeredToolNames(
-      {
-        email: {
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        activeModel: {
-          provider: 'openai-codex',
-          modelId: 'gpt-5.5',
-        },
-      },
-    );
-
-    expect(names).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-  });
-
-  test('does not let local-model metadata widen the public surface', () => {
-    const names = registeredToolNames(
-      {
-        argus: {
-          lanes: {
-            fast: {
-              model: 'local-qwen-fast',
-            },
-          },
-        },
-        email: {
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        context: {
-          activeModel: {
-            provider: 'olympus-local',
-            modelId: 'local-qwen-fast',
-          },
-        },
-      },
-    );
-
-    expect(names).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-  });
-
-  test('accepts future active model metadata from a second registration argument', () => {
-    const names: string[] = [];
-    plugin.register(
-      {
-        pluginConfig: {
-          argus: {
-            lanes: {
-              deep: {
-                model: 'local-qwen-deep',
-              },
-            },
-          },
-          email: {
-            requireLocalActiveModelForPrivateTools: true,
-          },
-        },
-        registerTool(tool: NativeTool) {
-          names.push(materializeTool(tool).name);
-        },
-      },
-      {
-        activeModel: {
-          providerId: 'olympus-local',
-          modelId: 'local-qwen-deep',
-        },
-      },
-    );
-
-    expect(names).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-  });
-
-  test('accepts provider-qualified local model refs without separate provider metadata', () => {
-    const names = registeredToolNames(
-      {
-        argus: {
-          lanes: {
-            fast: {
-              model: 'local-qwen-fast',
-            },
-          },
-        },
-        email: {
-          requireLocalActiveModelForPrivateTools: true,
-        },
-      },
-      {
-        toolContext: {
-          activeModel: {
-            modelRef: 'olympus-local/local-qwen-fast',
-          },
-        },
-      },
-    );
-
-    expect(names).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+  test('the registered roster does not vary with host-supplied context', () => {
+    // Olympus once gated private tools on the host's active-model metadata.
+    // Those tools and the gate were deleted on 2026-09-18, so the roster is a
+    // function of config alone: whatever extra shapes a host hands `register`,
+    // the public tools are what get registered.
+    const hostShapes: Array<Record<string, unknown>> = [
+      {},
+      { activeModel: { provider: 'openai-codex', modelId: 'gpt-5.5' } },
+      { context: { activeModel: { provider: 'olympus-local', modelId: 'local-qwen-fast' } } },
+      { toolContext: { activeModel: { modelRef: 'olympus-local/local-qwen-fast' } } },
+    ];
+    for (const shape of hostShapes) {
+      expect(registeredToolNames({ argus: { lanes: { fast: { model: 'local-qwen-fast' } } } }, shape))
+        .toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+    }
   });
 
   test('uses nested argus plugin config for tool execution', async () => {

@@ -2934,9 +2934,6 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS) {
     config.email.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_EMAIL_REQUEST_TIMEOUT_SECONDS");
   }
-  if (env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS) {
-    config.email.requireLocalActiveModelForPrivateTools = parseBoolean(env.OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS, "OLYMPUS_REQUIRE_LOCAL_ACTIVE_MODEL_FOR_PRIVATE_EMAIL_TOOLS");
-  }
   if (env.OLYMPUS_SOURCE_INDEX_ENABLED) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
@@ -3126,7 +3123,6 @@ function validateConfig(config) {
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
-  assertBoolean(config.email.requireLocalActiveModelForPrivateTools, "email.requireLocalActiveModelForPrivateTools");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
   config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry);
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath !== undefined) {
@@ -3316,8 +3312,7 @@ var init_config = __esm(() => {
     email: {
       enabled: true,
       baseUrl: "http://127.0.0.1:8010/v1",
-      requestTimeoutSeconds: 600,
-      requireLocalActiveModelForPrivateTools: false
+      requestTimeoutSeconds: 600
     },
     sourceIndex: {
       enabled: true,
@@ -65762,7 +65757,7 @@ var init_setup = __esm(() => {
   CONNECTOR_PROMPT = [
     "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
     "",
-    "Read skills/create-connector/SKILL.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
+    "Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
   ].join(`
 `);
   SETUP_GROUPS = [

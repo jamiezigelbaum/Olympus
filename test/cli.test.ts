@@ -951,11 +951,7 @@ describe('CLI tool surface', () => {
   }, 30_000);
 
   test('--tools-json uses the shared operation exposure policy', async () => {
-    const tools = await runToolsJson({
-      email: {
-        requireLocalActiveModelForPrivateTools: true,
-      },
-    });
+    const tools = await runToolsJson({});
     const names = tools.map((tool) => tool.name);
 
     expect(names).toContain('source_answer');
