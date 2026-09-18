@@ -1534,10 +1534,6 @@ function optionalXBookmarksSyncMode(
   );
 }
 
-
-
-
-
 function optionalAttachmentType(value: unknown): 'image' | 'video' | 'audio' | 'file' | 'link' | 'other' | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (

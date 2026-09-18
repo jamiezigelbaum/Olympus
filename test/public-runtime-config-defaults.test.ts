@@ -18,7 +18,7 @@ import { join, resolve } from 'node:path';
 import { Glob } from 'bun';
 import { afterAll, describe, expect, test } from 'bun:test';
 import ts from 'typescript';
-import { defaultConfig, loadConfig, REPOSITORY_ONLY_PLUGIN_CONFIG_KEYS } from '../src/core/config.ts';
+import { defaultConfig, loadConfig } from '../src/core/config.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const CONFIG_MODULE = 'src/core/config.ts';
@@ -88,9 +88,11 @@ describe('public runtime config defaults', () => {
     // A private section reappearing here is the regression: it would either
     // ship in the public bundle or grow a new exclusion span, and both are
     // decisions that belong in review rather than in a defaults literal.
+    // Whether a repository-only plugin key reaches the public manifest is
+    // proven by test/plugin-config-schema-reader-binding.test.ts, which
+    // compares the reader's key set against the manifest; not repeated here.
     expect(markedModules()).not.toContain(CONFIG_MODULE);
     expect(readFileSync(join(ROOT, CONFIG_MODULE), 'utf8')).not.toContain(START_MARKER);
-    expect([...REPOSITORY_ONLY_PLUGIN_CONFIG_KEYS].filter((key) => key in defaultConfig())).toEqual([]);
   });
 
   test('the private dev toggles default off and a defaults-only load still validates', () => {
