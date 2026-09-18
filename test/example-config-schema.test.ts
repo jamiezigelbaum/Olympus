@@ -13,7 +13,7 @@
  * The validator below covers the JSON Schema subset the manifest actually uses
  * rather than pulling in a dependency: $ref/$defs, type, properties,
  * additionalProperties, required, items, uniqueItems, enum, const, oneOf, and
- * minimum. An unsupported keyword is a hard error, so extending the manifest
+ * minimum/maximum. An unsupported keyword is a hard error, so extending the manifest
  * with a construct this gate cannot check fails loudly instead of silently
  * passing everything.
  */

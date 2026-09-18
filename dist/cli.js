@@ -41411,7 +41411,7 @@ var init_operations = __esm(() => {
     include_internal: { type: "boolean", description: "Whether the bridge may search internal corpora. Defaults true." },
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
     internal_content_max_bytes: { type: "number", description: "Max internal context bytes; worker-capped." },
-    timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, so a slow local analyst finishes instead of timing out." }
+    timeoutMs: { type: "number", description: "OpenClaw dynamic-tool watchdog budget in ms; use 600000 over slow local corpora. It also raises the private-lane request budget to match, up to a 600000 ms ceiling, so a slow local analyst finishes instead of timing out." }
   };
   operations = [
     {

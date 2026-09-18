@@ -290,6 +290,14 @@ describe('config', () => {
     });
   });
 
+  test('rejects a private-lane timeout above the 600s Gateway ceiling', () => {
+    expect(configFromPluginConfig({ email: { requestTimeoutSeconds: 600 } }).email.requestTimeoutSeconds).toBe(600);
+    expect(() => configFromPluginConfig({ email: { requestTimeoutSeconds: 900 } }))
+      .toThrow('email.requestTimeoutSeconds must be at most 600.');
+    expect(() => configFromPluginConfig({ email: { requestTimeoutSeconds: 601 } }))
+      .toThrow('email.requestTimeoutSeconds must be at most 600.');
+  });
+
   test('normalizes source-worker base URLs from plugin config', () => {
     expect(configFromPluginConfig({
       email: { baseUrl: 'http://source-worker.test' },
