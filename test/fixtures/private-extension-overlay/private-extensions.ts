@@ -23,6 +23,7 @@ export const fixtureCalls: {
   runtimeExpectations: number;
   registeredOperationNames: string[];
   toolContextSeen: Array<Record<string, unknown>>;
+  contextSawFixtureLane: boolean;
 } = {
   configFragments: 0,
   extendOperationContext: 0,
@@ -30,6 +31,7 @@ export const fixtureCalls: {
   runtimeExpectations: 0,
   registeredOperationNames: [],
   toolContextSeen: [],
+  contextSawFixtureLane: false,
 };
 
 export function resetFixtureCalls(): void {
@@ -82,12 +84,10 @@ const extensions: OlympusPrivateExtensions = {
 
   extendOperationContext(input) {
     fixtureCalls.extendOperationContext += 1;
-    // Proves the hook sees both the raw plugin config and the parsed config,
-    // and that what it returns survives into the shared operation context.
+    // Proves the hook sees both the raw plugin config and the parsed config.
     const raw = input.pluginConfig as { fixtureLane?: { enabled?: boolean } } | undefined;
-    return {
-      hireBrokerAuthority: { senderIsOwner: raw?.fixtureLane?.enabled === true && input.config.worker !== undefined },
-    };
+    fixtureCalls.contextSawFixtureLane = raw?.fixtureLane?.enabled === true && input.config.worker !== undefined;
+    return {};
   },
 
   register(input) {
@@ -108,7 +108,7 @@ const extensions: OlympusPrivateExtensions = {
       input.registerOperationTool(withContext, {
         toolContextExtension: (toolContext) => {
           fixtureCalls.toolContextSeen.push({ ...toolContext });
-          return { hireBrokerAuthority: { senderIsOwner: toolContext.senderIsOwner === true } };
+          return {};
         },
       });
       fixtureCalls.registeredOperationNames.push(withContext.name);

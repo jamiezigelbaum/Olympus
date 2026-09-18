@@ -3,71 +3,6 @@
   "purpose": "Everything in src/, the operation registry, and skills/ that the public product does not reach, each with a reason and the condition under which the entry goes away. test/public-surface-guard.test.ts fails on any unlisted leftover and on any entry that is no longer a leftover, so this file only shrinks.",
   "modules": [
     {
-      "path": "src/workers/hire-broker/a2a.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/broker.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/client.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/identity.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/index.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/ledger.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/membrane.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/payment.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/registry.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/release.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/secure-files.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/server.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/hire-broker/types.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Hire Broker is Castor capability.",
-      "retire_when": "Deleted."
-    },
-    {
       "path": "src/core/castor-workspace.ts",
       "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
       "retire_when": "Deleted."
@@ -280,16 +215,6 @@
   ],
   "operations": [
     {
-      "name": "expert_hire",
-      "reason": "Hire Broker operations; retiring with the Hire Broker.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "expert_report",
-      "reason": "Hire Broker operations; retiring with the Hire Broker.",
-      "retire_when": "Deleted."
-    },
-    {
       "name": "xanthos_file_deliver",
       "reason": "Private lane operations; retiring in favour of native OpenClaw file transfer.",
       "retire_when": "Deleted."
@@ -376,11 +301,6 @@
     }
   ],
   "skills": [
-    {
-      "path": "skills/hire-expert",
-      "reason": "Hire Broker skill; retiring with the Hire Broker.",
-      "retire_when": "Deleted."
-    },
     {
       "path": "skills/deliver-files",
       "reason": "Private lane skills; retiring with the lanes.",

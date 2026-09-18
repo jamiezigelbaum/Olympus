@@ -40,8 +40,6 @@ describe('operations', () => {
       'email_index_sync',
       'email_index_embed',
       'email_index_search',
-      'expert_hire',
-      'expert_report',
       'olympus_doctor',
     ]);
     expect(operations.find((operation) => operation.name === 'olympus_doctor')?.mutating).toBe(false);
@@ -65,55 +63,6 @@ describe('operations', () => {
     expect(operations.find((operation) => operation.name === 'source_index_promotion_candidates')?.mutating).toBe(false);
     expect(operations.find((operation) => operation.name === 'source_index_promotion_proposals')?.mutating).toBe(false);
     expect(operations.find((operation) => operation.name === 'source_index_promotion_proposal')?.mutating).toBe(false);
-    expect(operations.find((operation) => operation.name === 'expert_hire')).toMatchObject({
-      mutating: true,
-      nativeExposure: 'hireBrokerEnabledOnly',
-    });
-    expect(operations.find((operation) => operation.name === 'expert_report')).toMatchObject({
-      mutating: false,
-      nativeExposure: 'hireBrokerEnabledOnly',
-    });
-  });
-
-  test('expert bridge operations delegate only to the broker and bind confirmation to trusted owner context', async () => {
-    const hire = operations.find((operation) => operation.name === 'expert_hire')!;
-    const report = operations.find((operation) => operation.name === 'expert_report')!;
-    const calls: unknown[] = [];
-    const ctx: OperationContext = {
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-      hireBroker: {
-        hire: async (request: unknown) => {
-          calls.push(request);
-          return { status: 'submitted', handle: 'hire_fixture' };
-        },
-        report: async (handle: string) => {
-          calls.push({ handle });
-          return { handle, status: 'pending' };
-        },
-      } as unknown as NonNullable<OperationContext['hireBroker']>,
-      hireBrokerAuthority: { senderIsOwner: true },
-    };
-    const listing = { name: 'Fixture', endpoint: 'https://expert.example/a2a' };
-    const budget = { amount: 5, currency: 'USDC' };
-
-    await hire.handler(ctx, { listing, brief: 'Shape-only brief.', budget, owner_confirmed: true });
-    await report.handler(ctx, { handle: 'hire_fixture' });
-
-    expect(calls).toEqual([
-      { listing, brief: 'Shape-only brief.', budget, ownerConfirmed: true, ownerAuthorized: true },
-      { handle: 'hire_fixture' },
-    ]);
-    expect(operationToolSchema(hire)).toMatchObject({
-      required: ['listing', 'brief', 'budget'],
-      properties: {
-        listing: { type: 'object' },
-        brief: { type: 'string' },
-        budget: { type: 'object' },
-        owner_confirmed: { type: 'boolean' },
-      },
-    });
   });
 
   test('generates required tool schema for argus_complete', () => {
