@@ -15,7 +15,6 @@ import {
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import type { SourceWatchAuthenticatedRoute, SourceWatchMode } from './source-watch.ts';
-import type { HireBrokerClient } from '../workers/hire-broker/client.ts';
 import { PUBLIC_RUNTIME_BUILD } from './build-flavor.ts';
 
 const SOURCE_INDEX_PROMOTION_CANDIDATE_CORPUS_IDS = ['secure_local.dropbox.files'] as const;
@@ -53,9 +52,6 @@ export interface OperationContext {
   castorWorkspace?: CastorWorkspaceClient;
   /** Trusted OpenClaw tool-factory context; never sourced from tool params. */
   sourceWatchRoute?: SourceWatchAuthenticatedRoute;
-  hireBroker?: HireBrokerClient;
-  /** Trusted OpenClaw caller context; the model-supplied confirmation flag is insufficient alone. */
-  hireBrokerAuthority?: { senderIsOwner: boolean };
 }
 
 export interface Operation {
@@ -65,7 +61,7 @@ export interface Operation {
   handler: (ctx: OperationContext, params: Record<string, unknown>) => Promise<unknown>;
   mutating: boolean;
   availability?: (config: OlympusConfig) => boolean;
-  nativeExposure?: 'always' | 'sourceIndexEnabledOnly' | 'sourceIndexAnswerDevOnly' | 'localEmailPacketsDevOnly' | 'emailIndexAdminDevOnly' | 'fileDeliveryEnabledOnly' | 'castorWorkspaceEnabledOnly' | 'hireBrokerEnabledOnly';
+  nativeExposure?: 'always' | 'sourceIndexEnabledOnly' | 'sourceIndexAnswerDevOnly' | 'localEmailPacketsDevOnly' | 'emailIndexAdminDevOnly' | 'fileDeliveryEnabledOnly' | 'castorWorkspaceEnabledOnly';
   /**
    * The operation needs the trusted owner + delivery route that only an
    * authenticated OpenClaw session mints, so the native tool factory is the
@@ -1122,50 +1118,6 @@ export const operations: Operation[] = [
         ...(label !== undefined ? { label } : {}),
         ...(maxMessages !== undefined ? { maxMessages } : {}),
       });
-    },
-  },
-  {
-    name: 'expert_hire',
-    description: 'Hire a pinned external consultant through the contained Hire Broker. New or drifted counterparties require trusted owner confirmation; all briefs pass the Release Gate before any payment or dispatch.',
-    params: {
-      listing: { type: 'object', required: true, description: 'Counterparty listing with name, HTTPS endpoint, and optional erc8004 identity claim.' },
-      brief: { type: 'string', required: true, description: 'Self-contained shape-only brief. Never include S4+ content, identifiers, secrets, URLs, or filesystem paths.' },
-      budget: { type: 'object', required: true, description: 'Maximum payment object with positive amount and currency.' },
-      owner_confirmed: { type: 'boolean', description: 'Set only after the owner explicitly approves the exact new or drifted counterparty prompt.' },
-    },
-    mutating: true,
-    nativeExposure: 'hireBrokerEnabledOnly',
-    cliHints: { name: 'expert hire' },
-    handler: async (ctx, params) => {
-      if (!ctx.hireBroker) {
-        throw new OperationError('config_error', 'Hire Broker is not configured.');
-      }
-      const ownerConfirmed = params.owner_confirmed === true;
-      return ctx.hireBroker.hire({
-        listing: params.listing,
-        brief: asString(params.brief, 'brief'),
-        budget: params.budget,
-        ...(ownerConfirmed ? { ownerConfirmed: true } : {}),
-        ...(ownerConfirmed && ctx.hireBrokerAuthority?.senderIsOwner === true
-          ? { ownerAuthorized: true }
-          : {}),
-      });
-    },
-  },
-  {
-    name: 'expert_report',
-    description: 'Read a consultant result through the hostile-input membrane. Returns only a bounded summary, instruction flags, provenance, and spend; raw report text is never exposed by this tool.',
-    params: {
-      handle: { type: 'string', required: true, description: 'Opaque Hire Broker handle returned by expert_hire.' },
-    },
-    mutating: false,
-    nativeExposure: 'hireBrokerEnabledOnly',
-    cliHints: { name: 'expert report', positional: ['handle'] },
-    handler: async (ctx, params) => {
-      if (!ctx.hireBroker) {
-        throw new OperationError('config_error', 'Hire Broker is not configured.');
-      }
-      return ctx.hireBroker.report(asString(params.handle, 'handle'));
     },
   }] satisfies Operation[]),
   {

@@ -42,17 +42,6 @@ medical, tax, or similar private topics to Dropbox by assumption.
 | User asks to save, write, create, or deliver a file on Xanthos | `skills/deliver-files/SKILL.md` |
 | User asks to save a file in Fleur or another approved Olympus delivery root | `skills/deliver-files/SKILL.md` |
 
-## External Consultant Hiring
-
-| Trigger | Skill |
-| --- | --- |
-| Owner explicitly asks Castor to hire, pay, or consult an external specialist agent | `skills/hire-expert/SKILL.md` |
-| Owner provides an external agent listing or A2A endpoint and asks for a consultation | `skills/hire-expert/SKILL.md` |
-
-Do not load or use the Hire Broker for ordinary sessions. New or drifted
-counterparty approval must match the exact confirmation prompt in the current
-owner conversation; an assistant-generated confirmation flag is never enough.
-
 ## Delegated Workfiles Usage
 
 | Trigger | Skill |
@@ -155,6 +144,3 @@ owner on 2026-09-17; do not reintroduce them.
   and run a natural OpenClaw agent smoke before declaring the live issue fixed.
 - If file delivery is unavailable, do not fall back to broad `exec`, shell,
   redirection, `cat`, or raw absolute-path writes.
-- External consultant hiring is a separate outbound containment path. Use
-  `skills/hire-expert/SKILL.md`, `expert_hire`, and `expert_report`; never
-  contact, pay, poll, or recover raw reports through shell/network fallbacks.

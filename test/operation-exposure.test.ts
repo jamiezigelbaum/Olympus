@@ -3,21 +3,19 @@ import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
 
-function exposedNames(config = defaultConfig(), activeModel?: unknown, hireBrokerEnabled?: boolean): string[] {
-  return surfaceNames('native', config, activeModel, hireBrokerEnabled);
+function exposedNames(config = defaultConfig(), activeModel?: unknown): string[] {
+  return surfaceNames('native', config, activeModel);
 }
 
 function surfaceNames(
   surface: OperationSurface,
   config = defaultConfig(),
   activeModel?: unknown,
-  hireBrokerEnabled?: boolean,
 ): string[] {
   return exposedOperations(operations, {
     config,
     surface,
     activeModel,
-    ...(hireBrokerEnabled !== undefined ? { hireBrokerEnabled } : {}),
   }).map((operation) => operation.name);
 }
 
@@ -89,13 +87,6 @@ describe('operation exposure policy', () => {
     expect(names).not.toContain('source_index_promotion_proposals');
     expect(names).not.toContain('source_index_promotion_proposal');
     expect(names).not.toContain('source_index_promotion_decide');
-  });
-
-  test('keeps Hire Broker tools outside the v0.4 public surface', () => {
-    expect(exposedNames()).not.toContain('expert_hire');
-    expect(exposedNames()).not.toContain('expert_report');
-    expect(exposedNames(defaultConfig(), undefined, true)).not.toContain('expert_hire');
-    expect(exposedNames(defaultConfig(), undefined, true)).not.toContain('expert_report');
   });
 
   test('keeps Xanthos file delivery outside the v0.4 public surface', () => {

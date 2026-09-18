@@ -357,22 +357,6 @@ describe('native OpenClaw plugin adapter', () => {
     ]);
   });
 
-  test('keeps the Hire Broker bridge outside the public surface', () => {
-    expect(Object.keys(configSchemaProperties())).not.toContain('hireBroker');
-    expect(registeredToolNames({})).not.toContain('expert_hire');
-    expect(registeredToolNames({})).not.toContain('expert_report');
-
-    const names = registeredToolNames({
-      hireBroker: {
-        enabled: true,
-        socketPath: '/tmp/olympus-hire-broker-test.sock',
-        requestTimeoutSeconds: 1,
-      },
-    });
-    expect(names).not.toContain('expert_hire');
-    expect(names).not.toContain('expert_report');
-  });
-
   test('can disable promoted source-index read tools while preserving legacy proof compatibility', () => {
     const disabled = registeredToolNames({
       sourceIndex: {
