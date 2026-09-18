@@ -138,7 +138,6 @@ describe('CLI tool surface', () => {
       'data migrate',
       'x reconcile',
       'x content',
-      'xanthos',
       'email search',
       'email index',
       'email ping',
@@ -967,8 +966,6 @@ describe('CLI tool surface', () => {
     expect(names).toContain('source_answer');
     expect(names).toContain('source_index_status');
     expect(names).toContain('source_index_search');
-    expect(names).not.toContain('xanthos_file_deliver');
-    expect(names).not.toContain('castor_workspace');
     expect(names).not.toContain('source_index_sync');
     expect(names).not.toContain('email_search');
     expect(names).not.toContain('email_index_search');
@@ -976,37 +973,15 @@ describe('CLI tool surface', () => {
     expect(names).not.toContain('email_index_embed');
   }, 30_000);
 
-  test('--tools-json never exposes repository-only file delivery', async () => {
-    const tools = await runToolsJson({
-      fileDelivery: {
-        enabled: true,
-        baseUrl: 'http://xanthos-delivery.test/v1',
-      },
-    });
-
-    expect(tools.map((tool) => tool.name)).not.toContain('xanthos_file_deliver');
-  }, 30_000);
-
-  test('--tools-json never exposes repository-only Castor Workspace', async () => {
-    const tools = await runToolsJson({
-      castorWorkspace: {
-        enabled: true,
-        baseUrl: 'http://xanthos-workspace.test/v1',
-      },
-    });
-
-    expect(tools.map((tool) => tool.name)).not.toContain('castor_workspace');
-  }, 30_000);
-
   test('parseArgs accepts explicit false values for boolean flags', () => {
-    const castorWorkspace = operations.find((operation) => operation.name === 'castor_workspace')!;
+    const sourceExport = operations.find((operation) => operation.name === 'source_export')!;
 
-    expect(parseArgs(castorWorkspace, ['--action', 'export_gcs', '--dry-run=false'])).toEqual({
-      action: 'export_gcs',
+    expect(parseArgs(sourceExport, ['--items', '[]', '--dry-run=false'])).toEqual({
+      items: '[]',
       dry_run: false,
     });
-    expect(parseArgs(castorWorkspace, ['--action', 'export_gcs', '--dry-run', 'false'])).toEqual({
-      action: 'export_gcs',
+    expect(parseArgs(sourceExport, ['--items', '[]', '--dry-run', 'false'])).toEqual({
+      items: '[]',
       dry_run: false,
     });
   });

@@ -34,8 +34,6 @@ describe('operations', () => {
       'source_watch_create',
       'source_watches',
       'source_watch_cancel',
-      'xanthos_file_deliver',
-      'castor_workspace',
       'email_search',
       'email_index_sync',
       'email_index_embed',
@@ -47,7 +45,6 @@ describe('operations', () => {
     expect(operations.find((operation) => operation.name === 'email_index_sync')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'source_index_sync')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'email_index_embed')?.mutating).toBe(true);
-    expect(operations.find((operation) => operation.name === 'xanthos_file_deliver')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'source_export')?.mutating).toBe(true);
     expect(operations.find((operation) => operation.name === 'source_export')?.nativeExposure).toBe('sourceIndexAnswerDevOnly');
     expect(operations.find((operation) => operation.name === 'source_transcribe')?.mutating).toBe(true);
@@ -2087,158 +2084,6 @@ describe('operations', () => {
       trustDomain: 'secure_local',
       maxResults: 3,
     });
-  });
-
-  test('xanthos_file_deliver delegates only bounded delivery parameters', async () => {
-    const fileDeliver = operations.find((operation) => operation.name === 'xanthos_file_deliver');
-    const calls: unknown[] = [];
-    const ctx: OperationContext = {
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-      fileDelivery: {
-        deliver: async (options: unknown) => {
-          calls.push(options);
-          return {
-            kind: 'file_delivery_result',
-            delivery_id: 'delivery-1',
-            root_id: 'olympus_smoke',
-            relative_path: 'notes/test.md',
-            bytes_written: 11,
-            content_sha256: 'hash-1',
-            write_mode: 'create_new',
-            created_at: '2026-05-20T12:00:00.000Z',
-            approval_status: 'not_required',
-            audit_ref: 'file_delivery:delivery-1',
-            policy: {
-              bounded_file_delivery: true,
-              shell_used: false,
-              absolute_path_exposed: false,
-            },
-          };
-        },
-      } as unknown as NonNullable<OperationContext['fileDelivery']>,
-    };
-
-    const result = await fileDeliver!.handler(ctx, {
-      root_id: 'olympus_smoke',
-      relative_path: 'notes/test.md',
-      content: 'hello world',
-      content_encoding: 'utf8',
-      write_mode: 'create_new',
-      trust_domain: 'internal',
-      source_provenance: 'Owner request',
-      idempotency_key: 'request-1',
-      actor_id: 'castor',
-      session_id: 'session-1',
-      model_provider: 'olympus-local',
-      model_id: 'qwen-local',
-    });
-
-    expect(result).toMatchObject({
-      kind: 'file_delivery_result',
-      root_id: 'olympus_smoke',
-      policy: { shell_used: false, absolute_path_exposed: false },
-    });
-    expect(calls[0]).toEqual({
-      rootId: 'olympus_smoke',
-      relativePath: 'notes/test.md',
-      content: 'hello world',
-      contentEncoding: 'utf8',
-      writeMode: 'create_new',
-      trustDomain: 'internal',
-      sourceProvenance: 'Owner request',
-      idempotencyKey: 'request-1',
-      actorId: 'castor',
-      sessionId: 'session-1',
-      modelProvider: 'olympus-local',
-      modelId: 'qwen-local',
-    });
-    expect(operationToolSchema(fileDeliver!)).toMatchObject({
-      required: ['root_id', 'relative_path', 'content', 'write_mode', 'trust_domain', 'idempotency_key'],
-      properties: {
-        write_mode: { enum: ['dry_run', 'create_new', 'overwrite_with_approval'] },
-        trust_domain: { enum: ['public_safe', 'internal', 'secure_local'] },
-      },
-    });
-  });
-
-  test('castor_workspace delegates bounded workspace parameters', async () => {
-    const workspace = operations.find((operation) => operation.name === 'castor_workspace');
-    const calls: unknown[] = [];
-    const ctx: OperationContext = {
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-      castorWorkspace: {
-        run: async (options: unknown) => {
-          calls.push(options);
-          return {
-            kind: 'castor_workspace_export_gcs',
-            root_id: 'castor_workspace',
-            relative_path: 'trading-books',
-            destination_uri: 'gs://fixture-trading-books-rag/trading-books',
-            dry_run: true,
-            files: 10,
-            directories: 2,
-            bytes: 1234,
-            policy: {
-              castor_workspace_delegated: true,
-              shell_exposed_to_agent: false,
-              absolute_path_exposed: false,
-            },
-          };
-        },
-      } as unknown as NonNullable<OperationContext['castorWorkspace']>,
-    };
-
-    const result = await workspace!.handler(ctx, {
-      action: 'export_gcs',
-      root_id: 'castor_workspace',
-      relative_path: 'trading-books',
-      destination_uri: 'gs://fixture-trading-books-rag/trading-books',
-      dry_run: true,
-      include_media: true,
-      recursive: true,
-      idempotency_key: 'export-1',
-      actor_id: 'castor',
-      session_id: 'session-1',
-    });
-
-    expect(result).toMatchObject({
-      kind: 'castor_workspace_export_gcs',
-      policy: { castor_workspace_delegated: true, shell_exposed_to_agent: false },
-    });
-    expect(calls[0]).toEqual({
-      action: 'export_gcs',
-      rootId: 'castor_workspace',
-      relativePath: 'trading-books',
-      destinationUri: 'gs://fixture-trading-books-rag/trading-books',
-      recursive: true,
-      dryRun: true,
-      includeMedia: true,
-      idempotencyKey: 'export-1',
-      actorId: 'castor',
-      sessionId: 'session-1',
-    });
-    expect(operationToolSchema(workspace!)).toMatchObject({
-      required: ['action'],
-      properties: {
-        action: { enum: ['health', 'list', 'read', 'write', 'delete', 'export_gcs'] },
-        root_id: { type: 'string' },
-        destination_uri: { type: 'string' },
-        include_media: { type: 'boolean' },
-      },
-    });
-
-    await expect(workspace!.handler({
-      config: defaultConfig(),
-      delphi: {} as OperationContext['delphi'],
-      email: {} as OperationContext['email'],
-    }, {
-      action: 'list',
-      root_id: 'castor_workspace',
-    })).rejects.toThrow('Delegated workspace client is not configured');
   });
 
   test('email_index_sync delegates bounded admin parameters to private email lane', async () => {

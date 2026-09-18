@@ -3,36 +3,6 @@
   "purpose": "Everything in src/, the operation registry, and skills/ that the public product does not reach, each with a reason and the condition under which the entry goes away. test/public-surface-guard.test.ts fails on any unlisted leftover and on any entry that is no longer a leftover, so this file only shrinks.",
   "modules": [
     {
-      "path": "src/core/castor-workspace.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/castor-workspace/index.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/castor-workspace/server.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/core/file-delivery.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/file-delivery/index.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/file-delivery/server.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Private lane superseded by native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
       "path": "src/core/source-family.ts",
       "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
       "retire_when": "Wired into the public source roster, or deleted."
@@ -200,16 +170,6 @@
   ],
   "operations": [
     {
-      "name": "xanthos_file_deliver",
-      "reason": "Private lane operations; retiring in favour of native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "name": "castor_workspace",
-      "reason": "Private lane operations; retiring in favour of native OpenClaw file transfer.",
-      "retire_when": "Deleted."
-    },
-    {
       "name": "email_ping",
       "reason": "Pre-v0.4 email lane, superseded by source_answer over the Gmail connector store.",
       "retire_when": "Deleted."
@@ -286,16 +246,6 @@
     }
   ],
   "skills": [
-    {
-      "path": "skills/deliver-files",
-      "reason": "Private lane skills; retiring with the lanes.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "skills/castor-workspace",
-      "reason": "Private lane skills; retiring with the lanes.",
-      "retire_when": "Deleted."
-    },
     {
       "path": "skills/ask-email-local",
       "reason": "Pre-v0.4 email lane skill.",

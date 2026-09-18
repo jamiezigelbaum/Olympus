@@ -1,8 +1,6 @@
 import { DelphiClient } from './delphi.ts';
 import { runDoctor } from './doctor.ts';
 import { EmailClient, type SourceAnswerSelectedItemOption, type SourceExportItemOption } from './email.ts';
-import type { FileDeliveryClient } from './file-delivery.ts';
-import type { CastorWorkspaceClient } from './castor-workspace.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError } from './operation-error.ts';
@@ -48,8 +46,6 @@ export interface OperationContext {
   config: OlympusConfig;
   delphi: DelphiClient;
   email: EmailClient;
-  fileDelivery?: FileDeliveryClient;
-  castorWorkspace?: CastorWorkspaceClient;
   /** Trusted OpenClaw tool-factory context; never sourced from tool params. */
   sourceWatchRoute?: SourceWatchAuthenticatedRoute;
 }
@@ -61,7 +57,7 @@ export interface Operation {
   handler: (ctx: OperationContext, params: Record<string, unknown>) => Promise<unknown>;
   mutating: boolean;
   availability?: (config: OlympusConfig) => boolean;
-  nativeExposure?: 'always' | 'sourceIndexEnabledOnly' | 'sourceIndexAnswerDevOnly' | 'localEmailPacketsDevOnly' | 'emailIndexAdminDevOnly' | 'fileDeliveryEnabledOnly' | 'castorWorkspaceEnabledOnly';
+  nativeExposure?: 'always' | 'sourceIndexEnabledOnly' | 'sourceIndexAnswerDevOnly' | 'localEmailPacketsDevOnly' | 'emailIndexAdminDevOnly';
   /**
    * The operation needs the trusted owner + delivery route that only an
    * authenticated OpenClaw session mints, so the native tool factory is the
@@ -866,127 +862,6 @@ export const operations: Operation[] = [
     },
   },
   ...(PUBLIC_RUNTIME_BUILD ? [] : [{
-    name: 'xanthos_file_deliver',
-    description: [
-      'Deliver a UTF-8 or base64 file to an approved Xanthos logical root through the bounded file-delivery worker.',
-      'This tool accepts only logical root IDs and relative paths, uses no shell, exposes no absolute host paths, denies overwrites by default, and returns an audit reference.',
-    ].join(' '),
-    params: {
-      root_id: { type: 'string', required: true, description: 'Approved logical destination root, for example olympus_smoke or growth_fleur.' },
-      relative_path: { type: 'string', required: true, description: 'Relative file path below the approved root. Absolute paths and traversal are denied.' },
-      content: { type: 'string', required: true, description: 'File content as UTF-8 text or base64 bytes.' },
-      content_encoding: { type: 'string', enum: ['utf8', 'base64'], description: 'Content encoding. Defaults to utf8.' },
-      write_mode: { type: 'string', required: true, enum: ['dry_run', 'create_new', 'overwrite_with_approval'], description: 'dry_run validates only; create_new refuses existing files; overwrite requires explicit approval.' },
-      trust_domain: { type: 'string', required: true, enum: ['public_safe', 'internal', 'secure_local'], description: 'Trust domain of the content being delivered.' },
-      source_provenance: { type: 'string', description: 'Optional safe provenance for generated content.' },
-      idempotency_key: { type: 'string', required: true, description: 'Stable key for safe retries of the same delivery request.' },
-      approval_id: { type: 'string', description: 'Explicit approval reference required for overwrite_with_approval.' },
-      actor_id: { type: 'string', description: 'Optional caller or agent identity for audit.' },
-      session_id: { type: 'string', description: 'Optional session identity for audit.' },
-      model_provider: { type: 'string', description: 'Optional model/provider identity for audit.' },
-      model_id: { type: 'string', description: 'Optional model identity for audit.' },
-    },
-    mutating: true,
-    nativeExposure: 'fileDeliveryEnabledOnly',
-    cliHints: { name: 'xanthos file deliver' },
-    handler: async (ctx, params) => {
-      if (!ctx.fileDelivery) {
-        throw new OperationError(
-          'file_delivery_not_configured',
-          'File delivery client is not configured in this Olympus runtime.',
-        );
-      }
-      const rootId = asString(params.root_id, 'root_id');
-      const relativePath = asString(params.relative_path, 'relative_path');
-      const content = asString(params.content, 'content');
-      const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-      const writeMode = asFileDeliveryWriteMode(params.write_mode);
-      const trustDomain = asFileDeliveryTrustDomain(params.trust_domain);
-      const sourceProvenance = optionalString(params.source_provenance);
-      const idempotencyKey = asString(params.idempotency_key, 'idempotency_key');
-      const approvalId = optionalString(params.approval_id);
-      const actorId = optionalString(params.actor_id);
-      const sessionId = optionalString(params.session_id);
-      const modelProvider = optionalString(params.model_provider);
-      const modelId = optionalString(params.model_id);
-      return ctx.fileDelivery.deliver({
-        rootId,
-        relativePath,
-        content,
-        ...(contentEncoding !== undefined ? { contentEncoding } : {}),
-        writeMode,
-        trustDomain,
-        ...(sourceProvenance !== undefined ? { sourceProvenance } : {}),
-        idempotencyKey,
-        ...(approvalId !== undefined ? { approvalId } : {}),
-        ...(actorId !== undefined ? { actorId } : {}),
-        ...(sessionId !== undefined ? { sessionId } : {}),
-        ...(modelProvider !== undefined ? { modelProvider } : {}),
-        ...(modelId !== undefined ? { modelId } : {}),
-      });
-    },
-  },
-  {
-    name: 'castor_workspace',
-    description: [
-      'Use {{ownerName}} delegated assistant workfiles through a bounded Xanthos worker.',
-      'Anything inside the approved assistant workfiles root is intentionally delegated to {{assistantName}} for read, write, delete, and export through implemented destination actions without extra S4 approval gating.',
-      'Finder/macOS aliases inside the workspace may be read, listed, and exported; alias targets are not writable or deletable through this tool.',
-      'Use only logical root IDs and relative paths; the tool exposes no absolute host paths and does not grant shell access.',
-    ].join(' '),
-    params: {
-      action: { type: 'string', required: true, enum: ['health', 'list', 'read', 'write', 'delete', 'export_gcs'], description: 'Workspace action.' },
-      root_id: { type: 'string', description: 'Approved workspace root id. Use castor_workspace for the configured delegated workfiles root.' },
-      relative_path: { type: 'string', description: 'Relative path inside the workspace root. Empty path means the root.' },
-      content: { type: 'string', description: 'UTF-8 or base64 content for write.' },
-      content_encoding: { type: 'string', enum: ['utf8', 'base64'], description: 'Content encoding for write. Defaults to utf8.' },
-      destination_uri: { type: 'string', description: 'Allowlisted gs:// destination for export_gcs.' },
-      recursive: { type: 'boolean', description: 'Required for deleting directories; export_gcs is always recursive for directories.' },
-      dry_run: { type: 'boolean', description: 'For export_gcs, defaults true. Set false to perform the upload after inspecting a dry-run.' },
-      include_media: { type: 'boolean', description: 'For directory export_gcs, include media extensions in addition to md/txt/pdf/html. Defaults false.' },
-      idempotency_key: { type: 'string', description: 'Optional stable key for audit/retry correlation.' },
-      actor_id: { type: 'string', description: 'Optional caller identity for audit.' },
-      session_id: { type: 'string', description: 'Optional session identity for audit.' },
-    },
-    mutating: true,
-    nativeExposure: 'castorWorkspaceEnabledOnly',
-    cliHints: { name: 'castor workspace' },
-    handler: async (ctx, params) => {
-      if (!ctx.castorWorkspace) {
-        throw new OperationError(
-          'castor_workspace_not_configured',
-          'Delegated workspace client is not configured in this Olympus runtime.',
-        );
-      }
-      const action = asCastorWorkspaceAction(params.action);
-      const rootId = optionalString(params.root_id);
-      const relativePath = typeof params.relative_path === 'string' ? params.relative_path : undefined;
-      const content = typeof params.content === 'string' ? params.content : undefined;
-      const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-      const destinationUri = optionalString(params.destination_uri);
-      const recursive = optionalBoolean(params.recursive, 'recursive');
-      const dryRun = optionalBoolean(params.dry_run, 'dry_run');
-      const includeMedia = optionalBoolean(params.include_media, 'include_media');
-      const idempotencyKey = optionalString(params.idempotency_key);
-      const actorId = optionalString(params.actor_id);
-      const sessionId = optionalString(params.session_id);
-      return ctx.castorWorkspace.run({
-        action,
-        ...(rootId !== undefined ? { rootId } : {}),
-        ...(relativePath !== undefined ? { relativePath } : {}),
-        ...(content !== undefined ? { content } : {}),
-        ...(contentEncoding !== undefined ? { contentEncoding } : {}),
-        ...(destinationUri !== undefined ? { destinationUri } : {}),
-        ...(recursive !== undefined ? { recursive } : {}),
-        ...(dryRun !== undefined ? { dryRun } : {}),
-        ...(includeMedia !== undefined ? { includeMedia } : {}),
-        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
-        ...(actorId !== undefined ? { actorId } : {}),
-        ...(sessionId !== undefined ? { sessionId } : {}),
-      });
-    },
-  },
-  {
     name: 'email_search',
     description: [
       'Search private email and return a sanitized local-only source packet for approved local/private sessions.',
@@ -1657,42 +1532,6 @@ function optionalXBookmarksSyncMode(
     'invalid_params',
     'mode must be head, reconcile, window_diagnostic, folder_facet_refresh, or preservation-reattest for X bookmarks source-index sync.',
   );
-}
-
-function asFileDeliveryWriteMode(value: unknown): 'dry_run' | 'create_new' | 'overwrite_with_approval' {
-  const writeMode = asString(value, 'write_mode');
-  if (writeMode === 'dry_run' || writeMode === 'create_new' || writeMode === 'overwrite_with_approval') {
-    return writeMode;
-  }
-  throw new OperationError('invalid_params', 'write_mode must be dry_run, create_new, or overwrite_with_approval.');
-}
-
-function asFileDeliveryTrustDomain(value: unknown): 'public_safe' | 'internal' | 'secure_local' {
-  const trustDomain = asString(value, 'trust_domain');
-  if (trustDomain === 'public_safe' || trustDomain === 'internal' || trustDomain === 'secure_local') {
-    return trustDomain;
-  }
-  throw new OperationError('invalid_params', 'trust_domain must be public_safe, internal, or secure_local.');
-}
-
-function optionalFileContentEncoding(value: unknown): 'utf8' | 'base64' | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'utf8' || value === 'base64') return value;
-  throw new OperationError('invalid_params', 'content_encoding must be utf8 or base64.');
-}
-
-function asCastorWorkspaceAction(value: unknown): 'health' | 'list' | 'read' | 'write' | 'delete' | 'export_gcs' {
-  if (
-    value === 'health'
-    || value === 'list'
-    || value === 'read'
-    || value === 'write'
-    || value === 'delete'
-    || value === 'export_gcs'
-  ) {
-    return value;
-  }
-  throw new OperationError('invalid_params', 'action must be health, list, read, write, delete, or export_gcs.');
 }
 
 function optionalAttachmentType(value: unknown): 'image' | 'video' | 'audio' | 'file' | 'link' | 'other' | undefined {

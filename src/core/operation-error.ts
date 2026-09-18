@@ -15,13 +15,7 @@ export type OperationErrorCode =
   | 'source_index_answer_dev_required'
   | 'source_index_admin_required'
   | 'source_index_policy_violation'
-  | 'source_index_error'
-  | 'file_delivery_not_configured'
-  | 'file_delivery_unreachable'
-  | 'file_delivery_error'
-  | 'castor_workspace_not_configured'
-  | 'castor_workspace_unreachable'
-  | 'castor_workspace_error';
+  | 'source_index_error';
 
 export class OperationError extends Error {
   code: OperationErrorCode;

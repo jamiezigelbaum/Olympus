@@ -2961,24 +2961,6 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
-  if (env.OLYMPUS_FILE_DELIVERY_ENABLED) {
-    config.fileDelivery.enabled = parseBoolean(env.OLYMPUS_FILE_DELIVERY_ENABLED, "OLYMPUS_FILE_DELIVERY_ENABLED");
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_BASE_URL) {
-    config.fileDelivery.baseUrl = trimTrailingSlash(env.OLYMPUS_FILE_DELIVERY_BASE_URL);
-  }
-  if (env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS) {
-    config.fileDelivery.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_FILE_DELIVERY_REQUEST_TIMEOUT_SECONDS");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_ENABLED) {
-    config.castorWorkspace.enabled = parseBoolean(env.OLYMPUS_CASTOR_WORKSPACE_ENABLED, "OLYMPUS_CASTOR_WORKSPACE_ENABLED");
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL) {
-    config.castorWorkspace.baseUrl = trimTrailingSlash(env.OLYMPUS_CASTOR_WORKSPACE_BASE_URL);
-  }
-  if (env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS) {
-    config.castorWorkspace.requestTimeoutSeconds = parsePositiveNumber(env.OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS, "OLYMPUS_CASTOR_WORKSPACE_REQUEST_TIMEOUT_SECONDS");
-  }
 }
 function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
@@ -3069,12 +3051,6 @@ function mergeConfig(target, source) {
         ...source.sourceIndex.ingestionPolicies ?? {}
       }
     };
-  }
-  if (source.fileDelivery) {
-    target.fileDelivery = { ...target.fileDelivery, ...source.fileDelivery };
-  }
-  if (source.castorWorkspace) {
-    target.castorWorkspace = { ...target.castorWorkspace, ...source.castorWorkspace };
   }
 }
 function mirrorFastLaneToProfiles(config, profiles) {
@@ -3175,31 +3151,15 @@ function validateConfig(config) {
   if (config.sourceIndex.ingestionPolicies.dropboxPersonal?.policy !== undefined) {
     config.sourceIndex.ingestionPolicies.dropboxPersonal.policy = parseSourceIngestionPolicy(config.sourceIndex.ingestionPolicies.dropboxPersonal.policy, "sourceIndex.ingestionPolicies.dropboxPersonal.policy");
   }
-  assertBoolean(config.fileDelivery.enabled, "fileDelivery.enabled");
-  assertBoolean(config.castorWorkspace.enabled, "castorWorkspace.enabled");
   if (typeof config.email.baseUrl !== "string" || !config.email.baseUrl.startsWith("http://") && !config.email.baseUrl.startsWith("https://")) {
     throw new OperationError("config_error", "email.baseUrl must be an HTTP(S) URL.");
   }
   config.email.baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
-  if (typeof config.fileDelivery.baseUrl !== "string" || !config.fileDelivery.baseUrl.startsWith("http://") && !config.fileDelivery.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "fileDelivery.baseUrl must be an HTTP(S) URL.");
-  }
-  config.fileDelivery.baseUrl = trimTrailingSlash(config.fileDelivery.baseUrl);
-  if (typeof config.castorWorkspace.baseUrl !== "string" || !config.castorWorkspace.baseUrl.startsWith("http://") && !config.castorWorkspace.baseUrl.startsWith("https://")) {
-    throw new OperationError("config_error", "castorWorkspace.baseUrl must be an HTTP(S) URL.");
-  }
-  config.castorWorkspace.baseUrl = trimTrailingSlash(config.castorWorkspace.baseUrl);
   if (typeof config.email.requestTimeoutSeconds !== "number" || !Number.isFinite(config.email.requestTimeoutSeconds) || config.email.requestTimeoutSeconds <= 0) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be greater than zero.");
   }
   if (config.email.requestTimeoutSeconds > 600) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be at most 600.", 'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).');
-  }
-  if (typeof config.fileDelivery.requestTimeoutSeconds !== "number" || !Number.isFinite(config.fileDelivery.requestTimeoutSeconds) || config.fileDelivery.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "fileDelivery.requestTimeoutSeconds must be greater than zero.");
-  }
-  if (typeof config.castorWorkspace.requestTimeoutSeconds !== "number" || !Number.isFinite(config.castorWorkspace.requestTimeoutSeconds) || config.castorWorkspace.requestTimeoutSeconds <= 0) {
-    throw new OperationError("config_error", "castorWorkspace.requestTimeoutSeconds must be greater than zero.");
   }
 }
 function parseSchedulerSourceIds(value) {
@@ -3378,16 +3338,6 @@ var init_config = __esm(() => {
       answerDevEnabled: false,
       corpusRegistry: defaultSourceCorpusRegistryConfig(),
       ingestionPolicies: {}
-    },
-    fileDelivery: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8020/v1",
-      requestTimeoutSeconds: 30
-    },
-    castorWorkspace: {
-      enabled: false,
-      baseUrl: "http://127.0.0.1:8030/v1",
-      requestTimeoutSeconds: 300
     }
   };
   ARGUS_MODEL_PROFILES = [
@@ -41305,33 +41255,6 @@ function optionalXBookmarksSyncMode(value, corpusId) {
     return value;
   throw new OperationError("invalid_params", "mode must be head, reconcile, window_diagnostic, folder_facet_refresh, or preservation-reattest for X bookmarks source-index sync.");
 }
-function asFileDeliveryWriteMode(value) {
-  const writeMode = asString(value, "write_mode");
-  if (writeMode === "dry_run" || writeMode === "create_new" || writeMode === "overwrite_with_approval") {
-    return writeMode;
-  }
-  throw new OperationError("invalid_params", "write_mode must be dry_run, create_new, or overwrite_with_approval.");
-}
-function asFileDeliveryTrustDomain(value) {
-  const trustDomain = asString(value, "trust_domain");
-  if (trustDomain === "public_safe" || trustDomain === "internal" || trustDomain === "secure_local") {
-    return trustDomain;
-  }
-  throw new OperationError("invalid_params", "trust_domain must be public_safe, internal, or secure_local.");
-}
-function optionalFileContentEncoding(value) {
-  if (value === undefined || value === null || value === "")
-    return;
-  if (value === "utf8" || value === "base64")
-    return value;
-  throw new OperationError("invalid_params", "content_encoding must be utf8 or base64.");
-}
-function asCastorWorkspaceAction(value) {
-  if (value === "health" || value === "list" || value === "read" || value === "write" || value === "delete" || value === "export_gcs") {
-    return value;
-  }
-  throw new OperationError("invalid_params", "action must be health, list, read, write, delete, or export_gcs.");
-}
 function optionalAttachmentType(value) {
   if (value === undefined || value === null || value === "")
     return;
@@ -42113,121 +42036,6 @@ var init_operations = __esm(() => {
       }
     },
     ...PUBLIC_RUNTIME_BUILD ? [] : [
-      {
-        name: "xanthos_file_deliver",
-        description: [
-          "Deliver a UTF-8 or base64 file to an approved Xanthos logical root through the bounded file-delivery worker.",
-          "This tool accepts only logical root IDs and relative paths, uses no shell, exposes no absolute host paths, denies overwrites by default, and returns an audit reference."
-        ].join(" "),
-        params: {
-          root_id: { type: "string", required: true, description: "Approved logical destination root, for example olympus_smoke or growth_fleur." },
-          relative_path: { type: "string", required: true, description: "Relative file path below the approved root. Absolute paths and traversal are denied." },
-          content: { type: "string", required: true, description: "File content as UTF-8 text or base64 bytes." },
-          content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding. Defaults to utf8." },
-          write_mode: { type: "string", required: true, enum: ["dry_run", "create_new", "overwrite_with_approval"], description: "dry_run validates only; create_new refuses existing files; overwrite requires explicit approval." },
-          trust_domain: { type: "string", required: true, enum: ["public_safe", "internal", "secure_local"], description: "Trust domain of the content being delivered." },
-          source_provenance: { type: "string", description: "Optional safe provenance for generated content." },
-          idempotency_key: { type: "string", required: true, description: "Stable key for safe retries of the same delivery request." },
-          approval_id: { type: "string", description: "Explicit approval reference required for overwrite_with_approval." },
-          actor_id: { type: "string", description: "Optional caller or agent identity for audit." },
-          session_id: { type: "string", description: "Optional session identity for audit." },
-          model_provider: { type: "string", description: "Optional model/provider identity for audit." },
-          model_id: { type: "string", description: "Optional model identity for audit." }
-        },
-        mutating: true,
-        nativeExposure: "fileDeliveryEnabledOnly",
-        cliHints: { name: "xanthos file deliver" },
-        handler: async (ctx, params) => {
-          if (!ctx.fileDelivery) {
-            throw new OperationError("file_delivery_not_configured", "File delivery client is not configured in this Olympus runtime.");
-          }
-          const rootId = asString(params.root_id, "root_id");
-          const relativePath = asString(params.relative_path, "relative_path");
-          const content = asString(params.content, "content");
-          const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-          const writeMode = asFileDeliveryWriteMode(params.write_mode);
-          const trustDomain = asFileDeliveryTrustDomain(params.trust_domain);
-          const sourceProvenance = optionalString9(params.source_provenance);
-          const idempotencyKey = asString(params.idempotency_key, "idempotency_key");
-          const approvalId = optionalString9(params.approval_id);
-          const actorId = optionalString9(params.actor_id);
-          const sessionId = optionalString9(params.session_id);
-          const modelProvider = optionalString9(params.model_provider);
-          const modelId = optionalString9(params.model_id);
-          return ctx.fileDelivery.deliver({
-            rootId,
-            relativePath,
-            content,
-            ...contentEncoding !== undefined ? { contentEncoding } : {},
-            writeMode,
-            trustDomain,
-            ...sourceProvenance !== undefined ? { sourceProvenance } : {},
-            idempotencyKey,
-            ...approvalId !== undefined ? { approvalId } : {},
-            ...actorId !== undefined ? { actorId } : {},
-            ...sessionId !== undefined ? { sessionId } : {},
-            ...modelProvider !== undefined ? { modelProvider } : {},
-            ...modelId !== undefined ? { modelId } : {}
-          });
-        }
-      },
-      {
-        name: "castor_workspace",
-        description: [
-          "Use {{ownerName}} delegated assistant workfiles through a bounded Xanthos worker.",
-          "Anything inside the approved assistant workfiles root is intentionally delegated to {{assistantName}} for read, write, delete, and export through implemented destination actions without extra S4 approval gating.",
-          "Finder/macOS aliases inside the workspace may be read, listed, and exported; alias targets are not writable or deletable through this tool.",
-          "Use only logical root IDs and relative paths; the tool exposes no absolute host paths and does not grant shell access."
-        ].join(" "),
-        params: {
-          action: { type: "string", required: true, enum: ["health", "list", "read", "write", "delete", "export_gcs"], description: "Workspace action." },
-          root_id: { type: "string", description: "Approved workspace root id. Use castor_workspace for the configured delegated workfiles root." },
-          relative_path: { type: "string", description: "Relative path inside the workspace root. Empty path means the root." },
-          content: { type: "string", description: "UTF-8 or base64 content for write." },
-          content_encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding for write. Defaults to utf8." },
-          destination_uri: { type: "string", description: "Allowlisted gs:// destination for export_gcs." },
-          recursive: { type: "boolean", description: "Required for deleting directories; export_gcs is always recursive for directories." },
-          dry_run: { type: "boolean", description: "For export_gcs, defaults true. Set false to perform the upload after inspecting a dry-run." },
-          include_media: { type: "boolean", description: "For directory export_gcs, include media extensions in addition to md/txt/pdf/html. Defaults false." },
-          idempotency_key: { type: "string", description: "Optional stable key for audit/retry correlation." },
-          actor_id: { type: "string", description: "Optional caller identity for audit." },
-          session_id: { type: "string", description: "Optional session identity for audit." }
-        },
-        mutating: true,
-        nativeExposure: "castorWorkspaceEnabledOnly",
-        cliHints: { name: "castor workspace" },
-        handler: async (ctx, params) => {
-          if (!ctx.castorWorkspace) {
-            throw new OperationError("castor_workspace_not_configured", "Delegated workspace client is not configured in this Olympus runtime.");
-          }
-          const action = asCastorWorkspaceAction(params.action);
-          const rootId = optionalString9(params.root_id);
-          const relativePath = typeof params.relative_path === "string" ? params.relative_path : undefined;
-          const content = typeof params.content === "string" ? params.content : undefined;
-          const contentEncoding = optionalFileContentEncoding(params.content_encoding);
-          const destinationUri = optionalString9(params.destination_uri);
-          const recursive = optionalBoolean2(params.recursive, "recursive");
-          const dryRun = optionalBoolean2(params.dry_run, "dry_run");
-          const includeMedia = optionalBoolean2(params.include_media, "include_media");
-          const idempotencyKey = optionalString9(params.idempotency_key);
-          const actorId = optionalString9(params.actor_id);
-          const sessionId = optionalString9(params.session_id);
-          return ctx.castorWorkspace.run({
-            action,
-            ...rootId !== undefined ? { rootId } : {},
-            ...relativePath !== undefined ? { relativePath } : {},
-            ...content !== undefined ? { content } : {},
-            ...contentEncoding !== undefined ? { contentEncoding } : {},
-            ...destinationUri !== undefined ? { destinationUri } : {},
-            ...recursive !== undefined ? { recursive } : {},
-            ...dryRun !== undefined ? { dryRun } : {},
-            ...includeMedia !== undefined ? { includeMedia } : {},
-            ...idempotencyKey !== undefined ? { idempotencyKey } : {},
-            ...actorId !== undefined ? { actorId } : {},
-            ...sessionId !== undefined ? { sessionId } : {}
-          });
-        }
-      },
       {
         name: "email_search",
         description: [
@@ -57256,296 +57064,6 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
-// src/core/file-delivery.ts
-class FileDeliveryClient {
-  config;
-  transport;
-  constructor(config2, transport = createFileDeliveryTransport(config2)) {
-    this.config = config2;
-    this.transport = transport;
-  }
-  async health() {
-    if (!this.config.fileDelivery.enabled) {
-      return {
-        reachable: false,
-        configured: false,
-        base_url: this.config.fileDelivery.baseUrl,
-        policy: {
-          bounded_file_delivery: true,
-          shell_used: false,
-          absolute_path_exposed: false
-        },
-        detail: "File delivery is disabled. Configure a bounded Xanthos delivery worker before exposing the tool."
-      };
-    }
-    const startedAt = performance.now();
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/health`, {
-      method: "GET"
-    });
-    const data = asRecord10(response);
-    assertNoHostPathLeakFields(data);
-    const policy = asRecord10(data.policy);
-    if (policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-      throw new OperationError("file_delivery_error", "File delivery health policy was not bounded and path-safe.");
-    }
-    return {
-      reachable: true,
-      configured: typeof data.configured === "boolean" ? data.configured : true,
-      base_url: this.config.fileDelivery.baseUrl,
-      latency_ms: Math.round(performance.now() - startedAt),
-      ...Array.isArray(data.roots) ? { roots: data.roots } : {},
-      policy: {
-        bounded_file_delivery: true,
-        shell_used: false,
-        absolute_path_exposed: false
-      },
-      ...typeof data.detail === "string" ? { detail: data.detail } : {}
-    };
-  }
-  async deliver(options) {
-    if (!this.config.fileDelivery.enabled) {
-      throw new OperationError("file_delivery_not_configured", "File delivery is disabled.", "Configure the bounded Xanthos file-delivery worker before using file writes.");
-    }
-    const response = await this.transport.requestJson(`${this.config.fileDelivery.baseUrl}/file/deliver`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        root_id: options.rootId,
-        relative_path: options.relativePath,
-        content: options.content,
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        write_mode: options.writeMode,
-        trust_domain: options.trustDomain,
-        ...options.sourceProvenance ? { source_provenance: options.sourceProvenance } : {},
-        idempotency_key: options.idempotencyKey,
-        ...options.approvalId ? { approval_id: options.approvalId } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {},
-        ...options.modelProvider ? { model_provider: options.modelProvider } : {},
-        ...options.modelId ? { model_id: options.modelId } : {}
-      })
-    });
-    const data = asRecord10(response);
-    assertNoHostPathLeakFields(data);
-    return parseFileDeliveryResult(data);
-  }
-}
-function createFileDeliveryTransport(config2) {
-  return new DirectHttpFileDeliveryTransport(fetch, workerAuthTokenFromConfig(config2), config2.fileDelivery.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpFileDeliveryTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error2) {
-      if (isAbortError(error2)) {
-        throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker timed out at ${url} after ${this.timeoutMs}ms.`, "The file-delivery worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("file_delivery_unreachable", `Bounded file-delivery worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos file-delivery worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText3(response);
-      throw new OperationError("file_delivery_error", `Bounded file-delivery worker returned HTTP ${response.status}.`, body || "Check the Xanthos file-delivery worker logs.");
-    }
-    return response.json();
-  }
-}
-function parseFileDeliveryResult(value) {
-  const policy = asRecord10(value.policy);
-  if (value.kind !== "file_delivery_result" || policy.bounded_file_delivery !== true || policy.shell_used !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("file_delivery_error", "File delivery result did not include bounded path-safe policy.");
-  }
-  const writeMode = requiredWriteMode(value.write_mode, "write_mode");
-  const approvalStatus = requiredApprovalStatus(value.approval_status, "approval_status");
-  return {
-    kind: "file_delivery_result",
-    delivery_id: requiredString5(value.delivery_id, "delivery_id"),
-    root_id: requiredString5(value.root_id, "root_id"),
-    relative_path: requiredString5(value.relative_path, "relative_path"),
-    bytes_written: requiredNumber2(value.bytes_written, "bytes_written"),
-    content_sha256: requiredString5(value.content_sha256, "content_sha256"),
-    write_mode: writeMode,
-    created_at: requiredString5(value.created_at, "created_at"),
-    approval_status: approvalStatus,
-    audit_ref: requiredString5(value.audit_ref, "audit_ref"),
-    ...typeof value.idempotent_replay === "boolean" ? { idempotent_replay: value.idempotent_replay } : {},
-    policy: {
-      bounded_file_delivery: true,
-      shell_used: false,
-      absolute_path_exposed: false
-    }
-  };
-}
-function assertNoHostPathLeakFields(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("file_delivery_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields(nested, [...path, key]);
-  }
-}
-function asRecord10(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("file_delivery_error", "File delivery response was not a JSON object.");
-  }
-  return value;
-}
-function requiredString5(value, name) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new OperationError("file_delivery_error", `${name} must be a non-empty string.`);
-  }
-  return value;
-}
-function requiredNumber2(value, name) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new OperationError("file_delivery_error", `${name} must be a finite number.`);
-  }
-  return value;
-}
-function requiredWriteMode(value, name) {
-  if (value === "dry_run" || value === "create_new" || value === "overwrite_with_approval")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported write mode.`);
-}
-function requiredApprovalStatus(value, name) {
-  if (value === "dry_run" || value === "not_required" || value === "approved")
-    return value;
-  throw new OperationError("file_delivery_error", `${name} must be a supported approval status.`);
-}
-async function safeText3(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-var init_file_delivery = __esm(() => {
-  init_http_timeout();
-  init_operation_error();
-  init_worker_auth();
-});
-
-// src/core/castor-workspace.ts
-class CastorWorkspaceClient {
-  config;
-  transport;
-  constructor(config2, transport = createCastorWorkspaceTransport(config2)) {
-    this.config = config2;
-    this.transport = transport;
-  }
-  async run(options) {
-    if (!this.config.castorWorkspace.enabled) {
-      throw new OperationError("castor_workspace_not_configured", "Delegated workspace is disabled.", "Configure the bounded delegated workspace worker before exposing delegated filesystem access.");
-    }
-    const response = await this.transport.requestJson(`${this.config.castorWorkspace.baseUrl}/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: options.action,
-        ...options.rootId ? { root_id: options.rootId } : {},
-        ...options.relativePath !== undefined ? { relative_path: options.relativePath } : {},
-        ...options.content !== undefined ? { content: options.content } : {},
-        ...options.contentEncoding ? { content_encoding: options.contentEncoding } : {},
-        ...options.destinationUri ? { destination_uri: options.destinationUri } : {},
-        ...options.recursive !== undefined ? { recursive: options.recursive } : {},
-        ...options.dryRun !== undefined ? { dry_run: options.dryRun } : {},
-        ...options.includeMedia !== undefined ? { include_media: options.includeMedia } : {},
-        ...options.idempotencyKey ? { idempotency_key: options.idempotencyKey } : {},
-        ...options.actorId ? { actor_id: options.actorId } : {},
-        ...options.sessionId ? { session_id: options.sessionId } : {}
-      })
-    });
-    const data = asRecord11(response);
-    assertWorkspacePolicy(data);
-    assertNoHostPathLeakFields2(data);
-    return data;
-  }
-}
-function createCastorWorkspaceTransport(config2) {
-  return new DirectHttpCastorWorkspaceTransport(fetch, workerAuthTokenFromConfig(config2), config2.castorWorkspace.requestTimeoutSeconds * 1000);
-}
-
-class DirectHttpCastorWorkspaceTransport {
-  fetchImpl;
-  authToken;
-  timeoutMs;
-  constructor(fetchImpl = fetch, authToken, timeoutMs = 0) {
-    this.fetchImpl = fetchImpl;
-    this.authToken = authToken;
-    this.timeoutMs = timeoutMs;
-  }
-  async requestJson(url, init) {
-    let response;
-    try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), this.timeoutMs);
-    } catch (error2) {
-      if (isAbortError(error2)) {
-        throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker timed out at ${url} after ${this.timeoutMs}ms.`, "The delegated workspace worker did not answer within the configured request budget; check worker health before retrying.");
-      }
-      throw new OperationError("castor_workspace_unreachable", `Delegated workspace worker is unreachable at ${url}.`, error2 instanceof Error ? error2.message : "Check that the Xanthos delegated workspace worker is running.");
-    }
-    if (!response.ok) {
-      const body = await safeText4(response);
-      throw new OperationError("castor_workspace_error", `Delegated workspace worker returned HTTP ${response.status}.`, body || "Check the Xanthos delegated workspace worker logs.");
-    }
-    return response.json();
-  }
-}
-function assertWorkspacePolicy(value) {
-  const policy = asRecord11(value.policy);
-  if (policy.castor_workspace_delegated !== true || policy.shell_exposed_to_agent !== false || policy.absolute_path_exposed !== false) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response did not include bounded delegated policy.");
-  }
-}
-function assertNoHostPathLeakFields2(value, path = []) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoHostPathLeakFields2(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "absolute_path" || key === "target_path" || key === "root_path" || key === "host_path" || key === "filesystem_path") {
-      throw new OperationError("castor_workspace_error", `forbidden host path field "${[...path, key].join(".")}"`);
-    }
-    assertNoHostPathLeakFields2(nested, [...path, key]);
-  }
-}
-async function safeText4(response) {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-function asRecord11(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("castor_workspace_error", "Delegated workspace response was not an object.");
-  }
-  return value;
-}
-var init_castor_workspace = __esm(() => {
-  init_http_timeout();
-  init_operation_error();
-  init_worker_auth();
-});
-
 // src/mcp/tools.ts
 function listMcpTools(config2) {
   return exposedOperations(operations, { config: config2, surface: "mcp" }).map((operation) => ({
@@ -57608,9 +57126,7 @@ function makeContext() {
   return {
     config: config2,
     delphi: new DelphiClient(config2, createDelphiTransport(config2)),
-    email: new EmailClient(config2, createEmailTransport(config2)),
-    fileDelivery: new FileDeliveryClient(config2, createFileDeliveryTransport(config2)),
-    castorWorkspace: new CastorWorkspaceClient(config2, createCastorWorkspaceTransport(config2))
+    email: new EmailClient(config2, createEmailTransport(config2))
   };
 }
 var init_server3 = __esm(() => {
@@ -57620,8 +57136,6 @@ var init_server3 = __esm(() => {
   init_config();
   init_delphi();
   init_email();
-  init_file_delivery();
-  init_castor_workspace();
   init_operation_exposure();
   init_operations();
   init_version();
@@ -62186,9 +61700,9 @@ function parseFileExtractionCorporaEnv(raw) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entries must be objects.`);
     }
     const record3 = entry;
-    const corpusId = requiredString6(record3.corpus_id, "corpus_id");
-    const provider = requiredString6(record3.provider, "provider");
-    const scopes = Array.isArray(record3.scopes) ? record3.scopes.map((scope) => requiredString6(scope, "scopes[]")) : [];
+    const corpusId = requiredString5(record3.corpus_id, "corpus_id");
+    const provider = requiredString5(record3.provider, "provider");
+    const scopes = Array.isArray(record3.scopes) ? record3.scopes.map((scope) => requiredString5(scope, "scopes[]")) : [];
     if (scopes.length === 0) {
       throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} entry ${corpusId} needs at least one approved scope key.`);
     }
@@ -62312,7 +61826,7 @@ async function issueDropboxExtractionToken(broker, credentialHandle) {
 function storedTrustTier(store, item) {
   return store.localContent(item.identity.localItemId, 1)?.trustTier;
 }
-function requiredString6(value, field) {
+function requiredString5(value, field) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`${FILE_EXTRACTION_CORPORA_ENV} ${field} must be a non-empty string.`);
   }
@@ -62440,7 +61954,7 @@ function createOpenAICompatibleAnalystModel(options) {
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) was unreachable at ${url}.`, error2 instanceof Error ? error2.message : `Check the ${providerLabel3} endpoint and network.`);
         }
         if (!response.ok) {
-          const detail = await safeText5(response);
+          const detail = await safeText3(response);
           throw new OperationError("source_index_error", `${providerLabel3} (${model}) returned HTTP ${response.status}.`, detail || `Check the ${providerLabel3} endpoint logs and API key.`);
         }
         let data;
@@ -62487,7 +62001,7 @@ function maxTokensForChars(chars, options) {
   const boundedHeadroom = Math.max(0, Math.min(MAX_REASONING_HEADROOM_TOKENS, Math.floor(options.reasoningHeadroomTokens)));
   return Math.max(answerBudget, boundedHeadroom);
 }
-async function safeText5(response) {
+async function safeText3(response) {
   try {
     return await response.text();
   } catch {
@@ -63680,12 +63194,12 @@ class OpenClawSourceWatchDeliveryTransport {
     const result = await response.json().catch(() => {
       return;
     });
-    const record3 = asRecord12(result);
+    const record3 = asRecord10(result);
     if (record3?.status !== "sent") {
       const outcome = typeof record3?.status === "string" ? record3.status : "invalid_response";
       return { status: "failed", errorKind: safeErrorKind(`openclaw_${outcome}`) };
     }
-    const receipt = asRecord12(record3.receipt);
+    const receipt = asRecord10(record3.receipt);
     return {
       status: "delivered",
       receipt: {
@@ -63855,8 +63369,8 @@ async function runSourceWatchEvaluationPass(input) {
 }
 function resolveSourceWatchGatewayConnection(config2, options = {}) {
   const env = options.env ?? process.env;
-  const gateway = asRecord12(asRecord12(config2)?.gateway);
-  const tls = asRecord12(gateway?.tls);
+  const gateway = asRecord10(asRecord10(config2)?.gateway);
+  const tls = asRecord10(gateway?.tls);
   if (tls?.enabled !== undefined && typeof tls.enabled !== "boolean") {
     throw new TypeError("OpenClaw gateway.tls.enabled must be a boolean.");
   }
@@ -63907,11 +63421,11 @@ async function loadOpenClawGatewayConfig(env = process.env) {
     } catch {
       throw new Error("OpenClaw gateway configuration returned invalid JSON.");
     }
-    const record3 = asRecord12(parsed);
+    const record3 = asRecord10(parsed);
     if (!record3 || record3.ok === false) {
       throw new Error("OpenClaw gateway configuration was refused.");
     }
-    const tls = asRecord12(record3.tls);
+    const tls = asRecord10(record3.tls);
     return {
       gateway: {
         ...record3.port !== undefined ? { port: record3.port } : {},
@@ -64137,7 +63651,7 @@ function isWatchLifecycleRejection(error2) {
 function isDeliveryFenceRejection(error2) {
   return error2 instanceof Error && /lease fence|not actively leased|another executor|lease has expired/i.test(error2.message);
 }
-function asRecord12(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var SOURCE_WATCH_DELIVERY_ROUTE = "/plugins/olympus/watch-delivery", SOURCE_WATCH_DELIVERY_HEADLINE = "Olympus watch matched newly indexed evidence.", SOURCE_WATCH_DELIVERY_LEASE_MS, SOURCE_WATCH_DELIVERY_RETRY_MS, SOURCE_WATCH_POLICY;
@@ -68630,7 +68144,7 @@ function writeEmbeddingOperatorOverride(path, on) {
   writeFileSync10(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
-function asRecord13(value) {
+function asRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 function asStamp(value) {
@@ -68645,7 +68159,7 @@ function fresh(at, now, maxAgeMs) {
 }
 function readJsonFile(path) {
   try {
-    return asRecord13(JSON.parse(readFileSync26(path, "utf8")));
+    return asRecord11(JSON.parse(readFileSync26(path, "utf8")));
   } catch {
     return;
   }
@@ -68791,14 +68305,14 @@ async function fetchBackendModel(input) {
     });
     if (!response.ok)
       return;
-    const body = asRecord13(await response.json());
+    const body = asRecord11(await response.json());
     const data = body?.data;
     if (!Array.isArray(data))
       return;
-    const entry = data.map((item) => asRecord13(item)).find((item) => item !== undefined && item.id === input.model);
+    const entry = data.map((item) => asRecord11(item)).find((item) => item !== undefined && item.id === input.model);
     if (entry === undefined)
       return;
-    const backendModel = asRecord13(entry.metadata)?.backendModel;
+    const backendModel = asRecord11(entry.metadata)?.backendModel;
     return typeof backendModel === "string" && backendModel.trim() !== "" ? backendModel.trim() : "";
   } catch {
     return;
@@ -68847,12 +68361,12 @@ function resolveLaneReportDir(env = process.env) {
   }
   return REPORT_DIR_DEFAULT;
 }
-function asRecord14(value) {
+function asRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 function readJsonFile2(path) {
   try {
-    return asRecord14(JSON.parse(readFileSync27(path, "utf8")));
+    return asRecord12(JSON.parse(readFileSync27(path, "utf8")));
   } catch {
     return;
   }
@@ -68860,7 +68374,7 @@ function readJsonFile2(path) {
 function readNumber(record3, path) {
   let cursor = record3;
   for (const segment of path.split(".")) {
-    const step = asRecord14(cursor);
+    const step = asRecord12(cursor);
     if (step === undefined)
       return;
     cursor = step[segment];
@@ -68939,7 +68453,7 @@ function guardGoverning(spec, guard) {
   return;
 }
 function providerPauseGoverning(record3) {
-  const pause = asRecord14(record3.provider_pause);
+  const pause = asRecord12(record3.provider_pause);
   if (pause === undefined || pause.active !== true)
     return;
   const message = typeof pause.message === "string" && pause.message.trim() !== "" ? pause.message.trim() : undefined;
@@ -73795,7 +73309,7 @@ function createAnthropicAnalystModel(options) {
         clearTimeout(timer);
       }
       if (!response.ok) {
-        const detail = await safeText6(response);
+        const detail = await safeText4(response);
         throw new OperationError("source_index_error", `Anthropic analyst (${model}) returned HTTP ${response.status}.`, detail || "Check the Anthropic endpoint logs and API key.");
       }
       let data;
@@ -73826,7 +73340,7 @@ function parseAnthropicText(data) {
 function maxTokensForChars3(chars) {
   return Math.max(256, Math.ceil(chars / 3));
 }
-async function safeText6(response) {
+async function safeText4(response) {
   try {
     return await response.text();
   } catch {
@@ -80950,8 +80464,8 @@ async function readWorkerHttpState() {
   }
 }
 function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
-  const root = asRecord15(workerHttp);
-  const dashboard = asRecord15(root?.source_dashboard);
+  const root = asRecord13(workerHttp);
+  const dashboard = asRecord13(root?.source_dashboard);
   const sources = Array.isArray(dashboard?.sources) ? dashboard.sources : [];
   const capabilities = new Map(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((item) => [item.source_id, item]));
   const signals = [];
@@ -80962,17 +80476,17 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     }
   };
   for (const raw of sources) {
-    const source = asRecord15(raw);
+    const source = asRecord13(raw);
     if (!source)
       continue;
     const sourceId = typeof source.source_id === "string" && capabilities.has(source.source_id) ? source.source_id : undefined;
     if (!sourceId)
       continue;
     const capability = capabilities.get(sourceId);
-    const connection = asRecord15(source.connection);
+    const connection = asRecord13(source.connection);
     const connectionState = typeof connection?.state === "string" ? connection.state : "";
-    const answerReadiness = asRecord15(source.answer_readiness);
-    const queue = asRecord15(source.queue_health);
+    const answerReadiness = asRecord13(source.answer_readiness);
+    const queue = asRecord13(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
     const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
     if (source.configured !== true && !inFlight)
@@ -81002,7 +80516,7 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
   }
   return signals;
 }
-function asRecord15(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function fetchJson(url, init) {
