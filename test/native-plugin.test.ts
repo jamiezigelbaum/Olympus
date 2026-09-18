@@ -377,8 +377,6 @@ describe('native OpenClaw plugin adapter', () => {
     expect(names).toContain('source_answer');
     expect(names).toContain('source_index_status');
     expect(names).toContain('source_index_search');
-    expect(names).not.toContain('xanthos_file_deliver');
-    expect(names).not.toContain('castor_workspace');
     expect(names).not.toContain('email_answer');
     expect(names).not.toContain('source_index_sync');
     expect(names).not.toContain('email_search');
@@ -400,28 +398,6 @@ describe('native OpenClaw plugin adapter', () => {
     expect(names).not.toContain('source_index_sync');
     expect(names).not.toContain('email_index_sync');
     expect(names).not.toContain('email_index_embed');
-  });
-
-  test('keeps bounded Xanthos file delivery outside the public surface', () => {
-    const names = registeredToolNames({
-      fileDelivery: {
-        enabled: true,
-        baseUrl: 'http://xanthos-delivery.test/v1',
-      },
-    });
-
-    expect(names).not.toContain('xanthos_file_deliver');
-  });
-
-  test('keeps delegated Castor Workspace outside the public surface', () => {
-    const names = registeredToolNames({
-      castorWorkspace: {
-        enabled: true,
-        baseUrl: 'http://xanthos-workspace.test/v1',
-      },
-    });
-
-    expect(names).not.toContain('castor_workspace');
   });
 
   test('keeps email index admin tools outside the public surface', () => {

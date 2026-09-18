@@ -35,21 +35,6 @@ For private/personal source questions, use one `source_answer` call with
 named a source or selected a prior result. Do not route legal, financial,
 medical, tax, or similar private topics to Dropbox by assumption.
 
-## File Delivery Usage
-
-| Trigger | Skill |
-| --- | --- |
-| User asks to save, write, create, or deliver a file on Xanthos | `skills/deliver-files/SKILL.md` |
-| User asks to save a file in Fleur or another approved Olympus delivery root | `skills/deliver-files/SKILL.md` |
-
-## Delegated Workfiles Usage
-
-| Trigger | Skill |
-| --- | --- |
-| User asks the calling assistant to use, inspect, copy, delete, export, or organize files in delegated workfiles | `skills/castor-workspace/SKILL.md` |
-| User says a file or folder has been placed in delegated workfiles for the calling assistant to use freely | `skills/castor-workspace/SKILL.md` |
-| User asks to export delegated workfiles contents to Google Cloud Storage or a RAG corpus | `skills/castor-workspace/SKILL.md` |
-
 ## PKM Authoring And Onboarding
 
 | Trigger | Skill |
@@ -118,11 +103,6 @@ owner on 2026-09-17; do not reintroduce them.
   until local key handling exists. This does not authorize broad raw
   secure-local export; the calling assistant receives the bounded
   OPSEC-scanned answer.
-- Delegated workfiles is a separate delegated filesystem root exposed through
-  `castor_workspace`. Anything the owner places inside that approved root is
-  intentionally available to the calling assistant without additional S4 approval prompts. Use
-  `castor_workspace`, not shell or raw filesystem paths. Outside that root,
-  normal Olympus source/security policy still applies.
 - For ordinary source questions, do not inspect `skills/ask-sources/SKILL.md`
   with bash or file tools. Route directly to `source_answer`,
   `source_index_search`, and `source_index_status`; those tools are the
@@ -142,5 +122,3 @@ owner on 2026-09-17; do not reintroduce them.
 - When changing any OpenClaw-facing behavior, update the resolver, skill body,
   manifest, live installed extension, workspace `AGENTS.md`/`TOOLS.md` context,
   and run a natural OpenClaw agent smoke before declaring the live issue fixed.
-- If file delivery is unavailable, do not fall back to broad `exec`, shell,
-  redirection, `cat`, or raw absolute-path writes.

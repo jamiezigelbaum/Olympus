@@ -1,25 +1,24 @@
 // The public package deletes marked spans from real source files, and `bun
 // build` never type-checks the result. That is how the v0.4 package shipped a
 // broker whose OAuth mint methods were stripped while their caller survived,
-// and how src/core/config.ts shipped a DEFAULT_CONFIG missing the
-// fileDelivery and castorWorkspace sections its own interface
-// declared required — any packaged-build reader of those sections crashes
-// invisibly to `tsc` over the repo. The resolved design keeps the sections out
-// of the shipped bundle (the release's assertNoOwnerIdentifiers gate bans the
-// lane names outright) and strips the INTERFACE fields together with the
-// DEFAULT_CONFIG entries, so the stripped source is self-consistent. This test
-// locks both halves: the stripped config module behaves (no private-lane
-// sections, defaults-only load still works), and every marker-stripped module
-// type-checks after stripping under the repository compiler options — the
-// gate that was impossible while the stripped interface lied about
-// DEFAULT_CONFIG.
+// and how src/core/config.ts once shipped a DEFAULT_CONFIG missing sections
+// its own interface declared required — any packaged-build reader of those
+// sections crashes invisibly to `tsc` over the repo.
+//
+// The retired private lanes took the last exclusion span in src/core/config.ts
+// with them, so the config module is no longer marker-stripped at all: the
+// public build gets the same defaults the repository does. This test locks
+// both halves of the class gate that remains. The public defaults must carry
+// no private section and must still load with no config file and no env, and
+// every module that IS still marker-stripped must type-check after stripping
+// under the repository compiler options.
 
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Glob } from 'bun';
 import { afterAll, describe, expect, test } from 'bun:test';
 import ts from 'typescript';
-import { defaultConfig } from '../src/core/config.ts';
+import { defaultConfig, loadConfig, REPOSITORY_ONLY_PLUGIN_CONFIG_KEYS } from '../src/core/config.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const CONFIG_MODULE = 'src/core/config.ts';
@@ -84,23 +83,25 @@ function strippedMirror(): { mirror: string; strippedPaths: string[] } {
   return { mirror, strippedPaths };
 }
 
-describe('public runtime config stripping', () => {
-  test('the stripped config module drops the private-lane sections and still loads', async () => {
-    const { mirror } = strippedMirror();
-    const stripped = await import(join(mirror, CONFIG_MODULE)) as typeof import('../src/core/config.ts');
+describe('public runtime config defaults', () => {
+  test('src/core/config.ts carries no exclusion span, so the public build ships the repository defaults', () => {
+    // A private section reappearing here is the regression: it would either
+    // ship in the public bundle or grow a new exclusion span, and both are
+    // decisions that belong in review rather than in a defaults literal.
+    expect(markedModules()).not.toContain(CONFIG_MODULE);
+    expect(readFileSync(join(ROOT, CONFIG_MODULE), 'utf8')).not.toContain(START_MARKER);
+    expect([...REPOSITORY_ONLY_PLUGIN_CONFIG_KEYS].filter((key) => key in defaultConfig())).toEqual([]);
+  });
 
-    const publicDefaults = stripped.defaultConfig() as Partial<ReturnType<typeof defaultConfig>>;
-    expect('fileDelivery' in publicDefaults).toBe(false);
-    expect('castorWorkspace' in publicDefaults).toBe(false);
-    expect('domainExpert' in publicDefaults).toBe(false);
-
-    // Everything the public build DOES ship must be untouched by the strip,
-    // and a defaults-only load (no config file, no env) must still validate.
-    const { fileDelivery, castorWorkspace, ...sharedDefaults } = defaultConfig();
-    expect(publicDefaults).toEqual(sharedDefaults);
-    const publicLoaded = stripped.loadConfig({ OLYMPUS_CONFIG: join(mirror, 'absent-config.json') }) as
-      Partial<ReturnType<typeof defaultConfig>>;
-    expect(publicLoaded).toEqual(sharedDefaults);
+  test('the private dev toggles default off and a defaults-only load still validates', () => {
+    // The private surface the public build still carries is three dev toggles.
+    // Each must be off by default, and a load with no config file and no env
+    // must produce exactly the defaults — the validation path included.
+    const defaults = defaultConfig();
+    expect(defaults.email.localPacketsDevEnabled).toBe(false);
+    expect(defaults.email.indexAdminDevEnabled).toBe(false);
+    expect(defaults.sourceIndex.answerDevEnabled).toBe(false);
+    expect(loadConfig({ OLYMPUS_CONFIG: join(ROOT, 'absent-config.json') })).toEqual(defaults);
   });
 
   // The delta fix wave repaired the broker and credential-health strip spans,

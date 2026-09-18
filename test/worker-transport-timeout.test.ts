@@ -1,7 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
 import { DirectHttpEmailTransport, MAX_EMAIL_REQUEST_TIMEOUT_MS, effectiveEmailRequestTimeoutMs } from '../src/core/email.ts';
-import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 
 interface WorkerTransport {
   requestJson(url: string, init: RequestInit): Promise<unknown>;
@@ -37,18 +35,6 @@ describe('direct worker HTTP transport timeouts', () => {
         transport: new DirectHttpEmailTransport(hangingFetch('email'), 'worker-secret', timeoutMs),
         url: 'http://email.test/v1/answer',
         expectedMessage: `Private email lane timed out at http://email.test/v1/answer after ${timeoutMs}ms.`,
-      },
-      {
-        name: 'file delivery',
-        transport: new DirectHttpFileDeliveryTransport(hangingFetch('file delivery'), 'worker-secret', timeoutMs),
-        url: 'http://file.test/v1/file/deliver',
-        expectedMessage: `Bounded file-delivery worker timed out at http://file.test/v1/file/deliver after ${timeoutMs}ms.`,
-      },
-      {
-        name: 'Castor workspace',
-        transport: new DirectHttpCastorWorkspaceTransport(hangingFetch('Castor workspace'), 'worker-secret', timeoutMs),
-        url: 'http://workspace.test/v1/workspace',
-        expectedMessage: `Delegated workspace worker timed out at http://workspace.test/v1/workspace after ${timeoutMs}ms.`,
       },
     ];
 

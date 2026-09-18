@@ -3,25 +3,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { configFromPluginConfig, defaultConfig } from '../src/core/config.ts';
-import { DirectHttpCastorWorkspaceTransport } from '../src/core/castor-workspace.ts';
 import { DirectHttpEmailTransport } from '../src/core/email.ts';
-import { DirectHttpFileDeliveryTransport } from '../src/core/file-delivery.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
   unquoteEnvValue,
   workerAuthTokenFromConfig,
 } from '../src/core/worker-auth.ts';
-import { createCastorWorkspaceWorker } from '../src/workers/castor-workspace/index.ts';
-import { resolveCastorWorkspaceBindHostFromEnv } from '../src/workers/castor-workspace/server.ts';
 import {
   createEmailSourceWorker,
   type EmailSourceConnector,
   type EmailSourceHealth,
 } from '../src/workers/email-source/index.ts';
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
-import { createFileDeliveryWorker, type FileDeliveryRootPolicy } from '../src/workers/file-delivery/index.ts';
-import { resolveFileDeliveryBindHostFromEnv } from '../src/workers/file-delivery/server.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   warnIfWorkerAuthDisabled,
@@ -33,8 +27,6 @@ describe('worker HTTP bind and auth', () => {
   test('every worker server binds loopback by default and honors the shared override', () => {
     const resolvers = [
       resolveEmailSourceBindHostFromEnv,
-      resolveFileDeliveryBindHostFromEnv,
-      resolveCastorWorkspaceBindHostFromEnv,
     ];
 
     for (const resolve of resolvers) {
@@ -446,16 +438,8 @@ describe('worker HTTP bind and auth', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: 'hello' }),
     });
-    await new DirectHttpFileDeliveryTransport(fetchImpl, token).requestJson('http://file.test/v1/file/deliver', {
-      method: 'POST',
-      body: '{}',
-    });
-    await new DirectHttpCastorWorkspaceTransport(fetchImpl, token).requestJson('http://workspace.test/v1/workspace', {
-      method: 'POST',
-      body: '{}',
-    });
 
-    expect(captured).toHaveLength(3);
+    expect(captured).toHaveLength(1);
     for (const request of captured) {
       expect(request.headers.get('Authorization')).toBe('Bearer client-secret');
       expect(await request.text()).not.toContain('client-secret');
@@ -595,16 +579,6 @@ function workerCases(): Array<{
   request: (token?: string) => Request;
   cleanup?: () => void;
 }> {
-  const fileRoot = mkdtempSync(join(tmpdir(), 'olympus-worker-auth-file-'));
-  const filePolicy: FileDeliveryRootPolicy = {
-    rootId: 'safe',
-    path: fileRoot,
-    allowedTrustDomains: ['internal'],
-    maxBytes: 1024,
-    allowParentCreate: true,
-    allowDotfiles: false,
-    allowOverwrite: false,
-  };
   const emailConnector = fakeEmailConnector();
   return [
     {
@@ -613,26 +587,6 @@ function workerCases(): Array<{
       request: (token) => new Request('http://worker.test/v1/health/dependencies', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       }),
-    },
-    {
-      name: 'file-delivery',
-      fetch: createFileDeliveryWorker({ roots: [filePolicy] }).fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/file/deliver', {
-        root_id: 'safe',
-        relative_path: 'note.md',
-        content: 'hello',
-        write_mode: 'dry_run',
-        trust_domain: 'internal',
-        idempotency_key: 'auth-test',
-      }, token),
-      cleanup: () => rmSync(fileRoot, { recursive: true, force: true }),
-    },
-    {
-      name: 'castor-workspace',
-      fetch: createCastorWorkspaceWorker().fetch,
-      request: (token) => jsonRequest('http://worker.test/v1/workspace', {
-        action: 'health',
-      }, token),
     },
   ];
 }

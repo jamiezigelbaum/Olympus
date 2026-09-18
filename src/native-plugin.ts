@@ -3,10 +3,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { configFromPluginConfig } from './core/config.ts';
 import { createDelphiTransport, DelphiClient } from './core/delphi.ts';
 import { createEmailTransport, EmailClient } from './core/email.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import { createFileDeliveryTransport, FileDeliveryClient } from './core/file-delivery.ts';
-import { createCastorWorkspaceTransport, CastorWorkspaceClient } from './core/castor-workspace.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import { shouldExposeOperation } from './core/operation-exposure.ts';
 import { workerAuthTokenFromConfig } from './core/worker-auth.ts';
 import {
@@ -25,7 +21,6 @@ import {
   type Operation,
   type OperationContext,
 } from './core/operations.ts';
-import { PUBLIC_RUNTIME_BUILD } from './core/build-flavor.ts';
 import { isV04PublicOperation } from './core/public-surface.ts';
 import {
   loadPrivateExtensions,
@@ -235,12 +230,6 @@ const plugin = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
       email: new EmailClient(config, createEmailTransport(config)),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-      ...(PUBLIC_RUNTIME_BUILD ? {} : {
-        fileDelivery: new FileDeliveryClient(config, createFileDeliveryTransport(config)),
-        castorWorkspace: new CastorWorkspaceClient(config, createCastorWorkspaceTransport(config)),
-      }),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
       ...(privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}),
     };
 

@@ -60,7 +60,6 @@ describe('operation exposure policy', () => {
     expect(exposedNames(config)).not.toContain('source_watch_create');
     expect(exposedNames(config)).not.toContain('source_watches');
     expect(exposedNames(config)).not.toContain('source_watch_cancel');
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
     expect(exposedNames(config)).not.toContain('source_index_sync');
     expect(exposedNames(config)).not.toContain('email_index_search');
   });
@@ -87,15 +86,6 @@ describe('operation exposure policy', () => {
     expect(names).not.toContain('source_index_promotion_proposals');
     expect(names).not.toContain('source_index_promotion_proposal');
     expect(names).not.toContain('source_index_promotion_decide');
-  });
-
-  test('keeps Xanthos file delivery outside the v0.4 public surface', () => {
-    const config = defaultConfig();
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
-
-    config.fileDelivery.enabled = true;
-
-    expect(exposedNames(config)).not.toContain('xanthos_file_deliver');
   });
 
   test('hides private email tools when active-model guard is enabled without approved local metadata', () => {

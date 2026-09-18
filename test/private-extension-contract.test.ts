@@ -144,14 +144,13 @@ describe('private extension point: the public tree', () => {
   test('the public manifest still rejects every private config key', () => {
     expect(manifest.configSchema.additionalProperties).toBe(false);
     expect(Object.keys(manifest.configSchema.properties)).toEqual([...V0_4_PUBLIC_PLUGIN_CONFIG_KEYS]);
-    // The five keys the gateway refused when a private overlay was installed
-    // under the public manifest. They must stay refused by this artifact.
+    // The private dev keys the gateway refused when a private overlay was
+    // installed under the public manifest. They must stay refused by this
+    // artifact.
     const email = manifest.configSchema.properties.email as { properties: Record<string, unknown> };
     const sourceIndex = manifest.configSchema.properties.sourceIndex as { properties: Record<string, unknown> };
-    for (const key of ['fileDelivery', 'castorWorkspace']) {
-      expect(Object.keys(manifest.configSchema.properties)).not.toContain(key);
-    }
     expect(Object.keys(email.properties)).not.toContain('localPacketsDevEnabled');
+    expect(Object.keys(email.properties)).not.toContain('indexAdminDevEnabled');
     expect(Object.keys(sourceIndex.properties)).not.toContain('answerDevEnabled');
   });
 

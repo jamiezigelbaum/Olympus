@@ -1775,8 +1775,7 @@
       "path": "scripts/castor-workspace-proof.ts",
       "source_sha256": "a1520b06d4eb1ceeeab39a56dee2ed438d3ca6d9b4d097b3597bd698b7ff1d01",
       "replacement_sha256": "a1520b06d4eb1ceeeab39a56dee2ed438d3ca6d9b4d097b3597bd698b7ff1d01",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "2ff124a13eb555b41548416784e5eb95a3abfce4f3e400b7ce4a79b199a311b8"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path": "scripts/credential-health-alarm.ts",
@@ -2199,22 +2198,19 @@
       "path": "test/castor-workspace-proof.test.ts",
       "source_sha256": "5117f7f7c8c0f836fe2e433fbb11bb449a17167ed886c6b15ecfa4b58b441ac3",
       "replacement_sha256": "5117f7f7c8c0f836fe2e433fbb11bb449a17167ed886c6b15ecfa4b58b441ac3",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "31d4aec6eacd981202ab07af4069f6b6163196786457c85cce090a603a86eeb9"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path": "test/castor-workspace-worker-hardening.test.ts",
       "source_sha256": "60eee00af6f1e818ed63062e805e421068db574b9e123e5930fbb9502ba77a98",
       "replacement_sha256": "60eee00af6f1e818ed63062e805e421068db574b9e123e5930fbb9502ba77a98",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "d552a300c629a3399f80c706e14d71fbc49feb8539e9d29be1a685af705a6cd0"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path": "test/castor-workspace.test.ts",
       "source_sha256": "e6ec46157befbb0e156a8764263e32cd6d4e7936a9eaeb14017008ebe9be3f95",
       "replacement_sha256": "e6ec46157befbb0e156a8764263e32cd6d4e7936a9eaeb14017008ebe9be3f95",
-      "disposition": "retained_product_or_governance",
-      "public_sha256": "287b41d7acbc49afcd22a307e126fd3dfe67966c24662b980231af5040c0f888"
+      "disposition": "delete_after_live_proof"
     },
     {
       "path": "test/credential-broker-permanent-oauth-client-errors.test.ts",
@@ -2587,8 +2583,8 @@
   ],
   "counts": {
     "already_absent": 13,
-    "delete_after_live_proof": 397,
-    "retained_product_or_governance": 17
+    "delete_after_live_proof": 401,
+    "retained_product_or_governance": 13
   },
   "live_proof": {
     "status": "passed",
