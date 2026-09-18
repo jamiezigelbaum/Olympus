@@ -332,9 +332,10 @@ custom MCP installation through `hermes mcp add` but does not document that URI
 handler. No Nous catalog submission has been made; that remains a later,
 separately reviewed external action.
 
-Operator surfaces (sync, export, transcription, promotion) stay hidden unless
-their explicit admin gates are enabled, and worker bearer auth is enforced
-throughout.
+There are no operator agent tools. Index maintenance — sync, extraction,
+embedding, retries — is the worker's own scheduler, and what a person drives by
+hand goes through the `olympus` CLI. The agent tool surface is exactly the tools
+listed above, and worker bearer auth is enforced throughout.
 
 Operational note for connector-store corpora: run the matching sync script
 first, then mount the same SQLite store in the source worker with

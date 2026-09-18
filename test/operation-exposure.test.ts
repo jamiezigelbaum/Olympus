@@ -50,7 +50,7 @@ describe('operation exposure policy', () => {
     }
   });
 
-  test('can disable the product source-index read surface without exposing operator tools', () => {
+  test('can disable the product source-index read surface', () => {
     const config = defaultConfig();
     config.sourceIndex.enabled = false;
 
@@ -60,65 +60,48 @@ describe('operation exposure policy', () => {
     expect(exposedNames(config)).not.toContain('source_watch_create');
     expect(exposedNames(config)).not.toContain('source_watches');
     expect(exposedNames(config)).not.toContain('source_watch_cancel');
-    expect(exposedNames(config)).not.toContain('source_index_sync');
-    expect(exposedNames(config)).not.toContain('email_index_search');
+    expect(exposedNames(config)).toEqual([
+      'argus_ping',
+      'argus_list_models',
+      'argus_complete',
+      'olympus_doctor',
+    ]);
   });
 
-  test('legacy source-index answer dev gate still enables the promoted read surface', () => {
-    const config = defaultConfig();
-    config.sourceIndex.enabled = false;
-    config.sourceIndex.answerDevEnabled = true;
-
-    expect(exposedNames(config)).toContain('source_answer');
-    expect(exposedNames(config)).toContain('source_index_status');
-    expect(exposedNames(config)).toContain('source_index_search');
+  test('the retired private tool names cannot come back through the registry', () => {
+    // The fifteen pre-v0.4 email, index-administration and unqualified source
+    // workflow tools were deleted on 2026-09-18. Registering any of them again
+    // would have to pass the public lists first, but this is the cheap check
+    // that the registry itself no longer carries them.
+    const registered = new Set(operations.map((operation) => operation.name));
+    for (const name of [
+      'email_ping',
+      'email_answer',
+      'email_search',
+      'email_index_sync',
+      'email_index_embed',
+      'email_index_search',
+      'source_index_sync',
+      'source_export',
+      'source_transcribe',
+      'source_media_ingest',
+      'source_index_promotion_candidates',
+      'source_index_promotion_propose',
+      'source_index_promotion_proposals',
+      'source_index_promotion_proposal',
+      'source_index_promotion_decide',
+    ]) expect(registered.has(name), `${name} is still registered`).toBe(false);
   });
 
-  test('operator-gated source-index tools stay hidden on fresh product defaults', () => {
-    const names = exposedNames();
-
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('source_export');
-    expect(names).not.toContain('source_transcribe');
-    expect(names).not.toContain('source_media_ingest');
-    expect(names).not.toContain('source_index_promotion_candidates');
-    expect(names).not.toContain('source_index_promotion_propose');
-    expect(names).not.toContain('source_index_promotion_proposals');
-    expect(names).not.toContain('source_index_promotion_proposal');
-    expect(names).not.toContain('source_index_promotion_decide');
-  });
-
-  test('hides private email tools when active-model guard is enabled without approved local metadata', () => {
-    const config = defaultConfig();
-    config.email.localPacketsDevEnabled = true;
-    config.email.indexAdminDevEnabled = true;
-    config.email.requireLocalActiveModelForPrivateTools = true;
-
-    expect(exposedNames(config)).not.toContain('email_search');
-    expect(exposedNames(config)).not.toContain('email_index_search');
-    expect(exposedNames(config)).not.toContain('email_index_sync');
-    expect(exposedNames(config)).not.toContain('source_index_sync');
-    expect(exposedNames(config, { provider: 'openai-codex', modelId: 'gpt-5.5' }))
-      .not.toContain('email_index_search');
-  });
-
-  test('keeps private email packet/admin tools outside the v0.4 public surface', () => {
+  test('the active-model guard does not change the public roster', () => {
+    // It survives the private-tool retirement as a configuration flag with no
+    // gated tools left; nothing it can hide is on the public lists.
     const config = defaultConfig();
     config.argus.lanes.fast.model = 'local-qwen-fast';
-    config.email.localPacketsDevEnabled = true;
-    config.email.indexAdminDevEnabled = true;
     config.email.requireLocalActiveModelForPrivateTools = true;
 
-    const names = exposedNames(config, {
-      provider: 'olympus-local',
-      modelId: 'local-qwen-fast',
-    });
-
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).toContain('source_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
-    expect(names).not.toContain('source_index_sync');
+    expect(exposedNames(config)).toEqual(exposedNames());
+    expect(exposedNames(config, { provider: 'olympus-local', modelId: 'local-qwen-fast' }))
+      .toEqual(exposedNames());
   });
 });

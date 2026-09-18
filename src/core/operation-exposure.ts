@@ -37,9 +37,6 @@ export function shouldExposeOperation(
   if (operation.requiresOpenClawSessionRoute && context.surface !== 'native') {
     return false;
   }
-  if (operation.nativeExposure === 'sourceIndexAnswerDevOnly') {
-    return context.config.sourceIndex.answerDevEnabled;
-  }
   if (operation.nativeExposure === 'sourceIndexEnabledOnly') {
     return isSourceIndexReadSurfaceEnabled(context.config);
   }

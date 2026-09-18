@@ -953,12 +953,7 @@ describe('CLI tool surface', () => {
   test('--tools-json uses the shared operation exposure policy', async () => {
     const tools = await runToolsJson({
       email: {
-        localPacketsDevEnabled: true,
-        indexAdminDevEnabled: true,
         requireLocalActiveModelForPrivateTools: true,
-      },
-      sourceIndex: {
-        answerDevEnabled: true,
       },
     });
     const names = tools.map((tool) => tool.name);
@@ -966,23 +961,21 @@ describe('CLI tool surface', () => {
     expect(names).toContain('source_answer');
     expect(names).toContain('source_index_status');
     expect(names).toContain('source_index_search');
-    expect(names).not.toContain('source_index_sync');
-    expect(names).not.toContain('email_search');
-    expect(names).not.toContain('email_index_search');
-    expect(names).not.toContain('email_index_sync');
-    expect(names).not.toContain('email_index_embed');
+    // The CLI surface never carries the three source-watch tools: only the
+    // native tool factory can mint their authenticated session route.
+    expect(names).not.toContain('source_watch_create');
+    expect(names).not.toContain('source_watches');
+    expect(names).not.toContain('source_watch_cancel');
   }, 30_000);
 
   test('parseArgs accepts explicit false values for boolean flags', () => {
-    const sourceExport = operations.find((operation) => operation.name === 'source_export')!;
+    const sourceIndexStatus = operations.find((operation) => operation.name === 'source_index_status')!;
 
-    expect(parseArgs(sourceExport, ['--items', '[]', '--dry-run=false'])).toEqual({
-      items: '[]',
-      dry_run: false,
+    expect(parseArgs(sourceIndexStatus, ['--include-items=false'])).toEqual({
+      include_items: false,
     });
-    expect(parseArgs(sourceExport, ['--items', '[]', '--dry-run', 'false'])).toEqual({
-      items: '[]',
-      dry_run: false,
+    expect(parseArgs(sourceIndexStatus, ['--include-items', 'false'])).toEqual({
+      include_items: false,
     });
   });
 

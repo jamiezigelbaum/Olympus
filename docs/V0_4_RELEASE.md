@@ -53,6 +53,26 @@ testers have exercised the normal product journey without custom engineering.
   makes the internal rehearsal package retrievable; it does not claim full
   release qualification or replace the existing gates before inviting beta
   testers. ClawHub publication remains after qualification and beta feedback.
+- **2026-09-18 — The source tree equals the public product.** Removed the
+  private overlay seam (`src/private-extension-contract.ts` and its
+  `privateExtensions` registration in the native plugin), the Hire Broker, the
+  domain-library reader, and the file-delivery and castor-workspace private
+  lanes; then the fifteen non-public operations — the pre-v0.4 email tools
+  (`email_ping`, `email_answer`, `email_search`, `email_index_sync`,
+  `email_index_embed`, `email_index_search`), the index-administration tools
+  (`source_index_sync`), and the unqualified source workflows (`source_export`,
+  `source_transcribe`, `source_media_ingest`, and the five
+  `source_index_promotion_*` tools) — with their client methods, their three
+  private dev flags (`email.localPacketsDevEnabled`,
+  `email.indexAdminDevEnabled`, `sourceIndex.answerDevEnabled`), and the
+  `ask-email-local` and `update-openclaw-runtime` skills. Every registered
+  operation is now on the public tool lists, and
+  `test/public-surface-guard.test.ts` with
+  `config/public-surface-allowlist.json` keeps it that way: the tree equals the
+  public product or the allowlist says why not, and that list only shrinks.
+  The owner's private deployment runs the source checkout plus overlay today
+  and moves to the public artifact; that migration is a live-host operation
+  under the OpenClaw change protocol, not part of this repository change.
 - **2026-09-13 — Expert implementation belongs to Expert Agents.** Removed
   the duplicate worker, client, expert skills, tools, configuration, and serve
   command. An architecture guard prevents their return. Olympus's generic

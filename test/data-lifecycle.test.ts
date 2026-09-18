@@ -208,7 +208,6 @@ describe('Olympus data lifecycle', () => {
             client_email: 'config-service-account@example.test',
           },
         },
-        sourceIndex: { answerDevEnabled: true },
       }));
       writeFileSync(join(homeDir, '.olympus', 'sovereignty.json'), JSON.stringify({
         schemaVersion: 1,

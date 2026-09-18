@@ -295,282 +295,6 @@ describe('EmailClient', () => {
     }
   });
 
-  test('reports disabled email lane without reaching the network', async () => {
-    // Disabling is now an explicit choice rather than the default, so the test
-    // states it: the lane is on by default because every preset installs the
-    // worker.
-    const config = defaultConfig();
-    config.email.enabled = false;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => {
-        throw new Error('network should not be called');
-      }),
-    );
-
-    await expect(client.ping()).resolves.toMatchObject({
-      reachable: false,
-      configured: false,
-      raw_email_exposed: false,
-    });
-  });
-
-  test('answers through the configured private email lane without raw bodies', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    config.email.baseUrl = 'http://127.0.0.1:8010/v1';
-    const requests: Request[] = [];
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async (input, init) => {
-        requests.push(new Request(input, init));
-        return jsonResponse({
-          answer: 'The follow-up is due Friday.',
-          evidence: [{ id: 'gmail:thread-1', subject: 'Project follow-up' }],
-          audit: {
-            request_id: 'request-1',
-            queries_attempted: 1,
-            metadata_hits: 1,
-            evidence_count: 1,
-            reasoner_ms: 12,
-            fallback_used: false,
-            planner_used: false,
-            planner_fallback_used: true,
-            planned_search_count: 0,
-            planner_failure_reason: 'invalid_json',
-            retrieval_searches_attempted: 1,
-            retrieval_search_summaries: [
-              { source: 'baseline', index: 0, hits: 1, new_candidates_after_dedupe: 1, capped: false },
-            ],
-          },
-        });
-      }),
-    );
-
-    const result = await client.answer({
-      question: 'When is the follow-up due?',
-      from: 'alex@example.com',
-      maxMessages: 3,
-    });
-
-    expect(result).toEqual({
-      answer: 'The follow-up is due Friday.',
-      evidence: [{ id: 'gmail:thread-1', subject: 'Project follow-up' }],
-      audit: {
-        request_id: 'request-1',
-        queries_attempted: 1,
-        metadata_hits: 1,
-        evidence_count: 1,
-        reasoner_ms: 12,
-        fallback_used: false,
-        planner_used: false,
-        planner_fallback_used: true,
-        planned_search_count: 0,
-        planner_failure_reason: 'invalid_json',
-        retrieval_searches_attempted: 1,
-        retrieval_search_summaries: [
-          { source: 'baseline', index: 0, hits: 1, new_candidates_after_dedupe: 1, capped: false },
-        ],
-      },
-      policy: {
-        raw_email_exposed: false,
-        reasoning_lane: 'delphi_local',
-      },
-    });
-    expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/answer');
-    expect(await requests[0]?.json()).toEqual({
-      question: 'When is the follow-up due?',
-      from: 'alex@example.com',
-      max_messages: 3,
-    });
-  });
-
-  test('rejects private email lane responses that include raw message bodies', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => jsonResponse({
-        answer: 'Here is the body.',
-        raw_messages: [{ body: 'private email' }],
-      })),
-    );
-
-    await expect(client.answer({ question: 'What did it say?' })).rejects.toThrow(
-      'forbidden raw field "raw_messages"',
-    );
-  });
-
-  test('rejects audit responses that include raw snippet fields', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => jsonResponse({
-        answer: 'No raw audit should leave the lane.',
-        audit: {
-          request_id: 'request-1',
-          queries_attempted: 1,
-          metadata_hits: 1,
-          evidence_count: 1,
-          reasoner_ms: 12,
-          fallback_used: false,
-          snippets: ['private preview'],
-        },
-      })),
-    );
-
-    await expect(client.answer({ question: 'What did it say?' })).rejects.toThrow(
-      'forbidden raw field "audit.snippets"',
-    );
-  });
-
-  test('email_search fails closed unless local packet dev gate is enabled', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => {
-        throw new Error('network should not be called');
-      }),
-    );
-
-    await expect(client.search({ query: 'from:alex@example.com' })).rejects.toThrow(
-      'Email source packets require an approved local/private session.',
-    );
-  });
-
-  test('email_search calls the private worker and accepts sanitized local packet fields when gated', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    config.email.localPacketsDevEnabled = true;
-    config.email.baseUrl = 'http://127.0.0.1:8010/v1';
-    const requests: Request[] = [];
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async (input, init) => {
-        requests.push(new Request(input, init));
-        return jsonResponse({
-          packet: {
-            kind: 'email_source_packet',
-            packet_id: 'packet-1',
-            source: 'gmail',
-            account: 'person@example.com',
-            items: [{
-              item_id: 'msg-1',
-              thread_id: 'thread-1',
-              subject: 'Visit',
-              from: 'admissions@example.com',
-              date: '2026-05-02',
-              sanitized_text: 'Sanitized appointment details.',
-              provenance: {
-                source: 'gmail',
-                message_id: 'msg-1',
-                thread_id: 'thread-1',
-              },
-            }],
-          },
-          audit: {
-            request_id: 'request-1',
-            queries_attempted: 1,
-            metadata_hits: 1,
-            items_returned: 1,
-            sanitized_reads_attempted: 1,
-            sanitized_reads_succeeded: 1,
-            truncated: false,
-            local_packet: true,
-            raw_email_exposed: false,
-          },
-          policy: {
-            raw_email_exposed: false,
-            local_only: true,
-            requires_local_session: true,
-          },
-        });
-      }),
-    );
-
-    const result = await client.search({
-      query: 'OpenApply appointment',
-      from: 'admissions@example.com',
-      maxMessages: 3,
-    });
-
-    expect(result.packet.items[0]?.sanitized_text).toBe('Sanitized appointment details.');
-    expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/search');
-    expect(await requests[0]?.json()).toEqual({
-      query: 'OpenApply appointment',
-      from: 'admissions@example.com',
-      max_messages: 3,
-    });
-  });
-
-  test('email_search rejects forbidden raw packet field names', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    config.email.localPacketsDevEnabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => jsonResponse({
-        packet: {
-          kind: 'email_source_packet',
-          packet_id: 'packet-1',
-          source: 'gmail',
-          items: [{ body: 'private email' }],
-        },
-      })),
-    );
-
-    await expect(client.search({ query: 'anything' })).rejects.toThrow(
-      'forbidden raw field "packet.items.0.body"',
-    );
-  });
-
-  test('email_index_sync fails closed unless admin dev gate is enabled', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => {
-        throw new Error('network should not be called');
-      }),
-    );
-
-    await expect(client.indexSync({ newerThanDays: 7, maxMessages: 5 })).rejects.toThrow(
-      'Email index sync requires the explicit developer/admin proof gate.',
-    );
-  });
-
-  test('email_index_embed fails closed unless admin dev gate is enabled', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => {
-        throw new Error('network should not be called');
-      }),
-    );
-
-    await expect(client.indexEmbed({ account: 'person@example.com' })).rejects.toThrow(
-      'Email index embedding requires the explicit developer/admin proof gate.',
-    );
-  });
-
-  test('email_index_search fails closed unless local packet dev gate is enabled', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async () => {
-        throw new Error('network should not be called');
-      }),
-    );
-
-    await expect(client.indexSearch({ query: 'school visit' })).rejects.toThrow(
-      'Email index source packets require an approved local/private session.',
-    );
-  });
-
   test('source_answer fails closed when the source-index product surface is disabled', async () => {
     const config = defaultConfig();
     config.email.enabled = true;
@@ -970,8 +694,6 @@ describe('EmailClient', () => {
   test('source-index operational surfaces reject raw paths, scopes, cursors, and sessions', async () => {
     const config = defaultConfig();
     config.email.enabled = true;
-    config.email.indexAdminDevEnabled = true;
-    config.email.localPacketsDevEnabled = true;
     const client = new EmailClient(
       config,
       new DirectHttpEmailTransport(async (input) => {
@@ -988,14 +710,6 @@ describe('EmailClient', () => {
               secure_local_item_metadata_exposed: false,
               castor_visible: true,
             },
-          });
-        }
-        if (String(input).endsWith('/source/index/sync')) {
-          return jsonResponse({
-            sync_run_id: 'sync-1',
-            status: 'completed',
-            provider_cursor: 'offset_id:100',
-            policy: { raw_source_exposed: false, source_text_returned: false },
           });
         }
         return jsonResponse({
@@ -1027,10 +741,6 @@ describe('EmailClient', () => {
     await expect(client.sourceIndexStatus()).rejects.toThrow(
       'forbidden operational field "corpora.0.chat_scope"',
     );
-    await expect(client.sourceIndexSync({
-      corpusId: 'secure_local.telegram.messages',
-      chatScope: 'telegram.personal:chat:secret',
-    })).rejects.toThrow('forbidden operational field "provider_cursor"');
     await expect(client.sourceIndexSearch({ corpusId: 'secure_local.dropbox.files', query: 'secret' })).rejects.toThrow(
       'forbidden operational field "hits.0.path_display"',
     );
@@ -1583,26 +1293,14 @@ describe('EmailClient', () => {
     })).rejects.toThrow('source index search policy must describe a local safe result');
   });
 
-  test('source_index_sync and source_index_search call private source worker when gated', async () => {
+  test('source_index_search calls the private source worker with the canonical corpus', async () => {
     const config = defaultConfig();
     config.email.enabled = true;
-    config.email.indexAdminDevEnabled = true;
     const requests: Request[] = [];
     const client = new EmailClient(
       config,
       new DirectHttpEmailTransport(async (input, init) => {
         requests.push(new Request(input, init));
-        if (String(input).endsWith('/source/index/sync')) {
-          return jsonResponse({
-            sync_run_id: 'telegram-sync-1',
-            status: 'completed',
-            corpus_id: 'secure_local.telegram.protected.messages',
-            provider: 'telegram',
-            account: 'telegram.personal',
-            messages_indexed: 1,
-            policy: { raw_source_exposed: false, source_text_returned: false },
-          });
-        }
         return jsonResponse({
           kind: 'source_index_search',
           corpus_id: 'secure_local.telegram.protected.messages',
@@ -1629,13 +1327,6 @@ describe('EmailClient', () => {
       }),
     );
 
-    const sync = await client.sourceIndexSync({
-      corpusId: 'secure_local.telegram.messages',
-      account: 'telegram.personal',
-      chatScope: 'telegram.personal:chat:chat-porto',
-      maxMessages: 5,
-      providerCursor: 'offset_id:100',
-    });
     const search = await client.sourceIndexSearch({
       corpusId: 'secure_local.telegram.messages',
       query: 'surface',
@@ -1646,25 +1337,13 @@ describe('EmailClient', () => {
       maxResults: 5,
     });
 
-    expect(sync).toMatchObject({
-      corpus_id: 'secure_local.telegram.protected.messages',
-      policy: { raw_source_exposed: false, source_text_returned: false },
-    });
     expect(search).toMatchObject({
       kind: 'source_index_search',
       corpus_id: 'secure_local.telegram.protected.messages',
       policy: { raw_source_exposed: false, source_text_returned: false },
     });
-    expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/source/index/sync');
+    expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/source/index/search');
     expect(await requests[0]?.json()).toEqual({
-      corpus_id: 'secure_local.telegram.protected.messages',
-      account: 'telegram.personal',
-      chat_scope: 'telegram.personal:chat:chat-porto',
-      max_messages: 5,
-      provider_cursor: 'offset_id:100',
-    });
-    expect(requests[1]?.url).toBe('http://127.0.0.1:8010/v1/source/index/search');
-    expect(await requests[1]?.json()).toEqual({
       query: 'surface',
       corpus_id: 'secure_local.telegram.protected.messages',
       account: 'telegram.personal',
@@ -1673,138 +1352,6 @@ describe('EmailClient', () => {
       attachment_type: 'file',
       max_results: 5,
     });
-  });
-
-  test('email_index_sync, email_index_embed, and email_index_search call private worker when gated', async () => {
-    const config = defaultConfig();
-    config.email.enabled = true;
-    config.email.indexAdminDevEnabled = true;
-    config.email.localPacketsDevEnabled = true;
-    const requests: Request[] = [];
-    const client = new EmailClient(
-      config,
-      new DirectHttpEmailTransport(async (input, init) => {
-        requests.push(new Request(input, init));
-        if (String(input).endsWith('/index/sync')) {
-          return jsonResponse({
-            sync_run_id: 'sync-1',
-            status: 'completed',
-            provider: 'gmail',
-            account: 'person@example.com',
-            source_scope: 'newer_than_days:7;max:5',
-            items_seen: 1,
-            items_indexed: 1,
-            threads_indexed: 1,
-            checkpoint_recorded: true,
-            store_path: '/tmp/email.sqlite',
-            gaps: [],
-            policy: { raw_email_exposed: false, local_only: true },
-          });
-        }
-        if (String(input).endsWith('/index/embed')) {
-          return jsonResponse({
-            semantic_run_id: 'semantic-run-1',
-            status: 'completed',
-            provider: 'gmail',
-            account: 'person@example.com',
-            model_id: 'local-embedding-model',
-            embedding_provider: 'local-openai-compatible',
-            embedding_dimension: 32,
-            vector_backend: 'exact_scan',
-            chunks_seen: 1,
-            chunks_embedded: 1,
-            chunks_skipped: 0,
-            store_path: '/tmp/email.sqlite',
-            policy: {
-              raw_email_exposed: false,
-              local_only: true,
-              cloud_embedding_eligible: false,
-              derived_private_data: true,
-            },
-          });
-        }
-        return jsonResponse({
-          packet: {
-            kind: 'email_source_packet',
-            packet_id: 'packet-1',
-            source: 'gmail',
-            items: [{
-              item_id: 'msg-1',
-              thread_id: 'thread-1',
-              sanitized_text: 'Sanitized appointment details.',
-              provenance: {
-                provider: 'gmail',
-                account: 'person@example.com',
-                message_id: 'msg-1',
-                thread_id: 'thread-1',
-                local_message_id: '1',
-                chunk_ids: ['1'],
-                sync_run_id: 'sync-1',
-              },
-            }],
-          },
-          audit: {
-            request_id: 'request-1',
-            retrieval_source: 'local_index',
-            queries_attempted: 1,
-            retrieval_mode: 'hybrid',
-            requested_retrieval_mode: 'hybrid',
-            keyword_candidates: 1,
-            vector_candidates: 1,
-            fused_candidates: 1,
-            embedding_model_id: 'local-embedding-model',
-            vector_backend: 'exact_scan',
-            metadata_hits: 1,
-            items_returned: 1,
-            threads_returned: 1,
-            latency_ms: 1,
-            sanitized_reads_attempted: 0,
-            sanitized_reads_succeeded: 0,
-            truncated: false,
-            local_packet: true,
-            raw_email_exposed: false,
-          },
-          policy: {
-            raw_email_exposed: false,
-            local_only: true,
-            requires_local_session: true,
-          },
-        });
-      }),
-    );
-
-    await client.indexSync({ newerThanDays: 7, maxMessages: 5 });
-    const embed = await client.indexEmbed({ account: 'person@example.com', modelId: 'local-embedding-model', force: true });
-    const search = await client.indexSearch({
-      query: 'school visit',
-      retrievalMode: 'hybrid',
-      label: 'INBOX',
-      maxMessages: 5,
-    });
-
-    expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/index/sync');
-    expect(await requests[0]?.json()).toEqual({ newer_than_days: 7, max_messages: 5 });
-    expect(requests[1]?.url).toBe('http://127.0.0.1:8010/v1/index/embed');
-    expect(await requests[1]?.json()).toEqual({
-      account: 'person@example.com',
-      model_id: 'local-embedding-model',
-      force: true,
-    });
-    expect(requests[2]?.url).toBe('http://127.0.0.1:8010/v1/index/search');
-    expect(await requests[2]?.json()).toEqual({
-      query: 'school visit',
-      retrieval_mode: 'hybrid',
-      label: 'INBOX',
-      max_messages: 5,
-    });
-    expect(embed).toMatchObject({
-      model_id: 'local-embedding-model',
-      policy: { raw_email_exposed: false, cloud_embedding_eligible: false },
-    });
-    expect(search.packet.items[0]?.provenance.local_message_id).toBe('1');
-    expect(search.audit.retrieval_source).toBe('local_index');
-    expect(search.audit.retrieval_mode).toBe('hybrid');
-    expect(search.audit.embedding_model_id).toBe('local-embedding-model');
   });
 });
 

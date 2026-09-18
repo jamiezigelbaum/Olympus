@@ -21,26 +21,15 @@ import {
   type Operation,
   type OperationContext,
 } from './core/operations.ts';
-import { isV04PublicOperation } from './core/public-surface.ts';
-import {
-  loadPrivateExtensions,
-  type OlympusPrivateOperationToolRegistrar,
-} from './private-extension-contract.ts';
 
 /**
- * The private overlay is resolved once, at module scope, SYNCHRONOUSLY.
+ * Nothing in this module's graph may introduce a top-level `await`.
  *
  * OpenClaw's plugin loader is synchronous end to end — it `require()`s this
  * entry and falls back to a jiti source transform — so a top-level `await`
- * anywhere in this graph makes the built bundle unloadable on both legs and
- * every install fails before `register` is reached. Nothing in this file may
- * introduce one.
- *
- * A refusal here (version mismatch, malformed module) fails the plugin load,
- * which is the intended fail-closed behaviour: a private deployment must not
- * come up public.
+ * anywhere here makes the built bundle unloadable on both legs and every
+ * install fails before `register` is reached.
  */
-const privateExtensions = loadPrivateExtensions();
 
 interface OpenClawPluginApi {
   pluginConfig?: unknown;
@@ -230,19 +219,16 @@ const plugin = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
       email: new EmailClient(config, createEmailTransport(config)),
-      ...(privateExtensions?.extendOperationContext?.({ pluginConfig: api.pluginConfig, config }) ?? {}),
     };
 
     registerSourceWatchDeliveryRoute(api, config);
 
-    const registeredToolNames: string[] = [];
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, {
         config,
         surface: 'native',
         activeModel,
       })) continue;
-      registeredToolNames.push(operation.name);
       if (isSourceWatchOperation(operation)) {
         api.registerTool(((toolContext: OpenClawPluginToolContext) => {
           const sourceWatchRoute = sourceWatchRouteFromToolContext(toolContext);
@@ -255,43 +241,6 @@ const plugin = {
         api.registerTool(nativeToolFromOperation(operation, ctx));
       }
     }
-
-    if (!privateExtensions?.register) return;
-    // The overlay decides its own exposure, so the public positive lists in
-    // `shouldExposeOperation` stay exactly as the public artifact evaluates
-    // them. What it may not do is shadow or re-register a public tool.
-    const registerOperationTool: OlympusPrivateOperationToolRegistrar = (operation, options) => {
-      if (!operations.includes(operation)) {
-        throw new Error(`Private extension ${privateExtensions.id} registered an unknown operation.`);
-      }
-      if (isV04PublicOperation('native', operation.name) || registeredToolNames.includes(operation.name)) {
-        throw new Error(
-          `Private extension ${privateExtensions.id} may not register the already-registered or public `
-          + `tool ${operation.name}.`,
-        );
-      }
-      registeredToolNames.push(operation.name);
-      const extendToolContext = options?.toolContextExtension;
-      if (!extendToolContext) {
-        api.registerTool(nativeToolFromOperation(operation, ctx));
-        return;
-      }
-      api.registerTool(((toolContext: OpenClawPluginToolContext) => nativeToolFromOperation(operation, {
-        ...ctx,
-        ...extendToolContext(toolContext as Readonly<Record<string, unknown>>),
-      })) as unknown as NativeTool);
-    };
-    privateExtensions.register({
-      api,
-      pluginConfig: api.pluginConfig,
-      config,
-      activeModel,
-      operations,
-      context: ctx,
-      registeredToolNames,
-      isPublicNativeOperation: (operationName) => isV04PublicOperation('native', operationName),
-      registerOperationTool,
-    });
   },
 };
 

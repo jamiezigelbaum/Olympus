@@ -182,7 +182,7 @@ export function corpusProofFromStatus(
     );
   }
   if (!corpus.configured) actions.push(`${corpusId}: configure the source index and credential lane.`);
-  if (!corpus.last_refresh) actions.push(`${corpusId}: run a bounded source_index_sync to establish freshness.`);
+  if (!corpus.last_refresh) actions.push(`${corpusId}: let the worker scheduler run a bounded sync to establish freshness.`);
   if (counts.indexed_items === 0) actions.push(`${corpusId}: sync indexed items; current corpus has no indexed items.`);
   if (counts.extraction_failed && counts.extraction_failed > 0) {
     actions.push(`${corpusId}: repair ${counts.extraction_failed} failed extraction job(s).`);
