@@ -305,7 +305,7 @@ describe('source worker scheduler', () => {
       [SOURCE_SCHEDULER_SOURCE_IDS_ENV]: 'x.bookmarks,not allowed!',
     })).toThrow('sourceIds entries must be one of');
     expect(() => sourceSchedulerSourceIdsFromEnv({
-      [SOURCE_SCHEDULER_SOURCE_IDS_ENV]: 'domain_library.agent_library',
+      [SOURCE_SCHEDULER_SOURCE_IDS_ENV]: 'not_a_source.items',
     })).toThrow('sourceIds entries must be one of');
 
     // A fresh install enables the scheduler before any source is connected, so

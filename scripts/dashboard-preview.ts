@@ -37,7 +37,7 @@ import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 const NOW = new Date('2026-07-07T21:00:00.000Z');
 // A corpus no dashboard card owns. Every registry corpus has a card today, so
 // the fixture names a store-only corpus id directly.
-const UNCLAIMED_CORPUS_ID = 'internal.domain-library.derivatives';
+const UNCLAIMED_CORPUS_ID = 'internal.fixture-library.derivatives';
 const PREVIEW_GOOGLE_CLIENT_ID = 'olympus-pilot-preview.apps.googleusercontent.com';
 // The https origin a dashboard reached through a tailnet proxy derives its
 // callback from. It is what makes the redirect-URI block, the Web-application
@@ -125,7 +125,7 @@ function fullStatus(): SourceIndexStatusResult {
     corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 185_000, 185_000, { withText: 185_000, embedded: 185_000 }),
     corpus('secure_local.whatsapp.messages', 'chat', 'secure_local', 'whatsapp', 18_900, 18_900, { withText: 18_900, embedded: 18_900 }),
     // Owned by no card: exercises the "Indexed, but not on a card above" block.
-    corpus(UNCLAIMED_CORPUS_ID, 'file', 'internal', 'domain_library', 42, 42),
+    corpus(UNCLAIMED_CORPUS_ID, 'file', 'internal', 'fixture_library', 42, 42),
   ];
   return status;
 }

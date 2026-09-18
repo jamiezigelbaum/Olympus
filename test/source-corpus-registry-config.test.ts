@@ -1,9 +1,7 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { DOMAIN_LIBRARY_CORPUS_ID, runDomainLibrarySync } from '../scripts/domain-library-sync.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { operationToolSchema, operations, type OperationContext } from '../src/core/operations.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
@@ -28,6 +26,8 @@ import type {
   FileExtractionRunner,
 } from '../src/workers/file-extraction/runner.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { buildSourceSensitivity, type SourceItemIdentity } from '../src/core/source-index/types.ts';
 import {
   createSourceIndexStatusHandler,
   type SourceIndexStatusRetrievalAvailability,
@@ -340,35 +340,53 @@ describe('config-driven source corpus registry', () => {
 
   test('connector-store-backed config corpus reports configured counts when mounted', async () => {
     const root = mkdtempSync(join(tmpdir(), 'source-corpus-registry-config-'));
-    const registryRelativePath = 'castor-solon/references/source-registry.jsonl';
-    mkdirSync(join(root, 'castor-solon', 'references'), { recursive: true });
-    mkdirSync(join(root, 'castor-solon', 'sources'), { recursive: true });
-    const derivativePath = 'castor-solon/sources/approved.md';
-    const text = 'approved connector-store status derivative';
-    writeFileSync(join(root, derivativePath), text);
-    writeFileSync(join(root, registryRelativePath), `${JSON.stringify({
-      source_id: 'approved-status',
-      domain_id: 'governance',
-      workspace_relative_path: derivativePath,
-      trust_domain: 'internal',
-      tier: 'S3',
-      classification_status: 'approved',
-      content_hash: createHash('sha256').update(text).digest('hex'),
-    })}\n`);
+    const corpusId = 'internal.fixture.library';
     const dbPath = join(root, 'connector-store.db');
-    await runDomainLibrarySync({ workspaceRoot: root, registryRelativePath, dbPath });
+    const text = 'approved connector-store status derivative';
+    const identity: SourceItemIdentity = {
+      family: 'file',
+      provider: 'fixture_library',
+      accountScope: 'fixture',
+      providerItemId: 'approved-status',
+      providerFileId: 'approved-status',
+      localItemId: 'fixture:approved-status',
+      sourceVersion: 'approved-status:v1',
+    };
+    const rawItem: RawItem = {
+      identity,
+      mimeType: 'text/markdown',
+      content: { kind: 'text', text },
+      metadata: Object.freeze({ title: 'approved status', locatorUri: 'fixture://approved-status' }),
+      fetchedAt: '2026-07-08T20:00:00.000Z',
+    };
+    const connector: SourceConnector = {
+      id: 'fixture.library',
+      family: 'file',
+      async authenticate() {},
+      listItems(): AsyncIterable<SourceConnectorListPage> {
+        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+          yield { items: [rawItem], done: true };
+        })();
+      },
+      async fetchItem() {
+        return rawItem;
+      },
+      classify() {
+        return buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' });
+      },
+    };
 
     const config = defaultConfig();
-    // The domain-library corpus left the default roster with the 2026-07-28
-    // retirement, so an operator now has to register it explicitly for the
-    // mounted store to be visible at all. That is the shape this asserts.
+    // A connector-store-backed corpus outside the default roster is only
+    // visible once an operator registers it explicitly. That is the shape
+    // this asserts.
     config.sourceIndex.corpusRegistry = {
       schemaVersion: 1,
       corpora: [
         {
-          corpusId: DOMAIN_LIBRARY_CORPUS_ID,
-          sourceId: 'domain_library.agent_library',
-          provider: 'domain_library',
+          corpusId,
+          sourceId: 'fixture_library.items',
+          provider: 'fixture_library',
           family: 'file',
           trustDomain: 'internal',
           activationMode: 'lexical_only',
@@ -379,18 +397,19 @@ describe('config-driven source corpus registry', () => {
     const registry = createSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
     const store = new LocalConnectorStore({
       dbPath,
-      corpusId: DOMAIN_LIBRARY_CORPUS_ID,
+      corpusId,
       family: 'file',
       trustDomain: 'internal',
     });
     try {
+      await store.syncFromConnector(connector, { fetchContent: true });
       const statusHandler = createSourceIndexStatusHandler({
         corpusDefinitions: registry.definitions('status'),
         connectorStores: [store],
       });
-      const statusResult = await statusHandler.status({ corpus_id: DOMAIN_LIBRARY_CORPUS_ID });
+      const statusResult = await statusHandler.status({ corpus_id: corpusId });
       expect(statusResult.corpora).toEqual([expect.objectContaining({
-        corpus_id: DOMAIN_LIBRARY_CORPUS_ID,
+        corpus_id: corpusId,
         family: 'file',
         trust_domain: 'internal',
         configured: true,

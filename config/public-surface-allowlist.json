@@ -33,21 +33,6 @@
       "retire_when": "Deleted."
     },
     {
-      "path": "src/core/domain-library-registry.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/domain-library/connector.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
-      "retire_when": "Deleted."
-    },
-    {
-      "path": "src/workers/domain-library/index.ts",
-      "reason": "Retired by owner decision on 2026-09-18; deleted in the split PR series. Library registry reader with no live consumer.",
-      "retire_when": "Deleted."
-    },
-    {
       "path": "src/core/source-family.ts",
       "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
       "retire_when": "Wired into the public source roster, or deleted."
