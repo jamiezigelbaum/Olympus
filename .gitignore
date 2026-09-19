@@ -18,7 +18,6 @@ config/*.local.json
 eval/private/
 
 # Mirrored source trees written by tests that need a fresh module graph.
-.private-extension-mirror-*/
 .public-runtime-stripped-*/
 
 # Python bytecode cache from helper scripts

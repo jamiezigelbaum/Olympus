@@ -45,7 +45,6 @@
     "resource-wiki:compile-proof": "bun scripts/resource-wiki-compile-proof.ts",
     "resource-wiki:compile-real": "bun scripts/resource-wiki-compile-real.ts",
     "source-readiness:proof": "bun scripts/source-readiness-proof.ts",
-    "source-ingestion:dashboard": "bun scripts/source-ingestion-dashboard.ts",
     "source-ingestion:live-dashboard": "bun scripts/source-ingestion-live-dashboard.ts",
     "source-ingestion:digest": "bun scripts/source-ingestion-digest.ts",
     "whatsapp-transcribe:drain": "bun scripts/whatsapp-transcribe-drain.ts",
