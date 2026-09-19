@@ -240,12 +240,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
 
   // ---- 5. Deliberate leak tripwires that must spell the owner path out. ----
   {
-    path: 'test/source-ingestion-dashboard.test.ts',
-    label: 'an absolute path inside a person\'s home directory',
-    match: /^\/Users\/zig\/$/i,
-    reason: 'Asserts the dashboard HTML never renders the owner Dropbox root; the literal IS the guard (PR #135).',
-  },
-  {
     path: 'test/source-ingestion-live-dashboard.test.ts',
     label: 'an absolute path inside a person\'s home directory',
     match: /^\/Users\/zig\/$/i,
