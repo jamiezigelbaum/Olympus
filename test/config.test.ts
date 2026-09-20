@@ -2,7 +2,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { configFromPluginConfig, defaultConfig, loadConfig, parseBoolean, parseLane, parseModelProfile } from '../src/core/config.ts';
+import {
+  configFromPluginConfig,
+  configWithEnvironmentOverrides,
+  defaultConfig,
+  loadConfig,
+  parseBoolean,
+  parseLane,
+  parseModelProfile,
+} from '../src/core/config.ts';
 
 describe('config', () => {
   test('parses canonical boolean env vocabulary with trim and case normalization', () => {
@@ -48,6 +56,10 @@ describe('config', () => {
         },
       },
     })).toThrow('sourceIds entries must be one of');
+    expect(loadConfig({
+      OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',
+      OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS: '',
+    }).worker.scheduler.sourceIds).toEqual([]);
   });
 
   test('defaults to one Delphi model pool with legacy lane aliases', () => {
@@ -108,6 +120,7 @@ describe('config', () => {
     expect(config.email.enabled).toBe(true);
     expect(config.email.baseUrl).toBe('http://127.0.0.1:8010/v1');
     expect(config.worker.authToken).toBeUndefined();
+    expect(config.worker.service).toEqual({ enabled: false, startupTimeoutSeconds: 180, credentials: {} });
     expect(config.sourceIndex.enabled).toBe(true);
     expect(config.worker.scheduler).toMatchObject({
       enabled: false,
@@ -223,6 +236,15 @@ describe('config', () => {
       },
       worker: {
         authToken: 'plugin-worker-secret',
+        service: {
+          enabled: true,
+          startupTimeoutSeconds: 240,
+          credentials: {
+            OLYMPUS_CREDENTIAL_FIXTURE: 'synthetic-credential',
+          },
+          runtimePath: '/opt/bun/bin/bun',
+          executablePath: '/opt/openclaw/plugins/olympus/dist/cli.js',
+        },
         scheduler: {
           enabled: true,
           sourceIds: ['x.bookmarks'],
@@ -236,6 +258,15 @@ describe('config', () => {
     });
 
     expect(config.worker.authToken).toBe('plugin-worker-secret');
+    expect(config.worker.service).toEqual({
+      enabled: true,
+      startupTimeoutSeconds: 240,
+      credentials: {
+        OLYMPUS_CREDENTIAL_FIXTURE: 'synthetic-credential',
+      },
+      runtimePath: '/opt/bun/bin/bun',
+      executablePath: '/opt/openclaw/plugins/olympus/dist/cli.js',
+    });
     expect(config.worker.scheduler).toMatchObject({
       enabled: true,
       sourceIds: ['x.bookmarks'],
@@ -301,5 +332,94 @@ describe('config', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('rejects relative native worker service paths', () => {
+    expect(() => configFromPluginConfig({
+      worker: { service: { enabled: true, runtimePath: 'bin/bun' } },
+    })).toThrow('worker.service.runtimePath must be an absolute path.');
+    expect(() => configFromPluginConfig({
+      worker: { service: { enabled: true, executablePath: 'dist/cli.js' } },
+    })).toThrow('worker.service.executablePath must be an absolute path.');
+  });
+
+  test('bounds the native worker startup readiness deadline', () => {
+    expect(configFromPluginConfig({
+      worker: { service: { startupTimeoutSeconds: 600 } },
+    }).worker.service.startupTimeoutSeconds).toBe(600);
+    expect(() => configFromPluginConfig({
+      worker: { service: { startupTimeoutSeconds: 601 } },
+    })).toThrow('worker.service.startupTimeoutSeconds must be at most 600.');
+    expect(() => configFromPluginConfig({
+      worker: { service: { startupTimeoutSeconds: 0 } },
+    })).toThrow('worker.service.startupTimeoutSeconds must be greater than zero.');
+  });
+
+  test('accepts only approved resolved native worker credential environment names', () => {
+    expect(configFromPluginConfig({
+      worker: {
+        service: {
+          enabled: true,
+          credentials: {
+            OLYMPUS_CREDENTIAL_CUSTOM_PROVIDER: 'custom-secret',
+            OLYMPUS_SOURCE_INDEX_READWISE_TOKEN: 'readwise-secret',
+            GEMINI_API_KEY: 'gemini-secret',
+          },
+        },
+      },
+    }).worker.service.credentials).toEqual({
+      OLYMPUS_CREDENTIAL_CUSTOM_PROVIDER: 'custom-secret',
+      OLYMPUS_SOURCE_INDEX_READWISE_TOKEN: 'readwise-secret',
+      GEMINI_API_KEY: 'gemini-secret',
+    });
+
+    for (const name of ['OP_CONNECT_TOKEN', 'LD_PRELOAD']) {
+      expect(() => configFromPluginConfig({
+        worker: { service: { credentials: { [name]: 'forbidden' } } },
+      })).toThrow(`worker.service.credentials does not allow environment name ${name}.`);
+    }
+  });
+
+  test('fails closed when Gateway leaves a native worker credential unresolved', () => {
+    expect(() => configFromPluginConfig({
+      worker: {
+        service: {
+          enabled: true,
+          credentials: {
+            OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: {
+              source: 'env',
+              provider: 'default',
+              id: 'GEMINI_API_KEY',
+            },
+          },
+        },
+      },
+    })).toThrow(
+      'worker.service.credentials.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY must be resolved to a string',
+    );
+    expect(() => configFromPluginConfig({
+      worker: {
+        authToken: { source: 'env', provider: 'default', id: 'OLYMPUS_WORKER_AUTH_TOKEN' },
+        service: { enabled: true },
+      },
+    })).toThrow('worker.authToken must be resolved to a string');
+  });
+
+  test('native explicit sovereignty path overrides stale inline file policy only for managed children', () => {
+    const configured = configFromPluginConfig({
+      sovereignty: { policy: { schemaVersion: 1 } },
+    });
+    const standalone = configWithEnvironmentOverrides(configured, {
+      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/nonexistent-policy.json',
+    });
+    expect(standalone.sovereignty?.policy).toBeDefined();
+
+    const native = configWithEnvironmentOverrides(configured, {
+      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f',
+      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/nonexistent-policy.json',
+    });
+    expect(native.sovereignty).toEqual({
+      configPath: '/private/tmp/nonexistent-policy.json',
+    });
   });
 });

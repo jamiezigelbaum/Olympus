@@ -27,6 +27,10 @@ import {
   type SovereigntyEngine,
 } from './sovereignty.ts';
 import { setupPreflight } from './setup-preflight.ts';
+import {
+  credentialConfigFingerprint,
+  type WorkerCredentialReadiness,
+} from '../workers/credential-degradation.ts';
 import type { SecretStore } from './secret-store.ts';
 import {
   readConnectedHandleRegistry,
@@ -417,12 +421,21 @@ async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorChe
   // sovereignty_model_lanes below probes exactly those lanes behind the
   // identical gate — so repeating them here reports a running server as a
   // failure and leaves this check permanently red on every local posture.
-  const unmet = (await setupPreflight({
+  const preflightUnmet = (await setupPreflight({
     config: engine.config,
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.secretStore ? { secretStore: deps.secretStore } : {}),
     ...(deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}),
   })).filter((item) => item.kind !== 'local_model_server');
+  const workerReadiness = deps.config.email.enabled === true && preflightUnmet.some((item) => (
+    item.kind === 'env_secret' || item.kind === 'store_secret'
+  ))
+    ? await workerCredentialReadiness(deps)
+    : undefined;
+  const unmet = preflightUnmet.filter((item) => (
+    (item.kind !== 'env_secret' && item.kind !== 'store_secret')
+    || !workerReadinessMatchesProfile(engine, item.profileId, workerReadiness)
+  ));
   if (unmet.length === 0) {
     return {
       name: 'sovereignty_prerequisites',
@@ -436,6 +449,64 @@ async function sovereigntyPrerequisiteCheck(deps: DoctorDeps): Promise<DoctorChe
     detail: `Sovereignty preset has ${unmet.length} unmet prerequisite${unmet.length === 1 ? '' : 's'}: ${unmet.map((item) => item.detail).join('; ')}.`,
     hint: unmet.map((item) => item.remedy).join('\n'),
   };
+}
+
+async function workerCredentialReadiness(
+  deps: DoctorDeps,
+): Promise<WorkerCredentialReadiness[] | undefined> {
+  try {
+    const response = await (deps.fetchImpl ?? fetch)(
+      `${deps.config.email.baseUrl}/health/dependencies`,
+      workerRequestInit(deps),
+    );
+    if (!response.ok) return undefined;
+    const body = asRecord(await response.json());
+    const readiness = asRecord(body.credential_readiness);
+    const policy = asRecord(readiness.policy);
+    if (
+      readiness.kind !== 'worker_credential_readiness'
+      || policy.raw_runtime_secrets_exposed !== false
+      || policy.secret_refs_exposed !== false
+      || !Array.isArray(readiness.ready_profiles)
+    ) {
+      return undefined;
+    }
+    return readiness.ready_profiles.flatMap((entry) => {
+      const profile = asRecord(entry);
+      if (
+        typeof profile.profile_id !== 'string'
+        || typeof profile.config_fingerprint !== 'string'
+        || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)
+      ) {
+        return [];
+      }
+      const capabilities = Array.isArray(profile.affected_capabilities)
+        ? profile.affected_capabilities.filter((value): value is string => typeof value === 'string')
+        : undefined;
+      return [{
+        profile_id: profile.profile_id,
+        config_fingerprint: profile.config_fingerprint,
+        ...(capabilities && capabilities.length > 0 ? { affected_capabilities: capabilities } : {}),
+      }];
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function workerReadinessMatchesProfile(
+  engine: SovereigntyEngine,
+  profileId: string,
+  readiness: WorkerCredentialReadiness[] | undefined,
+): boolean {
+  if (!readiness) return false;
+  const profile = engine.config.modelProfiles[profileId];
+  if (!profile) return false;
+  const expectedFingerprint = credentialConfigFingerprint(profileId, profile);
+  return readiness.some((entry) => (
+    entry.profile_id === profileId
+    && entry.config_fingerprint === expectedFingerprint
+  ));
 }
 
 async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
@@ -553,6 +624,7 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     const counts = asRecord(corpus.counts);
     const embeddingParity = asRecord(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== 'disabled'
+      && corpus.activation_mode !== 'lexical_only'
       && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === 'number'
       ? asCount(embeddingParity.chunks)
@@ -564,7 +636,9 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     if (chunks > 0 || embedded > 0) {
       summaries.push(embeddingRequired
         ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})`
-        : `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`);
+        : corpus.embedding_policy === 'disabled'
+          ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`
+          : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);

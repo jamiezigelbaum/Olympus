@@ -526,3 +526,36 @@ health green when the worker is healthy and no credentials are degraded;
 mailbox configuration is not a prerequisite. Choose sources in the dashboard
 when you are ready. A selected source's connection/sync problems remain visible
 as source-readiness problems.
+
+### Optional native OpenClaw worker supervision
+
+On a host with the native plugin service API, Olympus can supervise its packaged
+worker as a child process. Set `plugins.entries.olympus.config.worker.service.enabled`
+to `true` through the host's supported configuration command. The service is off
+by default; standalone worker/MCP installations keep their existing lifecycle.
+
+Run setup/connect first: the child uses `~/.config/olympus/worker.env` and the
+configured worker bearer token. Source settings previously supplied by an external wrapper must be migrated
+before activation. Put provider SecretRefs in `worker.service.credentials`, keyed
+by the supported Olympus credential environment names. OpenClaw resolves these
+through its native secret providers and Olympus injects the resolved values only
+into the child; do not write raw provider credentials into the environment file.
+Bootstrap names such as `OP_CONNECT_TOKEN` are rejected by this credential map.
+Gateway and password-manager bootstrap credentials are not inherited by the child.
+For native supervision, an explicit sovereignty policy must use
+`sovereignty.configPath`; inline policies are rejected. Explicit plugin-level
+corpus registry, ingestion policy, and exclusion overrides are also rejected
+until they can be transported faithfully. Keep those source settings in the
+worker's supported environment/configuration files. A rejected configuration
+never silently starts the child under another policy.
+Stop the existing standalone worker before activating native supervision; an
+occupied endpoint is rejected rather than accepted as the new child. The host
+operator owns plugin installation and Gateway activation.
+
+`worker.service.runtimePath` may name an absolute Bun runtime path when Bun is
+not on the Gateway's PATH. The packaged CLI is selected automatically; the
+advanced `executablePath` override must be absolute. Startup readiness requires
+an authenticated response bearing the child instance ID. The startup deadline
+is 180 seconds by default and can be configured with `startupTimeoutSeconds`
+(up to 600 seconds). Failures remain visible through native service health;
+unexpected exits back off, and shutdown terminates the owned child process group.

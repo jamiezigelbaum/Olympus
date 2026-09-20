@@ -206,7 +206,10 @@ import {
   type ConnectorStoreResultProjector,
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
-import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
+import type {
+  WorkerCredentialDegradation,
+  WorkerCredentialReadiness,
+} from '../credential-degradation.ts';
 const CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: 'chat' }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
   [{ family: 'x' }, { folder: X_BOOKMARKS_FOLDER_FILTER_CODEC }],
@@ -449,6 +452,10 @@ export interface EmailSourceWorkerOptions {
     ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
   };
   credentialDegradations?: () => WorkerCredentialDegradation[];
+  /** Positive, secret-free proof for policy credentials resolved by this worker. */
+  credentialReadiness?: () => WorkerCredentialReadiness[];
+  /** Instance nonce supplied by the managed service supervisor. */
+  serviceInstanceId?: string;
   recheckCredentials?: () => WorkerCredentialDegradation[];
   basePath?: string;
 }
@@ -599,6 +606,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
   const credentialDegradations = options.credentialDegradations;
+  const credentialReadiness = options.credentialReadiness;
+  const serviceInstanceId = options.serviceInstanceId?.trim() || undefined;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map<DashboardOAuthSource, DashboardOAuthAttempt>();
   // The HMAC key material the publisher-relay `state` is signed with:
@@ -695,6 +704,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (filesAliasTaken) url.pathname = `${basePath}${filesAlias!.genericPath}`;
         const filesAliasLane = filesAliasTaken ? filesAlias! : undefined;
 
+        if (request.method === 'GET' && url.pathname === `${basePath}/service/readiness`) {
+          if (!serviceInstanceId) {
+            return json({
+              kind: 'worker_service_readiness',
+              ready: false,
+              reason: 'service_instance_id_unconfigured',
+              policy: { raw_runtime_secrets_exposed: false, source_text_returned: false },
+            }, 503);
+          }
+          return json({
+            kind: 'worker_service_readiness',
+            ready: true,
+            instance_id: serviceInstanceId,
+            policy: { raw_runtime_secrets_exposed: false, source_text_returned: false },
+          });
+        }
+
         if (request.method === 'GET' && url.pathname === `${basePath}/health`) {
           const degradedCredentials = credentialDegradations?.() ?? [];
           const health = isDeepHealthRequest(url)
@@ -705,7 +731,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'GET' && url.pathname === `${basePath}/health/dependencies`) {
-          const health = withCredentialDegradations(await connector.health(), credentialDegradations?.() ?? []);
+          const health = withCredentialReadiness(
+            withCredentialDegradations(await connector.health(), credentialDegradations?.() ?? []),
+            credentialReadiness?.(),
+          );
           assertNoRawEmailFields(health);
           return json(health);
         }
@@ -5726,6 +5755,24 @@ function withCredentialDegradations<T extends { degraded_credentials?: WorkerCre
       ...corpus,
       ...(corpusEmbeddingCanUseDegradedCredentials(corpus.embedding_policy) ? { embedding_lane: embeddingLane } : {}),
     })),
+  } as T;
+}
+
+function withCredentialReadiness<T extends object>(
+  result: T,
+  readyProfiles: WorkerCredentialReadiness[] | undefined,
+): T {
+  if (readyProfiles === undefined) return result;
+  return {
+    ...result,
+    credential_readiness: {
+      kind: 'worker_credential_readiness',
+      ready_profiles: readyProfiles,
+      policy: {
+        raw_runtime_secrets_exposed: false,
+        secret_refs_exposed: false,
+      },
+    },
   } as T;
 }
 

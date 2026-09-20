@@ -2829,7 +2829,7 @@ var init_secret_store = __esm(() => {
 // src/core/config.ts
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join4 } from "node:path";
+import { isAbsolute as isAbsolutePath, join as join4 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -2883,12 +2883,16 @@ function applyEnvironmentOverrides(config, env) {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
     config.sovereignty = {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
     config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
@@ -2983,6 +2987,11 @@ function mergeConfig(target, source) {
     target.worker = {
       ...target.worker,
       ...source.worker,
+      service: {
+        ...target.worker.service,
+        ...source.worker.service ?? {},
+        credentials: source.worker.service?.credentials ?? target.worker.service.credentials
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -3079,6 +3088,23 @@ function validateConfig(config) {
       delete config.worker.authToken;
     }
   }
+  assertBoolean(config.worker.service.enabled, "worker.service.enabled");
+  assertPositiveNumber(config.worker.service.startupTimeoutSeconds, "worker.service.startupTimeoutSeconds");
+  if (config.worker.service.startupTimeoutSeconds > 600) {
+    throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
+  }
+  config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  for (const [key, value] of [
+    ["runtimePath", config.worker.service.runtimePath],
+    ["executablePath", config.worker.service.executablePath]
+  ]) {
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.service.${key} must be an absolute path.`);
+    }
+    config.worker.service[key] = value.trim();
+  }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
   assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
@@ -3146,7 +3172,28 @@ function validateConfig(config) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be at most 600.", 'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).');
   }
 }
+function parseNativeWorkerCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES.has(name) && !/^OLYMPUS_CREDENTIAL_[A-Z0-9_]+$/.test(name)) {
+      throw new OperationError("config_error", `worker.service.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.service.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
+  if (typeof value === "string" && value.trim() === "")
+    return [];
   const values = typeof value === "string" ? value.split(",") : value;
   const selected = values.map((entry) => typeof entry === "string" ? entry.trim() : "");
   if (selected.some((entry) => !V0_4_PUBLIC_SOURCE_IDS.includes(entry))) {
@@ -3227,7 +3274,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
     throw error;
   }
 }
-var DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -3235,8 +3282,21 @@ var init_config = __esm(() => {
   init_source_ingestion_exclusions();
   init_secret_store();
   init_public_surface();
+  NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES = new Set([
+    "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
+    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+    "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+    "GEMINI_API_KEY",
+    "OLYMPUS_TELEGRAM_API_ID",
+    "OLYMPUS_TELEGRAM_API_HASH"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
+      service: {
+        enabled: false,
+        startupTimeoutSeconds: 180,
+        credentials: {}
+      },
       scheduler: {
         enabled: false,
         sourceIds: [],
@@ -33423,6 +33483,217 @@ var init_setup_preflight = __esm(() => {
   init_worker_auth();
 });
 
+// src/workers/credential-degradation.ts
+import { createHash as createHash24 } from "node:crypto";
+function credentialConfigFingerprint(profileId, profile) {
+  const material = JSON.stringify({
+    version: 1,
+    profile_id: profileId,
+    provider: profile.provider,
+    trust: profile.trust,
+    model: profile.model,
+    base_url: profile.baseUrl ?? null,
+    secret_ref: profile.secretRef ?? null,
+    purpose: profile.purpose ?? null
+  });
+  return createHash24("sha256").update(material, "utf8").digest("hex");
+}
+
+class WorkerBootSecretResolver {
+  failures = new Map;
+  resolved = new Map;
+  maxAttempts;
+  retryDelaysMs;
+  now;
+  schedule;
+  cancel;
+  resolveSecretRefValueSync;
+  warn;
+  constructor(options = {}) {
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+    this.now = options.now ?? (() => new Date);
+    this.schedule = options.schedule ?? ((run, delayMs) => {
+      const timer = setTimeout(run, delayMs);
+      timer.unref?.();
+      return timer;
+    });
+    this.cancel = options.cancel ?? ((handle) => {
+      clearTimeout(handle);
+    });
+    this.resolveSecretRefValueSync = options.resolveSecretRefValueSync ?? (() => {
+      return;
+    });
+    this.warn = options.warn ?? console.warn;
+  }
+  resolveSync(secretRef, env, context) {
+    const ref = secretRef?.trim();
+    if (!ref) {
+      const lane = context.affectedProfiles?.join(",") || context.displayName;
+      this.clearResolved(context);
+      this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
+      return;
+    }
+    try {
+      const value = this.resolveSecretRefValueSync(ref, env)?.trim();
+      if (value) {
+        this.recordResolved(ref, context);
+        this.failures.delete(ref);
+        return value;
+      }
+    } catch {}
+    this.clearResolved(context, ref);
+    this.recordFailure(ref, env, context);
+    return;
+  }
+  readiness() {
+    return [...this.resolved.values()].sort((left, right) => left.binding.profileId.localeCompare(right.binding.profileId)).map((state) => ({
+      profile_id: state.binding.profileId,
+      config_fingerprint: state.binding.configFingerprint,
+      ...state.affectedCapabilities?.length ? { affected_capabilities: [...state.affectedCapabilities] } : {}
+    }));
+  }
+  status() {
+    return [...this.failures.values()].map((failure) => {
+      const item = {
+        kind: "worker_credential_degraded",
+        display_name: failure.context.displayName,
+        state: failure.state,
+        status_label: "Credential unavailable - needs your attention",
+        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
+        attempts: failure.attempts,
+        max_attempts: failure.maxAttempts
+      };
+      if (failure.nextRetryAt)
+        item.next_retry_at = failure.nextRetryAt;
+      if (failure.context.affectedProfiles?.length)
+        item.affected_profiles = [...failure.context.affectedProfiles];
+      if (failure.context.affectedCapabilities?.length)
+        item.affected_capabilities = [...failure.context.affectedCapabilities];
+      return item;
+    });
+  }
+  recheckNow() {
+    for (const failure of this.failures.values()) {
+      this.tryResolveFailure(failure);
+    }
+    return this.status();
+  }
+  recordFailure(secretRef, env, context) {
+    const existing = this.failures.get(secretRef);
+    const failure = existing ?? {
+      secretRef,
+      env,
+      context,
+      attempts: 0,
+      maxAttempts: Math.max(1, this.maxAttempts),
+      state: "retrying",
+      scheduled: false
+    };
+    failure.context = mergeContext(failure.context, context);
+    this.failures.set(secretRef, failure);
+    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
+    if (existing)
+      return;
+    failure.attempts += 1;
+    this.scheduleRetry(failure);
+  }
+  recordResolved(secretRef, context) {
+    for (const binding of context.profileBindings ?? []) {
+      this.resolved.set(binding.profileId, {
+        secretRef,
+        binding: { ...binding },
+        ...context.affectedCapabilities?.length ? { affectedCapabilities: [...context.affectedCapabilities] } : {}
+      });
+    }
+  }
+  clearResolved(context, secretRef) {
+    const affectedProfiles = new Set(context.profileBindings?.map((binding) => binding.profileId) ?? context.affectedProfiles ?? []);
+    for (const [profileId, state] of this.resolved) {
+      if (state.secretRef === secretRef || affectedProfiles.has(profileId))
+        this.resolved.delete(profileId);
+    }
+  }
+  scheduleRetry(failure) {
+    if (failure.attempts >= failure.maxAttempts) {
+      failure.state = "stopped";
+      delete failure.nextRetryAt;
+      failure.scheduled = false;
+      this.cancelScheduledRetry(failure);
+      return;
+    }
+    if (failure.scheduled)
+      return;
+    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
+    const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
+    failure.state = "retrying";
+    failure.nextRetryAt = nextRetryAt;
+    failure.scheduled = true;
+    failure.retryHandle = this.schedule(() => {
+      failure.scheduled = false;
+      delete failure.retryHandle;
+      this.tryResolveFailure(failure);
+    }, delayMs);
+  }
+  cancelScheduledRetry(failure) {
+    if (failure.retryHandle === undefined)
+      return;
+    const handle = failure.retryHandle;
+    delete failure.retryHandle;
+    this.cancel(handle);
+  }
+  tryResolveFailure(failure) {
+    if (!this.failures.has(failure.secretRef))
+      return;
+    try {
+      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
+      failure.attempts += 1;
+      if (value) {
+        failure.state = "resolved_restart_required";
+        delete failure.nextRetryAt;
+        failure.scheduled = false;
+        this.clearResolved(failure.context, failure.secretRef);
+        return;
+      }
+    } catch {
+      failure.attempts += 1;
+    }
+    this.scheduleRetry(failure);
+  }
+}
+function mergeContext(existing, next) {
+  const merged = {
+    displayName: existing.displayName
+  };
+  const affectedProfiles = unique([
+    ...existing.affectedProfiles ?? [],
+    ...next.affectedProfiles ?? []
+  ]);
+  const affectedCapabilities = unique([
+    ...existing.affectedCapabilities ?? [],
+    ...next.affectedCapabilities ?? []
+  ]);
+  if (affectedProfiles)
+    merged.affectedProfiles = affectedProfiles;
+  if (affectedCapabilities)
+    merged.affectedCapabilities = affectedCapabilities;
+  const bindings = new Map;
+  for (const binding of [...existing.profileBindings ?? [], ...next.profileBindings ?? []]) {
+    bindings.set(binding.profileId, { ...binding });
+  }
+  if (bindings.size > 0)
+    merged.profileBindings = [...bindings.values()];
+  return merged;
+}
+function unique(values) {
+  const result = [...new Set(values.filter((value) => value.trim().length > 0))];
+  return result.length > 0 ? result : undefined;
+}
+var DEFAULT_MAX_ATTEMPTS = 3, DEFAULT_RETRY_DELAYS_MS, CREDENTIAL_HINT = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
+var init_credential_degradation = __esm(() => {
+  DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
+});
+
 // src/workers/credential-broker/unpaired-sources.ts
 import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync10, openSync as openSync5, readFileSync as readFileSync16 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
@@ -33680,7 +33951,7 @@ var init_unpaired_sources = __esm(() => {
 // src/core/connect.ts
 import { Buffer as Buffer4 } from "node:buffer";
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash24, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash25, randomBytes as randomBytes3 } from "node:crypto";
 import { mkdirSync as mkdirSync15, readFileSync as readFileSync17, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir23 } from "node:os";
@@ -33918,7 +34189,7 @@ function createOAuthPkceState() {
   const verifier = base64Url2(randomBytes3(32));
   return {
     verifier,
-    challenge: base64Url2(createHash24("sha256").update(verifier).digest()),
+    challenge: base64Url2(createHash25("sha256").update(verifier).digest()),
     state: base64Url2(randomBytes3(24))
   };
 }
@@ -35915,7 +36186,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
   const noCurrentArtifacts = retrieval.reason === "no_current_embedding_artifacts";
   const embeddedChunks = noCurrentArtifacts ? 0 : counts?.embedded_chunks ?? 0;
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } } : {};
-  const embeddingRequired = corpus.embeddingPolicy !== "disabled";
+  const embeddingRequired = corpus.embeddingPolicy !== "disabled" && corpus.activationMode !== "lexical_only";
   return {
     ...status,
     ...currentCounts,
@@ -39152,12 +39423,14 @@ async function sovereigntyPrerequisiteCheck(deps) {
       detail: "Skipped: no sovereignty policy is configured for prerequisite checks."
     };
   }
-  const unmet = (await setupPreflight({
+  const preflightUnmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
     ...deps.secretStore ? { secretStore: deps.secretStore } : {},
     ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
+  const workerReadiness = deps.config.email.enabled === true && preflightUnmet.some((item) => item.kind === "env_secret" || item.kind === "store_secret") ? await workerCredentialReadiness(deps) : undefined;
+  const unmet = preflightUnmet.filter((item) => item.kind !== "env_secret" && item.kind !== "store_secret" || !workerReadinessMatchesProfile(engine, item.profileId, workerReadiness));
   if (unmet.length === 0) {
     return {
       name: "sovereignty_prerequisites",
@@ -39172,6 +39445,42 @@ async function sovereigntyPrerequisiteCheck(deps) {
     hint: unmet.map((item) => item.remedy).join(`
 `)
   };
+}
+async function workerCredentialReadiness(deps) {
+  try {
+    const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
+    if (!response.ok)
+      return;
+    const body = asRecord9(await response.json());
+    const readiness = asRecord9(body.credential_readiness);
+    const policy = asRecord9(readiness.policy);
+    if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
+      return;
+    }
+    return readiness.ready_profiles.flatMap((entry) => {
+      const profile = asRecord9(entry);
+      if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
+        return [];
+      }
+      const capabilities = Array.isArray(profile.affected_capabilities) ? profile.affected_capabilities.filter((value) => typeof value === "string") : undefined;
+      return [{
+        profile_id: profile.profile_id,
+        config_fingerprint: profile.config_fingerprint,
+        ...capabilities && capabilities.length > 0 ? { affected_capabilities: capabilities } : {}
+      }];
+    });
+  } catch {
+    return;
+  }
+}
+function workerReadinessMatchesProfile(engine, profileId, readiness) {
+  if (!readiness)
+    return false;
+  const profile = engine.config.modelProfiles[profileId];
+  if (!profile)
+    return false;
+  const expectedFingerprint = credentialConfigFingerprint(profileId, profile);
+  return readiness.some((entry) => entry.profile_id === profileId && entry.config_fingerprint === expectedFingerprint);
 }
 async function emailWorkerCheck(deps) {
   const name = "email_worker";
@@ -39279,12 +39588,12 @@ async function sourceIndexStatusCheck(deps) {
     }
     const counts = asRecord9(corpus.counts);
     const embeddingParity = asRecord9(corpus.embedding_parity);
-    const embeddingRequired = corpus.embedding_policy !== "disabled" && embeddingParity.required !== false;
+    const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`);
+      summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
@@ -39854,7 +40163,7 @@ async function credentialHandleCheck(deps) {
       name: "credential_handles",
       ok: false,
       detail: `Credential handles need attention: ${problems.join("; ")}.`,
-      hint: CREDENTIAL_HINT
+      hint: CREDENTIAL_HINT2
     };
   }
   return {
@@ -39983,12 +40292,13 @@ function asCount(value) {
 function errorDetail2(error) {
   return error instanceof Error && error.message ? error.message : String(error);
 }
-var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES;
+var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES;
 var init_doctor = __esm(() => {
   init_config();
   init_worker_auth();
   init_sovereignty();
   init_setup_preflight();
+  init_credential_degradation();
   init_connected_handles();
   init_connect();
   init_source_ingestion_ledger();
@@ -56210,7 +56520,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync12, mkdirSync as mkdirSync22 } from "node:fs";
-import { createHash as createHash27, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash28, randomUUID as randomUUID14 } from "node:crypto";
 import { homedir as homedir30 } from "node:os";
 import { dirname as dirname26, join as join36 } from "node:path";
 import { Database as Database10 } from "bun:sqlite";
@@ -57204,7 +57514,7 @@ function makeJobId() {
   return `fx_${randomUUID14()}`;
 }
 function hashString5(value) {
-  return createHash27("sha256").update(value).digest("hex");
+  return createHash28("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -58956,9 +59266,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer5 } from "node:buffer";
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash28("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash29("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -59575,7 +59885,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -60035,7 +60345,7 @@ function retryable(errorKind, error2) {
 }
 function hashError(error2) {
   const detail = error2 instanceof Error ? `${error2.name}:${error2.message}` : String(error2);
-  return createHash29("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash30("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error2) {
   const message = error2 instanceof Error ? error2.message : "";
@@ -60150,7 +60460,7 @@ function summarizeEgressDestinations(values) {
   return { egressDestination: "venice_mixed_approved" };
 }
 function hashToken(value) {
-  return createHash29("sha256").update(value).digest("hex");
+  return createHash30("sha256").update(value).digest("hex");
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS;
 var init_runner = __esm(() => {
@@ -61578,7 +61888,7 @@ var init_answer_latency_log = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash30 } from "node:crypto";
+import { createHash as createHash31 } from "node:crypto";
 import { existsSync as existsSync24, readFileSync as readFileSync25 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir33 } from "node:os";
@@ -62051,7 +62361,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2564(value) {
-  return createHash30("sha256").update(value, "utf8").digest("hex");
+  return createHash31("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -62479,7 +62789,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 function escapeHtml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -62539,7 +62849,7 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash31("sha256").update(normalised).digest("hex");
+  return createHash32("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
@@ -62549,7 +62859,7 @@ function pageShell(input) {
   const poll = input.poll === undefined ? [] : [pollScript({
     signature: dashboardPageSignature(input.body),
     unlocked: input.poll.unlocked === true,
-    session: input.poll.controlSessionCsrfToken === undefined ? "" : createHash31("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24),
+    session: input.poll.controlSessionCsrfToken === undefined ? "" : createHash32("sha256").update("olympus-dashboard-session-marker\x00").update(input.poll.controlSessionCsrfToken).digest("hex").slice(0, 24),
     ...input.poll.intervalMs === undefined ? {} : { intervalMs: input.poll.intervalMs }
   })];
   const scripts = [...input.scripts ?? [], ...poll].join(`
@@ -68230,7 +68540,7 @@ var init_source_dispositions = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -68258,7 +68568,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash32("sha256").update(value).digest("hex");
+  return createHash33("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -68463,7 +68773,7 @@ function safeDetail(value) {
 var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
-import { createHash as createHash33, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash34, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync29, statSync as statSync9 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
 import { join as join45, resolve as resolve7 } from "node:path";
@@ -68509,6 +68819,8 @@ function createEmailSourceWorker(options = {}) {
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
   const credentialDegradations = options.credentialDegradations;
+  const credentialReadiness = options.credentialReadiness;
+  const serviceInstanceId = options.serviceInstanceId?.trim() || undefined;
   const recheckCredentials = options.recheckCredentials;
   const dashboardOAuthAttempts = new Map;
   let dashboardRelayStateKeysCache;
@@ -68563,6 +68875,22 @@ function createEmailSourceWorker(options = {}) {
         if (filesAliasTaken)
           url.pathname = `${basePath}${filesAlias.genericPath}`;
         const filesAliasLane = filesAliasTaken ? filesAlias : undefined;
+        if (request.method === "GET" && url.pathname === `${basePath}/service/readiness`) {
+          if (!serviceInstanceId) {
+            return json({
+              kind: "worker_service_readiness",
+              ready: false,
+              reason: "service_instance_id_unconfigured",
+              policy: { raw_runtime_secrets_exposed: false, source_text_returned: false }
+            }, 503);
+          }
+          return json({
+            kind: "worker_service_readiness",
+            ready: true,
+            instance_id: serviceInstanceId,
+            policy: { raw_runtime_secrets_exposed: false, source_text_returned: false }
+          });
+        }
         if (request.method === "GET" && url.pathname === `${basePath}/health`) {
           const degradedCredentials = credentialDegradations?.() ?? [];
           const health = isDeepHealthRequest(url) ? withCredentialDegradations(await connector.health(), degradedCredentials) : cheapWorkerHealth(connector, degradedCredentials);
@@ -68570,7 +68898,7 @@ function createEmailSourceWorker(options = {}) {
           return json(health);
         }
         if (request.method === "GET" && url.pathname === `${basePath}/health/dependencies`) {
-          const health = withCredentialDegradations(await connector.health(), credentialDegradations?.() ?? []);
+          const health = withCredentialReadiness(withCredentialDegradations(await connector.health(), credentialDegradations?.() ?? []), credentialReadiness?.());
           assertNoRawEmailFields(health);
           return json(health);
         }
@@ -71141,7 +71469,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual3(createHash33("sha256").update(expected).digest(), createHash33("sha256").update(state).digest());
+  return timingSafeEqual3(createHash34("sha256").update(expected).digest(), createHash34("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -71642,6 +71970,21 @@ function withCredentialDegradations(result, degradedCredentials) {
     }))
   };
 }
+function withCredentialReadiness(result, readyProfiles) {
+  if (readyProfiles === undefined)
+    return result;
+  return {
+    ...result,
+    credential_readiness: {
+      kind: "worker_credential_readiness",
+      ready_profiles: readyProfiles,
+      policy: {
+        raw_runtime_secrets_exposed: false,
+        secret_refs_exposed: false
+      }
+    }
+  };
+}
 function embeddingLaneDisabledState(degradedCredentials) {
   const embeddingCredentials = degradedCredentials.filter((credential) => credential.affected_capabilities?.includes("embedding") && (credential.state === "retrying" || credential.state === "stopped" || credential.state === "resolved_restart_required"));
   if (embeddingCredentials.length === 0)
@@ -72086,170 +72429,8 @@ var init_query_planner = __esm(() => {
   QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
 });
 
-// src/workers/credential-degradation.ts
-class WorkerBootSecretResolver {
-  failures = new Map;
-  maxAttempts;
-  retryDelaysMs;
-  now;
-  schedule;
-  cancel;
-  resolveSecretRefValueSync;
-  warn;
-  constructor(options = {}) {
-    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
-    this.now = options.now ?? (() => new Date);
-    this.schedule = options.schedule ?? ((run, delayMs) => {
-      const timer = setTimeout(run, delayMs);
-      timer.unref?.();
-      return timer;
-    });
-    this.cancel = options.cancel ?? ((handle) => {
-      clearTimeout(handle);
-    });
-    this.resolveSecretRefValueSync = options.resolveSecretRefValueSync ?? (() => {
-      return;
-    });
-    this.warn = options.warn ?? console.warn;
-  }
-  resolveSync(secretRef, env, context) {
-    const ref = secretRef?.trim();
-    if (!ref) {
-      const lane = context.affectedProfiles?.join(",") || context.displayName;
-      this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
-      return;
-    }
-    try {
-      const value = this.resolveSecretRefValueSync(ref, env)?.trim();
-      if (value) {
-        this.failures.delete(ref);
-        return value;
-      }
-    } catch {}
-    this.recordFailure(ref, env, context);
-    return;
-  }
-  status() {
-    return [...this.failures.values()].map((failure) => {
-      const item = {
-        kind: "worker_credential_degraded",
-        display_name: failure.context.displayName,
-        state: failure.state,
-        status_label: "Credential unavailable - needs your attention",
-        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT2,
-        attempts: failure.attempts,
-        max_attempts: failure.maxAttempts
-      };
-      if (failure.nextRetryAt)
-        item.next_retry_at = failure.nextRetryAt;
-      if (failure.context.affectedProfiles?.length)
-        item.affected_profiles = [...failure.context.affectedProfiles];
-      if (failure.context.affectedCapabilities?.length)
-        item.affected_capabilities = [...failure.context.affectedCapabilities];
-      return item;
-    });
-  }
-  recheckNow() {
-    for (const failure of this.failures.values()) {
-      this.tryResolveFailure(failure);
-    }
-    return this.status();
-  }
-  recordFailure(secretRef, env, context) {
-    const existing = this.failures.get(secretRef);
-    const failure = existing ?? {
-      secretRef,
-      env,
-      context,
-      attempts: 0,
-      maxAttempts: Math.max(1, this.maxAttempts),
-      state: "retrying",
-      scheduled: false
-    };
-    failure.context = mergeContext(failure.context, context);
-    this.failures.set(secretRef, failure);
-    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
-    if (existing)
-      return;
-    failure.attempts += 1;
-    this.scheduleRetry(failure);
-  }
-  scheduleRetry(failure) {
-    if (failure.attempts >= failure.maxAttempts) {
-      failure.state = "stopped";
-      delete failure.nextRetryAt;
-      failure.scheduled = false;
-      this.cancelScheduledRetry(failure);
-      return;
-    }
-    if (failure.scheduled)
-      return;
-    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
-    const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
-    failure.state = "retrying";
-    failure.nextRetryAt = nextRetryAt;
-    failure.scheduled = true;
-    failure.retryHandle = this.schedule(() => {
-      failure.scheduled = false;
-      delete failure.retryHandle;
-      this.tryResolveFailure(failure);
-    }, delayMs);
-  }
-  cancelScheduledRetry(failure) {
-    if (failure.retryHandle === undefined)
-      return;
-    const handle = failure.retryHandle;
-    delete failure.retryHandle;
-    this.cancel(handle);
-  }
-  tryResolveFailure(failure) {
-    if (!this.failures.has(failure.secretRef))
-      return;
-    try {
-      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
-      failure.attempts += 1;
-      if (value) {
-        failure.state = "resolved_restart_required";
-        delete failure.nextRetryAt;
-        failure.scheduled = false;
-        return;
-      }
-    } catch {
-      failure.attempts += 1;
-    }
-    this.scheduleRetry(failure);
-  }
-}
-function mergeContext(existing, next) {
-  const merged = {
-    displayName: existing.displayName
-  };
-  const affectedProfiles = unique([
-    ...existing.affectedProfiles ?? [],
-    ...next.affectedProfiles ?? []
-  ]);
-  const affectedCapabilities = unique([
-    ...existing.affectedCapabilities ?? [],
-    ...next.affectedCapabilities ?? []
-  ]);
-  if (affectedProfiles)
-    merged.affectedProfiles = affectedProfiles;
-  if (affectedCapabilities)
-    merged.affectedCapabilities = affectedCapabilities;
-  return merged;
-}
-function unique(values) {
-  const result = [...new Set(values.filter((value) => value.trim().length > 0))];
-  return result.length > 0 ? result : undefined;
-}
-var DEFAULT_MAX_ATTEMPTS = 3, DEFAULT_RETRY_DELAYS_MS, CREDENTIAL_HINT2 = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
-var init_credential_degradation = __esm(() => {
-  DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
-});
-
 // src/workers/source-scheduler.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -72915,7 +73096,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash34("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash35("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -73475,7 +73656,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash34("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash35("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -73800,7 +73981,7 @@ function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, 
     if (!profile.baseUrl?.trim()) {
       throw new Error(`Sovereignty embedding profile "${resolved.id}" requires baseUrl.`);
     }
-    const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, env, `Sovereignty embedding profile "${resolved.id}"`, bootSecretOptions(bootSecretResolver, [resolved.id], ["embedding"])) : undefined;
+    const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, env, `Sovereignty embedding profile "${resolved.id}"`, bootSecretOptions(bootSecretResolver, [resolved.id], ["embedding"], resolved)) : undefined;
     if (profile.secretRef && !apiKey)
       return;
     const outputDimensionality = requireSourceEmbeddingDimension({
@@ -73819,7 +74000,7 @@ function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, 
     });
   }
   if (profile.provider === "google-gemini") {
-    const apiKey = resolveSecretRefSync(profile.secretRef, env, `Sovereignty embedding profile "${resolved.id}"`, bootSecretOptions(bootSecretResolver, [resolved.id], ["embedding"]));
+    const apiKey = resolveSecretRefSync(profile.secretRef, env, `Sovereignty embedding profile "${resolved.id}"`, bootSecretOptions(bootSecretResolver, [resolved.id], ["embedding"], resolved));
     if (!apiKey)
       return;
     const outputDimensionality = requireSourceEmbeddingDimension({
@@ -74019,7 +74200,7 @@ async function createSovereigntyAnalystMap(input) {
     if (!backend)
       continue;
     if (profile.provider === "venice" && securePoolMemberIds.has(id)) {
-      const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Venice analyst profile", bootSecretOptions(input.bootSecretResolver, [id], ["analyst"]));
+      const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Venice analyst profile", bootSecretOptions(input.bootSecretResolver, [id], ["analyst"], resolved));
       if (!apiKey)
         continue;
       await validateSecureVeniceAnalystProfileAtConstruction({ profile, apiKey });
@@ -74081,7 +74262,7 @@ function createAnalystForSovereigntyProfile(input) {
     if (!profile.baseUrl?.trim()) {
       throw new Error("Local sovereignty analyst profiles require baseUrl.");
     }
-    const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty local analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"])) : undefined;
+    const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty local analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile })) : undefined;
     if (profile.secretRef && !apiKey)
       return;
     const config2 = structuredClone(input.olympusConfig);
@@ -74107,7 +74288,7 @@ function createAnalystForSovereigntyProfile(input) {
     }));
   }
   if (profile.provider === "venice") {
-    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Venice analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"]));
+    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Venice analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile }));
     if (!apiKey)
       return;
     return createAnalyst(createVeniceAnalystModel({
@@ -74119,7 +74300,7 @@ function createAnalystForSovereigntyProfile(input) {
     }));
   }
   if (profile.provider === "openai-compatible") {
-    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty OpenAI-compatible analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"]));
+    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty OpenAI-compatible analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile }));
     if (!apiKey)
       return;
     return {
@@ -74134,7 +74315,7 @@ function createAnalystForSovereigntyProfile(input) {
     };
   }
   if (profile.provider === "anthropic") {
-    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Anthropic analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"]));
+    const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty Anthropic analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile }));
     if (!apiKey)
       return;
     return {
@@ -75054,6 +75235,8 @@ async function main() {
       }
     } : {},
     credentialDegradations: () => bootSecretResolver.status(),
+    credentialReadiness: () => bootSecretResolver.readiness(),
+    ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() ? { serviceInstanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID.trim() } : {},
     recheckCredentials: () => bootSecretResolver.recheckNow()
   });
   warnIfWorkerAuthDisabled("private email source worker", authToken, hostname);
@@ -75311,7 +75494,8 @@ function resolveSecretRefSync(secretRef, env, label, options = {}) {
       return options.bootSecretResolver.resolveSync(undefined, env, {
         displayName: label,
         ...options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {},
-        ...options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}
+        ...options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {},
+        ...options.profileBindings ? { profileBindings: options.profileBindings } : {}
       });
     }
     throw new Error(`${label} requires a secretRef; inline secrets are not allowed in sovereignty.json.`);
@@ -75320,7 +75504,8 @@ function resolveSecretRefSync(secretRef, env, label, options = {}) {
     return options.bootSecretResolver.resolveSync(ref, env, {
       displayName: label,
       ...options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {},
-      ...options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}
+      ...options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {},
+      ...options.profileBindings ? { profileBindings: options.profileBindings } : {}
     });
   }
   const value = resolveSecretRefValueSync(ref, { env });
@@ -75329,11 +75514,17 @@ function resolveSecretRefSync(secretRef, env, label, options = {}) {
   }
   return value;
 }
-function bootSecretOptions(bootSecretResolver, affectedProfiles, affectedCapabilities) {
+function bootSecretOptions(bootSecretResolver, affectedProfiles, affectedCapabilities, profile) {
   return {
     ...bootSecretResolver ? { bootSecretResolver } : {},
     affectedProfiles,
-    affectedCapabilities
+    affectedCapabilities,
+    ...profile ? {
+      profileBindings: [{
+        profileId: profile.id,
+        configFingerprint: credentialConfigFingerprint(profile.id, profile.profile)
+      }]
+    } : {}
   };
 }
 function optionalEnv2(env, name) {
@@ -76328,7 +76519,7 @@ init_version();
 
 // src/core/lifecycle.ts
 init_atomic_file();
-import { createHash as createHash26 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync22, lstatSync as lstatSync13, mkdirSync as mkdirSync20, readFileSync as readFileSync23 } from "node:fs";
 import { homedir as homedir27, platform as osPlatform2 } from "node:os";
@@ -76337,7 +76528,7 @@ import { dirname as dirname24, isAbsolute as isAbsolute5, join as join34 } from 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash25, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash26, randomUUID as randomUUID12 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import {
   chmodSync as chmodSync10,
@@ -76365,7 +76556,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash25("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash26("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join32(tmpdir2(), ".olympus-artifact-snapshot-"));
   const artifactPath = join32(snapshotDir, "artifact.tgz");
   const descriptor = openSync6(artifactPath, "wx", 384);
@@ -76612,7 +76803,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest = createHash25("sha256");
+  const digest = createHash26("sha256");
   hashVersionTree(root, "", digest);
   return digest.digest("hex");
 }
@@ -77401,7 +77592,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2563(value) {
-  return createHash26("sha256").update(value).digest("hex");
+  return createHash27("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts
@@ -77931,7 +78122,10 @@ async function main2() {
     return;
   }
   if (args[0] === "__worker-service-run") {
-    await runWorkerForeground();
+    if (args.length > 2) {
+      throw new OperationError("invalid_params", "Native worker service invocation has unexpected arguments.");
+    }
+    await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
     return;
   }
   if (args[0] === "__oauth-detached-child") {
@@ -78981,10 +79175,21 @@ async function runWorkerCommand(args) {
   }
   throw new OperationError("invalid_params", `Unknown worker command: ${command}`);
 }
-async function runWorkerForeground() {
-  applyWorkerSetupEnv();
-  const { main: startEmailSourceWorker } = await init_server4().then(() => exports_server2);
-  startEmailSourceWorker();
+async function runWorkerForeground(options = {}) {
+  const env = options.env ?? process.env;
+  const managedInstanceId = options.managedInstanceId;
+  if (managedInstanceId === undefined) {
+    (options.applySetupEnv ?? (() => {
+      applyWorkerSetupEnv({ env });
+    }))();
+  } else {
+    const expected = env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(managedInstanceId) || expected !== managedInstanceId) {
+      throw new OperationError("config_error", "Native worker service invocation identity does not match its finalized environment.");
+    }
+  }
+  const startWorker = options.startWorker ?? (await init_server4().then(() => exports_server2)).main;
+  await startWorker();
 }
 async function readWorkerHttpState() {
   const config2 = loadConfig();
@@ -79714,6 +79919,7 @@ function formatCliFatalError(error2) {
 export {
   v04PublicCliCommandName,
   runXReconcileRecovery,
+  runWorkerForeground,
   runSourceSchedulerUnparkCancel,
   runSourceSchedulerUnpark,
   runGoogleRequestBudgetFutureRecovery,

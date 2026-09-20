@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute as isAbsolutePath, join } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import {
   defaultSourceCorpusRegistryConfig,
@@ -60,6 +60,15 @@ export interface ArgusModelProfileConfig {
 
 const ARGUS_MODEL_PROFILE_PURPOSES = ['chat', 'text_reasoning', 'classification', 'embedding', 'vision'] as const;
 
+const NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES = new Set([
+  'OLYMPUS_SOURCE_INDEX_READWISE_TOKEN',
+  'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
+  'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
+  'GEMINI_API_KEY',
+  'OLYMPUS_TELEGRAM_API_ID',
+  'OLYMPUS_TELEGRAM_API_HASH',
+]);
+
 export interface OlympusConfig {
   sovereignty?: {
     configPath?: string;
@@ -67,6 +76,18 @@ export interface OlympusConfig {
   };
   worker: {
     authToken?: string;
+    /**
+     * Opt-in OpenClaw supervision of the packaged worker subprocess. The
+     * native child loads the same ~/.config/olympus/worker.env written by
+     * Olympus setup/connect; host service-wrapper environment is not inherited.
+     */
+    service: {
+      enabled: boolean;
+      startupTimeoutSeconds: number;
+      credentials: Record<string, string>;
+      runtimePath?: string;
+      executablePath?: string;
+    };
     scheduler: {
       enabled: boolean;
       sourceIds: string[];
@@ -115,6 +136,11 @@ export interface OlympusConfig {
 
 const DEFAULT_CONFIG: OlympusConfig = {
   worker: {
+    service: {
+      enabled: false,
+      startupTimeoutSeconds: 180,
+      credentials: {},
+    },
     scheduler: {
       enabled: false,
       sourceIds: [],
@@ -318,12 +344,18 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
       ...(config.sovereignty ?? {}),
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim(),
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
     config.sovereignty = {
       ...(config.sovereignty ?? {}),
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim(),
     };
+    // The Gateway-selected native path must own trust policy. Otherwise a
+    // stale inline policy in ~/.olympus/config.json wins inside
+    // loadSovereigntyEngine even though this service explicitly selected a
+    // different configPath.
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
     config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
@@ -421,6 +453,34 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
 
   if (typeof worker?.authToken === 'string' && worker.authToken.trim()) {
     config.worker.authToken = worker.authToken.trim();
+  }
+  const service = asRecord(worker?.service);
+  if (service) {
+    if (typeof service.enabled === 'boolean') config.worker.service.enabled = service.enabled;
+    if (typeof service.startupTimeoutSeconds === 'number') {
+      config.worker.service.startupTimeoutSeconds = service.startupTimeoutSeconds;
+    }
+    const credentials = asRecord(service.credentials);
+    if (credentials) {
+      config.worker.service.credentials = parseNativeWorkerCredentials(
+        credentials,
+        config.worker.service.enabled,
+      );
+    }
+    if (typeof service.runtimePath === 'string' && service.runtimePath.trim()) {
+      config.worker.service.runtimePath = service.runtimePath.trim();
+    }
+    if (typeof service.executablePath === 'string' && service.executablePath.trim()) {
+      config.worker.service.executablePath = service.executablePath.trim();
+    }
+  }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, 'authToken') && typeof worker.authToken !== 'string') {
+    if (config.worker.service.enabled) {
+      throw new OperationError(
+        'config_error',
+        'worker.authToken must be resolved to a string before the native worker service starts.',
+      );
+    }
   }
   const scheduler = asRecord(worker?.scheduler);
   if (scheduler) {
@@ -628,6 +688,11 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
     target.worker = {
       ...target.worker,
       ...source.worker,
+      service: {
+        ...target.worker.service,
+        ...(source.worker.service ?? {}),
+        credentials: source.worker.service?.credentials ?? target.worker.service.credentials,
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...(source.worker.scheduler ?? {}),
@@ -773,6 +838,25 @@ function validateConfig(config: OlympusConfig): void {
       delete config.worker.authToken;
     }
   }
+  assertBoolean(config.worker.service.enabled, 'worker.service.enabled');
+  assertPositiveNumber(config.worker.service.startupTimeoutSeconds, 'worker.service.startupTimeoutSeconds');
+  if (config.worker.service.startupTimeoutSeconds > 600) {
+    throw new OperationError('config_error', 'worker.service.startupTimeoutSeconds must be at most 600.');
+  }
+  config.worker.service.credentials = parseNativeWorkerCredentials(
+    config.worker.service.credentials,
+    config.worker.service.enabled,
+  );
+  for (const [key, value] of [
+    ['runtimePath', config.worker.service.runtimePath],
+    ['executablePath', config.worker.service.executablePath],
+  ] as const) {
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.service.${key} must be an absolute path.`);
+    }
+    config.worker.service[key] = value.trim();
+  }
   assertBoolean(config.worker.scheduler.enabled, 'worker.scheduler.enabled');
   // An enabled scheduler with an empty allowlist is valid and idle. `olympus
   // setup` installs the worker BEFORE any source is connected, so demanding a
@@ -872,7 +956,40 @@ function validateConfig(config: OlympusConfig): void {
   }
 }
 
+function parseNativeWorkerCredentials(
+  value: Record<string, unknown>,
+  serviceEnabled: boolean,
+): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (
+      !NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES.has(name)
+      && !/^OLYMPUS_CREDENTIAL_[A-Z0-9_]+$/.test(name)
+    ) {
+      throw new OperationError(
+        'config_error',
+        `worker.service.credentials does not allow environment name ${name}.`,
+      );
+    }
+    if (typeof credential === 'string') {
+      if (!credential.trim()) {
+        throw new OperationError('config_error', `worker.service.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError(
+        'config_error',
+        `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`,
+      );
+    }
+  }
+  return parsed;
+}
+
 export function parseSchedulerSourceIds(value: string | readonly unknown[]): string[] {
+  if (typeof value === 'string' && value.trim() === '') return [];
   const values = typeof value === 'string' ? value.split(',') : value;
   const selected = values.map((entry) => typeof entry === 'string' ? entry.trim() : '');
   if (selected.some((entry) => !(V0_4_PUBLIC_SOURCE_IDS as readonly string[]).includes(entry))) {

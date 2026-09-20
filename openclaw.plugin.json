@@ -26,8 +26,38 @@
         "additionalProperties": false,
         "properties": {
           "authToken": {
-            "type": "string",
+            "$ref": "#/$defs/secretInput",
             "description": "Bearer token sent to Olympus worker HTTP endpoints. New installs should generate this and set OLYMPUS_WORKER_AUTH_TOKEN on the workers."
+          },
+          "service": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Opt-in Gateway supervision for the packaged Olympus worker. Existing standalone worker services remain the default when disabled.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Run the packaged Olympus worker as an OpenClaw plugin service. Defaults to false."
+              },
+              "startupTimeoutSeconds": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 600,
+                "description": "Maximum time to wait for authenticated worker readiness. Defaults to 180 seconds for installations whose source catalog validation makes startup slow."
+              },
+              "credentials": {
+                "type": "object",
+                "description": "Resolved provider credentials injected only into the native worker child. Keys are restricted at runtime to approved Olympus credential environment names; raw values should be supplied through Gateway SecretRefs.",
+                "additionalProperties": { "$ref": "#/$defs/secretInput" }
+              },
+              "runtimePath": {
+                "type": "string",
+                "description": "Optional absolute path to Bun. Omit to resolve an absolute Bun path from the Gateway environment."
+              },
+              "executablePath": {
+                "type": "string",
+                "description": "Optional absolute path to the packaged dist/cli.js worker entrypoint. Omit to use the copy beside the loaded plugin bundle."
+              }
+            }
           },
           "scheduler": {
             "type": "object",
@@ -268,6 +298,21 @@
       }
     },
     "$defs": {
+      "secretInput": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "enum": ["env", "file", "exec"] },
+              "provider": { "type": "string" },
+              "id": { "type": "string" }
+            },
+            "required": ["source", "provider", "id"]
+          }
+        ]
+      },
       "argusModelProfile": {
         "type": "object",
         "additionalProperties": false,
@@ -688,6 +733,14 @@
           }
         }
       }
+    }
+  },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        { "path": "worker.authToken", "expected": "string" },
+        { "path": "worker.service.credentials.*", "expected": "string" }
+      ]
     }
   },
   "uiHints": {

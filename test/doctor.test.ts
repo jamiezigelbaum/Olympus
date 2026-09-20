@@ -10,6 +10,7 @@ import {
   loadSovereigntyPreset,
   writeSovereigntyConfigFile,
 } from '../src/core/sovereignty.ts';
+import { credentialConfigFingerprint } from '../src/workers/credential-degradation.ts';
 import { buildSourceIngestionLedgerSnapshot } from '../src/workers/source-ingestion-ledger.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { ContentExtractionThroughputSignal } from '../src/core/ingestion-throughput.ts';
@@ -90,6 +91,7 @@ function dropboxCorpusReport(overrides: {
 function corpusReport(corpusId: string, overrides: {
   family?: string;
   trust_domain?: string;
+  activation_mode?: string;
   embedding_policy?: string;
   embedding_parity?: Record<string, unknown>;
   counts?: Record<string, number>;
@@ -99,6 +101,7 @@ function corpusReport(corpusId: string, overrides: {
     corpus_id: corpusId,
     family: overrides.family ?? 'document',
     trust_domain: overrides.trust_domain ?? 'internal',
+    activation_mode: overrides.activation_mode ?? 'hybrid_shadow',
     ...(overrides.embedding_policy ? { embedding_policy: overrides.embedding_policy } : {}),
     ...(overrides.embedding_parity ? { embedding_parity: overrides.embedding_parity } : {}),
     configured: true,
@@ -474,6 +477,33 @@ describe('runDoctor', () => {
     expect(sourceIndex.ok).toBe(true);
     expect(sourceIndex.detail).toContain('200 chunks, embeddings disabled');
     expect(sourceIndex.detail).not.toContain('embedding lag');
+  });
+
+  test('treats retained vectors as optional for lexical-only retrieval', async () => {
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [corpusReport('internal.email', {
+          family: 'email',
+          activation_mode: 'lexical_only',
+          embedding_policy: 'local_only',
+          counts: { chunks: 200, embedded_chunks: 0 },
+        })],
+      },
+    });
+    const result = await runDoctor(doctorDeps({
+      config: enabledEmailConfig(),
+      delphi: healthyDelphi(),
+      fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('gmail')] },
+    }));
+
+    const sourceIndex = checkByName(result.checks, 'source_index_status');
+    expect(sourceIndex.ok).toBe(true);
+    expect(sourceIndex.detail).toContain('embeddings optional (lexical-only retrieval)');
+    expect(sourceIndex.detail).not.toContain('embedding lag');
+    expect(sourceIndex.detail).not.toContain('embeddings disabled');
   });
 
   test('diagnoses lag from current embedding parity rather than obsolete raw artifacts', async () => {
@@ -918,6 +948,84 @@ describe('runDoctor', () => {
     const prerequisites = checkByName(result.checks, 'sovereignty_prerequisites');
     expect(prerequisites.ok).toBe(true);
     expect(prerequisites.detail).toContain('present');
+  });
+
+  test('accepts exact worker policy readiness when the wrapper secret is absent from doctor env', async () => {
+    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const profile = engine.config.modelProfiles['gemini-source-embedding']!;
+    const fingerprint = credentialConfigFingerprint('gemini-source-embedding', profile);
+    const config = defaultConfig();
+    config.email.enabled = true;
+    config.sourceIndex.enabled = false;
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: false },
+      '/v1/health/dependencies': {
+        credential_readiness: {
+          kind: 'worker_credential_readiness',
+          ready_profiles: [{
+            profile_id: 'gemini-source-embedding',
+            config_fingerprint: fingerprint,
+            affected_capabilities: ['embedding'],
+          }],
+          policy: {
+            raw_runtime_secrets_exposed: false,
+            secret_refs_exposed: false,
+          },
+        },
+      },
+    });
+
+    const result = await runDoctor({
+      config,
+      delphi: healthyDelphi(),
+      env: {},
+      secretStore: memorySecretStore({}),
+      fetchImpl,
+      sovereigntyEngine: engine,
+    });
+
+    expect(checkByName(result.checks, 'sovereignty_prerequisites')).toMatchObject({ ok: true });
+  });
+
+  test('does not accept readiness for the same profile id when its policy fingerprint differs', async () => {
+    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const profile = engine.config.modelProfiles['gemini-source-embedding']!;
+    const mismatchedFingerprint = credentialConfigFingerprint(
+      'gemini-source-embedding',
+      { ...profile, secretRef: 'env:DIFFERENT_GEMINI_KEY' },
+    );
+    const config = defaultConfig();
+    config.email.enabled = true;
+    config.sourceIndex.enabled = false;
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: false },
+      '/v1/health/dependencies': {
+        credential_readiness: {
+          kind: 'worker_credential_readiness',
+          ready_profiles: [{
+            profile_id: 'gemini-source-embedding',
+            config_fingerprint: mismatchedFingerprint,
+          }],
+          policy: {
+            raw_runtime_secrets_exposed: false,
+            secret_refs_exposed: false,
+          },
+        },
+      },
+    });
+
+    const result = await runDoctor({
+      config,
+      delphi: healthyDelphi(),
+      env: {},
+      secretStore: memorySecretStore({}),
+      fetchImpl,
+      sovereigntyEngine: engine,
+    });
+
+    const prerequisites = checkByName(result.checks, 'sovereignty_prerequisites');
+    expect(prerequisites.ok).toBe(false);
+    expect(prerequisites.detail).toContain('GEMINI_API_KEY');
   });
 
   test('a reachable local lane is not reported as an unmet prerequisite', async () => {
