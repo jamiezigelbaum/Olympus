@@ -344,12 +344,18 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
       ...(config.sovereignty ?? {}),
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim(),
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
     config.sovereignty = {
       ...(config.sovereignty ?? {}),
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim(),
     };
+    // The Gateway-selected native path must own trust policy. Otherwise a
+    // stale inline policy in ~/.olympus/config.json wins inside
+    // loadSovereigntyEngine even though this service explicitly selected a
+    // different configPath.
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()) delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
     config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);

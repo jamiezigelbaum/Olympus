@@ -35,6 +35,52 @@ describe('native Olympus worker service', () => {
     expect(existsSync(fixture.countPath)).toBe(false);
   });
 
+  test('fresh runtime config removal cannot resurrect the registration snapshot', async () => {
+    const fixture = fakeWorkerFixture();
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url,
+      workerEnvPath: fixture.envFilePath,
+    }));
+
+    await service.start({ config: { plugins: { entries: {} } } });
+    await Bun.sleep(100);
+
+    expect(existsSync(fixture.countPath)).toBe(false);
+  });
+
+  test('stop during an in-flight occupancy probe prevents the stale start from spawning', async () => {
+    const fixture = fakeWorkerFixture();
+    const probeStarted = deferred<void>();
+    const releaseProbe = deferred<void>();
+    const fetchWithBlockedOccupancy = (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (!new Headers(init?.headers).has('authorization')) {
+        probeStarted.resolve();
+        await releaseProbe.promise;
+        throw new TypeError('fixture endpoint is free');
+      }
+      return fetch(url, init);
+    }) as typeof fetch;
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 5_000,
+      readinessPollMs: 20,
+      stopGraceMs: 100,
+      workerEnvPath: fixture.envFilePath,
+      fetch: fetchWithBlockedOccupancy,
+    }));
+
+    const starting = service.start({});
+    await probeStarted.promise;
+    await service.stop();
+    releaseProbe.resolve();
+    await starting;
+    await Bun.sleep(100);
+
+    expect(existsSync(fixture.countPath)).toBe(false);
+  });
+
   test('becomes healthy only after an authenticated worker response', async () => {
     const fixture = fakeWorkerFixture();
     const events: string[] = [];
@@ -68,6 +114,7 @@ describe('native Olympus worker service', () => {
     process.env.OP_CONNECT_TOKEN = 'must-not-reach-worker';
     process.env.OP_SESSION_personal = 'must-not-reach-worker';
     process.env.OPENCLAW_GATEWAY_TOKEN = 'must-not-reach-worker';
+    writeFileSync(join(fixture.root, '.env'), 'OPENCLAW_GATEWAY_TOKEN=must-not-return-from-bun-dotenv\n');
     const service = track(createNativeWorkerService({
       initialPluginConfig: pluginConfig,
       moduleUrl: import.meta.url,
@@ -75,6 +122,7 @@ describe('native Olympus worker service', () => {
       readinessPollMs: 20,
       stopGraceMs: 100,
       workerEnvPath: fixture.envFilePath,
+      workingDirectory: fixture.root,
     }));
     try {
       await service.start({});
@@ -101,6 +149,7 @@ describe('native Olympus worker service', () => {
       errorBackoffSeconds: 11,
       maxTransientRetries: 2,
     };
+    pluginConfig.sovereignty = { configPath: '/opt/olympus/sovereignty.json' };
     const service = track(createNativeWorkerService({
       initialPluginConfig: pluginConfig,
       moduleUrl: import.meta.url,
@@ -123,7 +172,47 @@ describe('native Olympus worker service', () => {
       OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS: '5',
       OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS: '11',
       OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES: '2',
+      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/opt/olympus/sovereignty.json',
     });
+  });
+
+  test('refuses an inline sovereignty policy instead of starting with different trust rules', async () => {
+    const fixture = fakeWorkerFixture();
+    const pluginConfig = fixture.pluginConfig(true);
+    pluginConfig.sovereignty = { policy: { schemaVersion: 1 } };
+    const events: string[] = [];
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: pluginConfig,
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 1_000,
+      workerEnvPath: fixture.envFilePath,
+    }));
+
+    await expect(service.start({ serviceHealth: healthRecorder(events) }))
+      .rejects.toThrow('do not support an inline sovereignty policy');
+    expect(existsSync(fixture.countPath)).toBe(false);
+    expect(events).toEqual([
+      'failure:Gateway-managed Olympus workers do not support an inline sovereignty policy; configure sovereignty.configPath.',
+    ]);
+  });
+
+  test('refuses explicit source scope that the native child cannot transport', async () => {
+    const fixture = fakeWorkerFixture();
+    const pluginConfig = fixture.pluginConfig(true);
+    pluginConfig.sourceIndex = {
+      enabled: true,
+      ingestionExclusionsPath: '/opt/olympus/source-exclusions.json',
+    };
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: pluginConfig,
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 1_000,
+      workerEnvPath: fixture.envFilePath,
+    }));
+
+    await expect(service.start({}))
+      .rejects.toThrow('do not support explicit sourceIndex.ingestionExclusionsPath plugin config');
+    expect(existsSync(fixture.countPath)).toBe(false);
   });
 
   test('restarts an exited child with bounded backoff and clears health after readiness', async () => {
@@ -149,6 +238,59 @@ describe('native Olympus worker service', () => {
     ));
 
     expect(events).toEqual(['clear', 'failure:Olympus worker exited unexpectedly.', 'clear']);
+  });
+
+  test('cleans a crashed worker process group before starting its replacement', async () => {
+    const fixture = fakeWorkerFixture({ spawnDescendant: true });
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 20_000,
+      readinessPollMs: 20,
+      stopGraceMs: 100,
+      restartDelaysMs: [20],
+      workerEnvPath: fixture.envFilePath,
+    }));
+    await service.start({});
+    const crashedPid = Number(readFileSync(fixture.pidPath, 'utf8'));
+    const orphanCandidatePid = Number(readFileSync(fixture.descendantPidPath!, 'utf8'));
+
+    process.kill(crashedPid, 'SIGKILL');
+    await waitUntil(() => readCount(fixture.countPath) >= 2);
+
+    expect(processExists(orphanCandidatePid)).toBe(false);
+    expect(Number(readFileSync(fixture.pidPath, 'utf8'))).not.toBe(crashedPid);
+  });
+
+  test('stop waits for an in-flight crash cleanup before resolving', async () => {
+    const fixture = fakeWorkerFixture({ spawnDescendant: true });
+    let stopAfterCrash: Promise<void> | undefined;
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url,
+      startupTimeoutMs: 20_000,
+      readinessPollMs: 20,
+      stopGraceMs: 100,
+      restartDelaysMs: [20],
+      workerEnvPath: fixture.envFilePath,
+    }));
+    await service.start({
+      serviceHealth: {
+        reportFailure() {
+          stopAfterCrash = service.stop();
+        },
+        clearFailure() {},
+      },
+    });
+    const crashedPid = Number(readFileSync(fixture.pidPath, 'utf8'));
+    const descendantPid = Number(readFileSync(fixture.descendantPidPath!, 'utf8'));
+
+    process.kill(crashedPid, 'SIGKILL');
+    await waitUntil(() => stopAfterCrash !== undefined);
+    await stopAfterCrash;
+
+    expect(processExists(descendantPid)).toBe(false);
+    expect(readCount(fixture.countPath)).toBe(1);
   });
 
   test('stop terminates the detached process group including descendants and cancels restart', async () => {
@@ -337,6 +479,7 @@ writeFileSync(process.env.FAKE_WORKER_CONFIG_ENV_PATH, JSON.stringify(Object.fro
     'OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS',
     'OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS',
     'OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES',
+    'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
     'OLYMPUS_CREDENTIAL_SYNTHETIC',
   ].map((key) => [key, process.env[key]]),
 )));
@@ -427,4 +570,12 @@ function track(service: NativeWorkerServiceDefinition): NativeWorkerServiceDefin
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
   else process.env[key] = value;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }

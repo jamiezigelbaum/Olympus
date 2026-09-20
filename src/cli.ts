@@ -202,7 +202,10 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === '__worker-service-run') {
-    await runWorkerForeground();
+    if (args.length > 2) {
+      throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
+    }
+    await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
     return;
   }
 
@@ -1444,10 +1447,31 @@ async function runWorkerCommand(args: string[]): Promise<void> {
   throw new OperationError('invalid_params', `Unknown worker command: ${command}`);
 }
 
-async function runWorkerForeground(): Promise<void> {
-  applyWorkerSetupEnv();
-  const { main: startEmailSourceWorker } = await import('./workers/email-source/server.ts');
-  startEmailSourceWorker();
+export async function runWorkerForeground(options: {
+  managedInstanceId?: string;
+  env?: Record<string, string | undefined>;
+  applySetupEnv?: () => void;
+  startWorker?: () => void | Promise<void>;
+} = {}): Promise<void> {
+  const env = options.env ?? process.env;
+  const managedInstanceId = options.managedInstanceId;
+  if (managedInstanceId === undefined) {
+    (options.applySetupEnv ?? (() => { applyWorkerSetupEnv({ env }); }))();
+  } else {
+    const expected = env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(managedInstanceId)
+      || expected !== managedInstanceId
+    ) {
+      throw new OperationError(
+        'config_error',
+        'Native worker service invocation identity does not match its finalized environment.',
+      );
+    }
+  }
+  const startWorker = options.startWorker
+    ?? (await import('./workers/email-source/server.ts')).main;
+  await startWorker();
 }
 
 async function readWorkerHttpState(): Promise<Record<string, unknown>> {

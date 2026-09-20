@@ -542,6 +542,12 @@ through its native secret providers and Olympus injects the resolved values only
 into the child; do not write raw provider credentials into the environment file.
 Bootstrap names such as `OP_CONNECT_TOKEN` are rejected by this credential map.
 Gateway and password-manager bootstrap credentials are not inherited by the child.
+For native supervision, an explicit sovereignty policy must use
+`sovereignty.configPath`; inline policies are rejected. Explicit plugin-level
+corpus registry, ingestion policy, and exclusion overrides are also rejected
+until they can be transported faithfully. Keep those source settings in the
+worker's supported environment/configuration files. A rejected configuration
+never silently starts the child under another policy.
 Stop the existing standalone worker before activating native supervision; an
 occupied endpoint is rejected rather than accepted as the new child. The host
 operator owns plugin installation and Gateway activation.

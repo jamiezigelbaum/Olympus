@@ -42,6 +42,8 @@ interface NativeWorkerServiceOptions {
   fetch?: typeof fetch;
   /** Test seam; production always uses applyWorkerSetupEnv's default path. */
   workerEnvPath?: string;
+  /** Test seam; production inherits the Gateway working directory. */
+  workingDirectory?: string;
 }
 
 interface ServiceLifetime {
@@ -52,6 +54,7 @@ interface ServiceLifetime {
   stopping: boolean;
   restartAttempt: number;
   restartTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanupPromise: Promise<void> | undefined;
 }
 
 interface WorkerLaunchSettings {
@@ -64,6 +67,7 @@ interface WorkerLaunchSettings {
 }
 
 class NativeWorkerServiceStoppedError extends Error {}
+class NativeWorkerConfigurationError extends Error {}
 
 /**
  * Supervise the packaged Bun worker without loading its Bun-only module graph
@@ -118,27 +122,43 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
 
   const launch = async (lifetime: ServiceLifetime): Promise<void> => {
     if (!isCurrent(lifetime)) throw new NativeWorkerServiceStoppedError();
-    const config = freshConfig(lifetime.context.config, options.initialPluginConfig);
+    const fresh = freshConfig(lifetime.context.config, options.initialPluginConfig);
+    const config = fresh.config;
     if (!config.worker.service.enabled) return;
+    assertNativeWorkerScopeConfigSupported(fresh.pluginConfig);
     const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
-    if (await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl)) {
+    const endpointOccupied = await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl);
+    if (!isCurrent(lifetime)) throw new NativeWorkerServiceStoppedError();
+    if (endpointOccupied) {
       throw new Error('Olympus worker endpoint is already occupied.');
     }
-    const child = spawn(settings.runtimePath, [settings.executablePath, '__worker-service-run'], {
-      env: settings.env,
-      stdio: 'ignore',
-      detached: process.platform !== 'win32',
-    });
+    const child = spawn(
+      settings.runtimePath,
+      ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
+      {
+        env: settings.env,
+        stdio: 'ignore',
+        detached: process.platform !== 'win32',
+        ...(options.workingDirectory ? { cwd: options.workingDirectory } : {}),
+      },
+    );
     lifetime.child = child;
     lifetime.childReady = false;
     let spawnFailed = false;
 
     child.once('exit', () => {
-      if (lifetime.child === child) lifetime.child = undefined;
-      if (!isCurrent(lifetime) || !lifetime.childReady) return;
+      // Startup and intentional-stop paths retain or clear this ownership
+      // themselves. A ready crash must keep the exact child/PGID long enough
+      // to terminate descendants before any replacement can be scheduled.
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady) return;
       lifetime.childReady = false;
+      const cleanup = terminateChild(lifetime, stopGraceMs, child);
       reportFailure(lifetime, 'Olympus worker exited unexpectedly.');
-      scheduleRestart(lifetime);
+      void cleanup.then(() => {
+        scheduleRestart(lifetime);
+      }).catch(() => {
+        reportFailure(lifetime, 'Olympus worker descendants could not be stopped after an unexpected exit.');
+      });
     });
 
     child.once('error', () => {
@@ -158,6 +178,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
       spawnFailed: () => spawnFailed,
     });
     if (!isCurrent(lifetime) || lifetime.child !== child) throw new NativeWorkerServiceStoppedError();
+    if (spawnFailed || childExited(child)) throw new Error('Olympus worker exited during startup.');
     lifetime.childReady = true;
     lifetime.restartAttempt = 0;
     clearFailure(lifetime);
@@ -170,7 +191,8 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
       configPrefixes: [
         'plugins.entries.olympus.config.worker',
         'plugins.entries.olympus.config.email.baseUrl',
-        'plugins.entries.olympus.config.sourceIndex.enabled',
+        'plugins.entries.olympus.config.sourceIndex',
+        'plugins.entries.olympus.config.sovereignty',
       ],
     },
     async start(context) {
@@ -183,6 +205,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         stopping: false,
         restartAttempt: 0,
         restartTimer: undefined,
+        cleanupPromise: undefined,
       };
       current = lifetime;
       try {
@@ -190,9 +213,12 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
       } catch (error) {
         if (error instanceof NativeWorkerServiceStoppedError) return;
         await terminateChild(lifetime, stopGraceMs);
-        reportFailure(lifetime, 'Olympus worker failed to become ready.');
+        const message = error instanceof NativeWorkerConfigurationError
+          ? error.message
+          : 'Olympus worker failed to become ready.';
+        reportFailure(lifetime, message);
         if (current === lifetime) current = undefined;
-        throw new Error('Olympus worker failed to become ready.');
+        throw new Error(message);
       }
     },
     async stop() {
@@ -213,7 +239,10 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   }
 }
 
-function freshConfig(contextConfig: unknown, initialPluginConfig: unknown): OlympusConfig {
+function freshConfig(
+  contextConfig: unknown,
+  initialPluginConfig: unknown,
+): { config: OlympusConfig; pluginConfig: unknown } {
   const root = asRecord(contextConfig);
   const plugins = asRecord(root?.plugins);
   const entries = asRecord(plugins?.entries);
@@ -225,7 +254,30 @@ function freshConfig(contextConfig: unknown, initialPluginConfig: unknown): Olym
     .some((key) => Object.prototype.hasOwnProperty.call(root, key))
     ? root
     : undefined;
-  return configFromPluginConfig(livePluginConfig ?? directPluginConfig ?? initialPluginConfig);
+  // A full service context is the Gateway's fresh, SecretRef-resolved runtime
+  // snapshot. If its plugin entry was removed, default disabled config must
+  // win; falling back to the registration snapshot could resurrect stale or
+  // unresolved source SecretRefs after a reload.
+  const pluginConfig = entries
+    ? livePluginConfig
+    : directPluginConfig ?? initialPluginConfig;
+  return { config: configFromPluginConfig(pluginConfig), pluginConfig };
+}
+
+function assertNativeWorkerScopeConfigSupported(pluginConfig: unknown): void {
+  const sourceIndex = asRecord(asRecord(pluginConfig)?.sourceIndex);
+  const unsupported = [
+    'corpusRegistry',
+    'corpora',
+    'ingestionPolicies',
+    'ingestionExclusions',
+    'ingestionExclusionsPath',
+  ].filter((key) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key));
+  if (unsupported.length > 0) {
+    throw new NativeWorkerConfigurationError(
+      `Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`,
+    );
+  }
 }
 
 function workerLaunchSettings(
@@ -260,6 +312,14 @@ function workerLaunchSettings(
 }
 
 function applyNativeWorkerConfigEnv(config: OlympusConfig, env: NodeJS.ProcessEnv): void {
+  if (config.sovereignty?.policy) {
+    throw new NativeWorkerConfigurationError(
+      'Gateway-managed Olympus workers do not support an inline sovereignty policy; configure sovereignty.configPath.',
+    );
+  }
+  if (config.sovereignty?.configPath) {
+    env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH = config.sovereignty.configPath;
+  }
   const workerUrl = new URL(config.email.baseUrl);
   if (
     workerUrl.protocol !== 'http:'
@@ -420,11 +480,29 @@ function stripGatewayBootstrapSecrets(env: NodeJS.ProcessEnv): void {
   }
 }
 
-async function terminateChild(lifetime: ServiceLifetime, graceMs: number): Promise<void> {
+async function terminateChild(
+  lifetime: ServiceLifetime,
+  graceMs: number,
+  expectedChild?: ChildProcess,
+): Promise<void> {
+  if (lifetime.cleanupPromise) return await lifetime.cleanupPromise;
   const child = lifetime.child;
+  if (expectedChild && child !== expectedChild) return;
   lifetime.child = undefined;
   lifetime.childReady = false;
   if (!child?.pid) return;
+  const cleanup = terminateChildProcessGroup(child, graceMs);
+  lifetime.cleanupPromise = cleanup;
+  try {
+    await cleanup;
+  } finally {
+    if (lifetime.cleanupPromise === cleanup) lifetime.cleanupPromise = undefined;
+  }
+}
+
+async function terminateChildProcessGroup(child: ChildProcess, graceMs: number): Promise<void> {
+  const processGroupId = child.pid;
+  if (!processGroupId) return;
   signalChildTree(child, 'SIGTERM');
   await waitForChildExit(child, graceMs);
   // The direct child may exit before one of its descendants. On POSIX the

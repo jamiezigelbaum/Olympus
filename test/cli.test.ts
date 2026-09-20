@@ -22,6 +22,7 @@ import {
   parseSourceSchedulerUnparkArgs,
   parseTerminalContentRequalifyArgs,
   parseXContentRecoveryArgs,
+  runWorkerForeground,
 } from '../src/cli.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
@@ -29,6 +30,54 @@ import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
 
 describe('CLI tool surface', () => {
+  test('native managed foreground preserves the parent-finalized environment exactly once', async () => {
+    const instanceId = '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f';
+    let setupLoads = 0;
+    let workerStarts = 0;
+
+    await runWorkerForeground({
+      managedInstanceId: instanceId,
+      env: { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId },
+      applySetupEnv: () => { setupLoads += 1; },
+      startWorker: () => { workerStarts += 1; },
+    });
+    expect({ setupLoads, workerStarts }).toEqual({ setupLoads: 0, workerStarts: 1 });
+
+    await runWorkerForeground({
+      env: {},
+      applySetupEnv: () => { setupLoads += 1; },
+      startWorker: () => { workerStarts += 1; },
+    });
+    expect({ setupLoads, workerStarts }).toEqual({ setupLoads: 1, workerStarts: 2 });
+
+    await expect(runWorkerForeground({
+      managedInstanceId: instanceId,
+      env: { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada93540' },
+      applySetupEnv: () => { setupLoads += 1; },
+      startWorker: () => { workerStarts += 1; },
+    })).rejects.toThrow('identity does not match its finalized environment');
+    expect({ setupLoads, workerStarts }).toEqual({ setupLoads: 1, workerStarts: 2 });
+
+    const cli = Bun.spawn([process.execPath, 'src/cli.ts', '__worker-service-run', instanceId], {
+      cwd: join(import.meta.dir, '..'),
+      env: {
+        ...process.env,
+        OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada93540',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      cli.exited,
+      new Response(cli.stdout).text(),
+      new Response(cli.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe('');
+    expect(stderr).toContain('identity does not match its finalized environment');
+    expect(stderr).not.toContain('019f6ff4');
+  });
+
   test('worker status recovery names only sources with something to resume', () => {
     // On a machine with nothing connected, recovery listed partial_sync for
     // three sources and a pairing to finish for two more (clean-install

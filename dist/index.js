@@ -2146,12 +2146,16 @@ function applyEnvironmentOverrides(config, env) {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
     config.sovereignty = {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
     config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
@@ -11065,6 +11069,9 @@ var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
 
 class NativeWorkerServiceStoppedError extends Error {
 }
+
+class NativeWorkerConfigurationError extends Error {
+}
 function createNativeWorkerService(options) {
   const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
@@ -11110,29 +11117,38 @@ function createNativeWorkerService(options) {
   const launch = async (lifetime) => {
     if (!isCurrent(lifetime))
       throw new NativeWorkerServiceStoppedError;
-    const config = freshConfig(lifetime.context.config, options.initialPluginConfig);
+    const fresh = freshConfig(lifetime.context.config, options.initialPluginConfig);
+    const config = fresh.config;
     if (!config.worker.service.enabled)
       return;
+    assertNativeWorkerScopeConfigSupported(fresh.pluginConfig);
     const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
-    if (await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl)) {
+    const endpointOccupied = await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl);
+    if (!isCurrent(lifetime))
+      throw new NativeWorkerServiceStoppedError;
+    if (endpointOccupied) {
       throw new Error("Olympus worker endpoint is already occupied.");
     }
-    const child = spawn(settings.runtimePath, [settings.executablePath, "__worker-service-run"], {
+    const child = spawn(settings.runtimePath, ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId], {
       env: settings.env,
       stdio: "ignore",
-      detached: process.platform !== "win32"
+      detached: process.platform !== "win32",
+      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
     });
     lifetime.child = child;
     lifetime.childReady = false;
     let spawnFailed = false;
     child.once("exit", () => {
-      if (lifetime.child === child)
-        lifetime.child = undefined;
-      if (!isCurrent(lifetime) || !lifetime.childReady)
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
         return;
       lifetime.childReady = false;
+      const cleanup = terminateChild(lifetime, stopGraceMs, child);
       reportFailure(lifetime, "Olympus worker exited unexpectedly.");
-      scheduleRestart(lifetime);
+      cleanup.then(() => {
+        scheduleRestart(lifetime);
+      }).catch(() => {
+        reportFailure(lifetime, "Olympus worker descendants could not be stopped after an unexpected exit.");
+      });
     });
     child.once("error", () => {
       spawnFailed = true;
@@ -11149,6 +11165,8 @@ function createNativeWorkerService(options) {
     });
     if (!isCurrent(lifetime) || lifetime.child !== child)
       throw new NativeWorkerServiceStoppedError;
+    if (spawnFailed || childExited(child))
+      throw new Error("Olympus worker exited during startup.");
     lifetime.childReady = true;
     lifetime.restartAttempt = 0;
     clearFailure(lifetime);
@@ -11160,7 +11178,8 @@ function createNativeWorkerService(options) {
       configPrefixes: [
         "plugins.entries.olympus.config.worker",
         "plugins.entries.olympus.config.email.baseUrl",
-        "plugins.entries.olympus.config.sourceIndex.enabled"
+        "plugins.entries.olympus.config.sourceIndex",
+        "plugins.entries.olympus.config.sovereignty"
       ]
     },
     async start(context) {
@@ -11172,7 +11191,8 @@ function createNativeWorkerService(options) {
         childReady: false,
         stopping: false,
         restartAttempt: 0,
-        restartTimer: undefined
+        restartTimer: undefined,
+        cleanupPromise: undefined
       };
       current = lifetime;
       try {
@@ -11181,10 +11201,11 @@ function createNativeWorkerService(options) {
         if (error instanceof NativeWorkerServiceStoppedError)
           return;
         await terminateChild(lifetime, stopGraceMs);
-        reportFailure(lifetime, "Olympus worker failed to become ready.");
+        const message = error instanceof NativeWorkerConfigurationError ? error.message : "Olympus worker failed to become ready.";
+        reportFailure(lifetime, message);
         if (current === lifetime)
           current = undefined;
-        throw new Error("Olympus worker failed to become ready.");
+        throw new Error(message);
       }
     },
     async stop() {
@@ -11211,7 +11232,21 @@ function freshConfig(contextConfig, initialPluginConfig) {
   const olympus = asRecord6(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
-  return configFromPluginConfig(livePluginConfig ?? directPluginConfig ?? initialPluginConfig);
+  const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
+  return { config: configFromPluginConfig(pluginConfig), pluginConfig };
+}
+function assertNativeWorkerScopeConfigSupported(pluginConfig) {
+  const sourceIndex = asRecord6(asRecord6(pluginConfig)?.sourceIndex);
+  const unsupported = [
+    "corpusRegistry",
+    "corpora",
+    "ingestionPolicies",
+    "ingestionExclusions",
+    "ingestionExclusionsPath"
+  ].filter((key) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key));
+  if (unsupported.length > 0) {
+    throw new NativeWorkerConfigurationError(`Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`);
+  }
 }
 function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   const service = config.worker.service;
@@ -11242,6 +11277,12 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   };
 }
 function applyNativeWorkerConfigEnv(config, env) {
+  if (config.sovereignty?.policy) {
+    throw new NativeWorkerConfigurationError("Gateway-managed Olympus workers do not support an inline sovereignty policy; configure sovereignty.configPath.");
+  }
+  if (config.sovereignty?.configPath) {
+    env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH = config.sovereignty.configPath;
+  }
   const workerUrl = new URL(config.email.baseUrl);
   if (workerUrl.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(workerUrl.hostname) || workerUrl.pathname.replace(/\/$/, "") !== "/v1" || workerUrl.username || workerUrl.password || workerUrl.search || workerUrl.hash) {
     throw new Error("Gateway-managed Olympus workers require a loopback HTTP email.baseUrl ending in /v1.");
@@ -11376,11 +11417,28 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key];
   }
 }
-async function terminateChild(lifetime, graceMs) {
+async function terminateChild(lifetime, graceMs, expectedChild) {
+  if (lifetime.cleanupPromise)
+    return await lifetime.cleanupPromise;
   const child = lifetime.child;
+  if (expectedChild && child !== expectedChild)
+    return;
   lifetime.child = undefined;
   lifetime.childReady = false;
   if (!child?.pid)
+    return;
+  const cleanup = terminateChildProcessGroup(child, graceMs);
+  lifetime.cleanupPromise = cleanup;
+  try {
+    await cleanup;
+  } finally {
+    if (lifetime.cleanupPromise === cleanup)
+      lifetime.cleanupPromise = undefined;
+  }
+}
+async function terminateChildProcessGroup(child, graceMs) {
+  const processGroupId = child.pid;
+  if (!processGroupId)
     return;
   signalChildTree(child, "SIGTERM");
   await waitForChildExit(child, graceMs);

@@ -2883,12 +2883,16 @@ function applyEnvironmentOverrides(config, env) {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim()) {
     config.sovereignty = {
       ...config.sovereignty ?? {},
       configPath: env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH.trim()
     };
+    if (env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim())
+      delete config.sovereignty.policy;
   }
   if (env.OLYMPUS_ARGUS_DEFAULT_PROFILE) {
     config.argus.defaultProfile = parseModelProfile(env.OLYMPUS_ARGUS_DEFAULT_PROFILE);
@@ -78118,7 +78122,10 @@ async function main2() {
     return;
   }
   if (args[0] === "__worker-service-run") {
-    await runWorkerForeground();
+    if (args.length > 2) {
+      throw new OperationError("invalid_params", "Native worker service invocation has unexpected arguments.");
+    }
+    await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
     return;
   }
   if (args[0] === "__oauth-detached-child") {
@@ -79168,10 +79175,21 @@ async function runWorkerCommand(args) {
   }
   throw new OperationError("invalid_params", `Unknown worker command: ${command}`);
 }
-async function runWorkerForeground() {
-  applyWorkerSetupEnv();
-  const { main: startEmailSourceWorker } = await init_server4().then(() => exports_server2);
-  startEmailSourceWorker();
+async function runWorkerForeground(options = {}) {
+  const env = options.env ?? process.env;
+  const managedInstanceId = options.managedInstanceId;
+  if (managedInstanceId === undefined) {
+    (options.applySetupEnv ?? (() => {
+      applyWorkerSetupEnv({ env });
+    }))();
+  } else {
+    const expected = env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(managedInstanceId) || expected !== managedInstanceId) {
+      throw new OperationError("config_error", "Native worker service invocation identity does not match its finalized environment.");
+    }
+  }
+  const startWorker = options.startWorker ?? (await init_server4().then(() => exports_server2)).main;
+  await startWorker();
 }
 async function readWorkerHttpState() {
   const config2 = loadConfig();
@@ -79901,6 +79919,7 @@ function formatCliFatalError(error2) {
 export {
   v04PublicCliCommandName,
   runXReconcileRecovery,
+  runWorkerForeground,
   runSourceSchedulerUnparkCancel,
   runSourceSchedulerUnpark,
   runGoogleRequestBudgetFutureRecovery,

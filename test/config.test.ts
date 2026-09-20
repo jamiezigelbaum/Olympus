@@ -2,7 +2,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { configFromPluginConfig, defaultConfig, loadConfig, parseBoolean, parseLane, parseModelProfile } from '../src/core/config.ts';
+import {
+  configFromPluginConfig,
+  configWithEnvironmentOverrides,
+  defaultConfig,
+  loadConfig,
+  parseBoolean,
+  parseLane,
+  parseModelProfile,
+} from '../src/core/config.ts';
 
 describe('config', () => {
   test('parses canonical boolean env vocabulary with trim and case normalization', () => {
@@ -395,5 +403,23 @@ describe('config', () => {
         service: { enabled: true },
       },
     })).toThrow('worker.authToken must be resolved to a string');
+  });
+
+  test('native explicit sovereignty path overrides stale inline file policy only for managed children', () => {
+    const configured = configFromPluginConfig({
+      sovereignty: { policy: { schemaVersion: 1 } },
+    });
+    const standalone = configWithEnvironmentOverrides(configured, {
+      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/nonexistent-policy.json',
+    });
+    expect(standalone.sovereignty?.policy).toBeDefined();
+
+    const native = configWithEnvironmentOverrides(configured, {
+      OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f',
+      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/nonexistent-policy.json',
+    });
+    expect(native.sovereignty).toEqual({
+      configPath: '/private/tmp/nonexistent-policy.json',
+    });
   });
 });

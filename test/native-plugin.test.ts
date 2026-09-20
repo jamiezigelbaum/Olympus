@@ -79,7 +79,8 @@ describe('native OpenClaw plugin adapter', () => {
         configPrefixes: [
           'plugins.entries.olympus.config.worker',
           'plugins.entries.olympus.config.email.baseUrl',
-          'plugins.entries.olympus.config.sourceIndex.enabled',
+          'plugins.entries.olympus.config.sourceIndex',
+          'plugins.entries.olympus.config.sovereignty',
         ],
       },
       start: expect.any(Function),
