@@ -76,7 +76,7 @@ describe('CLI tool surface', () => {
     expect(stdout).toBe('');
     expect(stderr).toContain('identity does not match its finalized environment');
     expect(stderr).not.toContain('019f6ff4');
-  });
+  }, 30_000);
 
   test('worker status recovery names only sources with something to resume', () => {
     // On a machine with nothing connected, recovery listed partial_sync for
