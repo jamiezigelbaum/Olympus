@@ -6,6 +6,10 @@ import { createEmailTransport, EmailClient } from './core/email.ts';
 import { shouldExposeOperation } from './core/operation-exposure.ts';
 import { workerAuthTokenFromConfig } from './core/worker-auth.ts';
 import {
+  createNativeWorkerService,
+  type NativeWorkerServiceDefinition,
+} from './core/native-worker-service.ts';
+import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
   sourceWatchDeliveryMessage,
@@ -35,6 +39,7 @@ interface OpenClawPluginApi {
   pluginConfig?: unknown;
   config?: unknown;
   registerTool(tool: NativeTool): void;
+  registerService?(service: NativeWorkerServiceDefinition): void;
   registerHttpRoute?(route: {
     path: string;
     auth: 'plugin';
@@ -207,6 +212,15 @@ const plugin = {
   description: 'Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.',
   register(api: OpenClawPluginApi) {
     const config = configFromPluginConfig(api.pluginConfig);
+    const workerService = createNativeWorkerService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url,
+    });
+    if (api.registerService) {
+      api.registerService(workerService);
+    } else if (config.worker.service.enabled) {
+      throw new Error('This OpenClaw host does not support native Olympus worker services.');
+    }
     const ctx: OperationContext = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),

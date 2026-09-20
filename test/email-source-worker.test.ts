@@ -47,6 +47,24 @@ describe('canonical source worker', () => {
     expect(JSON.stringify(body)).not.toContain('message_body');
   });
 
+  test('serves supervisor instance readiness without exposing source or secret material', async () => {
+    const worker = createEmailSourceWorker({
+      connector: connector(),
+      serviceInstanceId: 'fixture-service-instance',
+    });
+    const response = await worker.fetch(
+      new Request('http://worker.test/v1/service/readiness'),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      kind: 'worker_service_readiness',
+      ready: true,
+      instance_id: 'fixture-service-instance',
+      policy: { raw_runtime_secrets_exposed: false, source_text_returned: false },
+    });
+  });
+
   test('says no account is connected, not that an internal component is unwired', async () => {
     // worker status leaked "gogcli is not wired yet. Configure the Gateway-side
     // connector before enabling email answers." on a clean install: an internal

@@ -588,6 +588,35 @@ providers, multi-account support, or a broader change to v0.4 privacy policy.
 Its exit is the same user journey on macOS and Linux without manual generated
 file edits or an agent-only repair.
 
+## Installation remediation (2026-09-20)
+
+Owner-authorized work: complete the Olympus credential migration to the existing
+1Password Connect installation with a separate read-only token and minimum vault
+grants; verify retained consumers before retiring their cache dependencies;
+correct worker readiness diagnostics; restore source operation; move Olympus
+background capabilities into native plugin services with supervised heavy-work
+children; retire obsolete deployment machinery and the old Mac tunnel/state from
+active use after preserving recovery copies. Preserve standalone MCP support.
+Gateway configuration, installs, reloads and restarts remain with the current
+platform owner. The platform lane owns the active CPU incident; incorporate its
+findings into worker containment without concurrent host tuning. Shared caches
+and service accounts remain until other-host dependencies are checked.
+
+### Deferred: high-value email embeddings
+
+Bulk email embedding, mailbox selection/cleanup, and security reclassification
+are future owner-led work, not a prerequisite for installation remediation.
+Preserve existing indexed mail and its current embedding scope; do not delete
+mail or enable additional cloud processing to clear a readiness warning.
+
+When reopened: inspect aggregate corpus composition, preview a conservative
+high-value subset and exclusions, validate security routing, estimate provider
+cost and processing time, then evaluate a bounded embedding batch against real
+retrieval questions before expanding. The initial planning estimate is 3–7
+engineering days, subject to corpus inspection; it excludes provider runtime and
+owner review. The old handoff's roughly 257,000 chunks is historical, not a fresh
+measurement. Deferred mail should remain honestly represented in status.
+
 ## Current register
 
 | Slice | State | Completion proof |

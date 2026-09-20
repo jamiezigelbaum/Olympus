@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/email-source/server.ts';
 import {
-  createSourceIndexEmbeddingProviderFromSovereignty,
-} from '../src/workers/email-source/server.ts';
-import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
+  credentialConfigFingerprint,
+  WorkerBootSecretResolver,
+} from '../src/workers/credential-degradation.ts';
 
 describe('worker boot secretRef degradation', () => {
   test('a fresh preset and connected Gemini key construct the boot provider without dimension configuration', () => {
@@ -131,6 +132,47 @@ describe('worker boot secretRef degradation', () => {
     });
     expect(serialized).not.toContain('store:missing-gemini');
     expect(resolveCalls).toBe(3);
+  });
+
+  test('publishes positive readiness bound to the exact policy profile without secret material', async () => {
+    const engine = createSovereigntyEngine(loadSovereigntyPreset('no-sensitive'));
+    const profile = engine.config.modelProfiles['gemini-source-embedding']!;
+    const resolver = new WorkerBootSecretResolver({
+      schedule: () => undefined,
+      resolveSecretRefValueSync: () => 'fixture-wrapper-secret',
+      warn: () => undefined,
+    });
+
+    expect(createSourceIndexEmbeddingProviderFromSovereignty(
+      engine,
+      'internal',
+      {},
+      resolver,
+    )).toBeDefined();
+
+    const worker = createEmailSourceWorker({
+      credentialReadiness: () => resolver.readiness(),
+    });
+    const response = await worker.fetch(new Request('http://worker.test/v1/health/dependencies'));
+    const body = await response.json();
+    const serialized = JSON.stringify(body);
+
+    expect(body).toMatchObject({
+      credential_readiness: {
+        kind: 'worker_credential_readiness',
+        ready_profiles: [{
+          profile_id: 'gemini-source-embedding',
+          config_fingerprint: credentialConfigFingerprint('gemini-source-embedding', profile),
+          affected_capabilities: ['embedding'],
+        }],
+        policy: {
+          raw_runtime_secrets_exposed: false,
+          secret_refs_exposed: false,
+        },
+      },
+    });
+    expect(serialized).not.toContain('fixture-wrapper-secret');
+    expect(serialized).not.toContain(profile.secretRef!);
   });
 });
 

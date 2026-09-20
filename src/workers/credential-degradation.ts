@@ -1,7 +1,46 @@
+import { createHash } from 'node:crypto';
+import type { SovereigntyModelProfile } from '../core/sovereignty.ts';
+
 export type WorkerCredentialDegradationState =
   | 'retrying'
   | 'stopped'
   | 'resolved_restart_required';
+
+export interface CredentialReadinessBinding {
+  profileId: string;
+  configFingerprint: string;
+}
+
+export interface WorkerCredentialReadiness {
+  profile_id: string;
+  config_fingerprint: string;
+  affected_capabilities?: string[];
+}
+
+/**
+ * Bind worker readiness to the policy profile that was actually resolved.
+ *
+ * The fingerprint includes the configured secretRef identifier, but never the
+ * value obtained from that ref. It is safe to return to a caller that already
+ * has the policy and prevents a same-named profile from another policy from
+ * satisfying doctor accidentally.
+ */
+export function credentialConfigFingerprint(
+  profileId: string,
+  profile: SovereigntyModelProfile,
+): string {
+  const material = JSON.stringify({
+    version: 1,
+    profile_id: profileId,
+    provider: profile.provider,
+    trust: profile.trust,
+    model: profile.model,
+    base_url: profile.baseUrl ?? null,
+    secret_ref: profile.secretRef ?? null,
+    purpose: profile.purpose ?? null,
+  });
+  return createHash('sha256').update(material, 'utf8').digest('hex');
+}
 
 export interface WorkerCredentialDegradation {
   kind: 'worker_credential_degraded';
@@ -30,6 +69,7 @@ export interface WorkerBootSecretContext {
   displayName: string;
   affectedProfiles?: string[];
   affectedCapabilities?: string[];
+  profileBindings?: CredentialReadinessBinding[];
 }
 
 interface SecretFailureState {
@@ -44,12 +84,19 @@ interface SecretFailureState {
   retryHandle?: unknown;
 }
 
+interface SecretResolutionState {
+  secretRef: string;
+  binding: CredentialReadinessBinding;
+  affectedCapabilities?: string[];
+}
+
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAYS_MS = [30_000, 60_000];
 const CREDENTIAL_HINT = 'Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.';
 
 export class WorkerBootSecretResolver {
   private readonly failures = new Map<string, SecretFailureState>();
+  private readonly resolved = new Map<string, SecretResolutionState>();
   private readonly maxAttempts: number;
   private readonly retryDelaysMs: number[];
   private readonly now: () => Date;
@@ -85,12 +132,14 @@ export class WorkerBootSecretResolver {
       // one shared key would report every affected lane under whichever name
       // resolved first. The composed key is not a resolvable secret ref.
       const lane = context.affectedProfiles?.join(',') || context.displayName;
+      this.clearResolved(context);
       this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
       return undefined;
     }
     try {
       const value = this.resolveSecretRefValueSync(ref, env)?.trim();
       if (value) {
+        this.recordResolved(ref, context);
         this.failures.delete(ref);
         return value;
       }
@@ -98,8 +147,22 @@ export class WorkerBootSecretResolver {
       // The failure detail can contain provider output or secret-store internals.
       // Operator status below uses only the configured display name.
     }
+    this.clearResolved(context, ref);
     this.recordFailure(ref, env, context);
     return undefined;
+  }
+
+  /** Return only non-sensitive positive readiness evidence for the worker. */
+  readiness(): WorkerCredentialReadiness[] {
+    return [...this.resolved.values()]
+      .sort((left, right) => left.binding.profileId.localeCompare(right.binding.profileId))
+      .map((state) => ({
+        profile_id: state.binding.profileId,
+        config_fingerprint: state.binding.configFingerprint,
+        ...(state.affectedCapabilities?.length
+          ? { affected_capabilities: [...state.affectedCapabilities] }
+          : {}),
+      }));
   }
 
   status(): WorkerCredentialDegradation[] {
@@ -155,6 +218,25 @@ export class WorkerBootSecretResolver {
     this.scheduleRetry(failure);
   }
 
+  private recordResolved(secretRef: string, context: WorkerBootSecretContext): void {
+    for (const binding of context.profileBindings ?? []) {
+      this.resolved.set(binding.profileId, {
+        secretRef,
+        binding: { ...binding },
+        ...(context.affectedCapabilities?.length
+          ? { affectedCapabilities: [...context.affectedCapabilities] }
+          : {}),
+      });
+    }
+  }
+
+  private clearResolved(context: WorkerBootSecretContext, secretRef?: string): void {
+    const affectedProfiles = new Set(context.profileBindings?.map((binding) => binding.profileId) ?? context.affectedProfiles ?? []);
+    for (const [profileId, state] of this.resolved) {
+      if (state.secretRef === secretRef || affectedProfiles.has(profileId)) this.resolved.delete(profileId);
+    }
+  }
+
   private scheduleRetry(failure: SecretFailureState): void {
     if (failure.attempts >= failure.maxAttempts) {
       failure.state = 'stopped';
@@ -198,6 +280,7 @@ export class WorkerBootSecretResolver {
         failure.state = 'resolved_restart_required';
         delete failure.nextRetryAt;
         failure.scheduled = false;
+        this.clearResolved(failure.context, failure.secretRef);
         return;
       }
     } catch {
@@ -224,6 +307,11 @@ function mergeContext(
   ]);
   if (affectedProfiles) merged.affectedProfiles = affectedProfiles;
   if (affectedCapabilities) merged.affectedCapabilities = affectedCapabilities;
+  const bindings = new Map<string, CredentialReadinessBinding>();
+  for (const binding of [...(existing.profileBindings ?? []), ...(next.profileBindings ?? [])]) {
+    bindings.set(binding.profileId, { ...binding });
+  }
+  if (bindings.size > 0) merged.profileBindings = [...bindings.values()];
   return merged;
 }
 

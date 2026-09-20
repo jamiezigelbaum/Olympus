@@ -446,7 +446,8 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts
     ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } }
     : {};
-  const embeddingRequired = corpus.embeddingPolicy !== 'disabled';
+  const embeddingRequired = corpus.embeddingPolicy !== 'disabled'
+    && corpus.activationMode !== 'lexical_only';
   return {
     ...status,
     ...currentCounts,

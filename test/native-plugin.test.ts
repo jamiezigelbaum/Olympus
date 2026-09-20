@@ -10,6 +10,7 @@ import {
   V0_4_PUBLIC_NATIVE_TOOLS,
   V0_4_PUBLIC_SOURCE_IDS,
 } from '../src/core/public-surface.ts';
+import type { NativeWorkerServiceDefinition } from '../src/core/native-worker-service.ts';
 
 const originalFetch = globalThis.fetch;
 
@@ -62,6 +63,30 @@ afterEach(() => {
 });
 
 describe('native OpenClaw plugin adapter', () => {
+  test('registers the opt-in worker supervisor with config reload ownership', () => {
+    const services: NativeWorkerServiceDefinition[] = [];
+    plugin.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerService(service: NativeWorkerServiceDefinition) {
+        services.push(service);
+      },
+    });
+
+    expect(services).toEqual([{
+      id: 'olympus-worker',
+      reload: {
+        configPrefixes: [
+          'plugins.entries.olympus.config.worker',
+          'plugins.entries.olympus.config.email.baseUrl',
+          'plugins.entries.olympus.config.sourceIndex.enabled',
+        ],
+      },
+      start: expect.any(Function),
+      stop: expect.any(Function),
+    }]);
+  });
+
   test('derives watch ownership only from authenticated caller context', () => {
     const first = sourceWatchRouteFromToolContext({
       agentId: 'castor', requesterSenderId: 'owner-1', senderIsOwner: true,
@@ -268,7 +293,15 @@ describe('native OpenClaw plugin adapter', () => {
     ]));
     expect(Object.keys(configSchemaProperties(['worker']))).toEqual(expect.arrayContaining([
       'authToken',
+      'service',
       'scheduler',
+    ]));
+    expect(Object.keys(configSchemaProperties(['worker', 'service']))).toEqual(expect.arrayContaining([
+      'enabled',
+      'startupTimeoutSeconds',
+      'credentials',
+      'runtimePath',
+      'executablePath',
     ]));
     expect(Object.keys(configSchemaProperties(['worker', 'scheduler']))).toEqual(expect.arrayContaining([
       'enabled',
@@ -326,6 +359,27 @@ describe('native OpenClaw plugin adapter', () => {
       'sync',
       'content',
     ]));
+  });
+
+  test('declares Gateway SecretRef resolution for native worker credentials', () => {
+    expect(manifest.configContracts.secretInputs.paths).toEqual([
+      { path: 'worker.authToken', expected: 'string' },
+      { path: 'worker.service.credentials.*', expected: 'string' },
+    ]);
+    const secretInput = asRecord(asRecord(manifest.configSchema).$defs).secretInput;
+    expect(asRecord(secretInput).oneOf).toEqual([
+      { type: 'string' },
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          source: { type: 'string', enum: ['env', 'file', 'exec'] },
+          provider: { type: 'string' },
+          id: { type: 'string' },
+        },
+        required: ['source', 'provider', 'id'],
+      },
+    ]);
   });
 
   test('loads at gateway startup so agent runtime tools are callable', () => {

@@ -2103,6 +2103,7 @@ var init_secret_store = __esm(() => {
 
 // src/core/config.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { isAbsolute as isAbsolutePath, join as join2 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -2234,6 +2235,29 @@ function configFromPluginConfig(pluginConfig) {
   }
   if (typeof worker?.authToken === "string" && worker.authToken.trim()) {
     config.worker.authToken = worker.authToken.trim();
+  }
+  const service = asRecord4(worker?.service);
+  if (service) {
+    if (typeof service.enabled === "boolean")
+      config.worker.service.enabled = service.enabled;
+    if (typeof service.startupTimeoutSeconds === "number") {
+      config.worker.service.startupTimeoutSeconds = service.startupTimeoutSeconds;
+    }
+    const credentials = asRecord4(service.credentials);
+    if (credentials) {
+      config.worker.service.credentials = parseNativeWorkerCredentials(credentials, config.worker.service.enabled);
+    }
+    if (typeof service.runtimePath === "string" && service.runtimePath.trim()) {
+      config.worker.service.runtimePath = service.runtimePath.trim();
+    }
+    if (typeof service.executablePath === "string" && service.executablePath.trim()) {
+      config.worker.service.executablePath = service.executablePath.trim();
+    }
+  }
+  if (worker && Object.prototype.hasOwnProperty.call(worker, "authToken") && typeof worker.authToken !== "string") {
+    if (config.worker.service.enabled) {
+      throw new OperationError("config_error", "worker.authToken must be resolved to a string before the native worker service starts.");
+    }
   }
   const scheduler = asRecord4(worker?.scheduler);
   if (scheduler) {
@@ -2451,6 +2475,23 @@ function validateConfig(config) {
       delete config.worker.authToken;
     }
   }
+  assertBoolean(config.worker.service.enabled, "worker.service.enabled");
+  assertPositiveNumber(config.worker.service.startupTimeoutSeconds, "worker.service.startupTimeoutSeconds");
+  if (config.worker.service.startupTimeoutSeconds > 600) {
+    throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
+  }
+  config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  for (const [key, value] of [
+    ["runtimePath", config.worker.service.runtimePath],
+    ["executablePath", config.worker.service.executablePath]
+  ]) {
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.service.${key} must be an absolute path.`);
+    }
+    config.worker.service[key] = value.trim();
+  }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
   assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
@@ -2518,7 +2559,28 @@ function validateConfig(config) {
     throw new OperationError("config_error", "email.requestTimeoutSeconds must be at most 600.", 'A private-lane timer longer than the 600s tool watchdog fails every Olympus tool call inside the OpenClaw Gateway with "Async work scope is closed" (OpenClaw 2026.9.4, 2026-09-17).');
   }
 }
+function parseNativeWorkerCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES.has(name) && !/^OLYMPUS_CREDENTIAL_[A-Z0-9_]+$/.test(name)) {
+      throw new OperationError("config_error", `worker.service.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.service.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
+  if (typeof value === "string" && value.trim() === "")
+    return [];
   const values = typeof value === "string" ? value.split(",") : value;
   const selected = values.map((entry) => typeof entry === "string" ? entry.trim() : "");
   if (selected.some((entry) => !V0_4_PUBLIC_SOURCE_IDS.includes(entry))) {
@@ -2602,7 +2664,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -2611,8 +2673,21 @@ var init_config = __esm(() => {
   init_secret_store();
   init_public_surface();
   ARGUS_MODEL_PROFILE_PURPOSES = ["chat", "text_reasoning", "classification", "embedding", "vision"];
+  NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES = new Set([
+    "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
+    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
+    "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+    "GEMINI_API_KEY",
+    "OLYMPUS_TELEGRAM_API_ID",
+    "OLYMPUS_TELEGRAM_API_HASH"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
+      service: {
+        enabled: false,
+        startupTimeoutSeconds: 180,
+        credentials: {}
+      },
       scheduler: {
         enabled: false,
         sourceIds: [],
@@ -3047,9 +3122,9 @@ var init_venice_models = __esm(() => {
 // src/core/sovereignty.ts
 import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join3 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join3(homedir3(), ".olympus", "sovereignty.json");
+  return join5(homedir3(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -3273,11 +3348,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord6(record.retrieval);
-  const trustDomainsRecord = asRecord6(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord7(record.retrieval);
+  const trustDomainsRecord = asRecord7(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord6(trustDomainsRecord?.[domain]);
+    const policy = asRecord7(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3289,19 +3364,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord6(value);
-  if (record?.sovereignty && asRecord6(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord7(value);
+  if (record?.sovereignty && asRecord7(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord6(value);
+  const record = asRecord7(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord6(item);
+    const profile = asRecord7(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3324,16 +3399,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord6(value);
+  const record = asRecord7(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord6(record[domain]);
+    const route = asRecord7(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord6(route.pool);
+    const poolRecord = asRecord7(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3543,7 +3618,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord6(value) {
+function asRecord7(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -3730,7 +3805,7 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
 import { dirname as dirname5 } from "node:path";
 function isCredentialProvider(value) {
@@ -3772,7 +3847,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash("sha256").update(handle).digest("hex");
+    const digest = createHash2("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -5431,9 +5506,9 @@ var init_credential_broker = __esm(() => {
 // src/workers/credential-broker/connected-handles.ts
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname6, join as join4 } from "node:path";
+import { dirname as dirname6, join as join6 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join4(homedir4(), ".config", "olympus", "handles.json");
+  return join6(homedir4(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -5925,9 +6000,9 @@ var init_ingest_filter = __esm(() => {
 // src/core/sensitivity-map.ts
 import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname8, join as join6 } from "node:path";
+import { dirname as dirname8, join as join8 } from "node:path";
 function defaultSensitivityMapPath() {
-  return join6(homedir6(), ".olympus", "sensitivity-map.json");
+  return join8(homedir6(), ".olympus", "sensitivity-map.json");
 }
 function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
@@ -5952,7 +6027,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord7(rawMap);
+  const root = asRecord8(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6011,11 +6086,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord7(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord7(record[tierName]);
+    const mapped = asRecord8(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6023,7 +6098,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord7(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6044,7 +6119,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord7(record.match);
+  const matchRecord = asRecord8(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6066,7 +6141,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -6124,7 +6199,7 @@ var init_sensitivity_map = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -6174,18 +6249,18 @@ function scanPatterns(text, patterns, structuralRefJson) {
 }
 function dedupeFindings(findings) {
   const seen = new Set;
-  const unique = [];
+  const unique2 = [];
   for (const finding of findings) {
     const key = `${finding.finding_type}:${finding.finding_hash}:${finding.structural_ref_json ?? ""}`;
     if (seen.has(key))
       continue;
     seen.add(key);
-    unique.push(finding);
+    unique2.push(finding);
   }
-  return unique;
+  return unique2;
 }
 function hashFinding(type, matchedText) {
-  return createHash2("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash3("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -6678,7 +6753,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -6962,9 +7037,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord8(json, "Gmail messages list response");
+    const record = asRecord9(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord8(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord9(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7140,7 +7215,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord8(value, label) {
+function asRecord9(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7157,7 +7232,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString(value) {
-  return createHash3("sha256").update(value).digest("hex");
+  return createHash4("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
 var init_gmail = __esm(() => {
@@ -7168,7 +7243,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -7581,16 +7656,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord9(json, "Google Drive files list response");
+    const record = asRecord10(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord9(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord10(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord9(json, "Google Drive folder");
+    const record = asRecord10(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7685,7 +7760,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord9(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord10(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7713,7 +7788,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord9(value, label) {
+function asRecord10(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7730,7 +7805,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString2(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -8680,7 +8755,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join7 } from "node:path";
+import { join as join9 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -8726,7 +8801,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join7(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join9(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -9027,10 +9102,10 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, join as join8 } from "node:path";
+import { dirname as dirname9, join as join10 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join8(homedir7(), ".local", "share");
-  return join8(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir7(), ".local", "share");
+  return join10(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
 var init_source_dashboard = __esm(() => {
@@ -9660,7 +9735,7 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -9977,7 +10052,7 @@ var SYSTEM_CLOCK = Object.freeze({
 // src/core/worker-auth.ts
 import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
@@ -9994,6 +10069,21 @@ function withWorkerAuthHeader(init, authToken) {
 }
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
+}
+function applyWorkerSetupEnv(options = {}) {
+  const targetEnv = options.env ?? process.env;
+  const path = workerSetupEnvPath(options);
+  const setupEnv = readWorkerSetupEnv({ ...options, workerEnvPath: path });
+  if (!setupEnv)
+    return { loaded: false, path, keys: [] };
+  const keys = [];
+  for (const [key, value] of Object.entries(setupEnv)) {
+    if (targetEnv[key]?.trim())
+      continue;
+    targetEnv[key] = value;
+    keys.push(key);
+  }
+  return { loaded: true, path, keys };
 }
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
@@ -10024,7 +10114,7 @@ function environmentWithWorkerSetupEnv(options = {}) {
 }
 function workerSetupEnvPath(options = {}) {
   const env = options.env ?? process.env;
-  return options.workerEnvPath ?? join2(options.homeDir ?? optionalToken(env.HOME) ?? homedir2(), ".config", "olympus", "worker.env");
+  return options.workerEnvPath ?? join3(options.homeDir ?? optionalToken(env.HOME) ?? homedir2(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -10961,6 +11051,380 @@ function shouldExposeOperation(operation, context) {
   return true;
 }
 
+// src/core/native-worker-service.ts
+init_config();
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { statSync as statSync3 } from "node:fs";
+import { basename, delimiter, isAbsolute as isAbsolute2, join as join4 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+var SERVICE_ID = "olympus-worker";
+var DEFAULT_READINESS_POLL_MS = 100;
+var DEFAULT_STOP_GRACE_MS = 2000;
+var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
+
+class NativeWorkerServiceStoppedError extends Error {
+}
+function createNativeWorkerService(options) {
+  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
+  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const fetchWorker = options.fetch ?? globalThis.fetch;
+  let generation = 0;
+  let current;
+  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  const clearFailure = (lifetime) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.clearFailure();
+    } catch {}
+  };
+  const scheduleRestart = (lifetime) => {
+    if (!isCurrent(lifetime) || lifetime.restartTimer)
+      return;
+    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    const delay = restartDelaysMs[index] ?? 30000;
+    lifetime.restartAttempt += 1;
+    lifetime.restartTimer = setTimeout(() => {
+      lifetime.restartTimer = undefined;
+      if (!isCurrent(lifetime))
+        return;
+      launch(lifetime).catch(async (error) => {
+        if (error instanceof NativeWorkerServiceStoppedError || !isCurrent(lifetime))
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        reportFailure(lifetime, "Olympus worker failed to become ready.");
+        scheduleRestart(lifetime);
+      });
+    }, delay);
+    lifetime.restartTimer.unref?.();
+  };
+  const launch = async (lifetime) => {
+    if (!isCurrent(lifetime))
+      throw new NativeWorkerServiceStoppedError;
+    const config = freshConfig(lifetime.context.config, options.initialPluginConfig);
+    if (!config.worker.service.enabled)
+      return;
+    const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
+    if (await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl)) {
+      throw new Error("Olympus worker endpoint is already occupied.");
+    }
+    const child = spawn(settings.runtimePath, [settings.executablePath, "__worker-service-run"], {
+      env: settings.env,
+      stdio: "ignore",
+      detached: process.platform !== "win32"
+    });
+    lifetime.child = child;
+    lifetime.childReady = false;
+    let spawnFailed = false;
+    child.once("exit", () => {
+      if (lifetime.child === child)
+        lifetime.child = undefined;
+      if (!isCurrent(lifetime) || !lifetime.childReady)
+        return;
+      lifetime.childReady = false;
+      reportFailure(lifetime, "Olympus worker exited unexpectedly.");
+      scheduleRestart(lifetime);
+    });
+    child.once("error", () => {
+      spawnFailed = true;
+    });
+    await waitForAuthenticatedReadiness({
+      lifetime,
+      child,
+      settings,
+      fetchWorker,
+      isCurrent,
+      startupTimeoutMs: options.startupTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1000,
+      readinessPollMs,
+      spawnFailed: () => spawnFailed
+    });
+    if (!isCurrent(lifetime) || lifetime.child !== child)
+      throw new NativeWorkerServiceStoppedError;
+    lifetime.childReady = true;
+    lifetime.restartAttempt = 0;
+    clearFailure(lifetime);
+    lifetime.context.logger?.info?.("Olympus worker service is ready.");
+  };
+  return {
+    id: SERVICE_ID,
+    reload: {
+      configPrefixes: [
+        "plugins.entries.olympus.config.worker",
+        "plugins.entries.olympus.config.email.baseUrl",
+        "plugins.entries.olympus.config.sourceIndex.enabled"
+      ]
+    },
+    async start(context) {
+      await stopCurrent();
+      const lifetime = {
+        generation: ++generation,
+        context,
+        child: undefined,
+        childReady: false,
+        stopping: false,
+        restartAttempt: 0,
+        restartTimer: undefined
+      };
+      current = lifetime;
+      try {
+        await launch(lifetime);
+      } catch (error) {
+        if (error instanceof NativeWorkerServiceStoppedError)
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        reportFailure(lifetime, "Olympus worker failed to become ready.");
+        if (current === lifetime)
+          current = undefined;
+        throw new Error("Olympus worker failed to become ready.");
+      }
+    },
+    async stop() {
+      await stopCurrent();
+    }
+  };
+  async function stopCurrent() {
+    const lifetime = current;
+    if (!lifetime)
+      return;
+    current = undefined;
+    lifetime.stopping = true;
+    if (lifetime.restartTimer) {
+      clearTimeout(lifetime.restartTimer);
+      lifetime.restartTimer = undefined;
+    }
+    await terminateChild(lifetime, stopGraceMs);
+  }
+}
+function freshConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord6(contextConfig);
+  const plugins = asRecord6(root?.plugins);
+  const entries = asRecord6(plugins?.entries);
+  const olympus = asRecord6(entries?.olympus);
+  const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
+  return configFromPluginConfig(livePluginConfig ?? directPluginConfig ?? initialPluginConfig);
+}
+function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
+  const service = config.worker.service;
+  const env = { ...process.env };
+  applyWorkerSetupEnv({ env, ...workerEnvPath ? { workerEnvPath } : {} });
+  stripGatewayBootstrapSecrets(env);
+  for (const [name, value] of Object.entries(service.credentials))
+    env[name] = value;
+  if (config.worker.authToken)
+    env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
+  applyNativeWorkerConfigEnv(config, env);
+  const authToken = workerAuthTokenFromConfig(config, {
+    env,
+    ...workerEnvPath ? { workerEnvPath } : {}
+  });
+  if (!authToken) {
+    throw new Error("Olympus worker service requires a configured worker auth token.");
+  }
+  const instanceId = randomUUID3();
+  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  return {
+    runtimePath: resolveBunRuntimePath(service.runtimePath, env),
+    executablePath: resolveWorkerExecutablePath(service.executablePath, moduleUrl),
+    env,
+    readinessUrl: `${config.email.baseUrl.replace(/\/$/, "")}/service/readiness`,
+    authToken,
+    instanceId
+  };
+}
+function applyNativeWorkerConfigEnv(config, env) {
+  const workerUrl = new URL(config.email.baseUrl);
+  if (workerUrl.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(workerUrl.hostname) || workerUrl.pathname.replace(/\/$/, "") !== "/v1" || workerUrl.username || workerUrl.password || workerUrl.search || workerUrl.hash) {
+    throw new Error("Gateway-managed Olympus workers require a loopback HTTP email.baseUrl ending in /v1.");
+  }
+  env.OLYMPUS_EMAIL_SOURCE_HOST = workerUrl.hostname === "[::1]" ? "::1" : workerUrl.hostname;
+  env.OLYMPUS_EMAIL_SOURCE_PORT = workerUrl.port || "80";
+  env.OLYMPUS_SOURCE_INDEX_ENABLED = String(config.sourceIndex.enabled);
+  env.OLYMPUS_WORKER_SCHEDULER_ENABLED = String(config.worker.scheduler.enabled);
+  env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS = config.worker.scheduler.sourceIds.join(",");
+  env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS = String(config.worker.scheduler.tickSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS = String(config.worker.scheduler.syncIntervalSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS = String(config.worker.scheduler.freshnessThresholdHours);
+  env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS = String(config.worker.scheduler.errorBackoffSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
+}
+function resolveBunRuntimePath(configured, env) {
+  if (configured)
+    return assertExecutableFile(configured, "Bun runtime");
+  const candidates = [
+    process.execPath,
+    ...env.BUN_INSTALL ? [join4(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+  ];
+  for (const candidate of candidates) {
+    if (!isAbsolute2(candidate) || !isBunExecutableName(candidate))
+      continue;
+    try {
+      if (statSync3(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
+}
+function resolveWorkerExecutablePath(configured, moduleUrl) {
+  const candidate = configured ?? fileURLToPath(new URL("./cli.js", moduleUrl));
+  return assertExecutableFile(candidate, "worker executable");
+}
+function assertExecutableFile(path, label) {
+  if (!isAbsolute2(path))
+    throw new Error(`Olympus ${label} path must be absolute.`);
+  try {
+    if (statSync3(path).isFile())
+      return path;
+  } catch {}
+  throw new Error(`Olympus ${label} is unavailable.`);
+}
+function isBunExecutableName(path) {
+  const name = basename(path).toLowerCase();
+  return name === "bun" || name === "bun.exe";
+}
+async function waitForAuthenticatedReadiness(input) {
+  const deadline = Date.now() + input.startupTimeoutMs;
+  while (Date.now() < deadline) {
+    if (!input.isCurrent(input.lifetime))
+      throw new NativeWorkerServiceStoppedError;
+    if (input.spawnFailed() || childExited(input.child))
+      throw new Error("Olympus worker exited during startup.");
+    const authenticated = await authenticatedReadinessProbe(input.fetchWorker, input.settings.readinessUrl, input.settings.authToken, input.settings.instanceId, Math.min(1000, Math.max(deadline - Date.now(), 1)));
+    if (authenticated) {
+      if (!input.isCurrent(input.lifetime))
+        throw new NativeWorkerServiceStoppedError;
+      if (input.spawnFailed() || childExited(input.child))
+        throw new Error("Olympus worker exited during startup.");
+      return;
+    }
+    await delay(input.readinessPollMs);
+  }
+  throw new Error("Olympus worker readiness timed out.");
+}
+async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchWorker(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return false;
+    }
+    const body = await response.json().catch(() => {
+      return;
+    });
+    return body?.instance_id === instanceId;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function workerEndpointIsOccupied(fetchWorker, url) {
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(), 250);
+  timeout.unref?.();
+  try {
+    const response = await fetchWorker(url, { method: "GET", signal: controller.signal });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function stripGatewayBootstrapSecrets(env) {
+  const exact = new Set([
+    "OP_CONNECT_HOST",
+    "OP_CONNECT_TOKEN",
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    "OPENCLAW_GATEWAY_TOKEN",
+    "OPENCLAW_GATEWAY_PASSWORD",
+    "OPENCLAW_HOOKS_TOKEN",
+    "OPENCLAW_NODE_TOKEN",
+    "OPENCLAW_DEVICE_TOKEN",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "NODE_OPTIONS",
+    "BUN_OPTIONS"
+  ]);
+  for (const key of Object.keys(env)) {
+    if (exact.has(key) || key.startsWith("OP_SESSION_"))
+      delete env[key];
+  }
+}
+async function terminateChild(lifetime, graceMs) {
+  const child = lifetime.child;
+  lifetime.child = undefined;
+  lifetime.childReady = false;
+  if (!child?.pid)
+    return;
+  signalChildTree(child, "SIGTERM");
+  await waitForChildExit(child, graceMs);
+  signalChildTree(child, "SIGKILL");
+  await waitForChildExit(child, 1000);
+}
+function signalChildTree(child, signal) {
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
+    else
+      child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH")
+      throw error;
+  }
+}
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+async function waitForChildExit(child, timeoutMs) {
+  if (childExited(child))
+    return;
+  await new Promise((resolve2) => {
+    const timeout = setTimeout(done, timeoutMs);
+    timeout.unref?.();
+    child.once("exit", done);
+    function done() {
+      clearTimeout(timeout);
+      child.removeListener("exit", done);
+      resolve2();
+    }
+  });
+}
+function delay(ms) {
+  return new Promise((resolve2) => {
+    const timeout = setTimeout(resolve2, ms);
+    timeout.unref?.();
+  });
+}
+function asRecord6(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
 // src/workers/source-watch-runtime.ts
 init_http_timeout();
 init_source_corpus_registry();
@@ -11030,7 +11494,7 @@ function constantTimeStringEqual(actual, expected) {
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname10, join as join9 } from "node:path";
+import { dirname as dirname10, join as join11 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
@@ -11132,13 +11596,223 @@ function storeSecretRemedy(key) {
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
 
+// src/workers/credential-degradation.ts
+import { createHash } from "node:crypto";
+function credentialConfigFingerprint(profileId, profile) {
+  const material = JSON.stringify({
+    version: 1,
+    profile_id: profileId,
+    provider: profile.provider,
+    trust: profile.trust,
+    model: profile.model,
+    base_url: profile.baseUrl ?? null,
+    secret_ref: profile.secretRef ?? null,
+    purpose: profile.purpose ?? null
+  });
+  return createHash("sha256").update(material, "utf8").digest("hex");
+}
+var DEFAULT_MAX_ATTEMPTS = 3;
+var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
+var CREDENTIAL_HINT = "Unlock or reconnect this credential, then restart the Olympus worker or run the credential re-check route.";
+
+class WorkerBootSecretResolver {
+  failures = new Map;
+  resolved = new Map;
+  maxAttempts;
+  retryDelaysMs;
+  now;
+  schedule;
+  cancel;
+  resolveSecretRefValueSync;
+  warn;
+  constructor(options = {}) {
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+    this.now = options.now ?? (() => new Date);
+    this.schedule = options.schedule ?? ((run, delayMs) => {
+      const timer = setTimeout(run, delayMs);
+      timer.unref?.();
+      return timer;
+    });
+    this.cancel = options.cancel ?? ((handle) => {
+      clearTimeout(handle);
+    });
+    this.resolveSecretRefValueSync = options.resolveSecretRefValueSync ?? (() => {
+      return;
+    });
+    this.warn = options.warn ?? console.warn;
+  }
+  resolveSync(secretRef, env, context) {
+    const ref = secretRef?.trim();
+    if (!ref) {
+      const lane = context.affectedProfiles?.join(",") || context.displayName;
+      this.clearResolved(context);
+      this.recordFailure(`__missing_secret_ref__:${lane}`, env, context);
+      return;
+    }
+    try {
+      const value = this.resolveSecretRefValueSync(ref, env)?.trim();
+      if (value) {
+        this.recordResolved(ref, context);
+        this.failures.delete(ref);
+        return value;
+      }
+    } catch {}
+    this.clearResolved(context, ref);
+    this.recordFailure(ref, env, context);
+    return;
+  }
+  readiness() {
+    return [...this.resolved.values()].sort((left, right) => left.binding.profileId.localeCompare(right.binding.profileId)).map((state) => ({
+      profile_id: state.binding.profileId,
+      config_fingerprint: state.binding.configFingerprint,
+      ...state.affectedCapabilities?.length ? { affected_capabilities: [...state.affectedCapabilities] } : {}
+    }));
+  }
+  status() {
+    return [...this.failures.values()].map((failure) => {
+      const item = {
+        kind: "worker_credential_degraded",
+        display_name: failure.context.displayName,
+        state: failure.state,
+        status_label: "Credential unavailable - needs your attention",
+        hint: failure.state === "resolved_restart_required" ? "Credential is now readable; restart the Olympus worker to re-enable the disabled lane." : CREDENTIAL_HINT,
+        attempts: failure.attempts,
+        max_attempts: failure.maxAttempts
+      };
+      if (failure.nextRetryAt)
+        item.next_retry_at = failure.nextRetryAt;
+      if (failure.context.affectedProfiles?.length)
+        item.affected_profiles = [...failure.context.affectedProfiles];
+      if (failure.context.affectedCapabilities?.length)
+        item.affected_capabilities = [...failure.context.affectedCapabilities];
+      return item;
+    });
+  }
+  recheckNow() {
+    for (const failure of this.failures.values()) {
+      this.tryResolveFailure(failure);
+    }
+    return this.status();
+  }
+  recordFailure(secretRef, env, context) {
+    const existing = this.failures.get(secretRef);
+    const failure = existing ?? {
+      secretRef,
+      env,
+      context,
+      attempts: 0,
+      maxAttempts: Math.max(1, this.maxAttempts),
+      state: "retrying",
+      scheduled: false
+    };
+    failure.context = mergeContext(failure.context, context);
+    this.failures.set(secretRef, failure);
+    this.warn(`Olympus worker credential unavailable: ${failure.context.displayName}. The affected lane is disabled.`);
+    if (existing)
+      return;
+    failure.attempts += 1;
+    this.scheduleRetry(failure);
+  }
+  recordResolved(secretRef, context) {
+    for (const binding of context.profileBindings ?? []) {
+      this.resolved.set(binding.profileId, {
+        secretRef,
+        binding: { ...binding },
+        ...context.affectedCapabilities?.length ? { affectedCapabilities: [...context.affectedCapabilities] } : {}
+      });
+    }
+  }
+  clearResolved(context, secretRef) {
+    const affectedProfiles = new Set(context.profileBindings?.map((binding) => binding.profileId) ?? context.affectedProfiles ?? []);
+    for (const [profileId, state] of this.resolved) {
+      if (state.secretRef === secretRef || affectedProfiles.has(profileId))
+        this.resolved.delete(profileId);
+    }
+  }
+  scheduleRetry(failure) {
+    if (failure.attempts >= failure.maxAttempts) {
+      failure.state = "stopped";
+      delete failure.nextRetryAt;
+      failure.scheduled = false;
+      this.cancelScheduledRetry(failure);
+      return;
+    }
+    if (failure.scheduled)
+      return;
+    const delayMs = this.retryDelaysMs[Math.min(failure.attempts - 1, this.retryDelaysMs.length - 1)] ?? 60000;
+    const nextRetryAt = new Date(this.now().getTime() + delayMs).toISOString();
+    failure.state = "retrying";
+    failure.nextRetryAt = nextRetryAt;
+    failure.scheduled = true;
+    failure.retryHandle = this.schedule(() => {
+      failure.scheduled = false;
+      delete failure.retryHandle;
+      this.tryResolveFailure(failure);
+    }, delayMs);
+  }
+  cancelScheduledRetry(failure) {
+    if (failure.retryHandle === undefined)
+      return;
+    const handle = failure.retryHandle;
+    delete failure.retryHandle;
+    this.cancel(handle);
+  }
+  tryResolveFailure(failure) {
+    if (!this.failures.has(failure.secretRef))
+      return;
+    try {
+      const value = this.resolveSecretRefValueSync(failure.secretRef, failure.env)?.trim();
+      failure.attempts += 1;
+      if (value) {
+        failure.state = "resolved_restart_required";
+        delete failure.nextRetryAt;
+        failure.scheduled = false;
+        this.clearResolved(failure.context, failure.secretRef);
+        return;
+      }
+    } catch {
+      failure.attempts += 1;
+    }
+    this.scheduleRetry(failure);
+  }
+}
+function mergeContext(existing, next) {
+  const merged = {
+    displayName: existing.displayName
+  };
+  const affectedProfiles = unique([
+    ...existing.affectedProfiles ?? [],
+    ...next.affectedProfiles ?? []
+  ]);
+  const affectedCapabilities = unique([
+    ...existing.affectedCapabilities ?? [],
+    ...next.affectedCapabilities ?? []
+  ]);
+  if (affectedProfiles)
+    merged.affectedProfiles = affectedProfiles;
+  if (affectedCapabilities)
+    merged.affectedCapabilities = affectedCapabilities;
+  const bindings = new Map;
+  for (const binding of [...existing.profileBindings ?? [], ...next.profileBindings ?? []]) {
+    bindings.set(binding.profileId, { ...binding });
+  }
+  if (bindings.size > 0)
+    merged.profileBindings = [...bindings.values()];
+  return merged;
+}
+function unique(values) {
+  const result = [...new Set(values.filter((value) => value.trim().length > 0))];
+  return result.length > 0 ? result : undefined;
+}
+
 // src/core/doctor.ts
 init_connected_handles();
 
 // src/core/connect.ts
 import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname7, join as join5 } from "node:path";
+import { dirname as dirname7, join as join7 } from "node:path";
 init_secret_store();
 
 // src/core/worker-service.ts
@@ -11177,7 +11851,7 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join5(homedir5(), ".olympus", "pending-oauth");
+  return join7(homedir5(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
@@ -11248,7 +11922,7 @@ var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympu
 var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
 var SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.";
-var CREDENTIAL_HINT = "Run the matching olympus connect command again for each handle that needs reauthorization.";
+var CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.";
 var STALE_RUNNING_SYNC_MS = 24 * 60 * 60 * 1000;
 var EMBEDDING_LAG_RATIO = 0.1;
 var DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files";
@@ -11325,7 +11999,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join9(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join11(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -11473,12 +12147,14 @@ async function sovereigntyPrerequisiteCheck(deps) {
       detail: "Skipped: no sovereignty policy is configured for prerequisite checks."
     };
   }
-  const unmet = (await setupPreflight({
+  const preflightUnmet = (await setupPreflight({
     config: engine.config,
     ...deps.env ? { env: deps.env } : {},
     ...deps.secretStore ? { secretStore: deps.secretStore } : {},
     ...deps.workerEnvPath ? { workerEnvPath: deps.workerEnvPath } : {}
   })).filter((item) => item.kind !== "local_model_server");
+  const workerReadiness = deps.config.email.enabled === true && preflightUnmet.some((item) => item.kind === "env_secret" || item.kind === "store_secret") ? await workerCredentialReadiness(deps) : undefined;
+  const unmet = preflightUnmet.filter((item) => item.kind !== "env_secret" && item.kind !== "store_secret" || !workerReadinessMatchesProfile(engine, item.profileId, workerReadiness));
   if (unmet.length === 0) {
     return {
       name: "sovereignty_prerequisites",
@@ -11493,6 +12169,42 @@ async function sovereigntyPrerequisiteCheck(deps) {
     hint: unmet.map((item) => item.remedy).join(`
 `)
   };
+}
+async function workerCredentialReadiness(deps) {
+  try {
+    const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
+    if (!response.ok)
+      return;
+    const body = asRecord11(await response.json());
+    const readiness = asRecord11(body.credential_readiness);
+    const policy = asRecord11(readiness.policy);
+    if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
+      return;
+    }
+    return readiness.ready_profiles.flatMap((entry) => {
+      const profile = asRecord11(entry);
+      if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
+        return [];
+      }
+      const capabilities = Array.isArray(profile.affected_capabilities) ? profile.affected_capabilities.filter((value) => typeof value === "string") : undefined;
+      return [{
+        profile_id: profile.profile_id,
+        config_fingerprint: profile.config_fingerprint,
+        ...capabilities && capabilities.length > 0 ? { affected_capabilities: capabilities } : {}
+      }];
+    });
+  } catch {
+    return;
+  }
+}
+function workerReadinessMatchesProfile(engine, profileId, readiness) {
+  if (!readiness)
+    return false;
+  const profile = engine.config.modelProfiles[profileId];
+  if (!profile)
+    return false;
+  const expectedFingerprint = credentialConfigFingerprint(profileId, profile);
+  return readiness.some((entry) => entry.profile_id === profileId && entry.config_fingerprint === expectedFingerprint);
 }
 async function emailWorkerCheck(deps) {
   const name = "email_worker";
@@ -11523,7 +12235,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord10(await response.json());
+  const health = asRecord11(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -11576,7 +12288,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord10(await response.json());
+  const status = asRecord11(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -11584,7 +12296,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord10(entry);
+    const corpus = asRecord11(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -11598,14 +12310,14 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord10(corpus.counts);
-    const embeddingParity = asRecord10(corpus.embedding_parity);
-    const embeddingRequired = corpus.embedding_policy !== "disabled" && embeddingParity.required !== false;
+    const counts = asRecord11(corpus.counts);
+    const embeddingParity = asRecord11(corpus.embedding_parity);
+    const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : `${corpusId}: connector store, ${chunks} chunks, embeddings disabled`);
+      summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
       problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
@@ -11659,7 +12371,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord10(await response.json());
+  const status = asRecord11(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -11704,7 +12416,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord10(await response.json());
+  const status = asRecord11(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -11716,8 +12428,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord10(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord10(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord11(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord11(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -11774,7 +12486,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord10(value);
+  const record = asRecord11(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -11787,7 +12499,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord10(entry);
+    const credential = asRecord11(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -11839,7 +12551,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord10(await response.json());
+  const status = asRecord11(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -11867,7 +12579,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord10(entry);
+    const source = asRecord11(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -11877,7 +12589,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord10(taskEntry);
+      const task = asRecord11(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -12013,7 +12725,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord10(await response.json());
+    return asRecord11(await response.json());
   } catch {
     return;
   }
@@ -12023,7 +12735,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord10(await response.json());
+    const status = asRecord11(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -12032,7 +12744,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord10(status.ingestion_ledger);
+  const ledger = asRecord11(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -12040,7 +12752,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join9(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join11(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -12064,12 +12776,12 @@ function readIngestionHealthState(path) {
     if (!existsSync9(path))
       return;
     const parsed = JSON.parse(readFileSync9(path, "utf8"));
-    const record = asRecord10(parsed);
-    const sources = asRecord10(record.sources);
+    const record = asRecord11(parsed);
+    const sources = asRecord11(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord10(sourceValue);
-      const terminal = asRecord10(source.failed_terminal_by_class);
+      const source = asRecord11(sourceValue);
+      const terminal = asRecord11(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -12097,9 +12809,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord10(await response.json());
+    const status = asRecord11(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord10(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord11(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -12175,7 +12887,7 @@ async function credentialHandleCheck(deps) {
       name: "credential_handles",
       ok: false,
       detail: `Credential handles need attention: ${problems.join("; ")}.`,
-      hint: CREDENTIAL_HINT
+      hint: CREDENTIAL_HINT2
     };
   }
   return {
@@ -12240,7 +12952,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord10(corpus.last_refresh);
+  const lastRefresh = asRecord11(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -12255,13 +12967,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord10(corpus.last_refresh);
+  const lastRefresh = asRecord11(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord10(corpus.last_sync);
+  const lastSync = asRecord11(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord10(corpus.counts);
+  const counts = asRecord11(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -12289,13 +13001,13 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join9(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join11(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord10(value) {
+function asRecord11(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -13092,13 +13804,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord11(payload);
+  const result = asRecord12(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord11(result.audit);
-  const policy = asRecord11(result.policy);
-  const synthesis = asRecord11(audit?.answer_synthesis);
-  const timings = asRecord11(audit?.phase_timings);
+  const audit = asRecord12(result.audit);
+  const policy = asRecord12(result.policy);
+  const synthesis = asRecord12(audit?.answer_synthesis);
+  const timings = asRecord12(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -13108,7 +13820,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord11(item);
+    const record = asRecord12(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -13119,7 +13831,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord11(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord12(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -13171,7 +13883,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -13183,6 +13895,15 @@ var plugin = {
   description: "Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.",
   register(api) {
     const config = configFromPluginConfig(api.pluginConfig);
+    const workerService = createNativeWorkerService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url
+    });
+    if (api.registerService) {
+      api.registerService(workerService);
+    } else if (config.worker.service.enabled) {
+      throw new Error("This OpenClaw host does not support native Olympus worker services.");
+    }
     const ctx = {
       config,
       delphi: new DelphiClient(config, createDelphiTransport(config)),
@@ -13387,7 +14108,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord11(value);
+  const record = asRecord12(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
@@ -13423,7 +14144,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash5("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash6("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

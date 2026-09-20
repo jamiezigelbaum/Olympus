@@ -180,7 +180,11 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
-import { WorkerBootSecretResolver } from '../credential-degradation.ts';
+import {
+  credentialConfigFingerprint,
+  WorkerBootSecretResolver,
+  type CredentialReadinessBinding,
+} from '../credential-degradation.ts';
 import {
   GeminiSourceEmbeddingProvider,
   OpenAICompatibleSourceEmbeddingProvider,
@@ -387,7 +391,7 @@ export function createSourceIndexEmbeddingProviderFromSovereignty(
         profile.secretRef,
         env,
         `Sovereignty embedding profile "${resolved.id}"`,
-        bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding']),
+        bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding'], resolved),
       )
       : undefined;
     if (profile.secretRef && !apiKey) return undefined;
@@ -413,7 +417,7 @@ export function createSourceIndexEmbeddingProviderFromSovereignty(
       profile.secretRef,
       env,
       `Sovereignty embedding profile "${resolved.id}"`,
-      bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding']),
+      bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding'], resolved),
     );
     if (!apiKey) return undefined;
     const outputDimensionality = requireSourceEmbeddingDimension({
@@ -752,7 +756,7 @@ async function createSovereigntyAnalystMap(input: {
         profile.secretRef,
         input.env,
         'Sovereignty Venice analyst profile',
-        bootSecretOptions(input.bootSecretResolver, [id], ['analyst']),
+        bootSecretOptions(input.bootSecretResolver, [id], ['analyst'], resolved),
       );
       if (!apiKey) continue;
       await validateSecureVeniceAnalystProfileAtConstruction({ profile, apiKey });
@@ -877,7 +881,7 @@ export function createAnalystForSovereigntyProfile(input: {
         profile.secretRef,
         input.env,
         'Sovereignty local analyst profile',
-        bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst']),
+        bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
       )
       : undefined;
     if (profile.secretRef && !apiKey) return undefined;
@@ -915,7 +919,7 @@ export function createAnalystForSovereigntyProfile(input: {
       profile.secretRef,
       input.env,
       'Sovereignty Venice analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst']),
+      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
     );
     if (!apiKey) return undefined;
     // Construct the catalog-gated adapter once with the pool member. Every
@@ -936,7 +940,7 @@ export function createAnalystForSovereigntyProfile(input: {
       profile.secretRef,
       input.env,
       'Sovereignty OpenAI-compatible analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst']),
+      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
     );
     if (!apiKey) return undefined;
     return {
@@ -955,7 +959,7 @@ export function createAnalystForSovereigntyProfile(input: {
       profile.secretRef,
       input.env,
       'Sovereignty Anthropic analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst']),
+      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
     );
     if (!apiKey) return undefined;
     return {
@@ -2486,9 +2490,13 @@ export async function main(): Promise<void> {
               };
             },
           },
-        }
+    }
       : {}),
     credentialDegradations: () => bootSecretResolver.status(),
+    credentialReadiness: () => bootSecretResolver.readiness(),
+    ...(process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim()
+      ? { serviceInstanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID.trim() }
+      : {}),
     recheckCredentials: () => bootSecretResolver.recheckNow(),
   });
   warnIfWorkerAuthDisabled('private email source worker', authToken, hostname);
@@ -3018,6 +3026,7 @@ function resolveSecretRefSync(
     bootSecretResolver?: WorkerBootSecretResolver;
     affectedProfiles?: string[];
     affectedCapabilities?: string[];
+    profileBindings?: CredentialReadinessBinding[];
   } = {},
 ): string | undefined {
   const ref = secretRef?.trim();
@@ -3027,6 +3036,7 @@ function resolveSecretRefSync(
         displayName: label,
         ...(options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {}),
         ...(options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}),
+        ...(options.profileBindings ? { profileBindings: options.profileBindings } : {}),
       });
     }
     throw new Error(`${label} requires a secretRef; inline secrets are not allowed in sovereignty.json.`);
@@ -3036,6 +3046,7 @@ function resolveSecretRefSync(
       displayName: label,
       ...(options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {}),
       ...(options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}),
+      ...(options.profileBindings ? { profileBindings: options.profileBindings } : {}),
     });
   }
   const value = resolveSecretRefValueSync(ref, { env });
@@ -3049,15 +3060,25 @@ function bootSecretOptions(
   bootSecretResolver: WorkerBootSecretResolver | undefined,
   affectedProfiles: string[],
   affectedCapabilities: string[],
+  profile?: { id: string; profile: SovereigntyModelProfile },
 ): {
   bootSecretResolver?: WorkerBootSecretResolver;
   affectedProfiles: string[];
   affectedCapabilities: string[];
+  profileBindings?: CredentialReadinessBinding[];
 } {
   return {
     ...(bootSecretResolver ? { bootSecretResolver } : {}),
     affectedProfiles,
     affectedCapabilities,
+    ...(profile
+      ? {
+          profileBindings: [{
+            profileId: profile.id,
+            configFingerprint: credentialConfigFingerprint(profile.id, profile.profile),
+          }],
+        }
+      : {}),
   };
 }
 
