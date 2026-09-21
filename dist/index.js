@@ -2259,6 +2259,21 @@ function configFromPluginConfig(pluginConfig, options = {}) {
       config.worker.service.executablePath = service.executablePath.trim();
     }
   }
+  const telegramCapture = asRecord4(worker?.telegramCapture);
+  if (telegramCapture) {
+    if (typeof telegramCapture.enabled === "boolean") {
+      config.worker.telegramCapture.enabled = telegramCapture.enabled;
+    }
+    const credentials = asRecord4(telegramCapture.credentials);
+    if (credentials) {
+      config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(credentials, requireResolvedWorkerSecrets && config.worker.telegramCapture.enabled);
+    }
+    for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
+      const value = telegramCapture[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.telegramCapture[key] = value.trim();
+    }
+  }
   if (worker && Object.prototype.hasOwnProperty.call(worker, "authToken") && typeof worker.authToken !== "string") {
     config.worker.authTokenSecretRefUnresolved = true;
     if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
@@ -2487,6 +2502,17 @@ function validateConfig(config) {
     throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
   }
   config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
+  config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
+  for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
+    const value = config.worker.telegramCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
+    }
+    config.worker.telegramCapture[key] = value.trim();
+  }
   for (const [key, value] of [
     ["runtimePath", config.worker.service.runtimePath],
     ["executablePath", config.worker.service.executablePath]
@@ -2584,6 +2610,25 @@ function parseNativeWorkerCredentials(value, serviceEnabled) {
   }
   return parsed;
 }
+function parseNativeTelegramCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError("config_error", `worker.telegramCapture.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.telegramCapture.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.telegramCapture.credentials.${name} must be resolved to a string before the native Telegram capture service starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
   if (typeof value === "string" && value.trim() === "")
     return [];
@@ -2670,7 +2715,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
 function asRecord4(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var ARGUS_MODEL_PROFILE_PURPOSES, NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -2687,11 +2732,19 @@ var init_config = __esm(() => {
     "OLYMPUS_TELEGRAM_API_ID",
     "OLYMPUS_TELEGRAM_API_HASH"
   ]);
+  NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES = new Set([
+    "OLYMPUS_TELEGRAM_API_ID",
+    "OLYMPUS_TELEGRAM_API_HASH"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
       service: {
         enabled: false,
         startupTimeoutSeconds: 180,
+        credentials: {}
+      },
+      telegramCapture: {
+        enabled: false,
         credentials: {}
       },
       scheduler: {
@@ -3126,11 +3179,11 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname4, join as join6 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join5(homedir3(), ".olympus", "sovereignty.json");
+  return join6(homedir4(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -3142,7 +3195,7 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
   if (existsSync4(configPath)) {
-    const parsed = JSON.parse(readFileSync5(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync6(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -3354,11 +3407,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord7(record.retrieval);
-  const trustDomainsRecord = asRecord7(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord8(record.retrieval);
+  const trustDomainsRecord = asRecord8(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord7(trustDomainsRecord?.[domain]);
+    const policy = asRecord8(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3370,19 +3423,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord7(value);
-  if (record?.sovereignty && asRecord7(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord8(value);
+  if (record?.sovereignty && asRecord8(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord7(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord7(item);
+    const profile = asRecord8(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3405,16 +3458,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord7(value);
+  const record = asRecord8(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord7(record[domain]);
+    const route = asRecord8(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord7(route.pool);
+    const poolRecord = asRecord8(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3624,7 +3677,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -5510,11 +5563,11 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { dirname as dirname6, join as join6 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname6, join as join7 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join6(homedir4(), ".config", "olympus", "handles.json");
+  return join7(homedir5(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -5523,7 +5576,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync6(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync6(path, "utf8"));
+  const parsed = JSON.parse(readFileSync7(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -6004,11 +6057,11 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync8 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { dirname as dirname8, join as join8 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync9 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { dirname as dirname8, join as join9 } from "node:path";
 function defaultSensitivityMapPath() {
-  return join8(homedir6(), ".olympus", "sensitivity-map.json");
+  return join9(homedir7(), ".olympus", "sensitivity-map.json");
 }
 function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
@@ -6022,7 +6075,7 @@ function loadSensitivityMap(options = {}) {
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync8(path, "utf8")), path);
+    return parseSensitivityMap(JSON.parse(readFileSync9(path, "utf8")), path);
   } catch (error) {
     if (options.ignoreInvalid)
       return;
@@ -6033,7 +6086,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord8(rawMap);
+  const root = asRecord9(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6092,11 +6145,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord8(record[tierName]);
+    const mapped = asRecord9(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6104,7 +6157,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6125,7 +6178,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord8(record.match);
+  const matchRecord = asRecord9(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6147,7 +6200,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7043,9 +7096,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord9(json, "Gmail messages list response");
+    const record = asRecord10(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord9(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord10(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7221,7 +7274,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord9(value, label) {
+function asRecord10(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7662,16 +7715,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive files list response");
+    const record = asRecord11(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord10(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord11(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive folder");
+    const record = asRecord11(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7766,7 +7819,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord10(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord11(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7794,7 +7847,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord10(value, label) {
+function asRecord11(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -8761,7 +8814,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -8807,7 +8860,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join9(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join10(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -9107,11 +9160,11 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, join as join10 } from "node:path";
+import { homedir as homedir8 } from "node:os";
+import { dirname as dirname9, join as join11 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(homedir7(), ".local", "share");
-  return join10(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir8(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
 var init_source_dashboard = __esm(() => {
@@ -11072,22 +11125,23 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync3 } from "node:fs";
 import { basename, delimiter, isAbsolute as isAbsolute2, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
-var SERVICE_ID = "olympus-worker";
+
+// src/core/native-process-service.ts
+import { spawn as spawnProcess } from "node:child_process";
 var DEFAULT_READINESS_POLL_MS = 100;
 var DEFAULT_STOP_GRACE_MS = 2000;
 var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
 
-class NativeWorkerServiceStoppedError extends Error {
+class NativeProcessServiceStoppedError extends Error {
 }
 
-class NativeWorkerConfigurationError extends Error {
+class NativeProcessConfigurationError extends Error {
 }
-function createNativeWorkerService(options) {
+function createNativeProcessService(options) {
   const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
-  const fetchWorker = options.fetch ?? globalThis.fetch;
+  const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current;
   const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
@@ -11116,10 +11170,10 @@ function createNativeWorkerService(options) {
       if (!isCurrent(lifetime))
         return;
       launch(lifetime).catch(async (error) => {
-        if (error instanceof NativeWorkerServiceStoppedError || !isCurrent(lifetime))
+        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
           return;
         await terminateChild(lifetime, stopGraceMs);
-        reportFailure(lifetime, "Olympus worker failed to become ready.");
+        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
         scheduleRestart(lifetime);
       });
     }, delay);
@@ -11127,20 +11181,21 @@ function createNativeWorkerService(options) {
   };
   const launch = async (lifetime) => {
     if (!isCurrent(lifetime))
-      throw new NativeWorkerServiceStoppedError;
-    const fresh = freshConfig(lifetime.context.config, options.initialPluginConfig);
-    const config = fresh.config;
-    if (!config.worker.service.enabled)
+      throw new NativeProcessServiceStoppedError;
+    const settings = await options.prepareStart({
+      serviceId: options.id,
+      serviceLabel: options.label,
+      context: lifetime.context,
+      initialConfig: options.initialConfig
+    });
+    if (!settings)
       return;
-    assertNativeWorkerScopeConfigSupported(fresh.pluginConfig);
-    const settings = workerLaunchSettings(config, options.moduleUrl, options.workerEnvPath);
-    const endpointOccupied = await workerEndpointIsOccupied(fetchWorker, settings.readinessUrl);
     if (!isCurrent(lifetime))
-      throw new NativeWorkerServiceStoppedError;
-    if (endpointOccupied) {
-      throw new Error("Olympus worker endpoint is already occupied.");
+      throw new NativeProcessServiceStoppedError;
+    if (settings.endpointOccupied) {
+      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
-    const child = spawn(settings.runtimePath, ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId], {
+    const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
       stdio: "ignore",
       detached: process.platform !== "win32",
@@ -11154,45 +11209,37 @@ function createNativeWorkerService(options) {
         return;
       lifetime.childReady = false;
       const cleanup = terminateChild(lifetime, stopGraceMs, child);
-      reportFailure(lifetime, "Olympus worker exited unexpectedly.");
+      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then(() => {
         scheduleRestart(lifetime);
       }).catch(() => {
-        reportFailure(lifetime, "Olympus worker descendants could not be stopped after an unexpected exit.");
+        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
       });
     });
     child.once("error", () => {
       spawnFailed = true;
     });
-    await waitForAuthenticatedReadiness({
+    await waitForChildReadiness({
       lifetime,
       child,
       settings,
-      fetchWorker,
       isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1000,
+      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
       readinessPollMs,
       spawnFailed: () => spawnFailed
     });
     if (!isCurrent(lifetime) || lifetime.child !== child)
-      throw new NativeWorkerServiceStoppedError;
+      throw new NativeProcessServiceStoppedError;
     if (spawnFailed || childExited(child))
-      throw new Error("Olympus worker exited during startup.");
+      throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
     lifetime.restartAttempt = 0;
     clearFailure(lifetime);
-    lifetime.context.logger?.info?.("Olympus worker service is ready.");
+    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
   return {
-    id: SERVICE_ID,
-    reload: {
-      configPrefixes: [
-        "plugins.entries.olympus.config.worker",
-        "plugins.entries.olympus.config.email.baseUrl",
-        "plugins.entries.olympus.config.sourceIndex",
-        "plugins.entries.olympus.config.sovereignty"
-      ]
-    },
+    id: options.id,
+    reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context) {
       await stopCurrent();
       const lifetime = {
@@ -11209,10 +11256,10 @@ function createNativeWorkerService(options) {
       try {
         await launch(lifetime);
       } catch (error) {
-        if (error instanceof NativeWorkerServiceStoppedError)
+        if (error instanceof NativeProcessServiceStoppedError)
           return;
         await terminateChild(lifetime, stopGraceMs);
-        const message = error instanceof NativeWorkerConfigurationError ? error.message : "Olympus worker failed to become ready.";
+        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
         reportFailure(lifetime, message);
         if (current === lifetime)
           current = undefined;
@@ -11236,197 +11283,24 @@ function createNativeWorkerService(options) {
     await terminateChild(lifetime, stopGraceMs);
   }
 }
-function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord6(contextConfig);
-  const plugins = asRecord6(root?.plugins);
-  const entries = asRecord6(plugins?.entries);
-  const olympus = asRecord6(entries?.olympus);
-  const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
-  const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
-  const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
-  return { config: configFromPluginConfig(pluginConfig), pluginConfig };
-}
-function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord6(asRecord6(pluginConfig)?.sourceIndex);
-  const unsupported = [
-    "corpusRegistry",
-    "corpora",
-    "ingestionPolicies",
-    "ingestionExclusions",
-    "ingestionExclusionsPath"
-  ].filter((key) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key));
-  if (unsupported.length > 0) {
-    throw new NativeWorkerConfigurationError(`Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`);
-  }
-}
-function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
-  const service = config.worker.service;
-  const env = { ...process.env };
-  applyWorkerSetupEnv({ env, ...workerEnvPath ? { workerEnvPath } : {} });
-  stripGatewayBootstrapSecrets(env);
-  for (const [name, value] of Object.entries(service.credentials))
-    env[name] = value;
-  if (config.worker.authToken)
-    env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
-  applyNativeWorkerConfigEnv(config, env);
-  const authToken = workerAuthTokenFromConfig(config, {
-    env,
-    ...workerEnvPath ? { workerEnvPath } : {}
-  });
-  if (!authToken) {
-    throw new Error("Olympus worker service requires a configured worker auth token.");
-  }
-  const instanceId = randomUUID3();
-  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
-  return {
-    runtimePath: resolveBunRuntimePath(service.runtimePath, env),
-    executablePath: resolveWorkerExecutablePath(service.executablePath, moduleUrl),
-    env,
-    readinessUrl: `${config.email.baseUrl.replace(/\/$/, "")}/service/readiness`,
-    authToken,
-    instanceId
-  };
-}
-function applyNativeWorkerConfigEnv(config, env) {
-  if (config.sovereignty?.policy) {
-    throw new NativeWorkerConfigurationError("Gateway-managed Olympus workers do not support an inline sovereignty policy; configure sovereignty.configPath.");
-  }
-  if (config.sovereignty?.configPath) {
-    env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH = config.sovereignty.configPath;
-  }
-  const workerUrl = new URL(config.email.baseUrl);
-  if (workerUrl.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(workerUrl.hostname) || workerUrl.pathname.replace(/\/$/, "") !== "/v1" || workerUrl.username || workerUrl.password || workerUrl.search || workerUrl.hash) {
-    throw new Error("Gateway-managed Olympus workers require a loopback HTTP email.baseUrl ending in /v1.");
-  }
-  env.OLYMPUS_EMAIL_SOURCE_HOST = workerUrl.hostname === "[::1]" ? "::1" : workerUrl.hostname;
-  env.OLYMPUS_EMAIL_SOURCE_PORT = workerUrl.port || "80";
-  env.OLYMPUS_SOURCE_INDEX_ENABLED = String(config.sourceIndex.enabled);
-  env.OLYMPUS_WORKER_SCHEDULER_ENABLED = String(config.worker.scheduler.enabled);
-  env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS = config.worker.scheduler.sourceIds.join(",");
-  env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS = String(config.worker.scheduler.tickSeconds);
-  env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS = String(config.worker.scheduler.syncIntervalSeconds);
-  env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS = String(config.worker.scheduler.freshnessThresholdHours);
-  env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS = String(config.worker.scheduler.errorBackoffSeconds);
-  env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
-}
-function resolveBunRuntimePath(configured, env) {
-  if (configured)
-    return assertExecutableFile(configured, "Bun runtime");
-  const candidates = [
-    process.execPath,
-    ...env.BUN_INSTALL ? [join4(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
-  ];
-  for (const candidate of candidates) {
-    if (!isAbsolute2(candidate) || !isBunExecutableName(candidate))
-      continue;
-    try {
-      if (statSync3(candidate).isFile())
-        return candidate;
-    } catch {}
-  }
-  throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
-}
-function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath(new URL("./cli.js", moduleUrl));
-  return assertExecutableFile(candidate, "worker executable");
-}
-function assertExecutableFile(path, label) {
-  if (!isAbsolute2(path))
-    throw new Error(`Olympus ${label} path must be absolute.`);
-  try {
-    if (statSync3(path).isFile())
-      return path;
-  } catch {}
-  throw new Error(`Olympus ${label} is unavailable.`);
-}
-function isBunExecutableName(path) {
-  const name = basename(path).toLowerCase();
-  return name === "bun" || name === "bun.exe";
-}
-async function waitForAuthenticatedReadiness(input) {
+async function waitForChildReadiness(input) {
   const deadline = Date.now() + input.startupTimeoutMs;
   while (Date.now() < deadline) {
     if (!input.isCurrent(input.lifetime))
-      throw new NativeWorkerServiceStoppedError;
+      throw new NativeProcessServiceStoppedError;
     if (input.spawnFailed() || childExited(input.child))
-      throw new Error("Olympus worker exited during startup.");
-    const authenticated = await authenticatedReadinessProbe(input.fetchWorker, input.settings.readinessUrl, input.settings.authToken, input.settings.instanceId, Math.min(1000, Math.max(deadline - Date.now(), 1)));
-    if (authenticated) {
+      throw new Error("Child exited during startup.");
+    const ready = await input.settings.readinessProbe(input.child);
+    if (ready) {
       if (!input.isCurrent(input.lifetime))
-        throw new NativeWorkerServiceStoppedError;
+        throw new NativeProcessServiceStoppedError;
       if (input.spawnFailed() || childExited(input.child))
-        throw new Error("Olympus worker exited during startup.");
+        throw new Error("Child exited during startup.");
       return;
     }
     await delay(input.readinessPollMs);
   }
-  throw new Error("Olympus worker readiness timed out.");
-}
-async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  timeout.unref?.();
-  try {
-    const response = await fetchWorker(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${authToken}` },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {
-        return;
-      });
-      return false;
-    }
-    const body = await response.json().catch(() => {
-      return;
-    });
-    return body?.instance_id === instanceId;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-async function workerEndpointIsOccupied(fetchWorker, url) {
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), 250);
-  timeout.unref?.();
-  try {
-    const response = await fetchWorker(url, { method: "GET", signal: controller.signal });
-    await response.body?.cancel().catch(() => {
-      return;
-    });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-function stripGatewayBootstrapSecrets(env) {
-  const exact = new Set([
-    "OP_CONNECT_HOST",
-    "OP_CONNECT_TOKEN",
-    "OP_SERVICE_ACCOUNT_TOKEN",
-    "OPENCLAW_GATEWAY_TOKEN",
-    "OPENCLAW_GATEWAY_PASSWORD",
-    "OPENCLAW_HOOKS_TOKEN",
-    "OPENCLAW_NODE_TOKEN",
-    "OPENCLAW_DEVICE_TOKEN",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_FRAMEWORK_PATH",
-    "NODE_OPTIONS",
-    "BUN_OPTIONS"
-  ]);
-  for (const key of Object.keys(env)) {
-    if (exact.has(key) || key.startsWith("OP_SESSION_"))
-      delete env[key];
-  }
+  throw new Error("Child readiness timed out.");
 }
 async function terminateChild(lifetime, graceMs, expectedChild) {
   if (lifetime.cleanupPromise)
@@ -11490,7 +11364,405 @@ function delay(ms) {
     timeout.unref?.();
   });
 }
+
+// src/core/native-worker-service.ts
+var SERVICE_ID = "olympus-worker";
+var SERVICE_LABEL = "worker";
+var READINESS_PROBE_TIMEOUT_MS = 1000;
+var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
+var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
+function createNativeWorkerService(options) {
+  const fetchWorker = options.fetch ?? globalThis.fetch;
+  return createNativeProcessService({
+    id: SERVICE_ID,
+    label: SERVICE_LABEL,
+    reload: {
+      configPrefixes: [
+        "plugins.entries.olympus.config.worker",
+        "plugins.entries.olympus.config.email.baseUrl",
+        "plugins.entries.olympus.config.sourceIndex",
+        "plugins.entries.olympus.config.sovereignty"
+      ]
+    },
+    initialConfig: options.initialPluginConfig,
+    ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
+    prepareStart: (input) => prepareWorkerStart(input, {
+      moduleUrl: options.moduleUrl,
+      fetchWorker,
+      ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {},
+      ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}
+    })
+  });
+}
+async function prepareWorkerStart(input, worker) {
+  const fresh = freshConfig(input.context.config, input.initialConfig);
+  const config = fresh.config;
+  if (!config.worker.service.enabled)
+    return;
+  assertNativeWorkerScopeConfigSupported(fresh.pluginConfig);
+  const settings = workerLaunchSettings(config, worker.moduleUrl, worker.workerEnvPath);
+  const startupTimeoutMs = config.worker.service.startupTimeoutSeconds * 1000;
+  const effectiveStartupTimeoutMs = worker.startupTimeoutMs ?? startupTimeoutMs;
+  return {
+    ...settings,
+    startupTimeoutMs,
+    command: settings.runtimePath,
+    args: ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId],
+    endpointOccupied: await workerEndpointIsOccupied(worker.fetchWorker, settings.readinessUrl),
+    readinessProbe: () => authenticatedReadinessProbe(worker.fetchWorker, settings.readinessUrl, settings.authToken, settings.instanceId, Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effectiveStartupTimeoutMs, 1)))
+  };
+}
+function freshConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord6(contextConfig);
+  const plugins = asRecord6(root?.plugins);
+  const entries = asRecord6(plugins?.entries);
+  const olympus = asRecord6(entries?.olympus);
+  const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
+  const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
+  return { config: configFromPluginConfig(pluginConfig), pluginConfig };
+}
+function assertNativeWorkerScopeConfigSupported(pluginConfig) {
+  const sourceIndex = asRecord6(asRecord6(pluginConfig)?.sourceIndex);
+  const unsupported = [
+    "corpusRegistry",
+    "corpora",
+    "ingestionPolicies",
+    "ingestionExclusions",
+    "ingestionExclusionsPath"
+  ].filter((key) => sourceIndex && Object.prototype.hasOwnProperty.call(sourceIndex, key));
+  if (unsupported.length > 0) {
+    throw new NativeProcessConfigurationError(`Gateway-managed Olympus workers do not support explicit sourceIndex.${unsupported[0]} plugin config; configure source scope through the worker environment.`);
+  }
+}
+function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
+  const service = config.worker.service;
+  const env = { ...process.env };
+  applyWorkerSetupEnv({ env, ...workerEnvPath ? { workerEnvPath } : {} });
+  stripGatewayBootstrapSecrets(env);
+  for (const [name, value] of Object.entries(service.credentials))
+    env[name] = value;
+  if (config.worker.authToken)
+    env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
+  applyNativeWorkerConfigEnv(config, env);
+  const authToken = workerAuthTokenFromConfig(config, {
+    env,
+    ...workerEnvPath ? { workerEnvPath } : {}
+  });
+  if (!authToken) {
+    throw new Error("Olympus worker service requires a configured worker auth token.");
+  }
+  const instanceId = randomUUID3();
+  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  return {
+    runtimePath: resolveBunRuntimePath(service.runtimePath, env),
+    executablePath: resolveWorkerExecutablePath(service.executablePath, moduleUrl),
+    env,
+    readinessUrl: `${config.email.baseUrl.replace(/\/$/, "")}/service/readiness`,
+    authToken,
+    instanceId
+  };
+}
+function applyNativeWorkerConfigEnv(config, env) {
+  if (config.sovereignty?.policy) {
+    throw new NativeProcessConfigurationError("Gateway-managed Olympus workers do not support an inline sovereignty policy; configure sovereignty.configPath.");
+  }
+  if (config.sovereignty?.configPath) {
+    env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH = config.sovereignty.configPath;
+  }
+  const workerUrl = new URL(config.email.baseUrl);
+  if (workerUrl.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(workerUrl.hostname) || workerUrl.pathname.replace(/\/$/, "") !== "/v1" || workerUrl.username || workerUrl.password || workerUrl.search || workerUrl.hash) {
+    throw new Error("Gateway-managed Olympus workers require a loopback HTTP email.baseUrl ending in /v1.");
+  }
+  env.OLYMPUS_EMAIL_SOURCE_HOST = workerUrl.hostname === "[::1]" ? "::1" : workerUrl.hostname;
+  env.OLYMPUS_EMAIL_SOURCE_PORT = workerUrl.port || "80";
+  env.OLYMPUS_SOURCE_INDEX_ENABLED = String(config.sourceIndex.enabled);
+  env.OLYMPUS_WORKER_SCHEDULER_ENABLED = String(config.worker.scheduler.enabled);
+  env.OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS = config.worker.scheduler.sourceIds.join(",");
+  env.OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS = String(config.worker.scheduler.tickSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS = String(config.worker.scheduler.syncIntervalSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS = String(config.worker.scheduler.freshnessThresholdHours);
+  env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS = String(config.worker.scheduler.errorBackoffSeconds);
+  env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
+}
+function resolveBunRuntimePath(configured, env) {
+  if (configured)
+    return assertExecutableFile(configured, "Bun runtime");
+  const candidates = [
+    process.execPath,
+    ...env.BUN_INSTALL ? [join4(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+  ];
+  for (const candidate of candidates) {
+    if (!isAbsolute2(candidate) || !isBunExecutableName(candidate))
+      continue;
+    try {
+      if (statSync3(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
+}
+function resolveWorkerExecutablePath(configured, moduleUrl) {
+  const candidate = configured ?? fileURLToPath(new URL("./cli.js", moduleUrl));
+  return assertExecutableFile(candidate, "worker executable");
+}
+function assertExecutableFile(path, label) {
+  if (!isAbsolute2(path))
+    throw new Error(`Olympus ${label} path must be absolute.`);
+  try {
+    if (statSync3(path).isFile())
+      return path;
+  } catch {}
+  throw new Error(`Olympus ${label} is unavailable.`);
+}
+function isBunExecutableName(path) {
+  const name = basename(path).toLowerCase();
+  return name === "bun" || name === "bun.exe";
+}
+async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchWorker(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return false;
+    }
+    const body = await response.json().catch(() => {
+      return;
+    });
+    return body?.instance_id === instanceId;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function workerEndpointIsOccupied(fetchWorker, url) {
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(), ENDPOINT_OCCUPANCY_TIMEOUT_MS);
+  timeout.unref?.();
+  try {
+    const response = await fetchWorker(url, { method: "GET", signal: controller.signal });
+    await response.body?.cancel().catch(() => {
+      return;
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function stripGatewayBootstrapSecrets(env) {
+  const exact = new Set([
+    "OP_CONNECT_HOST",
+    "OP_CONNECT_TOKEN",
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    "OPENCLAW_GATEWAY_TOKEN",
+    "OPENCLAW_GATEWAY_PASSWORD",
+    "OPENCLAW_HOOKS_TOKEN",
+    "OPENCLAW_NODE_TOKEN",
+    "OPENCLAW_DEVICE_TOKEN",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "NODE_OPTIONS",
+    "BUN_OPTIONS"
+  ]);
+  for (const key of Object.keys(env)) {
+    if (exact.has(key) || key.startsWith("OP_SESSION_"))
+      delete env[key];
+  }
+}
 function asRecord6(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+// src/core/native-telegram-service.ts
+init_config();
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { readFileSync as readFileSync5, statSync as statSync4 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { isAbsolute as isAbsolute3, join as join5 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var SERVICE_ID2 = "olympus-telegram-capture";
+var SERVICE_LABEL2 = "Telegram capture service";
+var DEFAULT_STARTUP_TIMEOUT_MS = 30000;
+var READINESS_FILE = "native-service-readiness.json";
+var TELEGRAM_CREDENTIAL_NAMES = [
+  "OLYMPUS_TELEGRAM_API_ID",
+  "OLYMPUS_TELEGRAM_API_HASH"
+];
+var MANAGED_TELEGRAM_ENV_NAMES = new Set([
+  "OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT",
+  "OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES",
+  "OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES",
+  "OLYMPUS_SOURCE_INDEX_TELEGRAM_CHAT_CLASSIFICATIONS_JSON",
+  "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES",
+  "OLYMPUS_TELEGRAM_PROTECTED_CHAT_SCOPES",
+  "OLYMPUS_TELEGRAM_CHAT_CLASSIFICATIONS_JSON",
+  "OLYMPUS_TELEGRAM_SESSION_PATH",
+  "OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR",
+  "OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR",
+  "OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH",
+  "OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH",
+  "OLYMPUS_TELEGRAM_GATEWAY_MAX_MESSAGES",
+  "OLYMPUS_TELEGRAM_GATEWAY_INTERVAL_SECONDS",
+  "OLYMPUS_TELEGRAM_GATEWAY_SPOOL_STALE_THRESHOLD_SECONDS"
+]);
+function createNativeTelegramService(options) {
+  return createNativeProcessService({
+    id: SERVICE_ID2,
+    label: SERVICE_LABEL2,
+    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.telegramCapture"] },
+    initialConfig: options.initialPluginConfig,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
+    prepareStart: (input) => prepareTelegramStart(input, options)
+  });
+}
+async function prepareTelegramStart(input, options) {
+  let config;
+  try {
+    config = configFromPluginConfig(freshPluginConfig(input.context.config, input.initialConfig));
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service configuration is invalid or contains unresolved credentials.");
+  }
+  const capture = config.worker.telegramCapture;
+  if (!capture.enabled)
+    return;
+  if (!capture.pythonPath) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires an absolute worker.telegramCapture.pythonPath.");
+  }
+  assertUsableFile(capture.pythonPath, "Python interpreter");
+  const scriptPath = fileURLToPath2(new URL("../scripts/telegram-telethon-reader.py", options.moduleUrl));
+  assertUsableFile(scriptPath, "packaged Telegram reader");
+  const loadedEnv = baseEnvironment();
+  applyWorkerSetupEnv({
+    env: loadedEnv,
+    ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
+  });
+  const env = selectedTelegramEnvironment(loadedEnv);
+  for (const name of TELEGRAM_CREDENTIAL_NAMES) {
+    const value = capture.credentials[name]?.trim();
+    if (!value) {
+      throw new NativeProcessConfigurationError(`Olympus Telegram capture service requires resolved ${name} credentials.`);
+    }
+    env[name] = value;
+  }
+  if (!/^\d+$/.test(env.OLYMPUS_TELEGRAM_API_ID ?? "") || Number(env.OLYMPUS_TELEGRAM_API_ID) < 1) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires a positive numeric OLYMPUS_TELEGRAM_API_ID.");
+  }
+  applyConfiguredPaths(config, env);
+  const sessionPath = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
+  if (!sessionPath || !sessionPath.endsWith(".session")) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires an existing .session file.");
+  }
+  assertUsableFile(sessionPath, "Telegram .session");
+  const approvedScopes = firstPresent(env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
+  const approvedChatCount = approvedScopes?.split(",").map((scope) => scope.trim()).filter(Boolean).length ?? 0;
+  if (approvedChatCount === 0) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service requires at least one approved chat scope.");
+  }
+  const stateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR ?? join5(env.HOME ?? homedir3(), ".local/state/olympus/telegram-capture-gateway");
+  const instanceId = randomUUID4();
+  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  return {
+    command: capture.pythonPath,
+    args: [scriptPath, "--gateway"],
+    env,
+    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
+    endpointOccupied: false,
+    stateDir,
+    instanceId,
+    readinessProbe: (child) => telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child)
+  };
+}
+function freshPluginConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord7(contextConfig);
+  const entries = asRecord7(asRecord7(root?.plugins)?.entries);
+  const olympus = asRecord7(entries?.olympus);
+  if (entries) {
+    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  }
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+    return root;
+  }
+  return initialPluginConfig;
+}
+function baseEnvironment() {
+  return Object.fromEntries(["HOME", "PATH", "TMPDIR", "LANG"].map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
+}
+function selectedTelegramEnvironment(loadedEnv) {
+  const env = baseEnvironment();
+  for (const [name, value] of Object.entries(loadedEnv)) {
+    if (!value || !isSelectedTelegramSetting(name))
+      continue;
+    env[name] = value;
+  }
+  return env;
+}
+function isSelectedTelegramSetting(name) {
+  return MANAGED_TELEGRAM_ENV_NAMES.has(name);
+}
+function applyConfiguredPaths(config, env) {
+  const capture = config.worker.telegramCapture;
+  if (capture.sessionPath)
+    env.OLYMPUS_TELEGRAM_SESSION_PATH = capture.sessionPath;
+  if (capture.stateDir)
+    env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR = capture.stateDir;
+  if (capture.spoolDir)
+    env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR = capture.spoolDir;
+  if (capture.reportPath)
+    env.OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH = capture.reportPath;
+}
+function assertUsableFile(path, label) {
+  if (!isAbsolute3(path)) {
+    throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} path must be absolute.`);
+  }
+  try {
+    if (!statSync4(path).isFile())
+      throw new Error("not_file");
+  } catch {
+    throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} file is missing.`);
+  }
+}
+async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child) {
+  try {
+    const path = join5(stateDir, READINESS_FILE);
+    const stat2 = statSync4(path);
+    if (!stat2.isFile() || stat2.size > 16 * 1024)
+      return false;
+    const receipt = JSON.parse(readFileSync5(path, "utf8"));
+    return receipt.kind === "telegram_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.authenticated === true && typeof receipt.approved_chats === "number" && Number.isInteger(receipt.approved_chats) && receipt.approved_chats === approvedChatCount;
+  } catch {
+    return false;
+  }
+}
+function firstPresent(...values) {
+  return values.find((value) => value?.trim())?.trim();
+}
+function asRecord7(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -11562,8 +11834,8 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname10, join as join11 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname10, join as join12 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
@@ -11879,9 +12151,9 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { dirname as dirname7, join as join7 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname7, join as join8 } from "node:path";
 init_secret_store();
 
 // src/core/worker-service.ts
@@ -11920,11 +12192,11 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join7(homedir5(), ".olympus", "pending-oauth");
+  return join8(homedir6(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync7(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync8(path, "utf8")));
   } catch {
     return;
   }
@@ -12068,7 +12340,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join11(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join12(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -12244,14 +12516,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord11(await response.json());
-    const readiness = asRecord11(body.credential_readiness);
-    const policy = asRecord11(readiness.policy);
+    const body = asRecord12(await response.json());
+    const readiness = asRecord12(body.credential_readiness);
+    const policy = asRecord12(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord11(entry);
+      const profile = asRecord12(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -12304,7 +12576,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord11(await response.json());
+  const health = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -12357,7 +12629,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord11(await response.json());
+  const status = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -12365,7 +12637,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord11(entry);
+    const corpus = asRecord12(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -12379,8 +12651,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord11(corpus.counts);
-    const embeddingParity = asRecord11(corpus.embedding_parity);
+    const counts = asRecord12(corpus.counts);
+    const embeddingParity = asRecord12(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -12440,7 +12712,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord11(await response.json());
+  const status = asRecord12(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -12485,7 +12757,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord11(await response.json());
+  const status = asRecord12(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -12497,8 +12769,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord11(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord11(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord12(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord12(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -12555,7 +12827,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord11(value);
+  const record = asRecord12(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -12568,7 +12840,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord11(entry);
+    const credential = asRecord12(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -12620,7 +12892,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord11(await response.json());
+  const status = asRecord12(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -12648,7 +12920,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord11(entry);
+    const source = asRecord12(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -12658,7 +12930,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord11(taskEntry);
+      const task = asRecord12(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -12794,7 +13066,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord11(await response.json());
+    return asRecord12(await response.json());
   } catch {
     return;
   }
@@ -12804,7 +13076,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord11(await response.json());
+    const status = asRecord12(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -12813,7 +13085,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord11(status.ingestion_ledger);
+  const ledger = asRecord12(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -12821,7 +13093,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join11(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join12(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -12844,13 +13116,13 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync9(path))
       return;
-    const parsed = JSON.parse(readFileSync9(path, "utf8"));
-    const record = asRecord11(parsed);
-    const sources = asRecord11(record.sources);
+    const parsed = JSON.parse(readFileSync10(path, "utf8"));
+    const record = asRecord12(parsed);
+    const sources = asRecord12(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord11(sourceValue);
-      const terminal = asRecord11(source.failed_terminal_by_class);
+      const source = asRecord12(sourceValue);
+      const terminal = asRecord12(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -12878,9 +13150,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord11(await response.json());
+    const status = asRecord12(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord11(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord12(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -13021,7 +13293,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord11(corpus.last_refresh);
+  const lastRefresh = asRecord12(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -13036,13 +13308,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord11(corpus.last_refresh);
+  const lastRefresh = asRecord12(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord11(corpus.last_sync);
+  const lastSync = asRecord12(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord11(corpus.counts);
+  const counts = asRecord12(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -13073,13 +13345,13 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join11(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join12(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -13876,13 +14148,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord12(payload);
+  const result = asRecord13(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord12(result.audit);
-  const policy = asRecord12(result.policy);
-  const synthesis = asRecord12(audit?.answer_synthesis);
-  const timings = asRecord12(audit?.phase_timings);
+  const audit = asRecord13(result.audit);
+  const policy = asRecord13(result.policy);
+  const synthesis = asRecord13(audit?.answer_synthesis);
+  const timings = asRecord13(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -13892,7 +14164,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord12(item);
+    const record = asRecord13(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -13903,7 +14175,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord12(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord13(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -13955,7 +14227,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord12(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -13971,10 +14243,15 @@ var plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
+    const telegramService = createNativeTelegramService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url
+    });
     if (api.registerService) {
       api.registerService(workerService);
-    } else if (config.worker.service.enabled) {
-      throw new Error("This OpenClaw host does not support native Olympus worker services.");
+      api.registerService(telegramService);
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      throw new Error("This OpenClaw host does not support native Olympus services.");
     }
     const ctx = {
       config,
@@ -14180,7 +14457,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord12(value);
+  const record = asRecord13(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

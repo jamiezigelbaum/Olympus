@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -13,6 +13,43 @@ const PYTHON = Bun.which('python3');
 const pythonTest = test.skipIf(!PYTHON);
 
 describe('long-lived read-only Telethon capture gateway', () => {
+  pythonTest('publishes authenticated native startup identity before history capture', async () => {
+    const fixture = gatewayFixture();
+    const instance = '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f';
+    try {
+      const result = await runGateway(fixture, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instance, FAKE_REQUIRE_NATIVE_READY: '1' });
+      expect(result.code).toBe(0);
+      const path = join(fixture.stateDir, 'native-service-readiness.json');
+      const receipt = JSON.parse(readFileSync(path, 'utf8'));
+      expect(receipt).toMatchObject({ kind: 'telegram_capture_service_readiness', instance_id: instance, authenticated: true, approved_chats: 2 });
+      expect(typeof receipt.pid).toBe('number');
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(JSON.stringify(receipt)).not.toContain(SECRET_TEXT);
+      expect(JSON.stringify(receipt)).not.toContain('api_hash');
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
+  pythonTest('refuses an unpaired native session before scope reads or readiness', async () => {
+    const fixture = gatewayFixture();
+    try {
+      const result = await runGateway(fixture, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f', FAKE_UNAUTHORIZED: '1' });
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('telegram_session_not_authorized');
+      expect(existsSync(join(fixture.stateDir, 'native-service-readiness.json'))).toBe(false);
+      expect(readJsonLines(fixture.callLog)).toEqual([{ event: 'connect' }]);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
+  pythonTest('rejects malformed native identity before contacting Telegram', async () => {
+    const fixture = gatewayFixture();
+    try {
+      const result = await runGateway(fixture, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'not-an-instance' });
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('invalid_native_service_instance_id');
+      expect(result.stderr).not.toContain('not-an-instance');
+      expect(readJsonLines(fixture.callLog)).toEqual([]);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
   pythonTest('connects once, captures exact approved chats, tags protected records, and keeps forward/backfill cursors separate', async () => {
     const fixture = gatewayFixture();
     try {
@@ -670,8 +707,17 @@ class TelegramClient:
         self.session_path = session_path
         self._event_tasks = []
     async def __aenter__(self):
+        if os.environ.get("OLYMPUS_NATIVE_SERVICE_INSTANCE_ID"):
+            raise RuntimeError("native capture must not start interactive login")
         log({"event":"connect"})
         return self
+    async def connect(self):
+        log({"event":"connect"})
+    async def disconnect(self):
+        if self._event_tasks:
+            await asyncio.gather(*self._event_tasks)
+    async def is_user_authorized(self):
+        return os.environ.get("FAKE_UNAUTHORIZED") != "1"
     async def __aexit__(self, exc_type, exc, tb):
         if self._event_tasks:
             await asyncio.gather(*self._event_tasks)
@@ -714,6 +760,9 @@ class TelegramClient:
                 await callback(Event(spec))
         self._event_tasks.append(asyncio.create_task(emit()))
     async def iter_messages(self, entity, limit, offset_id=0, min_id=0, reverse=False):
+        if os.environ.get("FAKE_REQUIRE_NATIVE_READY") == "1":
+            with open(os.path.join(os.environ["OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR"], "native-service-readiness.json")) as ready:
+                assert json.load(ready)["instance_id"] == os.environ["OLYMPUS_NATIVE_SERVICE_INSTANCE_ID"]
         log({"event":"read","entity":entity.id,"limit":limit,"offset_id":offset_id,"min_id":min_id,"reverse":reverse})
         if os.environ.get("FAKE_TELETHON_SWEEP_EMPTY") == "true":
             ids = []

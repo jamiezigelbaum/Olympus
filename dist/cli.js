@@ -2992,6 +2992,11 @@ function mergeConfig(target, source) {
         ...source.worker.service ?? {},
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials
       },
+      telegramCapture: {
+        ...target.worker.telegramCapture,
+        ...source.worker.telegramCapture ?? {},
+        credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -3094,6 +3099,17 @@ function validateConfig(config) {
     throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
   }
   config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
+  config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
+  for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
+    const value = config.worker.telegramCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
+    }
+    config.worker.telegramCapture[key] = value.trim();
+  }
   for (const [key, value] of [
     ["runtimePath", config.worker.service.runtimePath],
     ["executablePath", config.worker.service.executablePath]
@@ -3191,6 +3207,25 @@ function parseNativeWorkerCredentials(value, serviceEnabled) {
   }
   return parsed;
 }
+function parseNativeTelegramCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError("config_error", `worker.telegramCapture.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.telegramCapture.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.telegramCapture.credentials.${name} must be resolved to a string before the native Telegram capture service starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
   if (typeof value === "string" && value.trim() === "")
     return [];
@@ -3274,7 +3309,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
     throw error;
   }
 }
-var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -3290,11 +3325,19 @@ var init_config = __esm(() => {
     "OLYMPUS_TELEGRAM_API_ID",
     "OLYMPUS_TELEGRAM_API_HASH"
   ]);
+  NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES = new Set([
+    "OLYMPUS_TELEGRAM_API_ID",
+    "OLYMPUS_TELEGRAM_API_HASH"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
       service: {
         enabled: false,
         startupTimeoutSeconds: 180,
+        credentials: {}
+      },
+      telegramCapture: {
+        enabled: false,
         credentials: {}
       },
       scheduler: {

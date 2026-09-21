@@ -59,6 +59,46 @@
               }
             }
           },
+          "telegramCapture": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Opt-in Gateway supervision for the local read-only Telegram capture process.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Run Telegram capture as an OpenClaw plugin service. Defaults to false."
+              },
+              "credentials": {
+                "type": "object",
+                "description": "Resolved Telethon application credentials. Only OLYMPUS_TELEGRAM_API_ID and OLYMPUS_TELEGRAM_API_HASH are accepted; supply raw values through Gateway SecretRefs.",
+                "additionalProperties": false,
+                "properties": {
+                  "OLYMPUS_TELEGRAM_API_ID": { "$ref": "#/$defs/secretInput" },
+                  "OLYMPUS_TELEGRAM_API_HASH": { "$ref": "#/$defs/secretInput" }
+                }
+              },
+              "pythonPath": {
+                "type": "string",
+                "description": "Absolute path to an operator-provisioned Python interpreter with Telethon installed."
+              },
+              "sessionPath": {
+                "type": "string",
+                "description": "Optional absolute path to the existing authorized Telethon .session file. Native config overrides worker.env."
+              },
+              "stateDir": {
+                "type": "string",
+                "description": "Optional absolute capture state directory. Native config overrides worker.env."
+              },
+              "spoolDir": {
+                "type": "string",
+                "description": "Optional absolute append-only capture spool directory. Native config overrides worker.env."
+              },
+              "reportPath": {
+                "type": "string",
+                "description": "Optional absolute capture status report path. Native config overrides worker.env."
+              }
+            }
+          },
           "scheduler": {
             "type": "object",
             "additionalProperties": false,
@@ -739,7 +779,8 @@
     "secretInputs": {
       "paths": [
         { "path": "worker.authToken", "expected": "string" },
-        { "path": "worker.service.credentials.*", "expected": "string" }
+        { "path": "worker.service.credentials.*", "expected": "string" },
+        { "path": "worker.telegramCapture.credentials.*", "expected": "string" }
       ]
     }
   },

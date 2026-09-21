@@ -65,7 +65,19 @@ afterEach(() => {
 describe('native OpenClaw plugin adapter', () => {
   test('inspects an enabled native service with opaque refs without using ambient worker auth', async () => {
     const ref = { source: 'env', provider: 'default', id: 'WORKER_SECRET' };
-    const pluginConfig = { worker: { authToken: ref, service: { enabled: true, credentials: { GEMINI_API_KEY: ref } } } };
+    const pluginConfig = {
+      worker: {
+        authToken: ref,
+        service: { enabled: true, credentials: { GEMINI_API_KEY: ref } },
+        telegramCapture: {
+          enabled: true,
+          credentials: {
+            OLYMPUS_TELEGRAM_API_ID: ref,
+            OLYMPUS_TELEGRAM_API_HASH: ref,
+          },
+        },
+      },
+    };
     const tools: NativeTool[] = [];
     const services: NativeWorkerServiceDefinition[] = [];
     let requests = 0;
@@ -79,17 +91,19 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(1);
+      expect(services).toHaveLength(2);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
       expect(JSON.stringify(result)).not.toContain('ambient-credential');
       expect(requests).toBe(0);
       await expect(services[0]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } })).rejects.toThrow('failed to become ready');
+      await expect(services[1]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } }))
+        .rejects.toThrow('configuration is invalid or contains unresolved credentials');
     } finally {
       if (ambient === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
       else process.env.OLYMPUS_WORKER_AUTH_TOKEN = ambient;
-      await services[0]?.stop();
+      await Promise.all(services.map((service) => service.stop()));
     }
   });
 
@@ -111,19 +125,29 @@ describe('native OpenClaw plugin adapter', () => {
       },
     });
 
-    expect(services).toEqual([{
-      id: 'olympus-worker',
-      reload: {
-        configPrefixes: [
-          'plugins.entries.olympus.config.worker',
-          'plugins.entries.olympus.config.email.baseUrl',
-          'plugins.entries.olympus.config.sourceIndex',
-          'plugins.entries.olympus.config.sovereignty',
-        ],
+    expect(services).toEqual([
+      {
+        id: 'olympus-worker',
+        reload: {
+          configPrefixes: [
+            'plugins.entries.olympus.config.worker',
+            'plugins.entries.olympus.config.email.baseUrl',
+            'plugins.entries.olympus.config.sourceIndex',
+            'plugins.entries.olympus.config.sovereignty',
+          ],
+        },
+        start: expect.any(Function),
+        stop: expect.any(Function),
       },
-      start: expect.any(Function),
-      stop: expect.any(Function),
-    }]);
+      {
+        id: 'olympus-telegram-capture',
+        reload: {
+          configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'],
+        },
+        start: expect.any(Function),
+        stop: expect.any(Function),
+      },
+    ]);
   });
 
   test('derives watch ownership only from authenticated caller context', () => {
@@ -333,6 +357,7 @@ describe('native OpenClaw plugin adapter', () => {
     expect(Object.keys(configSchemaProperties(['worker']))).toEqual(expect.arrayContaining([
       'authToken',
       'service',
+      'telegramCapture',
       'scheduler',
     ]));
     expect(Object.keys(configSchemaProperties(['worker', 'service']))).toEqual(expect.arrayContaining([
@@ -342,6 +367,17 @@ describe('native OpenClaw plugin adapter', () => {
       'runtimePath',
       'executablePath',
     ]));
+    expect(Object.keys(configSchemaProperties(['worker', 'telegramCapture']))).toEqual(expect.arrayContaining([
+      'enabled',
+      'credentials',
+      'pythonPath',
+      'sessionPath',
+      'stateDir',
+      'spoolDir',
+      'reportPath',
+    ]));
+    expect(Object.keys(asRecord(configSchemaProperties(['worker', 'telegramCapture']).credentials).properties as Record<string, unknown>))
+      .toEqual(['OLYMPUS_TELEGRAM_API_ID', 'OLYMPUS_TELEGRAM_API_HASH']);
     expect(Object.keys(configSchemaProperties(['worker', 'scheduler']))).toEqual(expect.arrayContaining([
       'enabled',
       'sourceIds',
@@ -404,6 +440,7 @@ describe('native OpenClaw plugin adapter', () => {
     expect(manifest.configContracts.secretInputs.paths).toEqual([
       { path: 'worker.authToken', expected: 'string' },
       { path: 'worker.service.credentials.*', expected: 'string' },
+      { path: 'worker.telegramCapture.credentials.*', expected: 'string' },
     ]);
     const secretInput = asRecord(asRecord(manifest.configSchema).$defs).secretInput;
     expect(asRecord(secretInput).oneOf).toEqual([

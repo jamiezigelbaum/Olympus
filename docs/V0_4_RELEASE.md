@@ -590,14 +590,28 @@ file edits or an agent-only repair.
 
 ## Installation remediation (2026-09-20)
 
-Progress (2026-09-21): the PR47 bundle is activated on the owner installation;
-native validation/restart and a real source-index status turn passed, with ten
-corpora retained and no degraded worker credentials. The retained source
-credential consumers use the separately scoped Connect identity. Expert Agents
-activation remains independently owned and does not change this product's scope.
-Native worker supervision remains off until its environment and scheduler
-selection are preserved and inspection can register opaque SecretRefs safely.
-Unresolved explicit worker references must never fall back to ambient credentials.
+Progress (2026-09-21): PR47 and PR48 are activated on the owner installation.
+The source worker now runs as a native Gateway service with its prior seven-source
+scheduler selection preserved. Native validation/restart and a real source-index
+status turn passed: ten corpora retained, two credential profiles ready, and no
+degraded worker credentials. Its separate process receives no Connect bootstrap
+or Gateway token. The superseded email-source unit and drop-ins are archived. Successful native
+Gmail, Drive, and Readwise pulls also qualified retirement of the duplicate
+email/cloud freshness timers; their definitions and logs remain recoverable.
+Retained source credential consumers use the separate read-only Connect identity;
+shared cache and service-account retirement still requires dependency clearance.
+Expert Agents PR122 was separately authorized, activated, and verified with a real
+domain status tool call. The CPU workstream has ended and the owner has transferred
+Gateway custody to this remediation task. Telegram capture and remaining background
+service migrations are still in progress. Unresolved explicit worker references
+must never fall back to ambient credentials.
+
+Remaining live account actions: X bookmarks requires renewed OAuth consent;
+WhatsApp requires relinking the device. The unpaired WhatsApp producer's retry
+loop is stopped pending pairing, with session and spool data preserved. Neither
+an active service unit nor a successful empty spool import proves fresh capture.
+The shared cache remains because operator callers still exist and one other-host
+dependency check cannot complete while that host is locked.
 
 Owner-authorized work: complete the Olympus credential migration to the existing
 1Password Connect installation with a separate read-only token and minimum vault
@@ -606,9 +620,9 @@ correct worker readiness diagnostics; restore source operation; move Olympus
 background capabilities into native plugin services with supervised heavy-work
 children; retire obsolete deployment machinery and the old Mac tunnel/state from
 active use after preserving recovery copies. Preserve standalone MCP support.
-Gateway configuration, installs, reloads and restarts remain with the current
-platform owner. The platform lane owns the active CPU incident; incorporate its
-findings into worker containment without concurrent host tuning. Shared caches
+Gateway configuration, installs, reloads and restarts follow the canonical host
+protocol under the explicitly transferred custody. Preserve the completed CPU
+fixes and avoid unrelated host tuning. Shared caches
 and service accounts remain until other-host dependencies are checked.
 
 ### Deferred: high-value email embeddings

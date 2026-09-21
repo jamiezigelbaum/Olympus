@@ -69,6 +69,11 @@ const NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES = new Set([
   'OLYMPUS_TELEGRAM_API_HASH',
 ]);
 
+const NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES = new Set([
+  'OLYMPUS_TELEGRAM_API_ID',
+  'OLYMPUS_TELEGRAM_API_HASH',
+]);
+
 export interface OlympusConfig {
   sovereignty?: {
     configPath?: string;
@@ -89,6 +94,16 @@ export interface OlympusConfig {
       credentials: Record<string, string>;
       runtimePath?: string;
       executablePath?: string;
+    };
+    /** Opt-in Gateway supervision of the local Telethon capture process. */
+    telegramCapture: {
+      enabled: boolean;
+      credentials: Record<string, string>;
+      pythonPath?: string;
+      sessionPath?: string;
+      stateDir?: string;
+      spoolDir?: string;
+      reportPath?: string;
     };
     scheduler: {
       enabled: boolean;
@@ -141,6 +156,10 @@ const DEFAULT_CONFIG: OlympusConfig = {
     service: {
       enabled: false,
       startupTimeoutSeconds: 180,
+      credentials: {},
+    },
+    telegramCapture: {
+      enabled: false,
       credentials: {},
     },
     scheduler: {
@@ -480,6 +499,23 @@ export function configFromPluginConfig(
       config.worker.service.executablePath = service.executablePath.trim();
     }
   }
+  const telegramCapture = asRecord(worker?.telegramCapture);
+  if (telegramCapture) {
+    if (typeof telegramCapture.enabled === 'boolean') {
+      config.worker.telegramCapture.enabled = telegramCapture.enabled;
+    }
+    const credentials = asRecord(telegramCapture.credentials);
+    if (credentials) {
+      config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(
+        credentials,
+        requireResolvedWorkerSecrets && config.worker.telegramCapture.enabled,
+      );
+    }
+    for (const key of ['pythonPath', 'sessionPath', 'stateDir', 'spoolDir', 'reportPath'] as const) {
+      const value = telegramCapture[key];
+      if (typeof value === 'string' && value.trim()) config.worker.telegramCapture[key] = value.trim();
+    }
+  }
   if (worker && Object.prototype.hasOwnProperty.call(worker, 'authToken') && typeof worker.authToken !== 'string') {
     config.worker.authTokenSecretRefUnresolved = true;
     if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
@@ -700,6 +736,11 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.service ?? {}),
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials,
       },
+      telegramCapture: {
+        ...target.worker.telegramCapture,
+        ...(source.worker.telegramCapture ?? {}),
+        credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials,
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...(source.worker.scheduler ?? {}),
@@ -854,6 +895,19 @@ function validateConfig(config: OlympusConfig): void {
     config.worker.service.credentials,
     config.worker.service.enabled,
   );
+  assertBoolean(config.worker.telegramCapture.enabled, 'worker.telegramCapture.enabled');
+  config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(
+    config.worker.telegramCapture.credentials,
+    config.worker.telegramCapture.enabled,
+  );
+  for (const key of ['pythonPath', 'sessionPath', 'stateDir', 'spoolDir', 'reportPath'] as const) {
+    const value = config.worker.telegramCapture[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.telegramCapture.${key} must be an absolute path.`);
+    }
+    config.worker.telegramCapture[key] = value.trim();
+  }
   for (const [key, value] of [
     ['runtimePath', config.worker.service.runtimePath],
     ['executablePath', config.worker.service.executablePath],
@@ -989,6 +1043,38 @@ function parseNativeWorkerCredentials(
       throw new OperationError(
         'config_error',
         `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`,
+      );
+    }
+  }
+  return parsed;
+}
+
+function parseNativeTelegramCredentials(
+  value: Record<string, unknown>,
+  serviceEnabled: boolean,
+): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError(
+        'config_error',
+        `worker.telegramCapture.credentials does not allow environment name ${name}.`,
+      );
+    }
+    if (typeof credential === 'string') {
+      if (!credential.trim()) {
+        throw new OperationError(
+          'config_error',
+          `worker.telegramCapture.credentials.${name} must not be empty.`,
+        );
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError(
+        'config_error',
+        `worker.telegramCapture.credentials.${name} must be resolved to a string before the native Telegram capture service starts.`,
       );
     }
   }
