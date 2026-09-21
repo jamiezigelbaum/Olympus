@@ -162,3 +162,7 @@ replaced, spool write failure) — the daemon is deliberately crash-only.
   message content leaves the host through this bridge.
 
 New pairings advertise the linked-device name **Olympus Plugin** using the desktop device type.
+
+If WhatsApp requests interactive passkey authentication, this headless bridge
+removes its stale QR and stops with an explicit unsupported-flow message.
+It does not synthesize authenticator responses or bypass phone consent.

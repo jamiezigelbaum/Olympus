@@ -83,3 +83,11 @@ Each row becomes v0.4-qualified only when the same clean installation proves:
    with fail-closed behavior; and
 6. dashboard status that comes from this canonical state rather than a legacy
    index, migration switch, or private deployment report.
+
+### WhatsApp pairing limitation
+
+The read-only capture bridge supports ordinary linked-device QR pairing and
+reuse of an already authorized session. If WhatsApp instead requests interactive
+passkey authentication, the headless bridge cannot complete that flow: it removes
+the stale QR and stops with an explicit error. Do not report the source connected,
+keep retrying the old QR, or weaken the account's authentication settings.

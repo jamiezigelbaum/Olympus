@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"go.mau.fi/whatsmeow"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -63,5 +65,32 @@ func TestUpgradePreservesExistingUnpairedMappingState(t *testing.T) {
 	}
 	if devices != 0 {
 		t.Fatal("upgrade must not manufacture a paired device")
+	}
+}
+
+func TestUnsupportedPasskeyStopsOfferingStaleQR(t *testing.T) {
+	for _, event := range []string{whatsmeow.QRChannelEventPasskeyRequest, whatsmeow.QRChannelEventPasskeyResponse} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, qrFileName)
+		if err := os.WriteFile(path, []byte("synthetic QR"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectUnsupportedPairing(event, dir); err == nil {
+			t.Fatal("passkey flow must be explicitly refused")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("stale QR must be removed")
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, qrFileName)
+	if err := os.WriteFile(path, []byte("synthetic QR"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnsupportedPairing(whatsmeow.QRChannelEventCode, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("ordinary QR flow must remain available")
 	}
 }
