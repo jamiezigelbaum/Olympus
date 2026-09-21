@@ -213,7 +213,7 @@ It runs at the start of every job by default, and as a user timer every
 Host-side steps, per the standing deploy path (pull the worker checkout,
 install templates, restart). The wrapper and units are new templates in
 this repository; the private host installer (`olympus-ops`) needs a step
-that copies them, mirroring `install-sparta-email-cloud-freshness-units.sh`:
+that copies them:
 
 1. Pull the worker checkout to the merged `main` SHA and confirm it:
    `cd ~/.openclaw/plugin-src/Olympus && git checkout -- dist/cli.js && git pull --ff-only && git log --oneline -1`.

@@ -18,8 +18,9 @@ import hashlib
 import json
 import os
 import sys
+import uuid
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -237,7 +238,31 @@ class GatewayConfig:
     stale_threshold_seconds: int
 
 
+@asynccontextmanager
+async def gateway_client_session(client: Any, native: bool):
+    if not native:
+        async with client:
+            yield client
+        return
+    # Telethon's normal context manager calls start(), which may initiate login.
+    # Native capture only connects an already paired device, before any reads.
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise SafeConfigError("telegram_session_not_authorized")
+        yield client
+    finally:
+        await client.disconnect()
+
+
 async def run_gateway(run_once: bool = False) -> None:
+    instance_id = os.environ.get("OLYMPUS_NATIVE_SERVICE_INSTANCE_ID", "").strip()
+    if instance_id:
+        try:
+            if str(uuid.UUID(instance_id)) != instance_id:
+                raise ValueError("noncanonical")
+        except ValueError as error:
+            raise SafeConfigError("invalid_native_service_instance_id") from error
     config = gateway_config()
     api_id = require_int_env("OLYMPUS_TELEGRAM_API_ID")
     api_hash = require_env("OLYMPUS_TELEGRAM_API_HASH")
@@ -258,7 +283,7 @@ async def run_gateway(run_once: bool = False) -> None:
         sender_cache_lock = asyncio.Lock()
         sender_display_names: OrderedDict[str, str | None] = OrderedDict()
         reaction_entities: dict[str, Any] = {}
-        async with TelegramClient(session_path, api_id, api_hash) as client:
+        async with gateway_client_session(TelegramClient(session_path, api_id, api_hash), bool(instance_id)) as client:
             event_scopes, event_entities = await resolve_gateway_event_scopes(client, config)
 
             async def capture_new_message(event: Any) -> None:
@@ -292,6 +317,17 @@ async def run_gateway(run_once: bool = False) -> None:
             # the new-message lane cannot see one. It rides its own raw handler
             # and its own counters; the message lane above is untouched.
             client.add_event_handler(capture_reaction, events.Raw(types=[UpdateMessageReactions]))
+            if instance_id:
+                # Startup proof is separate from coverage: a long first history
+                # sweep must not look like an unstarted process to its owner.
+                write_json_atomic(config.state_dir / "native-service-readiness.json", {
+                    "kind": "telegram_capture_service_readiness",
+                    "instance_id": instance_id,
+                    "pid": os.getpid(),
+                    "authenticated": True,
+                    "approved_chats": len(config.approved_scopes),
+                    "generated_at": gateway_now_iso(),
+                })
             while True:
                 event_appended_before_cycle = gateway_event_lane_appended(state)
                 # Give callbacks already queued by Telethon a chance to land before

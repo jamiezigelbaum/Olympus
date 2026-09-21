@@ -559,3 +559,24 @@ an authenticated response bearing the child instance ID. The startup deadline
 is 180 seconds by default and can be configured with `startupTimeoutSeconds`
 (up to 600 seconds). Failures remain visible through native service health;
 unexpected exits back off, and shutdown terminates the owned child process group.
+
+### Optional native Telegram capture
+
+After pairing Telegram, enable `worker.telegramCapture.enabled` through the
+host's supported configuration command. Set `pythonPath` to an absolute Python
+interpreter with Telethon installed and `sessionPath` to the existing `.session`
+file. The packaged reader is selected automatically. Supply `OLYMPUS_TELEGRAM_API_ID`
+and `OLYMPUS_TELEGRAM_API_HASH` under `worker.telegramCapture.credentials` as
+Gateway SecretRefs. The capture child receives only its Telegram settings and
+credentials; it does not receive the source worker's other provider credentials.
+
+Preserve the approved chat scopes and security classifications in `worker.env`
+before activation. Optional `stateDir`, `spoolDir`, and `reportPath` settings
+select existing capture locations; changing paths does not migrate data. Stop
+an existing capture producer before enabling its replacement. The state-directory
+lock prevents two producers from sharing one capture state.
+
+Native capture never initiates interactive login. It reports ready only after
+an existing session authenticates, using a private receipt containing the child
+PID and a new instance ID. Capture freshness remains a separate check: a process
+ready to capture is not proof that new messages have arrived or been indexed.

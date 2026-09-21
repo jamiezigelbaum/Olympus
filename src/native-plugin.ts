@@ -9,6 +9,7 @@ import {
   createNativeWorkerService,
   type NativeWorkerServiceDefinition,
 } from './core/native-worker-service.ts';
+import { createNativeTelegramService } from './core/native-telegram-service.ts';
 import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
@@ -218,10 +219,15 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const telegramService = createNativeTelegramService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url,
+    });
     if (api.registerService) {
       api.registerService(workerService);
-    } else if (config.worker.service.enabled) {
-      throw new Error('This OpenClaw host does not support native Olympus worker services.');
+      api.registerService(telegramService);
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      throw new Error('This OpenClaw host does not support native Olympus services.');
     }
     const ctx: OperationContext = {
       config,
