@@ -95,7 +95,7 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(4);
+      expect(services).toHaveLength(5);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
@@ -162,6 +162,12 @@ describe('native OpenClaw plugin adapter', () => {
         reload: {
           configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'],
         },
+        start: expect.any(Function),
+        stop: expect.any(Function),
+      },
+      {
+        id: 'olympus-provider-credit-monitor',
+        reload: { configPrefixes: ['plugins.entries.olympus.config.worker.creditMonitor'] },
         start: expect.any(Function),
         stop: expect.any(Function),
       },
@@ -391,6 +397,7 @@ describe('native OpenClaw plugin adapter', () => {
     expect(Object.keys(configSchemaProperties(['worker']))).toEqual(expect.arrayContaining([
       'authToken',
       'service',
+      'creditMonitor',
       'telegramCapture',
       'whatsappCapture',
       'embeddingDrain',
@@ -491,6 +498,7 @@ describe('native OpenClaw plugin adapter', () => {
       { path: 'worker.authToken', expected: 'string' },
       { path: 'worker.service.credentials.*', expected: 'string' },
       { path: 'worker.telegramCapture.credentials.*', expected: 'string' },
+      { path: 'worker.creditMonitor.credentials.*', expected: 'string' },
       { path: 'worker.embeddingDrain.credentials.*', expected: 'string' },
     ]);
     const secretInput = asRecord(asRecord(manifest.configSchema).$defs).secretInput;

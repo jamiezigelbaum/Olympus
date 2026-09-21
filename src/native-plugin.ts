@@ -1,3 +1,4 @@
+import { createNativeCreditMonitorService } from './core/native-credit-monitor-service.ts';
 import { backgroundNativeProcessService } from './core/native-process-service.ts';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -226,6 +227,7 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
     const whatsappService = createNativeWhatsAppService({
       initialPluginConfig: api.pluginConfig,
     });
@@ -236,11 +238,13 @@ const plugin = {
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
+      api.registerService(creditMonitorService);
       api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
     } else if (
       config.worker.service.enabled
       || config.worker.telegramCapture.enabled
+      || config.worker.creditMonitor.enabled
       || config.worker.whatsappCapture.enabled
       || config.worker.embeddingDrain.enabled
     ) {

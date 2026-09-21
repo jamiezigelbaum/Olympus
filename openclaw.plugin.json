@@ -59,6 +59,21 @@
               }
             }
           },
+          "creditMonitor": {
+            "type": "object", "additionalProperties": false,
+            "description": "Optional native provider-credit monitoring; presently supports Venice billing.",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "provider": { "type": "string", "enum": ["venice"] },
+              "intervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+              "reportPath": { "type": "string", "description": "Absolute path for the private billing status report." },
+              "pauseFile": { "type": "string", "description": "Optional absolute path for the existing Venice pause marker." },
+              "credentials": {
+                "type": "object", "additionalProperties": false,
+                "properties": { "VENICE_API_KEY": { "$ref": "#/$defs/secretInput" } }
+              }
+            }
+          },
           "telegramCapture": {
             "type": "object",
             "additionalProperties": false,
@@ -832,6 +847,7 @@
         { "path": "worker.authToken", "expected": "string" },
         { "path": "worker.service.credentials.*", "expected": "string" },
         { "path": "worker.telegramCapture.credentials.*", "expected": "string" },
+        { "path": "worker.creditMonitor.credentials.*", "expected": "string" },
         { "path": "worker.embeddingDrain.credentials.*", "expected": "string" }
       ]
     }
