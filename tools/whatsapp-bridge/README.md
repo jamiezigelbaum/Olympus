@@ -160,3 +160,5 @@ replaced, spool write failure) — the daemon is deliberately crash-only.
 - Audio messages are downloaded into the private bounded local media cache for
   the local transcription lane. Other media keeps metadata only; no media or
   message content leaves the host through this bridge.
+
+New pairings advertise the linked-device name **Olympus Plugin** using the desktop device type.

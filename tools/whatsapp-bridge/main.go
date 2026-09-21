@@ -55,6 +55,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -196,11 +197,19 @@ type spoolRecord struct {
 	ReactionSenderTimestampMS int64  `json:"reaction_sender_timestamp_ms,omitempty"`
 }
 
+func configureDeviceIdentity() {
+	name := "Olympus Plugin"
+	store.DeviceProps.Os = &name
+	// UNKNOWN is displayed as "Other device"; DESKTOP uses the supplied name.
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
+}
+
 func main() {
 	// The linked-device store and every derivative written by this process are
 	// secret-bearing local state. Keep safe modes even when the daemon is run
 	// manually instead of through the systemd unit (which also sets UMask=0077).
 	syscall.Umask(0o077)
+	configureDeviceIdentity()
 
 	// Resolve the startup mode before touching the state dir, the session
 	// store, or the provider: an unusable native-mode request must fail without
