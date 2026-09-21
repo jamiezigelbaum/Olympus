@@ -88,7 +88,8 @@ export function backgroundNativeProcessService(
   return {
     ...service,
     async start(context) {
-      void service.start(context).catch(() => {
+      void service.start(context).catch((error) => {
+        if (error instanceof NativeProcessReportedStartError) return;
         // The supervisor normally reports a categorical failure itself. This
         // also covers cleanup failure; never forward raw child/spawn errors.
         try {
@@ -120,6 +121,9 @@ export class NativeProcessServiceStoppedError extends Error {}
  * verbatim, unlike raw spawn/HTTP failures.
  */
 export class NativeProcessConfigurationError extends Error {}
+
+/** The supervisor already sent this sanitized failure to its current health lease. */
+class NativeProcessReportedStartError extends Error {}
 
 /**
  * Reusable process supervision for native child services: fresh-config start,
@@ -280,7 +284,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
           : `Olympus ${options.label} failed to become ready.`;
         reportFailure(lifetime, message);
         if (current === lifetime) current = undefined;
-        throw new Error(message);
+        throw new NativeProcessReportedStartError(message);
       }
     },
     async stop() {

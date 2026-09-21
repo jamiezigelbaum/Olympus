@@ -9801,7 +9801,9 @@ function backgroundNativeProcessService(service) {
   return {
     ...service,
     async start(context) {
-      service.start(context).catch(() => {
+      service.start(context).catch((error) => {
+        if (error instanceof NativeProcessReportedStartError)
+          return;
         try {
           context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
         } catch {}
@@ -9814,6 +9816,9 @@ class NativeProcessServiceStoppedError extends Error {
 }
 
 class NativeProcessConfigurationError extends Error {
+}
+
+class NativeProcessReportedStartError extends Error {
 }
 function createNativeProcessService(options) {
   const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
@@ -9944,7 +9949,7 @@ function createNativeProcessService(options) {
         reportFailure(lifetime, message);
         if (current === lifetime)
           current = undefined;
-        throw new Error(message);
+        throw new NativeProcessReportedStartError(message);
       }
     },
     async stop() {

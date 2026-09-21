@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { backgroundNativeProcessService, createNativeProcessService } from '../src/core/native-process-service.ts';
+import { backgroundNativeProcessService, createNativeProcessService, NativeProcessConfigurationError } from '../src/core/native-process-service.ts';
 
 test('native registration returns promptly while readiness and stop remain owned', async () => {
   const health: string[] = [];
@@ -55,4 +55,16 @@ test('retirement from the initializing health callback prevents a stale child sp
   await service.start({ serviceHealth: { reportFailure() { stop = service.stop(); }, clearFailure() {} } });
   await stop;
   expect(spawned).toBe(false);
+});
+
+
+test('retains an actionable configuration failure instead of replacing it with a generic error', async () => {
+  const failures: string[] = [];
+  const service = backgroundNativeProcessService(createNativeProcessService({
+    id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+    async prepareStart() { throw new NativeProcessConfigurationError('Configure the required resolved fixture credential.'); },
+  }));
+  await service.start({ serviceHealth: { reportFailure(e) { failures.push(e.message); }, clearFailure() {} } });
+  await Bun.sleep(10);
+  expect(failures).toEqual(['Configure the required resolved fixture credential.']);
 });
