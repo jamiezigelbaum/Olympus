@@ -78,6 +78,29 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
   restartDelaysMs?: readonly number[];
 }
 
+/** OpenClaw replacement starts have a five-second deadline. Keep the host
+ * callback prompt while this supervisor retains readiness, failure, and stop
+ * ownership. Initializing children remain degraded until their receipt passes.
+ */
+export function backgroundNativeProcessService(
+  service: NativeProcessServiceDefinition,
+): NativeProcessServiceDefinition {
+  return {
+    ...service,
+    async start(context) {
+      void service.start(context).catch(() => {
+        // The supervisor normally reports a categorical failure itself. This
+        // also covers cleanup failure; never forward raw child/spawn errors.
+        try {
+          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
+        } catch {
+          // A stopped/replaced host lease must not resurrect stale health.
+        }
+      });
+    },
+  };
+}
+
 interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   generation: number;
   context: NativeProcessServiceContext;
@@ -181,6 +204,8 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (settings.endpointOccupied) {
       throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
+    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
       stdio: 'ignore',

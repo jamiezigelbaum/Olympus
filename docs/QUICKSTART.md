@@ -559,6 +559,9 @@ an authenticated response bearing the child instance ID. The startup deadline
 is 180 seconds by default and can be configured with `startupTimeoutSeconds`
 (up to 600 seconds). Failures remain visible through native service health;
 unexpected exits back off, and shutdown terminates the owned child process group.
+Slow child initialization runs in the background so it fits the host's bounded
+hot-replacement callback. Native service health reports initialization until the
+child passes its readiness check; installation alone does not prove it ready.
 
 ### Optional native Telegram capture
 

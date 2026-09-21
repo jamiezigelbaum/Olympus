@@ -96,7 +96,7 @@ describe('native Olympus worker service', () => {
     await service.start({ serviceHealth: healthRecorder(events) });
 
     expect(readCount(fixture.countPath)).toBe(1);
-    expect(events).toEqual(['clear']);
+    expect(events).toEqual(['failure:Olympus worker is starting.', 'clear']);
   });
 
   test('does not inherit Gateway and 1Password bootstrap credentials', async () => {
@@ -237,7 +237,7 @@ describe('native Olympus worker service', () => {
       && events.at(-1) === 'clear'
     ));
 
-    expect(events).toEqual(['clear', 'failure:Olympus worker exited unexpectedly.', 'clear']);
+    expect(events).toEqual(['failure:Olympus worker is starting.', 'clear', 'failure:Olympus worker exited unexpectedly.', 'failure:Olympus worker is starting.', 'clear']);
   });
 
   test('cleans a crashed worker process group before starting its replacement', async () => {
@@ -276,8 +276,8 @@ describe('native Olympus worker service', () => {
     }));
     await service.start({
       serviceHealth: {
-        reportFailure() {
-          stopAfterCrash = service.stop();
+        reportFailure(error) {
+          if (error.message === 'Olympus worker exited unexpectedly.') stopAfterCrash = service.stop();
         },
         clearFailure() {},
       },
@@ -365,7 +365,7 @@ describe('native Olympus worker service', () => {
     await Bun.sleep(80);
 
     expect(readCount(fixture.countPath)).toBe(1);
-    expect(events).toEqual(['failure:Olympus worker failed to become ready.']);
+    expect(events).toEqual(['failure:Olympus worker is starting.', 'failure:Olympus worker failed to become ready.']);
   });
 
   test('reconstructs child resources across repeated start and stop calls', async () => {

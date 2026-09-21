@@ -1,3 +1,4 @@
+import { backgroundNativeProcessService } from './core/native-process-service.ts';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { configFromPluginConfig } from './core/config.ts';
@@ -224,8 +225,8 @@ const plugin = {
       moduleUrl: import.meta.url,
     });
     if (api.registerService) {
-      api.registerService(workerService);
-      api.registerService(telegramService);
+      api.registerService(backgroundNativeProcessService(workerService));
+      api.registerService(backgroundNativeProcessService(telegramService));
     } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }

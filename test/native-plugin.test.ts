@@ -97,9 +97,16 @@ describe('native OpenClaw plugin adapter', () => {
       expect(JSON.stringify(result)).toContain('has not been resolved');
       expect(JSON.stringify(result)).not.toContain('ambient-credential');
       expect(requests).toBe(0);
-      await expect(services[0]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } })).rejects.toThrow('failed to become ready');
-      await expect(services[1]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } }))
-        .rejects.toThrow('configuration is invalid or contains unresolved credentials');
+      const failures: string[] = [];
+      for (const service of services) await service.start({
+        config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
+        serviceHealth: { reportFailure(error) { failures.push(error.message); }, clearFailure() {} },
+      });
+      await Bun.sleep(10);
+      expect(failures.some((message) => message.includes('failed to become ready'))).toBe(true);
+      expect(failures.some((message) => message.includes('configuration is invalid or contains unresolved credentials'))).toBe(true);
+      expect(requests).toBe(0);
+
     } finally {
       if (ambient === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
       else process.env.OLYMPUS_WORKER_AUTH_TOKEN = ambient;
@@ -111,7 +118,14 @@ describe('native OpenClaw plugin adapter', () => {
     const pluginConfig = { worker: { authToken: 'explicit-worker-credential', service: { enabled: true, credentials: { GEMINI_API_KEY: { source: 'env', provider: 'default', id: 'GEMINI_SECRET' } } } } };
     const services: NativeWorkerServiceDefinition[] = [];
     expect(registeredToolNames(pluginConfig, { registerService(service: NativeWorkerServiceDefinition) { services.push(service); } })).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-    await expect(services[0]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } })).rejects.toThrow('failed to become ready');
+    const failures: string[] = [];
+    await services[0]!.start({
+      config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
+      serviceHealth: { reportFailure(error) { failures.push(error.message); }, clearFailure() {} },
+    });
+    await Bun.sleep(10);
+    expect(failures.some((message) => message.includes('failed to become ready'))).toBe(true);
+
     await services[0]!.stop();
   });
 

@@ -9792,6 +9792,260 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
+// src/core/native-process-service.ts
+import { spawn as spawnProcess } from "node:child_process";
+var DEFAULT_READINESS_POLL_MS = 100;
+var DEFAULT_STOP_GRACE_MS = 2000;
+var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
+function backgroundNativeProcessService(service) {
+  return {
+    ...service,
+    async start(context) {
+      service.start(context).catch(() => {
+        try {
+          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
+        } catch {}
+      });
+    }
+  };
+}
+
+class NativeProcessServiceStoppedError extends Error {
+}
+
+class NativeProcessConfigurationError extends Error {
+}
+function createNativeProcessService(options) {
+  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
+  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const spawnChild = options.spawn ?? spawnProcess;
+  let generation = 0;
+  let current;
+  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  const clearFailure = (lifetime) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.clearFailure();
+    } catch {}
+  };
+  const scheduleRestart = (lifetime) => {
+    if (!isCurrent(lifetime) || lifetime.restartTimer)
+      return;
+    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    const delay = restartDelaysMs[index] ?? 30000;
+    lifetime.restartAttempt += 1;
+    lifetime.restartTimer = setTimeout(() => {
+      lifetime.restartTimer = undefined;
+      if (!isCurrent(lifetime))
+        return;
+      launch(lifetime).catch(async (error) => {
+        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
+        scheduleRestart(lifetime);
+      });
+    }, delay);
+    lifetime.restartTimer.unref?.();
+  };
+  const launch = async (lifetime) => {
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const settings = await options.prepareStart({
+      serviceId: options.id,
+      serviceLabel: options.label,
+      context: lifetime.context,
+      initialConfig: options.initialConfig
+    });
+    if (!settings)
+      return;
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (settings.endpointOccupied) {
+      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
+    }
+    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const child = spawnChild(settings.command, [...settings.args], {
+      env: settings.env,
+      stdio: "ignore",
+      detached: process.platform !== "win32",
+      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
+    });
+    lifetime.child = child;
+    lifetime.childReady = false;
+    let spawnFailed = false;
+    child.once("exit", () => {
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
+        return;
+      lifetime.childReady = false;
+      const cleanup = terminateChild(lifetime, stopGraceMs, child);
+      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      cleanup.then(() => {
+        scheduleRestart(lifetime);
+      }).catch(() => {
+        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
+      });
+    });
+    child.once("error", () => {
+      spawnFailed = true;
+    });
+    await waitForChildReadiness({
+      lifetime,
+      child,
+      settings,
+      isCurrent,
+      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+      readinessPollMs,
+      spawnFailed: () => spawnFailed
+    });
+    if (!isCurrent(lifetime) || lifetime.child !== child)
+      throw new NativeProcessServiceStoppedError;
+    if (spawnFailed || childExited(child))
+      throw new Error(`Olympus ${options.label} exited during startup.`);
+    lifetime.childReady = true;
+    lifetime.restartAttempt = 0;
+    clearFailure(lifetime);
+    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
+  };
+  return {
+    id: options.id,
+    reload: { configPrefixes: [...options.reload.configPrefixes] },
+    async start(context) {
+      await stopCurrent();
+      const lifetime = {
+        generation: ++generation,
+        context,
+        child: undefined,
+        childReady: false,
+        stopping: false,
+        restartAttempt: 0,
+        restartTimer: undefined,
+        cleanupPromise: undefined
+      };
+      current = lifetime;
+      try {
+        await launch(lifetime);
+      } catch (error) {
+        if (error instanceof NativeProcessServiceStoppedError)
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
+        reportFailure(lifetime, message);
+        if (current === lifetime)
+          current = undefined;
+        throw new Error(message);
+      }
+    },
+    async stop() {
+      await stopCurrent();
+    }
+  };
+  async function stopCurrent() {
+    const lifetime = current;
+    if (!lifetime)
+      return;
+    current = undefined;
+    lifetime.stopping = true;
+    if (lifetime.restartTimer) {
+      clearTimeout(lifetime.restartTimer);
+      lifetime.restartTimer = undefined;
+    }
+    await terminateChild(lifetime, stopGraceMs);
+  }
+}
+async function waitForChildReadiness(input) {
+  const deadline = Date.now() + input.startupTimeoutMs;
+  while (Date.now() < deadline) {
+    if (!input.isCurrent(input.lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (input.spawnFailed() || childExited(input.child))
+      throw new Error("Child exited during startup.");
+    const ready = await input.settings.readinessProbe(input.child);
+    if (ready) {
+      if (!input.isCurrent(input.lifetime))
+        throw new NativeProcessServiceStoppedError;
+      if (input.spawnFailed() || childExited(input.child))
+        throw new Error("Child exited during startup.");
+      return;
+    }
+    await delay(input.readinessPollMs);
+  }
+  throw new Error("Child readiness timed out.");
+}
+async function terminateChild(lifetime, graceMs, expectedChild) {
+  if (lifetime.cleanupPromise)
+    return await lifetime.cleanupPromise;
+  const child = lifetime.child;
+  if (expectedChild && child !== expectedChild)
+    return;
+  lifetime.child = undefined;
+  lifetime.childReady = false;
+  if (!child?.pid)
+    return;
+  const cleanup = terminateChildProcessGroup(child, graceMs);
+  lifetime.cleanupPromise = cleanup;
+  try {
+    await cleanup;
+  } finally {
+    if (lifetime.cleanupPromise === cleanup)
+      lifetime.cleanupPromise = undefined;
+  }
+}
+async function terminateChildProcessGroup(child, graceMs) {
+  const processGroupId = child.pid;
+  if (!processGroupId)
+    return;
+  signalChildTree(child, "SIGTERM");
+  await waitForChildExit(child, graceMs);
+  signalChildTree(child, "SIGKILL");
+  await waitForChildExit(child, 1000);
+}
+function signalChildTree(child, signal) {
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
+    else
+      child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH")
+      throw error;
+  }
+}
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+async function waitForChildExit(child, timeoutMs) {
+  if (childExited(child))
+    return;
+  await new Promise((resolve) => {
+    const timeout = setTimeout(done, timeoutMs);
+    timeout.unref?.();
+    child.once("exit", done);
+    function done() {
+      clearTimeout(timeout);
+      child.removeListener("exit", done);
+      resolve();
+    }
+  });
+}
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms);
+    timeout.unref?.();
+  });
+}
+
 // src/native-plugin.ts
 init_config();
 import { createHash as createHash6 } from "node:crypto";
@@ -11125,247 +11379,6 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync3 } from "node:fs";
 import { basename, delimiter, isAbsolute as isAbsolute2, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
-
-// src/core/native-process-service.ts
-import { spawn as spawnProcess } from "node:child_process";
-var DEFAULT_READINESS_POLL_MS = 100;
-var DEFAULT_STOP_GRACE_MS = 2000;
-var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
-
-class NativeProcessServiceStoppedError extends Error {
-}
-
-class NativeProcessConfigurationError extends Error {
-}
-function createNativeProcessService(options) {
-  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
-  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
-  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
-  const spawnChild = options.spawn ?? spawnProcess;
-  let generation = 0;
-  let current;
-  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
-  const reportFailure = (lifetime, message) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.reportFailure(new Error(message));
-    } catch {}
-  };
-  const clearFailure = (lifetime) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.clearFailure();
-    } catch {}
-  };
-  const scheduleRestart = (lifetime) => {
-    if (!isCurrent(lifetime) || lifetime.restartTimer)
-      return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
-    const delay = restartDelaysMs[index] ?? 30000;
-    lifetime.restartAttempt += 1;
-    lifetime.restartTimer = setTimeout(() => {
-      lifetime.restartTimer = undefined;
-      if (!isCurrent(lifetime))
-        return;
-      launch(lifetime).catch(async (error) => {
-        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
-          return;
-        await terminateChild(lifetime, stopGraceMs);
-        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        scheduleRestart(lifetime);
-      });
-    }, delay);
-    lifetime.restartTimer.unref?.();
-  };
-  const launch = async (lifetime) => {
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    const settings = await options.prepareStart({
-      serviceId: options.id,
-      serviceLabel: options.label,
-      context: lifetime.context,
-      initialConfig: options.initialConfig
-    });
-    if (!settings)
-      return;
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (settings.endpointOccupied) {
-      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
-    }
-    const child = spawnChild(settings.command, [...settings.args], {
-      env: settings.env,
-      stdio: "ignore",
-      detached: process.platform !== "win32",
-      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
-    });
-    lifetime.child = child;
-    lifetime.childReady = false;
-    let spawnFailed = false;
-    child.once("exit", () => {
-      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
-        return;
-      lifetime.childReady = false;
-      const cleanup = terminateChild(lifetime, stopGraceMs, child);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
-      cleanup.then(() => {
-        scheduleRestart(lifetime);
-      }).catch(() => {
-        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
-      });
-    });
-    child.once("error", () => {
-      spawnFailed = true;
-    });
-    await waitForChildReadiness({
-      lifetime,
-      child,
-      settings,
-      isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-      readinessPollMs,
-      spawnFailed: () => spawnFailed
-    });
-    if (!isCurrent(lifetime) || lifetime.child !== child)
-      throw new NativeProcessServiceStoppedError;
-    if (spawnFailed || childExited(child))
-      throw new Error(`Olympus ${options.label} exited during startup.`);
-    lifetime.childReady = true;
-    lifetime.restartAttempt = 0;
-    clearFailure(lifetime);
-    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
-  };
-  return {
-    id: options.id,
-    reload: { configPrefixes: [...options.reload.configPrefixes] },
-    async start(context) {
-      await stopCurrent();
-      const lifetime = {
-        generation: ++generation,
-        context,
-        child: undefined,
-        childReady: false,
-        stopping: false,
-        restartAttempt: 0,
-        restartTimer: undefined,
-        cleanupPromise: undefined
-      };
-      current = lifetime;
-      try {
-        await launch(lifetime);
-      } catch (error) {
-        if (error instanceof NativeProcessServiceStoppedError)
-          return;
-        await terminateChild(lifetime, stopGraceMs);
-        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
-        reportFailure(lifetime, message);
-        if (current === lifetime)
-          current = undefined;
-        throw new Error(message);
-      }
-    },
-    async stop() {
-      await stopCurrent();
-    }
-  };
-  async function stopCurrent() {
-    const lifetime = current;
-    if (!lifetime)
-      return;
-    current = undefined;
-    lifetime.stopping = true;
-    if (lifetime.restartTimer) {
-      clearTimeout(lifetime.restartTimer);
-      lifetime.restartTimer = undefined;
-    }
-    await terminateChild(lifetime, stopGraceMs);
-  }
-}
-async function waitForChildReadiness(input) {
-  const deadline = Date.now() + input.startupTimeoutMs;
-  while (Date.now() < deadline) {
-    if (!input.isCurrent(input.lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (input.spawnFailed() || childExited(input.child))
-      throw new Error("Child exited during startup.");
-    const ready = await input.settings.readinessProbe(input.child);
-    if (ready) {
-      if (!input.isCurrent(input.lifetime))
-        throw new NativeProcessServiceStoppedError;
-      if (input.spawnFailed() || childExited(input.child))
-        throw new Error("Child exited during startup.");
-      return;
-    }
-    await delay(input.readinessPollMs);
-  }
-  throw new Error("Child readiness timed out.");
-}
-async function terminateChild(lifetime, graceMs, expectedChild) {
-  if (lifetime.cleanupPromise)
-    return await lifetime.cleanupPromise;
-  const child = lifetime.child;
-  if (expectedChild && child !== expectedChild)
-    return;
-  lifetime.child = undefined;
-  lifetime.childReady = false;
-  if (!child?.pid)
-    return;
-  const cleanup = terminateChildProcessGroup(child, graceMs);
-  lifetime.cleanupPromise = cleanup;
-  try {
-    await cleanup;
-  } finally {
-    if (lifetime.cleanupPromise === cleanup)
-      lifetime.cleanupPromise = undefined;
-  }
-}
-async function terminateChildProcessGroup(child, graceMs) {
-  const processGroupId = child.pid;
-  if (!processGroupId)
-    return;
-  signalChildTree(child, "SIGTERM");
-  await waitForChildExit(child, graceMs);
-  signalChildTree(child, "SIGKILL");
-  await waitForChildExit(child, 1000);
-}
-function signalChildTree(child, signal) {
-  try {
-    if (process.platform !== "win32" && child.pid)
-      process.kill(-child.pid, signal);
-    else
-      child.kill(signal);
-  } catch (error) {
-    if (error.code !== "ESRCH")
-      throw error;
-  }
-}
-function childExited(child) {
-  return child.exitCode !== null || child.signalCode !== null;
-}
-async function waitForChildExit(child, timeoutMs) {
-  if (childExited(child))
-    return;
-  await new Promise((resolve2) => {
-    const timeout = setTimeout(done, timeoutMs);
-    timeout.unref?.();
-    child.once("exit", done);
-    function done() {
-      clearTimeout(timeout);
-      child.removeListener("exit", done);
-      resolve2();
-    }
-  });
-}
-function delay(ms) {
-  return new Promise((resolve2) => {
-    const timeout = setTimeout(resolve2, ms);
-    timeout.unref?.();
-  });
-}
-
-// src/core/native-worker-service.ts
 var SERVICE_ID = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
@@ -14248,8 +14261,8 @@ var plugin = {
       moduleUrl: import.meta.url
     });
     if (api.registerService) {
-      api.registerService(workerService);
-      api.registerService(telegramService);
+      api.registerService(backgroundNativeProcessService(workerService));
+      api.registerService(backgroundNativeProcessService(telegramService));
     } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
       throw new Error("This OpenClaw host does not support native Olympus services.");
     }

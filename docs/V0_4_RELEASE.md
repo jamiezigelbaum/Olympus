@@ -602,9 +602,14 @@ Retained source credential consumers use the separate read-only Connect identity
 shared cache and service-account retirement still requires dependency clearance.
 Expert Agents PR122 was separately authorized, activated, and verified with a real
 domain status tool call. The CPU workstream has ended and the owner has transferred
-Gateway custody to this remediation task. Telegram capture and remaining background
-service migrations are still in progress. Unresolved explicit worker references
-must never fall back to ambient credentials.
+Gateway custody to this remediation task. PR49 restored native Telegram capture:
+one approved-chat probe captured one message; activation preserved all 661 approved
+scopes, authenticated the existing session, and verified child credential isolation.
+A real Castor source-index status call succeeded with ten corpora and both Telegram
+corpora present. Remaining background-service migrations are in progress. Unresolved explicit worker references
+must never fall back to ambient credentials. The installed host gives hot-replacement
+service start callbacks five seconds, so slow child initialization runs in the
+background and reports pending/failure/recovery through native service health.
 
 Remaining live account actions: X bookmarks requires renewed OAuth consent;
 WhatsApp requires relinking the device. The unpaired WhatsApp producer's retry
