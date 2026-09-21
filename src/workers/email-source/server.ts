@@ -1265,9 +1265,9 @@ export async function main(): Promise<void> {
     readwiseCredentialHandle !== undefined,
   ) ? readwiseCredentialHandle : undefined;
   // Gmail and Drive deliberately have no boot-time handle binding: their lanes
-  // select a handle per scheduler build. Readwise and X still bind their
-  // connector runtimes at boot; dashboard hot-activation remains qualification
-  // work and must not be confused with the removal of hidden enable flags here.
+  // select a handle per scheduler build. X follows the same rule below: its
+  // canonical store exists independently, while provider reads bind only to a
+  // currently usable handle. Readwise still binds its runtime at boot.
   const xBookmarksCredentialHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE',
@@ -1440,16 +1440,18 @@ export async function main(): Promise<void> {
   });
   const readwiseConnectorStore = readwiseConnectorStoreRuntime?.store;
   const readwiseConnectorStoreSync = readwiseConnectorStoreRuntime?.sync;
-  const xBookmarksConnectorStoreRuntime = createXBookmarksConnectorStoreRuntime({
-    enabled: xBookmarksHandle !== undefined,
-    ...(xBookmarksHandle ? { handle: xBookmarksHandle } : {}),
+  const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(
+    process.env,
+    'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
+    sourceIndexReadEnabled,
+  );
+  const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
+    enabled: xBookmarksConnectorStoreLane.enabled,
     ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
   });
-  const xBookmarksConnectorStore = xBookmarksConnectorStoreRuntime?.store;
-  const xBookmarksConnectorStoreSync = xBookmarksConnectorStoreRuntime?.sync;
-  const xBookmarksContentRecovery = xBookmarksConnectorStoreRuntime?.contentRecovery;
+  const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
   const gmailConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   const googleDriveConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   // Exactly one Gmail day counter per runtime, durable across restart.
@@ -2154,6 +2156,24 @@ export async function main(): Promise<void> {
   const sourceIngestionLedger = sourceIndexReadEnabled
     ? new SqliteSourceIngestionLedgerStore()
     : undefined;
+  const currentXBookmarksRuntime = () => {
+    const handle = connectorStoreLaneHandle({
+      env: process.env,
+      laneEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
+      pinEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE',
+      provider: 'x',
+      capability: 'x.bookmarks.sync',
+      handles: readActiveConnectedHandles(process.env),
+    });
+    const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
+    if (runtime) {
+      connectorStoreAccountScopes.set(
+        runtime.store.corpusId,
+        sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
+      );
+    }
+    return runtime;
+  };
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
@@ -2251,21 +2271,24 @@ export async function main(): Promise<void> {
               : {}),
           })
       : undefined;
+    const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
+      ?.runtimeForHandle(currentXBookmarksHandle);
+    if (currentXBookmarksConnectorStoreRuntime) {
+      connectorStoreAccountScopes.set(
+        currentXBookmarksConnectorStoreRuntime.store.corpusId,
+        sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || 'personal',
+      );
+    }
     // The canonical store lane rides the same source id and is bound to the
     // handle its runtime selected at boot.
     const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined
       && currentReadwiseHandle.handle === readwiseHandle?.handle
       && readwiseConnectorStoreSync !== undefined;
-    // Order matters for the token's truth: a store that was never built reports
-    // no_store_sync rather than handle_rebound, which would otherwise fire on
-    // every boot that had no X handle to bind the store to in the first place.
     const xBookmarksSkipReason = !currentXBookmarksHandle
       ? 'no_handle' as const
-      : !xBookmarksConnectorStoreSync
+      : !currentXBookmarksConnectorStoreRuntime
         ? 'no_store_sync' as const
-        : currentXBookmarksHandle.handle !== xBookmarksHandle?.handle
-          ? 'handle_rebound' as const
-          : undefined;
+        : undefined;
     const sources = [
       recordLane(
         SCHEDULER_SOURCE_IDS.gmail,
@@ -2317,10 +2340,10 @@ export async function main(): Promise<void> {
       recordLane(
         SCHEDULER_SOURCE_IDS.xBookmarks,
         xBookmarksSkipReason,
-        () => xBookmarksConnectorStoreSync
+        () => currentXBookmarksConnectorStoreRuntime
           ? createXBookmarksSchedulerSource({
             config: olympusConfig,
-            liveSync: xBookmarksConnectorStoreSync,
+            liveSync: currentXBookmarksConnectorStoreRuntime.sync,
           })
           : undefined,
       ),
@@ -2398,8 +2421,7 @@ export async function main(): Promise<void> {
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
     ...(readwiseConnectorStoreSync ? { readwiseConnectorStoreSync } : {}),
-    ...(xBookmarksConnectorStoreSync ? { xBookmarksConnectorStoreSync } : {}),
-    ...(xBookmarksContentRecovery ? { xBookmarksContentRecovery } : {}),
+    currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
@@ -2782,6 +2804,11 @@ export interface XBookmarksConnectorStoreRuntime {
   contentRecovery: XBookmarksContentRecoveryHandler;
 }
 
+export interface RefreshableXBookmarksConnectorStoreRuntime {
+  store: LocalConnectorStore;
+  runtimeForHandle(handle: ConnectedCredentialHandle | undefined): XBookmarksConnectorStoreRuntime | undefined;
+}
+
 export interface ReadwiseConnectorStoreRuntime {
   store: LocalConnectorStore;
   sync: ReadwiseConnectorStoreSyncHandler;
@@ -2853,9 +2880,85 @@ export function createXBookmarksConnectorStoreRuntime(options: {
   usageStore?: LocalXBookmarksApiUsageStore;
   env?: Record<string, string | undefined>;
 }): XBookmarksConnectorStoreRuntime | undefined {
+  if (!xBookmarksRuntimeBinding(options)) return undefined;
+  return createRefreshableXBookmarksConnectorStoreRuntime(options)?.runtimeForHandle(options.handle);
+}
+
+/**
+ * Keep the canonical X store mounted independently of the OAuth grant while
+ * binding every provider-reading capability to the current usable handle.
+ * The scheduler calls runtimeForHandle on each registry refresh, so a renewed
+ * grant can activate without a process restart and a removed/expired grant
+ * produces no task. The cached runtime also preserves X's single-minter rule
+ * across dashboard renders and adoption ticks.
+ */
+export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
+  enabled: boolean;
+  embeddingProvider?: SourceEmbeddingProvider;
+  account?: string;
+  dbPath?: string;
+  usageStore?: LocalXBookmarksApiUsageStore;
+  reconcileStateStore?: LocalXBookmarksReconcileStateStore;
+  env?: Record<string, string | undefined>;
+}): RefreshableXBookmarksConnectorStoreRuntime | undefined {
+  const embeddingProvider = options.embeddingProvider;
+  if (!options.enabled || !embeddingProvider) return undefined;
+  const env = options.env ?? process.env;
+  const store = createXBookmarksConnectorStore(
+    options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env),
+  );
+  let usageStore = options.usageStore;
+  let reconcileStateStore = options.reconcileStateStore;
+  let cachedKey: string | undefined;
+  let cachedRuntime: XBookmarksConnectorStoreRuntime | undefined;
+  return {
+    store,
+    runtimeForHandle(handle) {
+      const binding = xBookmarksRuntimeBinding({
+        enabled: options.enabled,
+        ...(handle ? { handle } : {}),
+        embeddingProvider,
+        ...(options.account ? { account: options.account } : {}),
+        env,
+      });
+      if (!binding) {
+        cachedKey = undefined;
+        cachedRuntime = undefined;
+        return undefined;
+      }
+      const key = [binding.handle.handle, binding.principalAccount, binding.providerUserId].join('\0');
+      if (cachedKey === key && cachedRuntime) return cachedRuntime;
+      usageStore ??= new LocalXBookmarksApiUsageStore();
+      reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(
+        defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath),
+      );
+      cachedRuntime = bindXBookmarksConnectorStoreRuntime({
+        ...binding,
+        store,
+        usageStore,
+        reconcileStateStore,
+        env,
+      });
+      cachedKey = key;
+      return cachedRuntime;
+    },
+  };
+}
+
+function xBookmarksRuntimeBinding(options: {
+  enabled: boolean;
+  handle?: ConnectedCredentialHandle;
+  embeddingProvider?: SourceEmbeddingProvider;
+  account?: string;
+  env?: Record<string, string | undefined>;
+}): {
+  handle: ConnectedCredentialHandle;
+  embeddingProvider: SourceEmbeddingProvider;
+  principalAccount: string;
+  providerUserId: string;
+} | undefined {
   const handle = options.handle;
   const env = options.env ?? process.env;
-  const principalAccount = options.account?.trim() || handle?.accountRole?.trim() || 'personal';
   const providerUserId = env.OLYMPUS_SOURCE_INDEX_X_USER_ID?.trim()
     || handle?.providerAccountId?.trim();
   if (
@@ -2866,50 +2969,60 @@ export function createXBookmarksConnectorStoreRuntime(options: {
     || handle.backendState?.status === 'reauth_required'
     || !options.embeddingProvider
     || !providerUserId
-  ) {
-    return undefined;
-  }
-  const store = createXBookmarksConnectorStore(
-    options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env),
-  );
-  const usageStore = options.usageStore ?? new LocalXBookmarksApiUsageStore();
-  const reconcileStateStore = new LocalXBookmarksReconcileStateStore(
-    defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath),
-  );
+  ) return undefined;
+  return {
+    handle,
+    embeddingProvider: options.embeddingProvider,
+    principalAccount: options.account?.trim() || handle.accountRole?.trim() || 'personal',
+    providerUserId,
+  };
+}
+
+function bindXBookmarksConnectorStoreRuntime(options: {
+  handle: ConnectedCredentialHandle;
+  embeddingProvider: SourceEmbeddingProvider;
+  principalAccount: string;
+  providerUserId: string;
+  store: LocalConnectorStore;
+  usageStore: LocalXBookmarksApiUsageStore;
+  reconcileStateStore: LocalXBookmarksReconcileStateStore;
+  env: Record<string, string | undefined>;
+}): XBookmarksConnectorStoreRuntime {
+  const env = options.env;
   // One broker instance owns both scheduled acquisition and operator recovery.
   // X rotates refresh tokens, so separate minters in separate processes can
   // revoke the worker's live session; keeping both paths inside this runtime
   // makes the single-minter rule structural.
   const credentialBroker = createEnvCredentialBroker({ env });
   const sync = createXBookmarksConnectorStoreSyncHandler({
-    store,
+    store: options.store,
     embeddingProvider: options.embeddingProvider,
-    credentialHandle: handle.handle,
-    account: principalAccount,
-    userId: providerUserId,
+    credentialHandle: options.handle.handle,
+    account: options.principalAccount,
+    userId: options.providerUserId,
     credentialBroker,
     ...(env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim()
       ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() }
       : {}),
-    usageStore,
-    reconcileStateStore,
+    usageStore: options.usageStore,
+    reconcileStateStore: options.reconcileStateStore,
     env,
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
-    store,
-    usageStore,
-    reconcileStateStore,
+    store: options.store,
+    usageStore: options.usageStore,
+    reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
-    credentialHandle: handle.handle,
+    credentialHandle: options.handle.handle,
     credentialBroker,
-    account: principalAccount,
-    userId: providerUserId,
+    account: options.principalAccount,
+    userId: options.providerUserId,
     ...(env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim()
       ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() }
       : {}),
     env,
   });
-  return { store, sync, contentRecovery };
+  return { store: options.store, sync, contentRecovery };
 }
 
 /**

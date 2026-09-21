@@ -3,11 +3,16 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { createXBookmarksConnectorStoreRuntime } from '../src/workers/email-source/server.ts';
+import {
+  createRefreshableXBookmarksConnectorStoreRuntime,
+  createXBookmarksConnectorStoreRuntime,
+} from '../src/workers/email-source/server.ts';
+import { defaultConfig } from '../src/core/config.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import {
   LocalXBookmarksApiUsageStore,
+  LocalXBookmarksReconcileStateStore,
   X_BOOKMARKS_CORPUS_ID,
   createXBookmarksConnectorStore,
   createXBookmarksSourceConnector,
@@ -15,6 +20,7 @@ import {
   type XBookmarksConnectorStoreSyncHandler,
   type XBookmarksLiveSyncResult,
 } from '../src/workers/x-bookmarks/index.ts';
+import { createXBookmarksSchedulerSource } from '../src/workers/source-scheduler.ts';
 
 describe('X bookmarks live server integration', () => {
   test('constructs the connector-store runtime only behind all three gates', () => {
@@ -53,6 +59,47 @@ describe('X bookmarks live server integration', () => {
     expect(runtime).not.toHaveProperty('legacyReplay');
     runtime?.store.close();
     usageStore.close();
+  });
+
+  test('activates the canonical store task after reauth without reviving it after disconnect', () => {
+    const usageStore = new LocalXBookmarksApiUsageStore(':memory:');
+    const reconcileStateStore = new LocalXBookmarksReconcileStateStore(':memory:');
+    const lane = createRefreshableXBookmarksConnectorStoreRuntime({
+      enabled: true,
+      embeddingProvider: fakeEmbeddingProvider(),
+      dbPath: ':memory:',
+      usageStore,
+      reconcileStateStore,
+      env: {},
+    });
+    if (!lane) throw new Error('fixture lane should be configured');
+    const expired = {
+      ...xHandle(),
+      backendState: { kind: 'oauth2_refresh' as const, status: 'reauth_required' as const },
+    };
+    const sourceFor = (handle: ConnectedCredentialHandle | undefined) => {
+      const runtime = lane.runtimeForHandle(handle);
+      return runtime
+        ? createXBookmarksSchedulerSource({ config: defaultConfig(), liveSync: runtime.sync })
+        : undefined;
+    };
+
+    try {
+      expect(sourceFor(expired)).toBeUndefined();
+      const renewedRuntime = lane.runtimeForHandle(xHandle());
+      expect(renewedRuntime?.store).toBe(lane.store);
+      expect(lane.runtimeForHandle(xHandle())).toBe(renewedRuntime);
+      expect(sourceFor(xHandle())?.tasks.map((task) => task.id)).toEqual([
+        'x.bookmarks_head',
+        'x.bookmarks_reconcile',
+      ]);
+      expect(sourceFor(undefined)).toBeUndefined();
+      expect(sourceFor(expired)).toBeUndefined();
+    } finally {
+      lane.store.close();
+      usageStore.close();
+      reconcileStateStore.close();
+    }
   });
 
   test('runs explicit head, reconcile, and admin diagnostic modes through the live handler', async () => {

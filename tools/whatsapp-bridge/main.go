@@ -55,6 +55,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -196,11 +197,19 @@ type spoolRecord struct {
 	ReactionSenderTimestampMS int64  `json:"reaction_sender_timestamp_ms,omitempty"`
 }
 
+func configureDeviceIdentity() {
+	name := "Olympus Plugin"
+	store.DeviceProps.Os = &name
+	// UNKNOWN is displayed as "Other device"; DESKTOP uses the supplied name.
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
+}
+
 func main() {
 	// The linked-device store and every derivative written by this process are
 	// secret-bearing local state. Keep safe modes even when the daemon is run
 	// manually instead of through the systemd unit (which also sets UMask=0077).
 	syscall.Umask(0o077)
+	configureDeviceIdentity()
 
 	// Resolve the startup mode before touching the state dir, the session
 	// store, or the provider: an unusable native-mode request must fail without
@@ -281,6 +290,10 @@ func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Co
 		connectWithBackoff(client)
 		paired := false
 		for item := range qrChan {
+			if err := rejectUnsupportedPairing(item.Event, stateDir); err != nil {
+				client.Disconnect()
+				log.Fatalf("olympus-whatsapp-bridge: %v", err)
+			}
 			switch item.Event {
 			case whatsmeow.QRChannelEventCode:
 				emitQR(item.Code, stateDir, qrStdoutEnabled())
@@ -312,6 +325,16 @@ func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Co
 // steady state: whatsmeow's auto-reconnect handles transient drops with its own
 // backoff. We only exit on signals or on fatal session events (logged out,
 // stream replaced) — systemd's Restart=always brings the daemon back.
+// A passkey challenge requires a real authenticator and explicit user flow.
+// Never leave an obsolete QR visible or pretend that headless pairing finished.
+func rejectUnsupportedPairing(event, stateDir string) error {
+	if event != whatsmeow.QRChannelEventPasskeyRequest && event != whatsmeow.QRChannelEventPasskeyResponse {
+		return nil
+	}
+	removeQRFile(stateDir)
+	return errors.New("interactive passkey authentication is required and is not supported by this bridge; pairing stopped")
+}
+
 func runUntilExit(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
