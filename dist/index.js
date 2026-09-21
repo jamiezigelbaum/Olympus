@@ -13059,6 +13059,9 @@ function staleTaskAttempt(task, deps) {
   return now.getTime() - attemptedAtMs > deps.config.worker.scheduler.tickSeconds * 3 * 1000;
 }
 function workerRequestInit(deps) {
+  if (deps.config.worker.authTokenSecretRefUnresolved) {
+    throw new Error("The configured worker credential has not been resolved by the host.");
+  }
   return withWorkerAuthHeader({ method: "GET" }, workerAuthTokenFromConfig(deps.config));
 }
 function readRegistrySafely(deps) {

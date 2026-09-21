@@ -1399,6 +1399,9 @@ function staleTaskAttempt(task: Record<string, unknown>, deps: DoctorDeps): bool
 }
 
 function workerRequestInit(deps: DoctorDeps): RequestInit {
+  if (deps.config.worker.authTokenSecretRefUnresolved) {
+    throw new Error('The configured worker credential has not been resolved by the host.');
+  }
   return withWorkerAuthHeader({ method: 'GET' }, workerAuthTokenFromConfig(deps.config));
 }
 
