@@ -177,6 +177,9 @@ const PUBLIC_INSTALL_URLS = new Set([
   'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-pilot.2',
   'https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-pilot.2/olympus-0.4.0.tgz',
   'https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.2',
+  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v0.4.0-beta.2',
+  'https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-beta.2/olympus-0.4.0-beta.2.tgz',
+  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-beta.2',
 ]);
 
 export function scannableText(relativePath: string, text: string): string {
