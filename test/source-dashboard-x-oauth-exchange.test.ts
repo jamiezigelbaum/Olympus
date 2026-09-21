@@ -20,6 +20,16 @@ import type { OAuthFetch } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import {
+  readConnectedHandleRegistry,
+  writeConnectedHandleRegistry,
+} from '../src/workers/credential-broker/connected-handles.ts';
+import type {
+  XApiUsageStatus,
+  XBookmarksConnectorStoreSyncHandler,
+  XBookmarksContentRecoveryHandler,
+  XBookmarksLiveSyncResult,
+} from '../src/workers/x-bookmarks/index.ts';
 
 const dirs: string[] = [];
 
@@ -31,13 +41,18 @@ interface XWorkerFixture {
   fetch: (request: Request) => Promise<Response>;
   secretStore: SecretStore;
   exchanges: Array<{ authorization: string | null; body: URLSearchParams }>;
+  registryPath?: string;
+  runtimeCalls?: string[];
 }
 
 function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-x-oauth-'));
   dirs.push(dir);
   const secretStore = memorySecretStore(initialSecrets);
+  const registryPath = join(dir, 'handles.json');
   const exchanges: XWorkerFixture['exchanges'] = [];
+  const runtimeCalls: string[] = [];
+  const runtime = xRuntimeFixture(runtimeCalls);
   const oauthFetch: OAuthFetch = async (url, init) => {
     if (String(url).includes('/2/users/me')) {
       return new Response(JSON.stringify({ data: { id: '882404022' } }), {
@@ -60,12 +75,24 @@ function xWorkerFixture(initialSecrets: Record<string, string>): XWorkerFixture 
   const worker = createEmailSourceWorker({
     sourceDashboard: {
       sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
-      registryPath: join(dir, 'handles.json'),
+      registryPath,
       secretStore,
       oauthFetch,
     },
+    currentXBookmarksRuntime: () => readConnectedHandleRegistry(registryPath).handles.some((handle) =>
+      handle.provider === 'x'
+      && handle.allowedCapabilities.includes('x.bookmarks.sync')
+      && handle.backendState?.status !== 'reauth_required')
+      ? runtime
+      : undefined,
   });
-  return { fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }), secretStore, exchanges };
+  return {
+    fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' }),
+    secretStore,
+    exchanges,
+    registryPath,
+    runtimeCalls,
+  };
 }
 
 async function startXConnect(
@@ -132,6 +159,79 @@ describe('dashboard X OAuth exchange', () => {
     ))).status).toBe(303);
     expect(fixture.exchanges).toHaveLength(1);
     expect(fixture.exchanges[0]!.authorization).toBe(expectedBasic);
+  });
+
+  test('an expired-boot worker resolves every X HTTP consumer after reconnect and refuses them after disconnect', async () => {
+    const fixture = xWorkerFixture({
+      'x.personal.oauth.client_id': 'x-client-id-fixture',
+      'x.personal.oauth.client_secret': 'x-client-secret-fixture',
+    });
+    const post = (path: string, body: Record<string, unknown>) => fixture.fetch(new Request(`http://worker.test${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer dashboard-secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }));
+
+    expect((await post('/dashboard/sync-now', { source: 'x' })).status).toBe(501);
+    const started = await startXConnect(fixture, {});
+    const state = new URL((await started.json()).authorization_url).searchParams.get('state')!;
+    expect((await fixture.fetch(new Request(
+      `http://worker.test/oauth/callback/x?code=x-code-runtime&state=${state}`,
+    ))).status).toBe(303);
+    // OAuth completion starts one ordinary (non-operator) reconcile immediately.
+    expect(fixture.runtimeCalls).toEqual(['reconcile:scheduled']);
+
+    expect((await post('/dashboard/sync-now', { source: 'x' })).status).toBe(200);
+    expect((await post('/v1/source/index/sync', {
+      corpus_id: 'internal.x.bookmarks',
+      mode: 'head',
+    })).status).toBe(200);
+    expect((await post('/v1/source/index/x-bookmarks/content/recover', {
+      execute: false,
+      limit: 1,
+    })).status).toBe(200);
+    expect(fixture.runtimeCalls).toEqual([
+      'reconcile:scheduled',
+      'reconcile:operator',
+      'head:operator',
+      'recover',
+    ]);
+
+    writeConnectedHandleRegistry({ version: 1, handles: [] }, fixture.registryPath!);
+    const callsBeforeDisconnectChecks = [...fixture.runtimeCalls!];
+    expect((await post('/dashboard/sync-now', { source: 'x' })).status).toBe(501);
+    expect((await post('/v1/source/index/sync', {
+      corpus_id: 'internal.x.bookmarks',
+      mode: 'reconcile',
+    })).status).toBe(501);
+    expect((await post('/v1/source/index/x-bookmarks/content/recover', {
+      execute: false,
+    })).status).toBe(501);
+    expect(fixture.runtimeCalls).toEqual(callsBeforeDisconnectChecks);
+  });
+
+  test('recovery rechecks authorization after receiving a delayed request body', async () => {
+    const calls: string[] = [];
+    const runtime = xRuntimeFixture(calls);
+    let connected = true;
+    const worker = createEmailSourceWorker({ currentXBookmarksRuntime: () => connected ? runtime : undefined });
+    let releaseBody!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        releaseBody = () => { controller.enqueue(new TextEncoder().encode('{"execute":true}')); controller.close(); };
+      },
+    });
+    const pending = worker.fetch(new Request('http://worker.test/v1/source/index/x-bookmarks/content/recover', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    }));
+    connected = false;
+    releaseBody();
+    const response = await pending;
+    expect(response.status).toBe(501);
+    expect(calls).toEqual([]);
   });
 
   test('provider error prose never reaches the failure page in any encoding', async () => {
@@ -476,6 +576,71 @@ function memorySecretStore(initial: Record<string, string> = {}): SecretStore {
     },
     async list() {
       return [...secrets.keys()].sort();
+    },
+  };
+}
+
+function xRuntimeFixture(calls: string[]): {
+  sync: XBookmarksConnectorStoreSyncHandler;
+  contentRecovery: XBookmarksContentRecoveryHandler;
+} {
+  const usage = (): XApiUsageStatus => ({
+    utc_day: '2026-09-21',
+    api_requests: 0,
+    resource_reads: 0,
+    estimated_billable_resources: 0,
+    reserved_resource_reads: 0,
+    estimated_spend_microusd: 0,
+    estimated_spend_usd: 0,
+    estimated_unit_cost_usd: 0.001,
+    estimate: true,
+    hard_budgets: {
+      api_requests: 4_000,
+      resource_reads: 10_000,
+      estimated_spend_microusd: 2_000_000,
+    },
+    guard: { state: 'ok' },
+    policy: {
+      counts_only: true,
+      raw_source_exposed: false,
+      source_text_returned: false,
+      resource_ids_exposed: false,
+      provider_cursor_exposed: false,
+    },
+  });
+  const result = (): XBookmarksLiveSyncResult => ({ status: 'idle', counts: {}, api_usage: usage() });
+  return {
+    sync: {
+      async syncHead(request = {}) {
+        calls.push(`head:${request.provenance ?? 'scheduled'}`);
+        return result();
+      },
+      async reconcile(request = {}) {
+        calls.push(`reconcile:${request.provenance ?? 'scheduled'}`);
+        return result();
+      },
+      async diagnoseWindow(request = {}) {
+        calls.push(`window_diagnostic:${request.provenance ?? 'scheduled'}`);
+        return result();
+      },
+      lastCompleteReconcileAt: () => undefined,
+      completeReconcileWatermark: () => undefined,
+      apiUsageStatus: usage,
+    },
+    contentRecovery: {
+      async recover() {
+        calls.push('recover');
+        return {
+          kind: 'x_bookmarks_content_recovery',
+          status: 'complete',
+          policy: {
+            counts_only: true,
+            raw_source_exposed: false,
+            source_text_returned: false,
+            resource_ids_exposed: false,
+          },
+        } as never;
+      },
     },
   };
 }

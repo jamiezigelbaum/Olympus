@@ -356,6 +356,15 @@ export interface EmailSourceWorkerOptions {
   xBookmarksConnectorStoreSync?: XBookmarksConnectorStoreSyncHandler;
   xBookmarksContentRecovery?: XBookmarksContentRecoveryHandler;
   /**
+   * Resolves the one current X runtime after registry changes. When present it
+   * is authoritative: an absent result means no provider read is allowed, and
+   * the boot-time compatibility handlers above are not consulted.
+   */
+  currentXBookmarksRuntime?: () => {
+    sync?: XBookmarksConnectorStoreSyncHandler;
+    contentRecovery?: XBookmarksContentRecoveryHandler;
+  } | undefined;
+  /**
    * The source-neutral extraction factory. Serves the generic
    * `/source/index/files/*` routes, and serves a family-scoped extraction path
    * too once that family's own legacy handler is no longer wired — see
@@ -591,6 +600,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const readwiseConnectorStoreSync = options.readwiseConnectorStoreSync;
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
+  const currentXBookmarksRuntime = options.currentXBookmarksRuntime
+    ?? (() => {
+      if (!xBookmarksConnectorStoreSync && !xBookmarksContentRecovery) return undefined;
+      return {
+        ...(xBookmarksConnectorStoreSync ? { sync: xBookmarksConnectorStoreSync } : {}),
+        ...(xBookmarksContentRecovery ? { contentRecovery: xBookmarksContentRecovery } : {}),
+      };
+    });
   const fileExtraction = options.fileExtraction;
   const dropboxEvalShardExport = options.dropboxEvalShardExport;
   const dropboxSourceExport = options.dropboxSourceExport;
@@ -2006,17 +2023,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           request.method === 'POST'
           && url.pathname === `${basePath}/source/index/x-bookmarks/content/recover`
         ) {
-          if (!xBookmarksContentRecovery) {
+          const record = await parseObjectBody(request);
+          const execute = asOptionalBoolean(record.execute);
+          const limit = asOptionalNumber(record.limit);
+          const contentRecovery = currentXBookmarksRuntime()?.contentRecovery;
+          if (!contentRecovery) {
             throw new EmailSourceWorkerError(
               501,
               'x_bookmarks_content_recovery_not_supported',
               'Private source worker does not support X bookmark content recovery.',
             );
           }
-          const record = await parseObjectBody(request);
-          const execute = asOptionalBoolean(record.execute);
-          const limit = asOptionalNumber(record.limit);
-          const result = await xBookmarksContentRecovery.recover({
+          const result = await contentRecovery.recover({
             ...(execute !== undefined ? { execute } : {}),
             ...(limit !== undefined ? { limit } : {}),
           });
@@ -2059,18 +2077,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 'mode must be head, reconcile, or window_diagnostic for X bookmarks sync.',
               );
             }
-            if (!xBookmarksConnectorStoreSync) {
+            const xSync = currentXBookmarksRuntime()?.sync;
+            if (!xSync) {
               throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'X bookmarks connector-store sync is not configured.');
             }
-            if (mode === 'window_diagnostic' && !xBookmarksConnectorStoreSync.diagnoseWindow) {
+            if (mode === 'window_diagnostic' && !xSync.diagnoseWindow) {
               throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'X bookmarks window diagnostics are not configured.');
             }
             try {
               const result = mode === 'head'
-                ? await xBookmarksConnectorStoreSync.syncHead({ provenance: 'operator' })
+                ? await xSync.syncHead({ provenance: 'operator' })
                 : mode === 'reconcile'
-                  ? await xBookmarksConnectorStoreSync.reconcile({ provenance: 'operator' })
-                  : await xBookmarksConnectorStoreSync.diagnoseWindow!({ provenance: 'operator' });
+                  ? await xSync.reconcile({ provenance: 'operator' })
+                  : await xSync.diagnoseWindow!({ provenance: 'operator' });
               const safeResult = xBookmarksLiveAdminResult(mode, result);
               assertNoRawEmailFields(safeResult);
               return json(safeResult);
@@ -2089,7 +2108,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                       },
                     }
                   : {}),
-                api_usage: xBookmarksConnectorStoreSync.apiUsageStatus(),
+                api_usage: xSync.apiUsageStatus(),
               });
               assertNoRawEmailFields(safeError);
               return json({ ...safeError, status: 'degraded', error_kind: error.errorKind }, 503);
@@ -2553,10 +2572,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       return readwiseConnectorStoreSync.sync();
     }
 
-    if (request.source === 'x' && xBookmarksConnectorStoreSync) {
+    const xSync = request.source === 'x' ? currentXBookmarksRuntime()?.sync : undefined;
+    if (request.source === 'x' && xSync) {
       return xBookmarksLiveAdminResult(
         'reconcile',
-        await xBookmarksConnectorStoreSync.reconcile(
+        await xSync.reconcile(
           request.reason === 'manual' ? { provenance: 'operator' } : {},
         ),
       );
@@ -2677,7 +2697,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         || dashboardSyncHookServes(source);
     }
     if (source === 'readwise') return readwiseConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
-    if (source === 'x') return xBookmarksConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
+    if (source === 'x') return currentXBookmarksRuntime()?.sync !== undefined || dashboardSyncHookServes(source);
     if (source === 'dropbox') {
       const schedulerStatus = sourceScheduler?.status();
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'dropbox.files' || candidate.corpus_id === DROPBOX_FILES_CORPUS_ID) === true
