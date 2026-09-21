@@ -583,3 +583,18 @@ Native capture never initiates interactive login. It reports ready only after
 an existing session authenticates, using a private receipt containing the child
 PID and a new instance ID. Capture freshness remains a separate check: a process
 ready to capture is not proof that new messages have arrived or been indexed.
+
+### Optional provider-credit monitoring
+
+`worker.creditMonitor` runs a native periodic billing probe; the currently
+supported provider is `venice`. It is disabled by default. Set an absolute
+`reportPath`, provide `credentials.VENICE_API_KEY` through a Gateway SecretRef,
+and enable it through the host's supported configuration command. The default
+interval is 600 seconds (allowed range: 60–86,400). An optional absolute
+`pauseFile` preserves the existing provider pause-marker behavior.
+
+The monitor checks the official billing endpoint, never processes source
+content, and does not inherit other provider credentials. A successful credit
+check does not prove that every model is available. Stop the old monitor before
+enabling its replacement; preserve the report and pause paths so existing
+consumers keep using the same files.

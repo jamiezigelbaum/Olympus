@@ -2992,6 +2992,11 @@ function mergeConfig(target, source) {
         ...source.worker.service ?? {},
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials
       },
+      creditMonitor: {
+        ...target.worker.creditMonitor,
+        ...source.worker.creditMonitor ?? {},
+        credentials: source.worker.creditMonitor?.credentials ?? target.worker.creditMonitor.credentials
+      },
       telegramCapture: {
         ...target.worker.telegramCapture,
         ...source.worker.telegramCapture ?? {},
@@ -3099,6 +3104,20 @@ function validateConfig(config) {
     throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
   }
   config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  assertBoolean(config.worker.creditMonitor.enabled, "worker.creditMonitor.enabled");
+  if (config.worker.creditMonitor.provider !== "venice")
+    throw new OperationError("config_error", "worker.creditMonitor.provider must be venice.");
+  assertPositiveInteger(config.worker.creditMonitor.intervalSeconds, "worker.creditMonitor.intervalSeconds");
+  if (config.worker.creditMonitor.intervalSeconds < 60 || config.worker.creditMonitor.intervalSeconds > 86400) {
+    throw new OperationError("config_error", "worker.creditMonitor.intervalSeconds must be between 60 and 86400.");
+  }
+  config.worker.creditMonitor.credentials = parseNativeCreditCredentials(config.worker.creditMonitor.credentials, config.worker.creditMonitor.enabled);
+  for (const key of ["reportPath", "pauseFile"]) {
+    const value = config.worker.creditMonitor[key];
+    if (value !== undefined && (typeof value !== "string" || !isAbsolutePath(value))) {
+      throw new OperationError("config_error", `worker.creditMonitor.${key} must be an absolute path.`);
+    }
+  }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
   for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
@@ -3204,6 +3223,18 @@ function parseNativeWorkerCredentials(value, serviceEnabled) {
     if (serviceEnabled) {
       throw new OperationError("config_error", `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`);
     }
+  }
+  return parsed;
+}
+function parseNativeCreditCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (name !== "VENICE_API_KEY")
+      throw new OperationError("config_error", `worker.creditMonitor.credentials does not allow environment name ${name}.`);
+    if (typeof credential === "string" && credential.trim())
+      parsed[name] = credential;
+    else if (typeof credential === "string" || serviceEnabled)
+      throw new OperationError("config_error", "worker.creditMonitor.credentials.VENICE_API_KEY must be a resolved nonempty string.");
   }
   return parsed;
 }
@@ -3336,6 +3367,7 @@ var init_config = __esm(() => {
         startupTimeoutSeconds: 180,
         credentials: {}
       },
+      creditMonitor: { enabled: false, provider: "venice", intervalSeconds: 600, credentials: {} },
       telegramCapture: {
         enabled: false,
         credentials: {}

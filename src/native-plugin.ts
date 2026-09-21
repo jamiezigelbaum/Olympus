@@ -1,3 +1,4 @@
+import { createNativeCreditMonitorService } from './core/native-credit-monitor-service.ts';
 import { backgroundNativeProcessService } from './core/native-process-service.ts';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -224,10 +225,12 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      api.registerService(creditMonitorService);
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }
     const ctx: OperationContext = {

@@ -2259,6 +2259,24 @@ function configFromPluginConfig(pluginConfig, options = {}) {
       config.worker.service.executablePath = service.executablePath.trim();
     }
   }
+  const creditMonitor = asRecord4(worker?.creditMonitor);
+  if (creditMonitor) {
+    if (typeof creditMonitor.enabled === "boolean")
+      config.worker.creditMonitor.enabled = creditMonitor.enabled;
+    if (creditMonitor.provider !== undefined && creditMonitor.provider !== "venice") {
+      throw new OperationError("config_error", "worker.creditMonitor.provider must be venice.");
+    }
+    if (typeof creditMonitor.intervalSeconds === "number")
+      config.worker.creditMonitor.intervalSeconds = creditMonitor.intervalSeconds;
+    const credentials = asRecord4(creditMonitor.credentials);
+    if (credentials)
+      config.worker.creditMonitor.credentials = parseNativeCreditCredentials(credentials, requireResolvedWorkerSecrets && config.worker.creditMonitor.enabled);
+    for (const key of ["reportPath", "pauseFile"]) {
+      const value = creditMonitor[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.creditMonitor[key] = value.trim();
+    }
+  }
   const telegramCapture = asRecord4(worker?.telegramCapture);
   if (telegramCapture) {
     if (typeof telegramCapture.enabled === "boolean") {
@@ -2502,6 +2520,20 @@ function validateConfig(config) {
     throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
   }
   config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  assertBoolean(config.worker.creditMonitor.enabled, "worker.creditMonitor.enabled");
+  if (config.worker.creditMonitor.provider !== "venice")
+    throw new OperationError("config_error", "worker.creditMonitor.provider must be venice.");
+  assertPositiveInteger(config.worker.creditMonitor.intervalSeconds, "worker.creditMonitor.intervalSeconds");
+  if (config.worker.creditMonitor.intervalSeconds < 60 || config.worker.creditMonitor.intervalSeconds > 86400) {
+    throw new OperationError("config_error", "worker.creditMonitor.intervalSeconds must be between 60 and 86400.");
+  }
+  config.worker.creditMonitor.credentials = parseNativeCreditCredentials(config.worker.creditMonitor.credentials, config.worker.creditMonitor.enabled);
+  for (const key of ["reportPath", "pauseFile"]) {
+    const value = config.worker.creditMonitor[key];
+    if (value !== undefined && (typeof value !== "string" || !isAbsolutePath(value))) {
+      throw new OperationError("config_error", `worker.creditMonitor.${key} must be an absolute path.`);
+    }
+  }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
   for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
@@ -2607,6 +2639,18 @@ function parseNativeWorkerCredentials(value, serviceEnabled) {
     if (serviceEnabled) {
       throw new OperationError("config_error", `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`);
     }
+  }
+  return parsed;
+}
+function parseNativeCreditCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (name !== "VENICE_API_KEY")
+      throw new OperationError("config_error", `worker.creditMonitor.credentials does not allow environment name ${name}.`);
+    if (typeof credential === "string" && credential.trim())
+      parsed[name] = credential;
+    else if (typeof credential === "string" || serviceEnabled)
+      throw new OperationError("config_error", "worker.creditMonitor.credentials.VENICE_API_KEY must be a resolved nonempty string.");
   }
   return parsed;
 }
@@ -2743,6 +2787,7 @@ var init_config = __esm(() => {
         startupTimeoutSeconds: 180,
         credentials: {}
       },
+      creditMonitor: { enabled: false, provider: "venice", intervalSeconds: 600, credentials: {} },
       telegramCapture: {
         enabled: false,
         credentials: {}
@@ -3179,9 +3224,9 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { dirname as dirname5, join as join6 } from "node:path";
 function defaultSovereigntyConfigPath() {
   return join6(homedir4(), ".olympus", "sovereignty.json");
 }
@@ -3194,8 +3239,8 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
-  if (existsSync4(configPath)) {
-    const parsed = JSON.parse(readFileSync6(configPath, "utf8"));
+  if (existsSync5(configPath)) {
+    const parsed = JSON.parse(readFileSync7(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -3407,11 +3452,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord8(record.retrieval);
-  const trustDomainsRecord = asRecord8(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord9(record.retrieval);
+  const trustDomainsRecord = asRecord9(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord8(trustDomainsRecord?.[domain]);
+    const policy = asRecord9(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3423,19 +3468,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord8(value);
-  if (record?.sovereignty && asRecord8(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord9(value);
+  if (record?.sovereignty && asRecord9(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord8(item);
+    const profile = asRecord9(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3458,16 +3503,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord8(record[domain]);
+    const route = asRecord9(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord8(route.pool);
+    const poolRecord = asRecord9(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3677,7 +3722,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -3866,7 +3911,7 @@ var init_publisher_oauth_client = __esm(() => {
 // src/workers/credential-broker/index.ts
 import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname5 } from "node:path";
+import { dirname as dirname6 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -3933,7 +3978,7 @@ class JsonCredentialOAuth2StateStore {
       }
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname5(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -3945,7 +3990,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname5(this.path), { recursive: true });
+        await mkdir2(dirname6(this.path), { recursive: true });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -4166,7 +4211,7 @@ class EnvCredentialBroker {
     const clientId = await this.resolveFirstSecret(oauth2.clientIdEnvNames, oauth2.clientIdSecretRef ? [oauth2.clientIdSecretRef] : []);
     const clientSecret = await this.resolveFirstSecret(oauth2.clientSecretEnvNames ?? [], oauth2.clientSecretSecretRef ? [oauth2.clientSecretSecretRef] : []);
     const refreshToken = await this.resolveFirstSecret(oauth2.refreshTokenEnvNames ?? [], oauth2.refreshTokenSecretRef ? [oauth2.refreshTokenSecretRef] : []) ?? storedState?.refreshToken?.trim();
-    const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
+    const refreshTokenPinnedInEnv = !!firstNonEmptyEnv2(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
       throw missingCredentialError(definition.handle, capability);
     if (storedState?.status === "reauth_required" || !refreshToken) {
@@ -4307,7 +4352,7 @@ class EnvCredentialBroker {
     const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
     if (!rawCredential)
       throw missingCredentialError(definition.handle, capability);
-    const impersonatedSubject = firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames);
+    const impersonatedSubject = firstNonEmptyEnv2(this.env, serviceAccount.impersonatedSubjectEnvNames);
     if (!impersonatedSubject)
       throw missingCredentialError(definition.handle, capability);
     const storedState = await this.oauth2StateStore?.load(definition.handle);
@@ -4434,7 +4479,7 @@ class EnvCredentialBroker {
     const rawCredential = await this.resolveFirstSecret(serviceAccount.credentialJsonEnvNames, serviceAccount.credentialJsonSecretRef ? [serviceAccount.credentialJsonSecretRef] : []);
     if (!rawCredential)
       return statusFromDefinition(definition, "missing", now);
-    if (!firstNonEmptyEnv(this.env, serviceAccount.impersonatedSubjectEnvNames)) {
+    if (!firstNonEmptyEnv2(this.env, serviceAccount.impersonatedSubjectEnvNames)) {
       return statusFromDefinition(definition, "missing", now);
     }
     const storedState = await this.oauth2StateStore?.load(definition.handle);
@@ -4447,7 +4492,7 @@ class EnvCredentialBroker {
     if (!definition.backendState)
       return;
     const statusEnvNames = definition.statusEnvNames ?? [];
-    if (statusEnvNames.length > 0 && !firstNonEmptyEnv(this.env, statusEnvNames))
+    if (statusEnvNames.length > 0 && !firstNonEmptyEnv2(this.env, statusEnvNames))
       return;
     const expiresAt = definition.backendState.expiresAt ?? expiresAtFromSeconds(now, definition.expiresInSeconds);
     return normalizeBackendState({
@@ -4456,7 +4501,7 @@ class EnvCredentialBroker {
     }, definition.handle, sessionKind);
   }
   async resolveFirstSecret(envNames, secretRefs) {
-    const envValue = firstNonEmptyEnv(this.env, envNames);
+    const envValue = firstNonEmptyEnv2(this.env, envNames);
     if (envValue)
       return envValue;
     for (const ref of secretRefs) {
@@ -4903,7 +4948,7 @@ function expiresAtFromSeconds(now, seconds) {
     return;
   return new Date(now.getTime() + Math.floor(seconds) * 1000).toISOString();
 }
-function firstNonEmptyEnv(env, names) {
+function firstNonEmptyEnv2(env, names) {
   for (const name of names) {
     const value = env[name]?.trim();
     if (value)
@@ -5563,9 +5608,9 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { dirname as dirname6, join as join7 } from "node:path";
+import { dirname as dirname7, join as join7 } from "node:path";
 function defaultHandleRegistryPath() {
   return join7(homedir5(), ".config", "olympus", "handles.json");
 }
@@ -5573,10 +5618,10 @@ function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
 }
 function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync6(path)) {
+  if (!existsSync7(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync7(path, "utf8"));
+  const parsed = JSON.parse(readFileSync8(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -5604,7 +5649,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync5(dirname6(path), { recursive: true });
+  mkdirSync6(dirname7(path), { recursive: true });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -5614,7 +5659,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, prese
   }, null, 2));
 }
 function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync6(path))
+  if (!existsSync7(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -5644,7 +5689,7 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
   });
 }
 function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync6(path))
+  if (!existsSync7(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -6057,9 +6102,9 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync9 } from "node:fs";
+import { chmodSync as chmodSync2, existsSync as existsSync9, lstatSync as lstatSync2, readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname8, join as join9 } from "node:path";
+import { dirname as dirname9, join as join9 } from "node:path";
 function defaultSensitivityMapPath() {
   return join9(homedir7(), ".olympus", "sensitivity-map.json");
 }
@@ -6069,13 +6114,13 @@ function resolveSensitivityMapPath(options = {}) {
 }
 function loadSensitivityMap(options = {}) {
   const path = resolveSensitivityMapPath(options);
-  if (!existsSync8(path)) {
+  if (!existsSync9(path)) {
     if (options.allowMissing)
       return;
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync9(path, "utf8")), path);
+    return parseSensitivityMap(JSON.parse(readFileSync10(path, "utf8")), path);
   } catch (error) {
     if (options.ignoreInvalid)
       return;
@@ -6083,10 +6128,10 @@ function loadSensitivityMap(options = {}) {
   }
 }
 function sensitivityMapRemedy(path) {
-  return `Write the map to ${path}. Run olympus setup first if ${dirname8(path)} does not exist yet; it creates that directory with owner-only permissions.`;
+  return `Write the map to ${path}. Run olympus setup first if ${dirname9(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord9(rawMap);
+  const root = asRecord10(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6145,11 +6190,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord10(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord9(record[tierName]);
+    const mapped = asRecord10(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6157,7 +6202,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord10(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6178,7 +6223,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord9(record.match);
+  const matchRecord = asRecord10(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6200,7 +6245,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord9(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7096,9 +7141,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord10(json, "Gmail messages list response");
+    const record = asRecord11(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord10(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord11(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7274,7 +7319,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord10(value, label) {
+function asRecord11(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7715,16 +7760,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord11(json, "Google Drive files list response");
+    const record = asRecord12(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord11(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord12(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord11(json, "Google Drive folder");
+    const record = asRecord12(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7819,7 +7864,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord11(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord12(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7847,7 +7892,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord11(value, label) {
+function asRecord12(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -9161,7 +9206,7 @@ var init_public_source_capabilities = __esm(() => {
 
 // src/workers/source-dashboard.ts
 import { homedir as homedir8 } from "node:os";
-import { dirname as dirname9, join as join11 } from "node:path";
+import { dirname as dirname10, join as join11 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir8(), ".local", "share");
   return join11(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
@@ -9792,6 +9837,569 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
+// src/core/native-credit-monitor-service.ts
+init_config();
+import { isAbsolute as isAbsolute2 } from "node:path";
+
+// src/core/provider-credit-status.ts
+init_atomic_file();
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
+import { dirname as dirname4 } from "node:path";
+var VENICE_BILLING_BASE_URL = "https://api.venice.ai/api/v1";
+var DEFAULT_BASE_URL = VENICE_BILLING_BASE_URL;
+var DEFAULT_TIMEOUT_MS = 15000;
+var USAGE_PAGE_LIMIT = 500;
+var USAGE_LOOKBACK_DAYS = 16;
+var BUNDLED_CREDITS = "BUNDLED_CREDITS";
+async function fetchVeniceCreditStatus(options = {}) {
+  const env = options.env ?? process.env;
+  const generatedAt = options.now ?? new Date;
+  const apiKey = veniceApiKeyFromEnv(env);
+  if (!apiKey) {
+    return buildReport({
+      generatedAt,
+      status: "not_configured",
+      errorKind: "venice_billing_api_key_missing",
+      errorMessage: "Venice credit monitor has no API key environment variable configured."
+    });
+  }
+  const baseUrl = trimTrailingSlash2(options.baseUrl ?? env.OLYMPUS_VENICE_CREDIT_STATUS_BASE_URL ?? DEFAULT_BASE_URL);
+  const timeoutMs = positiveInt(env.OLYMPUS_VENICE_CREDIT_STATUS_TIMEOUT_MS, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const callerSignal = options.signal;
+  const forwardAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted)
+      controller.abort();
+    else
+      callerSignal.addEventListener("abort", forwardAbort, { once: true });
+  }
+  try {
+    const fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
+    const requestInit = {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        accept: "application/json"
+      },
+      signal: controller.signal
+    };
+    const response = await fetchImpl(`${baseUrl}/billing/balance`, requestInit);
+    if (!response.ok)
+      return buildHttpErrorReport(generatedAt, response.status, "balance");
+    const body = await response.json();
+    const usageResult = await fetchBundledCreditUsage({
+      baseUrl,
+      generatedAt,
+      fetchImpl,
+      requestInit
+    });
+    return buildBalanceReport(generatedAt, body, usageResult.usage);
+  } catch (error) {
+    return buildReport({
+      generatedAt,
+      status: "unavailable",
+      errorKind: "venice_billing_probe_failed",
+      errorMessage: safeErrorMessage(error)
+    });
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", forwardAbort);
+  }
+}
+async function fetchBundledCreditUsage(input) {
+  const lookbackStart = new Date(input.generatedAt.getTime() - USAGE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const entries = [];
+  let page = 1;
+  let totalPages = 1;
+  try {
+    do {
+      const url = new URL(`${input.baseUrl}/billing/usage`);
+      url.searchParams.set("currency", BUNDLED_CREDITS);
+      url.searchParams.set("startDate", lookbackStart.toISOString());
+      url.searchParams.set("endDate", input.generatedAt.toISOString());
+      url.searchParams.set("limit", String(USAGE_PAGE_LIMIT));
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("sortOrder", "desc");
+      const response = await input.fetchImpl(url.toString(), input.requestInit);
+      if (!response.ok) {
+        return {
+          entries: [],
+          usage: unavailableUsage(`venice_billing_usage_http_${response.status}`, `Venice billing usage returned HTTP ${response.status}.`, page - 1)
+        };
+      }
+      const body = await response.json();
+      if (!Array.isArray(body.data)) {
+        return {
+          entries: [],
+          usage: unavailableUsage("venice_billing_usage_invalid_response", "Venice billing usage returned no data array.", page)
+        };
+      }
+      entries.push(...body.data.filter(isRecord));
+      totalPages = positiveNumber(body.pagination?.totalPages) ?? page;
+      page += 1;
+    } while (page <= totalPages);
+    return {
+      entries,
+      usage: aggregateBundledCreditUsage(entries, input.generatedAt, page - 1)
+    };
+  } catch (error) {
+    return {
+      entries: [],
+      usage: unavailableUsage("venice_billing_usage_probe_failed", safeErrorMessage(error), page - 1)
+    };
+  }
+}
+function aggregateBundledCreditUsage(entries, generatedAt, pagesFetched = 1) {
+  const bundledEntries = entries.filter((entry) => normalizedString(entry.currency)?.toUpperCase() === BUNDLED_CREDITS);
+  const trailingStart = new Date(generatedAt.getTime() - 24 * 60 * 60 * 1000);
+  const allocation = bundledEntries.filter(isBundledCreditAllocation).map((entry) => ({ entry, timestamp: dateValue(entry.timestamp) })).filter((value) => value.timestamp !== null).sort((left, right) => right.timestamp.getTime() - left.timestamp.getTime())[0];
+  const cycle = allocation ? {
+    ...aggregateUsageWindow(bundledEntries, allocation.timestamp, generatedAt),
+    derivation: "bundled_credit_allocation"
+  } : null;
+  return {
+    endpoint: "billing/usage",
+    currency: BUNDLED_CREDITS,
+    status: "ok",
+    pages_fetched: pagesFetched,
+    entries_scanned: entries.length,
+    trailing_24h: aggregateUsageWindow(bundledEntries, trailingStart, generatedAt),
+    current_billing_cycle: cycle,
+    cycle_derivation: cycle ? "bundled_credit_allocation" : "unavailable"
+  };
+}
+function aggregateUsageWindow(entries, start, end) {
+  const aggregate = emptyUsageAggregate(start, end);
+  for (const entry of entries) {
+    const timestamp = dateValue(entry.timestamp);
+    if (!timestamp || timestamp < start || timestamp > end)
+      continue;
+    const amount = numberValue(entry.amount);
+    if (amount === null || amount >= 0)
+      continue;
+    const spend = -amount;
+    const family = skuFamily(normalizedString(entry.sku) ?? "");
+    aggregate.spend += spend;
+    aggregate.entry_count += 1;
+    aggregate.by_sku_family[family].spend += spend;
+    aggregate.by_sku_family[family].entry_count += 1;
+  }
+  roundUsageAggregate(aggregate);
+  return aggregate;
+}
+function emptyUsageAggregate(start, end) {
+  return {
+    start_at: start.toISOString(),
+    end_at: end.toISOString(),
+    spend: 0,
+    entry_count: 0,
+    by_sku_family: {
+      vision_extraction: { spend: 0, entry_count: 0 },
+      secure_answers: { spend: 0, entry_count: 0 },
+      other: { spend: 0, entry_count: 0 }
+    }
+  };
+}
+function roundUsageAggregate(aggregate) {
+  aggregate.spend = roundCreditAmount(aggregate.spend);
+  for (const family of Object.values(aggregate.by_sku_family))
+    family.spend = roundCreditAmount(family.spend);
+}
+function skuFamily(sku) {
+  const normalized = sku.toLowerCase();
+  if (normalized.startsWith("grok-4-"))
+    return "vision_extraction";
+  if (normalized.startsWith("e2ee-glm-"))
+    return "secure_answers";
+  return "other";
+}
+function isBundledCreditAllocation(entry) {
+  const amount = numberValue(entry.amount);
+  if (amount === null || amount <= 0)
+    return false;
+  const notes = normalizedString(entry.notes)?.toLowerCase() ?? "";
+  return /allocat|renew|rollover|subscription|credit/.test(notes);
+}
+function buildBalanceReport(generatedAt, body, bundledCreditUsage) {
+  const canConsume = typeof body.canConsume === "boolean" ? body.canConsume : null;
+  const consumptionCurrency = normalizedString(body.consumptionCurrency);
+  const balances = normalizeBalances(body.balances);
+  const diemEpochAllocation = numberValue(body.diemEpochAllocation);
+  return buildReport({
+    generatedAt,
+    status: canConsume === false ? "credit_exhausted" : "ok",
+    canConsume,
+    consumptionCurrency,
+    balances,
+    diemEpochAllocation,
+    ...bundledCreditUsage ? { bundledCreditUsage } : {}
+  });
+}
+function buildHttpErrorReport(generatedAt, status, endpoint) {
+  if (status === 401 || status === 403) {
+    return buildReport({
+      generatedAt,
+      status: "auth_failed",
+      errorKind: `venice_billing_http_${status}`,
+      errorMessage: `Venice billing ${endpoint} rejected the configured API key.`
+    });
+  }
+  if (status === 402) {
+    return buildReport({
+      generatedAt,
+      status: "credit_exhausted",
+      canConsume: false,
+      errorKind: "venice_billing_http_402",
+      errorMessage: `Venice billing ${endpoint} reported credit/payment exhaustion.`
+    });
+  }
+  if (status === 429) {
+    return buildReport({
+      generatedAt,
+      status: "rate_limited",
+      errorKind: "venice_billing_http_429",
+      errorMessage: `Venice billing ${endpoint} is rate limited.`
+    });
+  }
+  return buildReport({
+    generatedAt,
+    status: "unavailable",
+    errorKind: `venice_billing_http_${status}`,
+    errorMessage: `Venice billing ${endpoint} returned HTTP ${status}.`
+  });
+}
+function buildReport(input) {
+  const report = {
+    kind: "venice_credit_status",
+    generated_at: input.generatedAt.toISOString(),
+    provider: "venice",
+    endpoint: "billing/balance",
+    usage_endpoint: "billing/usage",
+    status: input.status,
+    can_consume: input.canConsume ?? null,
+    consumption_currency: input.consumptionCurrency ?? null,
+    balances: input.balances ?? {},
+    diem_epoch_allocation: input.diemEpochAllocation ?? null,
+    bundled_credits_usage: input.bundledCreditUsage ?? unavailableUsage("venice_billing_usage_not_fetched", "Venice billing usage was not fetched."),
+    ...input.errorKind ? { error_kind: input.errorKind } : {},
+    ...input.errorMessage ? { error_message: input.errorMessage } : {},
+    policy: {
+      api_key_exposed: false,
+      source_text_returned: false,
+      billing_probe_only: true,
+      pause_authority: "billing/balance.canConsume"
+    },
+    actions: []
+  };
+  report.actions = actionsForReport(report);
+  return report;
+}
+function unavailableUsage(errorKind, errorMessage, pagesFetched = 0) {
+  return {
+    endpoint: "billing/usage",
+    currency: BUNDLED_CREDITS,
+    status: "unavailable",
+    pages_fetched: pagesFetched,
+    entries_scanned: 0,
+    trailing_24h: null,
+    current_billing_cycle: null,
+    cycle_derivation: "unavailable",
+    error_kind: errorKind,
+    error_message: errorMessage
+  };
+}
+function actionsForReport(report) {
+  const actions = [];
+  if (report.status === "credit_exhausted") {
+    actions.push("venice: billing/balance.canConsume is false; keep escalation paused until credits are refilled, then clear the provider pause marker and restart Venice timers.");
+  } else if (report.status === "not_configured") {
+    actions.push("venice: credit monitor is not configured; provide OLYMPUS_SOURCE_INDEX_VENICE_API_KEY through the private-host runtime secret wrapper.");
+  } else if (report.status === "auth_failed") {
+    actions.push("venice: billing balance rejected the API key; repair the Venice credential before resuming escalation.");
+  } else if (report.status === "rate_limited") {
+    actions.push("venice: billing balance probe is rate limited; keep the last known credit state and retry on the next monitor tick.");
+  } else if (report.status === "unavailable") {
+    actions.push("venice: billing balance probe is unavailable; keep the last known credit state and retry on the next monitor tick.");
+  }
+  if (report.status === "ok" && report.bundled_credits_usage.status === "unavailable") {
+    actions.push("venice: bundled-credit usage is unavailable; canConsume remains the pause authority and usage will retry on the next monitor tick.");
+  }
+  return actions;
+}
+function normalizeBalances(value) {
+  if (!value || typeof value !== "object")
+    return {};
+  const output = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const number = numberValue(raw);
+    if (number !== null)
+      output[key.toLowerCase()] = number;
+  }
+  return output;
+}
+function veniceApiKeyFromEnv(env) {
+  return firstNonEmptyEnv(env, [
+    "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+    "OLYMPUS_VENICE_API_KEY",
+    "VENICE_API_KEY",
+    "API_KEY_VENICE"
+  ]);
+}
+function firstNonEmptyEnv(env, names) {
+  for (const name of names) {
+    const value = env[name]?.trim();
+    if (value)
+      return value;
+  }
+  return;
+}
+function normalizedString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+function numberValue(value) {
+  if (typeof value === "number" && Number.isFinite(value))
+    return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed))
+      return parsed;
+  }
+  return null;
+}
+function positiveNumber(value) {
+  const parsed = numberValue(value);
+  return parsed !== null && Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+function dateValue(value) {
+  const raw = normalizedString(value);
+  if (!raw)
+    return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function roundCreditAmount(value) {
+  return Math.round((value + Number.EPSILON) * 1e8) / 1e8;
+}
+function positiveInt(value, defaultValue) {
+  if (value === undefined || value.trim().length === 0)
+    return defaultValue;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+function trimTrailingSlash2(value) {
+  return value.replace(/\/+$/, "");
+}
+function safeErrorMessage(error) {
+  const message = error instanceof Error && error.message.trim() ? error.message.trim() : "unknown Venice billing probe failure";
+  return message.length > 300 ? `${message.slice(0, 300)}...truncated` : message;
+}
+function writeReport(path, report) {
+  mkdirSync4(dirname4(path), { recursive: true });
+  writePrivateFileAtomicSync(path, `${JSON.stringify(report, null, 2)}
+`);
+}
+function writeProviderPause(path, report) {
+  mkdirSync4(dirname4(path), { recursive: true });
+  writePrivateFileAtomicSync(path, `${JSON.stringify({
+    active: true,
+    kind: "venice",
+    reason: "provider_credit_exhausted",
+    error_kind: report.error_kind ?? "venice_billing_credit_exhausted",
+    created_at: report.generated_at,
+    message: "Venice escalation paused because billing/balance.canConsume is false. Refill Venice credits, remove this marker, then restart Venice escalation timers."
+  }, null, 2)}
+`);
+}
+function reconcileProviderPauseFile(path, report) {
+  if (report.can_consume === false) {
+    writeProviderPause(path, report);
+    return "written";
+  }
+  if (report.status === "ok" && report.can_consume === true && isVeniceProviderPauseFile(path)) {
+    unlinkSync2(path);
+    return "cleared";
+  }
+  return "left";
+}
+function isVeniceProviderPauseFile(path) {
+  if (!existsSync4(path))
+    return false;
+  try {
+    const raw = JSON.parse(readFileSync4(path, "utf8"));
+    return raw.kind === "venice";
+  } catch {
+    return false;
+  }
+}
+
+// src/core/native-credit-monitor-service.ts
+var SERVICE_ID = "olympus-provider-credit-monitor";
+var RELOAD_PREFIX = "plugins.entries.olympus.config.worker.creditMonitor";
+var API_KEY_CREDENTIAL_NAME = "VENICE_API_KEY";
+function createNativeCreditMonitorService(options) {
+  let current;
+  let generation = 0;
+  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  const clearFailure = (lifetime) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.clearFailure();
+    } catch {}
+  };
+  async function tickOnce(lifetime, settings) {
+    if (!isCurrent(lifetime))
+      return;
+    let report;
+    try {
+      report = await fetchVeniceCreditStatus({
+        env: { [API_KEY_CREDENTIAL_NAME]: settings.credentials[API_KEY_CREDENTIAL_NAME] },
+        baseUrl: VENICE_BILLING_BASE_URL,
+        signal: lifetime.controller.signal,
+        ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
+      });
+    } catch {
+      reportFailure(lifetime, "Olympus Venice credit monitor could not complete its billing probe.");
+      return;
+    }
+    if (!isCurrent(lifetime))
+      return;
+    const reportPath = settings.reportPath;
+    if (!reportPath)
+      return;
+    try {
+      writeReport(reportPath, report);
+      if (settings.pauseFile) {
+        if (!isCurrent(lifetime))
+          return;
+        reconcileProviderPauseFile(settings.pauseFile, report);
+      }
+    } catch {
+      reportFailure(lifetime, "Olympus Venice credit monitor could not publish its status files.");
+      return;
+    }
+    if (!isCurrent(lifetime))
+      return;
+    if (report.status === "ok")
+      clearFailure(lifetime);
+    else
+      reportFailure(lifetime, `Olympus Venice credit monitor reported status ${report.status}.`);
+  }
+  async function runTick(lifetime, settings) {
+    try {
+      await tickOnce(lifetime, settings);
+    } catch {} finally {
+      if (!isCurrent(lifetime))
+        return;
+      lifetime.timer = setTimeout(() => {
+        lifetime.timer = undefined;
+        if (!isCurrent(lifetime))
+          return;
+        lifetime.tick = runTick(lifetime, settings);
+      }, options.intervalMs ?? settings.intervalSeconds * 1000);
+      lifetime.timer.unref?.();
+    }
+  }
+  async function stopCurrent() {
+    const lifetime = current;
+    if (!lifetime)
+      return;
+    current = undefined;
+    lifetime.stopping = true;
+    if (lifetime.timer) {
+      clearTimeout(lifetime.timer);
+      lifetime.timer = undefined;
+    }
+    lifetime.controller.abort();
+    try {
+      await lifetime.tick;
+    } catch {}
+  }
+  return {
+    id: SERVICE_ID,
+    reload: { configPrefixes: [RELOAD_PREFIX] },
+    async start(context) {
+      const startGeneration = ++generation;
+      await stopCurrent();
+      if (startGeneration !== generation)
+        return;
+      let settings;
+      try {
+        settings = configFromPluginConfig(freshPluginConfig(context.config, options.initialPluginConfig)).worker.creditMonitor;
+      } catch {
+        try {
+          context.serviceHealth?.reportFailure(new Error("Olympus credit monitor configuration is invalid or contains unresolved credentials."));
+        } catch {}
+        return;
+      }
+      if (!settings.enabled)
+        return;
+      const problem = creditMonitorConfigurationProblem(settings);
+      if (problem) {
+        try {
+          context.serviceHealth?.reportFailure(new Error(problem));
+        } catch {}
+        return;
+      }
+      const lifetime = {
+        context,
+        controller: new AbortController,
+        timer: undefined,
+        tick: undefined,
+        stopping: false
+      };
+      current = lifetime;
+      try {
+        context.logger?.info?.("Olympus Venice credit monitor is running.");
+      } catch {}
+      lifetime.tick = runTick(lifetime, settings);
+    },
+    async stop() {
+      generation += 1;
+      await stopCurrent();
+    }
+  };
+}
+function creditMonitorConfigurationProblem(settings) {
+  if (settings.provider !== "venice") {
+    return "Olympus credit monitor is configured with an unsupported provider.";
+  }
+  if (!settings.reportPath || !isAbsolute2(settings.reportPath)) {
+    return "Olympus Venice credit monitor requires an absolute worker.creditMonitor.reportPath.";
+  }
+  if (!settings.credentials[API_KEY_CREDENTIAL_NAME]) {
+    return `Olympus Venice credit monitor requires a resolved worker.creditMonitor.credentials.${API_KEY_CREDENTIAL_NAME}.`;
+  }
+  return;
+}
+function freshPluginConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord5(contextConfig);
+  const entries = asRecord5(asRecord5(root?.plugins)?.entries);
+  const olympus = asRecord5(entries?.olympus);
+  if (entries) {
+    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  }
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+    return root;
+  }
+  return initialPluginConfig;
+}
+function asRecord5(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
 // src/core/native-process-service.ts
 import { spawn as spawnProcess } from "node:child_process";
 var DEFAULT_READINESS_POLL_MS = 100;
@@ -10033,20 +10641,20 @@ function childExited(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve) => {
+  await new Promise((resolve2) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve();
+      resolve2();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(resolve, ms);
+  return new Promise((resolve2) => {
+    const timeout = setTimeout(resolve2, ms);
     timeout.unref?.();
   });
 }
@@ -10368,7 +10976,7 @@ var SYSTEM_CLOCK = Object.freeze({
 });
 
 // src/core/worker-auth.ts
-import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
@@ -10411,7 +11019,7 @@ function readWorkerSetupEnv(options = {}) {
     const stat2 = statSync2(path);
     if (!stat2.isFile() || (stat2.mode & 63) !== 0)
       return;
-    return parseWorkerSetupEnv(readFileSync4(path, "utf8"));
+    return parseWorkerSetupEnv(readFileSync5(path, "utf8"));
   } catch {
     return;
   }
@@ -10522,7 +11130,7 @@ class EmailClient {
         ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
-    const data = asRecord5(response);
+    const data = asRecord6(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexAnswerResult(data);
@@ -10564,7 +11172,7 @@ class EmailClient {
         ...options.query ? { query: options.query } : {}
       })
     });
-    const data = asRecord5(response);
+    const data = asRecord6(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexStatusResult(data);
@@ -10581,7 +11189,7 @@ class EmailClient {
         ...options.limit !== undefined ? { limit: options.limit } : {}
       })
     });
-    const data = asRecord5(response);
+    const data = asRecord6(response);
     assertNoRawEmailFields(data);
     return data;
   }
@@ -10620,7 +11228,7 @@ class EmailClient {
         ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}
       })
     });
-    const data = asRecord5(response);
+    const data = asRecord6(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexSearchResult(data, {
@@ -10873,7 +11481,7 @@ function hasUniqueJsonObjectMembers(input) {
     return false;
   }
 }
-function asRecord5(value) {
+function asRecord6(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new OperationError("email_error", "Private email lane response was not a JSON object.");
   }
@@ -10903,8 +11511,8 @@ function parseSourceIndexAnswerResult(value) {
   if (!Array.isArray(value.evidence)) {
     throw new OperationError("email_error", "source answer evidence must be an array.");
   }
-  const audit = asRecord5(value.audit);
-  const policy = asRecord5(value.policy);
+  const audit = asRecord6(value.audit);
+  const policy = asRecord6(value.policy);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer audit must be raw-source-safe.");
   }
@@ -10941,7 +11549,7 @@ function parseSourceIndexAnswerResult(value) {
   };
 }
 function parseSourceAnswerSelfHealAudit(value) {
-  const audit = asRecord5(value);
+  const audit = asRecord6(value);
   const outcome = audit.outcome;
   if (outcome !== "healed" && outcome !== "in_progress" && outcome !== "failed" && outcome !== "skipped") {
     return;
@@ -10968,7 +11576,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   if (typeof audit.reason === "string")
     parsed.reason = audit.reason;
   if (audit.prior_state !== undefined) {
-    const prior = asRecord5(audit.prior_state);
+    const prior = asRecord6(audit.prior_state);
     parsed.prior_state = {
       ...typeof prior.extraction_status === "string" ? { extraction_status: prior.extraction_status } : {},
       ...typeof prior.extraction_completeness === "string" ? { extraction_completeness: prior.extraction_completeness } : {}
@@ -10977,7 +11585,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   return parsed;
 }
 function parseSourceAnswerPhaseTimings(value) {
-  const timings = asRecord5(value);
+  const timings = asRecord6(value);
   const parsed = {
     lane_setup_ms: requiredNonNegativeNumber(timings.lane_setup_ms, "audit.phase_timings.lane_setup_ms"),
     bulk_gate_ms: requiredNonNegativeNumber(timings.bulk_gate_ms, "audit.phase_timings.bulk_gate_ms"),
@@ -10998,7 +11606,7 @@ function parseSourceAnswerPhaseTimings(value) {
   return parsed;
 }
 function parseSourceAnswerSynthesisAudit(value) {
-  const audit = asRecord5(value);
+  const audit = asRecord6(value);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer synthesis audit must be raw-source-safe.");
   }
@@ -11017,7 +11625,7 @@ function parseSourceAnswerSynthesisAudit(value) {
   };
 }
 function parseSourceAnswerAnalystFallback(value) {
-  const fallback = asRecord5(value);
+  const fallback = asRecord6(value);
   const from = fallback.from === "venice" || fallback.from === "cloud" ? fallback.from : undefined;
   const reason = fallback.reason === "timeout" || fallback.reason === "escalation" || fallback.reason === "unavailable" || isSanitizedAnalystFallbackReason(fallback.reason) ? fallback.reason : undefined;
   if (!from || fallback.to !== "local" || !reason) {
@@ -11038,7 +11646,7 @@ function parseSourceIndexStatusResult(value) {
   if (value.kind !== "source_index_status") {
     throw new OperationError("email_error", "source index status result must have kind=source_index_status.");
   }
-  const policy = asRecord5(value.policy);
+  const policy = asRecord6(value.policy);
   if (policy.read_only !== true || policy.raw_source_exposed !== false || policy.source_packets_exposed !== false || policy.source_text_returned !== false || policy.secure_local_item_metadata_exposed !== false || policy.castor_visible !== true) {
     throw new OperationError("email_error", "source index status policy must describe a read-only calling-assistant-visible result.");
   }
@@ -11082,8 +11690,8 @@ function parseSourceIndexSearchResult(value, context) {
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
-  const audit = asRecord5(value.audit);
-  const policy = asRecord5(value.policy);
+  const audit = asRecord6(value.audit);
+  const policy = asRecord6(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
   if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || corpus.trustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== corpus.trustDomain) {
@@ -11163,13 +11771,13 @@ function withSourceWatchHeaders(route) {
   return headers;
 }
 function parseSourceWatchResult(value, kind) {
-  const record = asRecord5(value);
+  const record = asRecord6(value);
   assertNoRawEmailFields(record);
   assertNoSourceIndexOperationalLeakFields(record);
   if (record.kind !== kind) {
     throw new OperationError("email_error", `Source watch result must have kind=${kind}.`);
   }
-  const policy = asRecord5(record.policy);
+  const policy = asRecord6(record.policy);
   if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.message_bodies_returned !== false || policy.evidence_pointers_only !== true) {
     throw new OperationError("email_error", "Source watch result must be content-free and evidence-pointer-only.");
   }
@@ -11182,7 +11790,7 @@ function parseSourceWatchResult(value, kind) {
   if (kind === "source_watch") {
     return {
       kind,
-      watch: asRecord5(record.watch),
+      watch: asRecord6(record.watch),
       policy: safePolicy
     };
   }
@@ -11191,7 +11799,7 @@ function parseSourceWatchResult(value, kind) {
   }
   return {
     kind,
-    watches: record.watches.map(asRecord5),
+    watches: record.watches.map(asRecord6),
     ...typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor } : {},
     policy: safePolicy
   };
@@ -11334,14 +11942,14 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
   }
 }
 function parseSourceAnswerOpsec(value) {
-  const opsec = asRecord5(value);
+  const opsec = asRecord6(value);
   if (opsec.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer OPSEC audit must be raw-source-safe.");
   }
   if (!Array.isArray(opsec.structured_evidence)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include structured evidence.");
   }
-  const releaseDecision = asRecord5(opsec.release_decision);
+  const releaseDecision = asRecord6(opsec.release_decision);
   if (typeof releaseDecision.decision !== "string" || !Array.isArray(releaseDecision.reasons)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include a release decision.");
   }
@@ -11382,9 +11990,9 @@ function shouldExposeOperation(operation, context) {
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync3 } from "node:fs";
-import { basename, delimiter, isAbsolute as isAbsolute2, join as join4 } from "node:path";
+import { basename, delimiter, isAbsolute as isAbsolute3, join as join4 } from "node:path";
 import { fileURLToPath } from "node:url";
-var SERVICE_ID = "olympus-worker";
+var SERVICE_ID2 = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
 var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
@@ -11392,7 +12000,7 @@ var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
 function createNativeWorkerService(options) {
   const fetchWorker = options.fetch ?? globalThis.fetch;
   return createNativeProcessService({
-    id: SERVICE_ID,
+    id: SERVICE_ID2,
     label: SERVICE_LABEL,
     reload: {
       configPrefixes: [
@@ -11436,17 +12044,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord6(contextConfig);
-  const plugins = asRecord6(root?.plugins);
-  const entries = asRecord6(plugins?.entries);
-  const olympus = asRecord6(entries?.olympus);
+  const root = asRecord7(contextConfig);
+  const plugins = asRecord7(root?.plugins);
+  const entries = asRecord7(plugins?.entries);
+  const olympus = asRecord7(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord6(asRecord6(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord7(asRecord7(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -11517,7 +12125,7 @@ function resolveBunRuntimePath(configured, env) {
     ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!isAbsolute2(candidate) || !isBunExecutableName(candidate))
+    if (!isAbsolute3(candidate) || !isBunExecutableName(candidate))
       continue;
     try {
       if (statSync3(candidate).isFile())
@@ -11531,7 +12139,7 @@ function resolveWorkerExecutablePath(configured, moduleUrl) {
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
-  if (!isAbsolute2(path))
+  if (!isAbsolute3(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
     if (statSync3(path).isFile())
@@ -11608,18 +12216,18 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key];
   }
 }
-function asRecord6(value) {
+function asRecord7(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
 // src/core/native-telegram-service.ts
 init_config();
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync5, statSync as statSync4 } from "node:fs";
+import { readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute3, join as join5 } from "node:path";
+import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-var SERVICE_ID2 = "olympus-telegram-capture";
+var SERVICE_ID3 = "olympus-telegram-capture";
 var SERVICE_LABEL2 = "Telegram capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS = 30000;
 var READINESS_FILE = "native-service-readiness.json";
@@ -11646,7 +12254,7 @@ var MANAGED_TELEGRAM_ENV_NAMES = new Set([
 ]);
 function createNativeTelegramService(options) {
   return createNativeProcessService({
-    id: SERVICE_ID2,
+    id: SERVICE_ID3,
     label: SERVICE_LABEL2,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.telegramCapture"] },
     initialConfig: options.initialPluginConfig,
@@ -11662,7 +12270,7 @@ function createNativeTelegramService(options) {
 async function prepareTelegramStart(input, options) {
   let config;
   try {
-    config = configFromPluginConfig(freshPluginConfig(input.context.config, input.initialConfig));
+    config = configFromPluginConfig(freshPluginConfig2(input.context.config, input.initialConfig));
   } catch {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service configuration is invalid or contains unresolved credentials.");
   }
@@ -11716,10 +12324,10 @@ async function prepareTelegramStart(input, options) {
     readinessProbe: (child) => telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child)
   };
 }
-function freshPluginConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord7(contextConfig);
-  const entries = asRecord7(asRecord7(root?.plugins)?.entries);
-  const olympus = asRecord7(entries?.olympus);
+function freshPluginConfig2(contextConfig, initialPluginConfig) {
+  const root = asRecord8(contextConfig);
+  const entries = asRecord8(asRecord8(root?.plugins)?.entries);
+  const olympus = asRecord8(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -11755,7 +12363,7 @@ function applyConfiguredPaths(config, env) {
     env.OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH = capture.reportPath;
 }
 function assertUsableFile(path, label) {
-  if (!isAbsolute3(path)) {
+  if (!isAbsolute4(path)) {
     throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} path must be absolute.`);
   }
   try {
@@ -11771,7 +12379,7 @@ async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, c
     const stat2 = statSync4(path);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync5(path, "utf8"));
+    const receipt = JSON.parse(readFileSync6(path, "utf8"));
     return receipt.kind === "telegram_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.authenticated === true && typeof receipt.approved_chats === "number" && Number.isInteger(receipt.approved_chats) && receipt.approved_chats === approvedChatCount;
   } catch {
     return false;
@@ -11780,7 +12388,7 @@ async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, c
 function firstPresent(...values) {
   return values.find((value) => value?.trim())?.trim();
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -11852,13 +12460,13 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname10, join as join12 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync11, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname11, join as join12 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
 init_secret_store();
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
@@ -11866,7 +12474,7 @@ async function setupPreflight(options) {
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
   const inputEnv = options.env ?? process.env;
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync5(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync6(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
@@ -12169,9 +12777,9 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname7, join as join8 } from "node:path";
+import { dirname as dirname8, join as join8 } from "node:path";
 init_secret_store();
 
 // src/core/worker-service.ts
@@ -12214,7 +12822,7 @@ function defaultDetachedOAuthStateDir() {
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync8(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync9(path, "utf8")));
   } catch {
     return;
   }
@@ -12346,7 +12954,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync9(configPath))
+  if (configPath === undefined || !existsSync10(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -12534,14 +13142,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord12(await response.json());
-    const readiness = asRecord12(body.credential_readiness);
-    const policy = asRecord12(readiness.policy);
+    const body = asRecord13(await response.json());
+    const readiness = asRecord13(body.credential_readiness);
+    const policy = asRecord13(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord12(entry);
+      const profile = asRecord13(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -12594,7 +13202,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord12(await response.json());
+  const health = asRecord13(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -12647,7 +13255,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -12655,7 +13263,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord12(entry);
+    const corpus = asRecord13(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -12669,8 +13277,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord12(corpus.counts);
-    const embeddingParity = asRecord12(corpus.embedding_parity);
+    const counts = asRecord13(corpus.counts);
+    const embeddingParity = asRecord13(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -12730,7 +13338,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -12775,7 +13383,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -12787,8 +13395,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord12(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord12(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord13(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord13(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -12845,7 +13453,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord12(value);
+  const record = asRecord13(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -12858,7 +13466,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord12(entry);
+    const credential = asRecord13(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -12910,7 +13518,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord12(await response.json());
+  const status = asRecord13(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -12938,7 +13546,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord12(entry);
+    const source = asRecord13(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -12948,7 +13556,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord12(taskEntry);
+      const task = asRecord13(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -13084,7 +13692,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord12(await response.json());
+    return asRecord13(await response.json());
   } catch {
     return;
   }
@@ -13094,7 +13702,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord12(await response.json());
+    const status = asRecord13(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -13103,7 +13711,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord12(status.ingestion_ledger);
+  const ledger = asRecord13(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -13111,7 +13719,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join12(dirname10(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join12(dirname11(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -13132,15 +13740,15 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync9(path))
+    if (!existsSync10(path))
       return;
-    const parsed = JSON.parse(readFileSync10(path, "utf8"));
-    const record = asRecord12(parsed);
-    const sources = asRecord12(record.sources);
+    const parsed = JSON.parse(readFileSync11(path, "utf8"));
+    const record = asRecord13(parsed);
+    const sources = asRecord13(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord12(sourceValue);
-      const terminal = asRecord12(source.failed_terminal_by_class);
+      const source = asRecord13(sourceValue);
+      const terminal = asRecord13(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -13155,7 +13763,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync7(dirname10(path), { recursive: true });
+  mkdirSync8(dirname11(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -13168,9 +13776,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord12(await response.json());
+    const status = asRecord13(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord12(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord13(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -13311,7 +13919,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord12(corpus.last_refresh);
+  const lastRefresh = asRecord13(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -13326,13 +13934,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord12(corpus.last_refresh);
+  const lastRefresh = asRecord13(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord12(corpus.last_sync);
+  const lastSync = asRecord13(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord12(corpus.counts);
+  const counts = asRecord13(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -13363,13 +13971,13 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join12(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join12(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord12(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -14166,13 +14774,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord13(payload);
+  const result = asRecord14(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord13(result.audit);
-  const policy = asRecord13(result.policy);
-  const synthesis = asRecord13(audit?.answer_synthesis);
-  const timings = asRecord13(audit?.phase_timings);
+  const audit = asRecord14(result.audit);
+  const policy = asRecord14(result.policy);
+  const synthesis = asRecord14(audit?.answer_synthesis);
+  const timings = asRecord14(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -14182,7 +14790,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord13(item);
+    const record = asRecord14(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -14193,7 +14801,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord13(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord14(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -14245,7 +14853,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord13(value) {
+function asRecord14(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -14265,10 +14873,12 @@ var plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
+    const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      api.registerService(creditMonitorService);
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled) {
       throw new Error("This OpenClaw host does not support native Olympus services.");
     }
     const ctx = {
@@ -14475,7 +15085,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord13(value);
+  const record = asRecord14(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

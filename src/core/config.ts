@@ -95,6 +95,14 @@ export interface OlympusConfig {
       runtimePath?: string;
       executablePath?: string;
     };
+    creditMonitor: {
+      enabled: boolean;
+      provider: 'venice';
+      intervalSeconds: number;
+      reportPath?: string;
+      pauseFile?: string;
+      credentials: Record<string, string>;
+    };
     /** Opt-in Gateway supervision of the local Telethon capture process. */
     telegramCapture: {
       enabled: boolean;
@@ -158,6 +166,7 @@ const DEFAULT_CONFIG: OlympusConfig = {
       startupTimeoutSeconds: 180,
       credentials: {},
     },
+    creditMonitor: { enabled: false, provider: 'venice', intervalSeconds: 600, credentials: {} },
     telegramCapture: {
       enabled: false,
       credentials: {},
@@ -499,6 +508,20 @@ export function configFromPluginConfig(
       config.worker.service.executablePath = service.executablePath.trim();
     }
   }
+  const creditMonitor = asRecord(worker?.creditMonitor);
+  if (creditMonitor) {
+    if (typeof creditMonitor.enabled === 'boolean') config.worker.creditMonitor.enabled = creditMonitor.enabled;
+    if (creditMonitor.provider !== undefined && creditMonitor.provider !== 'venice') {
+      throw new OperationError('config_error', 'worker.creditMonitor.provider must be venice.');
+    }
+    if (typeof creditMonitor.intervalSeconds === 'number') config.worker.creditMonitor.intervalSeconds = creditMonitor.intervalSeconds;
+    const credentials = asRecord(creditMonitor.credentials);
+    if (credentials) config.worker.creditMonitor.credentials = parseNativeCreditCredentials(credentials, requireResolvedWorkerSecrets && config.worker.creditMonitor.enabled);
+    for (const key of ['reportPath', 'pauseFile'] as const) {
+      const value = creditMonitor[key];
+      if (typeof value === 'string' && value.trim()) config.worker.creditMonitor[key] = value.trim();
+    }
+  }
   const telegramCapture = asRecord(worker?.telegramCapture);
   if (telegramCapture) {
     if (typeof telegramCapture.enabled === 'boolean') {
@@ -736,6 +759,11 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.service ?? {}),
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials,
       },
+      creditMonitor: {
+        ...target.worker.creditMonitor,
+        ...(source.worker.creditMonitor ?? {}),
+        credentials: source.worker.creditMonitor?.credentials ?? target.worker.creditMonitor.credentials,
+      },
       telegramCapture: {
         ...target.worker.telegramCapture,
         ...(source.worker.telegramCapture ?? {}),
@@ -895,6 +923,19 @@ function validateConfig(config: OlympusConfig): void {
     config.worker.service.credentials,
     config.worker.service.enabled,
   );
+  assertBoolean(config.worker.creditMonitor.enabled, 'worker.creditMonitor.enabled');
+  if (config.worker.creditMonitor.provider !== 'venice') throw new OperationError('config_error', 'worker.creditMonitor.provider must be venice.');
+  assertPositiveInteger(config.worker.creditMonitor.intervalSeconds, 'worker.creditMonitor.intervalSeconds');
+  if (config.worker.creditMonitor.intervalSeconds < 60 || config.worker.creditMonitor.intervalSeconds > 86400) {
+    throw new OperationError('config_error', 'worker.creditMonitor.intervalSeconds must be between 60 and 86400.');
+  }
+  config.worker.creditMonitor.credentials = parseNativeCreditCredentials(config.worker.creditMonitor.credentials, config.worker.creditMonitor.enabled);
+  for (const key of ['reportPath', 'pauseFile'] as const) {
+    const value = config.worker.creditMonitor[key];
+    if (value !== undefined && (typeof value !== 'string' || !isAbsolutePath(value))) {
+      throw new OperationError('config_error', `worker.creditMonitor.${key} must be an absolute path.`);
+    }
+  }
   assertBoolean(config.worker.telegramCapture.enabled, 'worker.telegramCapture.enabled');
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(
     config.worker.telegramCapture.credentials,
@@ -1045,6 +1086,16 @@ function parseNativeWorkerCredentials(
         `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`,
       );
     }
+  }
+  return parsed;
+}
+
+function parseNativeCreditCredentials(value: Record<string, unknown>, serviceEnabled: boolean): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (name !== 'VENICE_API_KEY') throw new OperationError('config_error', `worker.creditMonitor.credentials does not allow environment name ${name}.`);
+    if (typeof credential === 'string' && credential.trim()) parsed[name] = credential;
+    else if (typeof credential === 'string' || serviceEnabled) throw new OperationError('config_error', 'worker.creditMonitor.credentials.VENICE_API_KEY must be a resolved nonempty string.');
   }
   return parsed;
 }
