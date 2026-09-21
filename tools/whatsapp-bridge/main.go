@@ -290,6 +290,10 @@ func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Co
 		connectWithBackoff(client)
 		paired := false
 		for item := range qrChan {
+			if err := rejectUnsupportedPairing(item.Event, stateDir); err != nil {
+				client.Disconnect()
+				log.Fatalf("olympus-whatsapp-bridge: %v", err)
+			}
 			switch item.Event {
 			case whatsmeow.QRChannelEventCode:
 				emitQR(item.Code, stateDir, qrStdoutEnabled())
@@ -321,6 +325,16 @@ func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Co
 // steady state: whatsmeow's auto-reconnect handles transient drops with its own
 // backoff. We only exit on signals or on fatal session events (logged out,
 // stream replaced) — systemd's Restart=always brings the daemon back.
+// A passkey challenge requires a real authenticator and explicit user flow.
+// Never leave an obsolete QR visible or pretend that headless pairing finished.
+func rejectUnsupportedPairing(event, stateDir string) error {
+	if event != whatsmeow.QRChannelEventPasskeyRequest && event != whatsmeow.QRChannelEventPasskeyResponse {
+		return nil
+	}
+	removeQRFile(stateDir)
+	return errors.New("interactive passkey authentication is required and is not supported by this bridge; pairing stopped")
+}
+
 func runUntilExit(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
