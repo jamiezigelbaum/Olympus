@@ -61,7 +61,7 @@ describe('native source embedding drain service', () => {
     expect(starts[0]?.env.UNRELATED_VALUE).toBeUndefined();
     expect(starts[0]?.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID).toBeUndefined();
     const baseline = configFromPluginConfig({ sovereignty: { policy: { schemaVersion: 1 } } });
-    const env = { ...starts[0]!.env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/unused-conflicting-policy.json' };
+    const env: Record<string, string | undefined> = { ...starts[0]!.env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/unused-conflicting-policy.json' };
     const standaloneEnv = { ...env };
     delete standaloneEnv.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID;
     expect(configWithEnvironmentOverrides(baseline, env).sovereignty)

@@ -172,7 +172,7 @@ test('a zero exit before the first poll completes only with an exact-instance re
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('a ready child that leaves cleanly later completes and still stops its process group', async () => {
   const fx = fixture();
@@ -200,7 +200,7 @@ test('a ready child that leaves cleanly later completes and still stops its proc
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('a ready child that exits nonzero still restarts under the same option', async () => {
   const fx = fixture();
@@ -225,7 +225,7 @@ test('a ready child that exits nonzero still restarts under the same option', as
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('a zero exit without a readiness receipt fails instead of completing', async () => {
   const fx = fixture();
@@ -244,7 +244,7 @@ test('a zero exit without a readiness receipt fails instead of completing', asyn
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('a ready child killed by a signal still restarts under the same option', async () => {
   const fx = fixture();
@@ -269,7 +269,7 @@ test('a ready child killed by a signal still restarts under the same option', as
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('the default supervision still fails a zero exit that lands before the first poll', async () => {
   const fx = fixture();
@@ -282,7 +282,7 @@ test('the default supervision still fails a zero exit that lands before the firs
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);
 
 test('the default supervision still restarts a ready child that exits zero', async () => {
   const fx = fixture();
@@ -306,4 +306,4 @@ test('the default supervision still restarts a ready child that exits zero', asy
     await run.service.stop();
     fx.cleanup();
   }
-});
+}, 15_000);

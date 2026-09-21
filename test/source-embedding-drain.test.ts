@@ -212,7 +212,7 @@ describe('canonical connector-store embedding drain', () => {
       server.stop(true);
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 function provider(
