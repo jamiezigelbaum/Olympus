@@ -15593,7 +15593,7 @@ function firstString(...values) {
 var plugin = {
   id: "olympus",
   name: "Olympus",
-  description: "Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.",
+  description: "Privacy-aware source ingestion and cited answers across email, files, messaging, bookmarks, and reading sources.",
   register(api) {
     const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
     const workerService = createNativeWorkerService({
