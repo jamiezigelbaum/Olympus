@@ -122,7 +122,7 @@ describe('native Telegram capture service', () => {
     expect(starts[1]!.pid).not.toBe(first.pid);
   });
 
-  test('refuses stale readiness and reports only the categorical startup failure', async () => {
+  test('refuses stale readiness and reports initialization followed by categorical failure', async () => {
     const fixture = telegramFixture({ publishReadiness: false });
     mkdirSync(fixture.stateDir, { recursive: true });
     writeFileSync(join(fixture.stateDir, 'native-service-readiness.json'), JSON.stringify({
@@ -148,7 +148,7 @@ describe('native Telegram capture service', () => {
         clearFailure() {},
       },
     })).rejects.toThrow('Olympus Telegram capture service failed to become ready.');
-    expect(failures).toEqual(['Olympus Telegram capture service failed to become ready.']);
+    expect(failures).toEqual(['Olympus Telegram capture service is starting.', 'Olympus Telegram capture service failed to become ready.']);
   });
 
   test('fails before spawn for missing credentials, session, or approved scopes', async () => {

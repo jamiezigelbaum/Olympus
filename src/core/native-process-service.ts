@@ -78,6 +78,30 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
   restartDelaysMs?: readonly number[];
 }
 
+/** OpenClaw replacement starts have a five-second deadline. Keep the host
+ * callback prompt while this supervisor retains readiness, failure, and stop
+ * ownership. Initializing children remain degraded until their receipt passes.
+ */
+export function backgroundNativeProcessService(
+  service: NativeProcessServiceDefinition,
+): NativeProcessServiceDefinition {
+  return {
+    ...service,
+    async start(context) {
+      void service.start(context).catch((error) => {
+        if (error instanceof NativeProcessReportedStartError) return;
+        // The supervisor normally reports a categorical failure itself. This
+        // also covers cleanup failure; never forward raw child/spawn errors.
+        try {
+          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
+        } catch {
+          // A stopped/replaced host lease must not resurrect stale health.
+        }
+      });
+    },
+  };
+}
+
 interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   generation: number;
   context: NativeProcessServiceContext;
@@ -97,6 +121,9 @@ export class NativeProcessServiceStoppedError extends Error {}
  * verbatim, unlike raw spawn/HTTP failures.
  */
 export class NativeProcessConfigurationError extends Error {}
+
+/** The supervisor already sent this sanitized failure to its current health lease. */
+class NativeProcessReportedStartError extends Error {}
 
 /**
  * Reusable process supervision for native child services: fresh-config start,
@@ -181,6 +208,8 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (settings.endpointOccupied) {
       throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
+    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
       stdio: 'ignore',
@@ -255,7 +284,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
           : `Olympus ${options.label} failed to become ready.`;
         reportFailure(lifetime, message);
         if (current === lifetime) current = undefined;
-        throw new Error(message);
+        throw new NativeProcessReportedStartError(message);
       }
     },
     async stop() {
