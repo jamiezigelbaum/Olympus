@@ -73,6 +73,7 @@ export function createNativeTranscriptionCleanupService(
     ?? fileURLToPath(new URL('../config/systemd/user/olympus-whisper-transcribe.sh', options.moduleUrl ?? import.meta.url));
   let current: CleanupLifetime | undefined;
   let generation = 0;
+  let retirement: Promise<void> | undefined;
 
   const isCurrent = (lifetime: CleanupLifetime): boolean =>
     current === lifetime && !lifetime.stopped;
@@ -95,12 +96,20 @@ export function createNativeTranscriptionCleanupService(
   async function runSweepOnce(
     lifetime: CleanupLifetime,
     kernel: NativeProcessServiceDefinition,
-  ): Promise<void> {
-    if (!isCurrent(lifetime)) return;
+  ): Promise<boolean> {
+    if (!isCurrent(lifetime)) return false;
     try {
       await kernel.start(lifetime.context);
+      return true;
     } catch {
       reportFailure(lifetime, 'Olympus transcription temp cleanup failed to complete.');
+      try {
+        await kernel.stop();
+        return true;
+      } catch {
+        reportFailure(lifetime, 'Olympus transcription temp cleanup could not stop its owned process group.');
+        return false;
+      }
     }
   }
 
@@ -110,7 +119,7 @@ export function createNativeTranscriptionCleanupService(
     settings: TranscriptionCleanupSettings,
   ): Promise<void> {
     while (isCurrent(lifetime)) {
-      await runSweepOnce(lifetime, kernel);
+      if (!await runSweepOnce(lifetime, kernel)) return;
       if (!isCurrent(lifetime)) return;
       const waited = await waitInterval(lifetime, settings.intervalSeconds);
       if (!waited || !isCurrent(lifetime)) return;
@@ -224,22 +233,28 @@ export function createNativeTranscriptionCleanupService(
    * already in flight settles on the fence instead of starting work late.
    */
   async function stopCurrent(): Promise<void> {
+    if (retirement) return await retirement;
     const lifetime = current;
     if (!lifetime) return;
-    current = undefined;
     lifetime.stopped = true;
     if (lifetime.timer) {
       clearTimeout(lifetime.timer);
       lifetime.timer = undefined;
     }
     lifetime.cancelInterval?.();
-    await lifetime.kernel.stop();
-    try {
+    const cleanup = (async () => {
+      await lifetime.kernel.stop();
       await lifetime.tick;
-    } catch {
-      // The tick swallows its own failures; a rejected tick must not block stop.
+      if (current === lifetime) current = undefined;
+    })();
+    retirement = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (retirement === cleanup) retirement = undefined;
     }
   }
+
 }
 
 /** Categorical configuration problems; never the offending value. */

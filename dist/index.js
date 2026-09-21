@@ -10001,6 +10001,8 @@ function createNativeProcessService(options) {
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current;
+  let retiring;
+  let retirement;
   const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
   const reportFailure = (lifetime, message) => {
     if (!isCurrent(lifetime))
@@ -10122,9 +10124,12 @@ function createNativeProcessService(options) {
     id: options.id,
     reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context) {
+      const requestedGeneration = ++generation;
       await stopCurrent();
+      if (requestedGeneration !== generation)
+        return;
       const lifetime = {
-        generation: ++generation,
+        generation: requestedGeneration,
         context,
         child: undefined,
         childReady: false,
@@ -10148,20 +10153,34 @@ function createNativeProcessService(options) {
       }
     },
     async stop() {
+      generation += 1;
       await stopCurrent();
     }
   };
   async function stopCurrent() {
-    const lifetime = current;
+    if (retirement)
+      return await retirement;
+    const lifetime = current ?? retiring;
     if (!lifetime)
       return;
     current = undefined;
+    retiring = lifetime;
     lifetime.stopping = true;
     if (lifetime.restartTimer) {
       clearTimeout(lifetime.restartTimer);
       lifetime.restartTimer = undefined;
     }
-    await terminateChild(lifetime, stopGraceMs);
+    const cleanup = terminateChild(lifetime, stopGraceMs).then(() => {
+      if (retiring === lifetime)
+        retiring = undefined;
+    });
+    retirement = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (retirement === cleanup)
+        retirement = undefined;
+    }
   }
 }
 async function waitForChildReadiness(input) {
@@ -10208,14 +10227,18 @@ async function terminateChild(lifetime, graceMs, expectedChild) {
   const child = lifetime.child;
   if (expectedChild && child !== expectedChild)
     return;
-  lifetime.child = undefined;
   lifetime.childReady = false;
-  if (!child?.pid)
+  if (!child?.pid) {
+    if (lifetime.child === child)
+      lifetime.child = undefined;
     return;
+  }
   const cleanup = terminateChildProcessGroup(child, graceMs);
   lifetime.cleanupPromise = cleanup;
   try {
     await cleanup;
+    if (lifetime.child === child)
+      lifetime.child = undefined;
   } finally {
     if (lifetime.cleanupPromise === cleanup)
       lifetime.cleanupPromise = undefined;
@@ -10275,6 +10298,7 @@ function createNativeTranscriptionCleanupService(options) {
   const scriptPath = options.scriptPath ?? fileURLToPath(new URL("../config/systemd/user/olympus-whisper-transcribe.sh", options.moduleUrl ?? import.meta.url));
   let current;
   let generation = 0;
+  let retirement;
   const isCurrent = (lifetime) => current === lifetime && !lifetime.stopped;
   const reportFailure = (lifetime, message) => {
     if (!isCurrent(lifetime))
@@ -10285,16 +10309,25 @@ function createNativeTranscriptionCleanupService(options) {
   };
   async function runSweepOnce(lifetime, kernel) {
     if (!isCurrent(lifetime))
-      return;
+      return false;
     try {
       await kernel.start(lifetime.context);
+      return true;
     } catch {
       reportFailure(lifetime, "Olympus transcription temp cleanup failed to complete.");
+      try {
+        await kernel.stop();
+        return true;
+      } catch {
+        reportFailure(lifetime, "Olympus transcription temp cleanup could not stop its owned process group.");
+        return false;
+      }
     }
   }
   async function runLoop(lifetime, kernel, settings) {
     while (isCurrent(lifetime)) {
-      await runSweepOnce(lifetime, kernel);
+      if (!await runSweepOnce(lifetime, kernel))
+        return;
       if (!isCurrent(lifetime))
         return;
       const waited = await waitInterval(lifetime, settings.intervalSeconds);
@@ -10384,20 +10417,30 @@ function createNativeTranscriptionCleanupService(options) {
     }
   };
   async function stopCurrent() {
+    if (retirement)
+      return await retirement;
     const lifetime = current;
     if (!lifetime)
       return;
-    current = undefined;
     lifetime.stopped = true;
     if (lifetime.timer) {
       clearTimeout(lifetime.timer);
       lifetime.timer = undefined;
     }
     lifetime.cancelInterval?.();
-    await lifetime.kernel.stop();
-    try {
+    const cleanup = (async () => {
+      await lifetime.kernel.stop();
       await lifetime.tick;
-    } catch {}
+      if (current === lifetime)
+        current = undefined;
+    })();
+    retirement = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (retirement === cleanup)
+        retirement = undefined;
+    }
   }
 }
 function cleanupConfigurationProblem(settings) {

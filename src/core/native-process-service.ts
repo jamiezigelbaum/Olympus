@@ -165,6 +165,8 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current: ServiceLifetime<TSettings> | undefined;
+  let retiring: ServiceLifetime<TSettings> | undefined;
+  let retirement: Promise<void> | undefined;
 
   const isCurrent = (lifetime: ServiceLifetime<TSettings>): boolean => current === lifetime && !lifetime.stopping;
 
@@ -306,9 +308,11 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     id: options.id,
     reload: { configPrefixes: [...options.reload.configPrefixes] },
     async start(context) {
+      const requestedGeneration = ++generation;
       await stopCurrent();
+      if (requestedGeneration !== generation) return;
       const lifetime: ServiceLifetime<TSettings> = {
-        generation: ++generation,
+        generation: requestedGeneration,
         context,
         child: undefined,
         childReady: false,
@@ -332,21 +336,35 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       }
     },
     async stop() {
+      generation += 1;
       await stopCurrent();
     },
   };
 
   async function stopCurrent(): Promise<void> {
-    const lifetime = current;
+    if (retirement) return await retirement;
+    const lifetime = current ?? retiring;
     if (!lifetime) return;
     current = undefined;
+    retiring = lifetime;
     lifetime.stopping = true;
     if (lifetime.restartTimer) {
       clearTimeout(lifetime.restartTimer);
       lifetime.restartTimer = undefined;
     }
-    await terminateChild(lifetime, stopGraceMs);
+    // A failed signal retains both the lifetime and exact child/PGID. No new
+    // start may pass this boundary until a later stop establishes cleanup.
+    const cleanup = terminateChild(lifetime, stopGraceMs).then(() => {
+      if (retiring === lifetime) retiring = undefined;
+    });
+    retirement = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (retirement === cleanup) retirement = undefined;
+    }
   }
+
 }
 
 async function waitForChildReadiness<TSettings extends NativeProcessStartSettings>(input: {
@@ -411,13 +429,16 @@ async function terminateChild<TSettings extends NativeProcessStartSettings>(
   if (lifetime.cleanupPromise) return await lifetime.cleanupPromise;
   const child = lifetime.child;
   if (expectedChild && child !== expectedChild) return;
-  lifetime.child = undefined;
   lifetime.childReady = false;
-  if (!child?.pid) return;
+  if (!child?.pid) {
+    if (lifetime.child === child) lifetime.child = undefined;
+    return;
+  }
   const cleanup = terminateChildProcessGroup(child, graceMs);
   lifetime.cleanupPromise = cleanup;
   try {
     await cleanup;
+    if (lifetime.child === child) lifetime.child = undefined;
   } finally {
     if (lifetime.cleanupPromise === cleanup) lifetime.cleanupPromise = undefined;
   }

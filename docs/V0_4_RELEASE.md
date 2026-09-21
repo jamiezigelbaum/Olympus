@@ -21,6 +21,13 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-21 — SSH stays in private ops for this beta.** The owner keeps
+  remote-compute SSH transport outside the public plugin. Olympus consumes the
+  configured model API and performs model discovery; it ships no tenant hosts,
+  keys, Connect deployment, or Tailscale prerequisite. Repair the existing host
+  tunnel without widening its trust boundary. A generic plugin SSH manager is
+  not part of this release.
+
 - **2026-09-21 — Finish fixes, then release the beta.** The owner accepts the
   successful tester installation/source-use report as sufficient beta feedback
   and authorizes publication after the agreed Olympus installation and native

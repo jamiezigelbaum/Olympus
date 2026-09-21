@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -274,8 +275,9 @@ describe('native transcription temp cleanup service', () => {
     const service = serviceFor(fx, pluginConfig(fx, { intervalSeconds: 60 }), {
       scriptPath: fixtureScript(fx, 'sleep 0.6'),
     });
-    await service.start({});
-    await waitUntil(() => sweepCount(fx) >= 2, 'two sequential sweeps');
+    const run = context();
+    await service.start(run.context);
+    await waitUntil(() => run.events.filter((event) => event === 'clear').length >= 2, 'two completed sequential sweeps');
     await service.stop();
     // Each sweep removed its own marker before the next one started: no tick
     // began while its predecessor was still running.
@@ -323,8 +325,9 @@ describe('native transcription temp cleanup service', () => {
       const service = serviceFor(fx, pluginConfig(fx, { intervalSeconds: 60, minAgeMinutes: 120 }), {
         scriptPath: fixtureScript(fx, 'exit 0'),
       });
-      await service.start({});
-      await waitUntil(() => existsSync(fx.envPath), 'the environment dump');
+      const run = context();
+      await service.start(run.context);
+      await waitUntil(() => run.events.includes('clear'), 'completed environment dump');
       const dumped = readEnvDump(fx);
       expect(dumped.HOME).toBe('/home/olympus-operator');
       expect(dumped.PATH).toBe('/usr/bin:/bin:/usr/local/bin');
@@ -499,3 +502,94 @@ describe('native transcription temp cleanup service', () => {
     await service.stop();
   }, 15_000);
 });
+
+interface SyntheticCleanupChild extends EventEmitter {
+  pid: number;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+}
+
+function syntheticCleanupHarness(options: { denied?: boolean; delayMs?: number } = {}) {
+  const children: SyntheticCleanupChild[] = [];
+  let live = 0;
+  let maxLive = 0;
+  let deny = options.denied ?? false;
+  const realKill = process.kill;
+  process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+    const child = children.find((entry) => entry.pid === -pid);
+    if (!child) return realKill(pid, signal);
+    if (deny) throw Object.assign(new Error('synthetic denied'), { code: 'EPERM' });
+    if (child.signalCode === null && child.exitCode === null && signal !== 0) {
+      setTimeout(() => {
+        if (child.signalCode !== null || child.exitCode !== null) return;
+        child.signalCode = (signal ?? 'SIGTERM') as NodeJS.Signals;
+        live -= 1;
+        child.emit('exit', null, child.signalCode);
+      }, options.delayMs ?? 0);
+    }
+    return true;
+  }) as typeof process.kill;
+  const spawn = (() => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 970000 + children.length,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+    });
+    children.push(child);
+    live += 1;
+    maxLive = Math.max(maxLive, live);
+    return child;
+  }) as unknown as typeof spawnProcess;
+  return {
+    children, spawn,
+    maxLive: () => maxLive,
+    allowCleanup: () => { deny = false; },
+    restore: () => { process.kill = realKill; },
+  };
+}
+
+test('concurrent stop and start share retirement before another sweep can launch', async () => {
+  const fixture = syntheticCleanupHarness({ delayMs: 120 });
+  const service = createNativeTranscriptionCleanupService({
+    initialPluginConfig: { worker: { transcriptionCleanup: { enabled: true, maxRuntimeSeconds: 5 } } },
+    scriptPath: '/synthetic/unused.sh', spawn: fixture.spawn,
+  });
+  try {
+    await service.start({});
+    await waitUntil(() => fixture.children.length === 1, 'first synthetic sweep');
+    const stopped = service.stop();
+    const restarted = service.start({});
+    await Promise.all([stopped, restarted]);
+    await waitUntil(() => fixture.children.length === 2, 'replacement synthetic sweep');
+    expect(fixture.maxLive()).toBe(1);
+  } finally {
+    fixture.allowCleanup();
+    try { await service.stop(); } finally { fixture.restore(); }
+  }
+}, 15_000);
+
+test('failed cleanup retains custody and blocks replacement until the old child is stopped', async () => {
+  const fixture = syntheticCleanupHarness({ denied: true });
+  const events: string[] = [];
+  const service = createNativeTranscriptionCleanupService({
+    initialPluginConfig: { worker: { transcriptionCleanup: { enabled: true, maxRuntimeSeconds: 1 } } },
+    scriptPath: '/synthetic/unused.sh', spawn: fixture.spawn, intervalMs: 5,
+  });
+  try {
+    await service.start({ serviceHealth: { reportFailure: error => { events.push(error.message); }, clearFailure() {} } });
+    await waitUntil(() => events.some((message) => message.includes('could not stop its owned process group')), 'blocked cleanup');
+    await Bun.sleep(30);
+    expect(fixture.children).toHaveLength(1);
+    expect(fixture.children[0]!.signalCode).toBeNull();
+    await expect(service.start({})).rejects.toThrow('synthetic denied');
+    expect(fixture.children).toHaveLength(1);
+    fixture.allowCleanup();
+    await service.start({});
+    await waitUntil(() => fixture.children.length === 2, 'replacement after successful cleanup');
+    expect(fixture.children[0]!.signalCode).not.toBeNull();
+    expect(fixture.maxLive()).toBe(1);
+  } finally {
+    fixture.allowCleanup();
+    try { await service.stop(); } finally { fixture.restore(); }
+  }
+}, 15_000);
