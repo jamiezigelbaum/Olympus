@@ -52,6 +52,24 @@ describe('native Telegram capture service', () => {
     }, { requireResolvedWorkerSecrets: false }).worker.telegramCapture.credentials).toEqual({});
   });
 
+  test('matches Python readiness for duplicate and whitespace-padded approved scopes', async () => {
+    const fixture = telegramFixture();
+    writeFileSync(fixture.workerEnvPath, readFileSync(fixture.workerEnvPath, 'utf8').replace(
+      'APPROVED_CHAT_SCOPES=telegram.personal:chat:42',
+      'APPROVED_CHAT_SCOPES= telegram.personal:chat:42, ,telegram.personal:chat:42 ',
+    ));
+    const service = track(createNativeTelegramService({
+      initialPluginConfig: fixture.pluginConfig,
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+      startupTimeoutMs: 2_000,
+      readinessPollMs: 10,
+      stopGraceMs: 100,
+    }));
+    await service.start({});
+    expect(readStarts(fixture.startsPath)).toHaveLength(1);
+  });
+
   test('uses fresh scoped environment and instance-bound receipt across stop and restart', async () => {
     const fixture = telegramFixture();
     const service = track(createNativeTelegramService({

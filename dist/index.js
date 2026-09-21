@@ -11680,7 +11680,7 @@ async function prepareTelegramStart(input, options) {
   }
   assertUsableFile(sessionPath, "Telegram .session");
   const approvedScopes = firstPresent(env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES, env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
-  const approvedChatCount = approvedScopes?.split(",").map((scope) => scope.trim()).filter(Boolean).length ?? 0;
+  const approvedChatCount = new Set((approvedScopes ?? "").split(",").map((scope) => scope.trim()).filter(Boolean)).size;
   if (approvedChatCount === 0) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires at least one approved chat scope.");
   }
