@@ -1,3 +1,4 @@
+import { PUBLIC_ENTRYPOINTS } from '../scripts/public-surface-reach.ts';
 // The public package is built by deleting marked text spans from real source
 // files (scripts/public-runtime-strip.ts). Nothing downstream notices when a
 // span deletes more than its author meant: `bun build` does not type-check, a
@@ -51,7 +52,7 @@ interface SurvivingReferences {
 
 describe('public runtime source stripping', () => {
   test('the stripped module list, the build filter, and the markers in src agree', () => {
-    const marked = [...new Glob('src/**/*.ts').scanSync({ cwd: ROOT })]
+    const marked = [...new Set([...new Glob('src/**/*.ts').scanSync({ cwd: ROOT }), ...PUBLIC_ENTRYPOINTS.filter((path) => path.startsWith('scripts/'))])]
       .filter((path) => readFileSync(join(ROOT, path), 'utf8').includes(PUBLIC_RUNTIME_EXCLUDE_START))
       .map((path) => path.split('\\').join('/'))
       .sort();

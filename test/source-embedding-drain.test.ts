@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   assertEmbeddingProviderForLane,
   optionsFromEnv,
+  publishNativeEmbeddingDrainReadiness,
   runSourceEmbeddingDrain,
   sourceEmbeddingLaneRosterFromEnv,
   type CorpusEmbeddingRequest,
@@ -136,6 +140,79 @@ describe('canonical connector-store embedding drain', () => {
     });
     expect(options.lanes).toEqual([]);
   });
+
+  test('publishes a private content-free readiness receipt bound to the native nonce and pid', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-ready-'));
+    const path = join(root, 'state', 'readiness.json');
+    try {
+      publishNativeEmbeddingDrainReadiness({
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: path,
+      }, 4242);
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
+        kind: 'source_embedding_drain_service_readiness',
+        schema_version: 1,
+        instance_id: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
+        pid: 4242,
+        options_validated: true,
+        content_free: true,
+      });
+      expect(statSync(path).mode & 0o077).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('does not publish readiness into a directory writable by other users', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-shared-'));
+    const path = join(root, 'readiness.json');
+    try {
+      chmodSync(root, 0o777);
+      expect(() => publishNativeEmbeddingDrainReadiness({
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: path,
+      })).toThrow('owner-controlled report directory');
+      expect(existsSync(path)).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('refuses invalid native identity before any provider write', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-invalid-native-'));
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const child = Bun.spawn([
+        process.execPath,
+        join(import.meta.dir, '..', 'scripts', 'source-embedding-drain.ts'),
+        '--report',
+        join(root, 'report.json'),
+      ], {
+        env: {
+          HOME: root,
+          PATH: process.env.PATH ?? '',
+          OLYMPUS_CONFIG: join(root, 'missing-config.json'),
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: 'not-a-uuid',
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: join(root, 'readiness.json'),
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      expect(await child.exited).not.toBe(0);
+      expect(requests).toBe(0);
+      expect(await new Response(child.stderr).text()).toContain('must be a canonical UUID');
+    } finally {
+      server.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 function provider(

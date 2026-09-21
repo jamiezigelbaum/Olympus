@@ -118,6 +118,38 @@
               }
             }
           },
+          "embeddingDrain": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Opt-in Gateway supervision for the packaged source embedding drain.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Run the source embedding drain as an OpenClaw plugin service. Defaults to false."
+              },
+              "credentials": {
+                "type": "object",
+                "description": "Resolved Gemini embedding credentials. Only GEMINI_API_KEY and OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY are accepted; supply raw values through Gateway SecretRefs.",
+                "additionalProperties": false,
+                "properties": {
+                  "GEMINI_API_KEY": { "$ref": "#/$defs/secretInput" },
+                  "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY": { "$ref": "#/$defs/secretInput" }
+                }
+              },
+              "runtimePath": {
+                "type": "string",
+                "description": "Optional absolute path to Bun. Omit to resolve an absolute Bun path from the Gateway environment."
+              },
+              "environmentPath": {
+                "type": "string",
+                "description": "Optional absolute file of nonsecret drain settings, parsed as data. Defaults to the managed worker.env; credentials still come only from native SecretRefs."
+              },
+              "reportPath": {
+                "type": "string",
+                "description": "Optional absolute path for the existing source embedding drain report. Native config overrides worker.env."
+              }
+            }
+          },
           "scheduler": {
             "type": "object",
             "additionalProperties": false,
@@ -799,7 +831,8 @@
       "paths": [
         { "path": "worker.authToken", "expected": "string" },
         { "path": "worker.service.credentials.*", "expected": "string" },
-        { "path": "worker.telegramCapture.credentials.*", "expected": "string" }
+        { "path": "worker.telegramCapture.credentials.*", "expected": "string" },
+        { "path": "worker.embeddingDrain.credentials.*", "expected": "string" }
       ]
     }
   },

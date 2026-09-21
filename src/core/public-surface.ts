@@ -196,6 +196,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'bin/olympus',
   'dist/index.js',
   'dist/cli.js',
+  'dist/embedding-drain.js',
   'scripts/telegram-telethon-reader.py',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/go.mod',

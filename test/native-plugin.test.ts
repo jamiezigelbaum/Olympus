@@ -76,6 +76,10 @@ describe('native OpenClaw plugin adapter', () => {
             OLYMPUS_TELEGRAM_API_HASH: ref,
           },
         },
+        embeddingDrain: {
+          enabled: true,
+          credentials: { OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: ref },
+        },
       },
     };
     const tools: NativeTool[] = [];
@@ -91,7 +95,7 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(3);
+      expect(services).toHaveLength(4);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
@@ -165,6 +169,14 @@ describe('native OpenClaw plugin adapter', () => {
         id: 'olympus-whatsapp-capture',
         reload: {
           configPrefixes: ['plugins.entries.olympus.config.worker.whatsappCapture'],
+        },
+        start: expect.any(Function),
+        stop: expect.any(Function),
+      },
+      {
+        id: 'olympus-source-embedding-drain',
+        reload: {
+          configPrefixes: ['plugins.entries.olympus.config.worker.embeddingDrain'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),
@@ -381,6 +393,7 @@ describe('native OpenClaw plugin adapter', () => {
       'service',
       'telegramCapture',
       'whatsappCapture',
+      'embeddingDrain',
       'scheduler',
     ]));
     expect(Object.keys(configSchemaProperties(['worker', 'service']))).toEqual(expect.arrayContaining([
@@ -406,6 +419,15 @@ describe('native OpenClaw plugin adapter', () => {
       'binaryPath',
       'stateDir',
     ]);
+    expect(Object.keys(configSchemaProperties(['worker', 'embeddingDrain']))).toEqual([
+      'enabled',
+      'credentials',
+      'runtimePath',
+      'environmentPath',
+      'reportPath',
+    ]);
+    expect(Object.keys(asRecord(configSchemaProperties(['worker', 'embeddingDrain']).credentials).properties as Record<string, unknown>))
+      .toEqual(['GEMINI_API_KEY', 'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY']);
     expect(Object.keys(configSchemaProperties(['worker', 'scheduler']))).toEqual(expect.arrayContaining([
       'enabled',
       'sourceIds',
@@ -469,6 +491,7 @@ describe('native OpenClaw plugin adapter', () => {
       { path: 'worker.authToken', expected: 'string' },
       { path: 'worker.service.credentials.*', expected: 'string' },
       { path: 'worker.telegramCapture.credentials.*', expected: 'string' },
+      { path: 'worker.embeddingDrain.credentials.*', expected: 'string' },
     ]);
     const secretInput = asRecord(asRecord(manifest.configSchema).$defs).secretInput;
     expect(asRecord(secretInput).oneOf).toEqual([
