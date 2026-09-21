@@ -47,7 +47,6 @@
     "source-readiness:proof": "bun scripts/source-readiness-proof.ts",
     "source-ingestion:live-dashboard": "bun scripts/source-ingestion-live-dashboard.ts",
     "source-ingestion:digest": "bun scripts/source-ingestion-digest.ts",
-    "whatsapp-transcribe:drain": "bun scripts/whatsapp-transcribe-drain.ts",
     "source-embedding:drain": "bun scripts/source-embedding-drain.ts",
     "embedding-identity:repair": "bun scripts/embedding-identity-repair.ts",
     "source-exclusions:purge": "bun scripts/source-exclusion-purge.ts",

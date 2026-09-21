@@ -100,19 +100,7 @@ const LANE_REPORTS: readonly LaneReportSpec[] = [
     livePhases: ['starting', 'embedding', 'sleeping', 'backoff'],
     guardUnit: 'olympus-source-embedding-drain.service',
   },
-  {
-    id: 'whatsapp-transcribe-drain',
-    name: 'Transcription',
-    unit: 'items',
-    file: 'whatsapp-transcribe-drain-current.json',
-    // No counter and no rate, deliberately. This lane's report path is declared
-    // by its installer, but NO writer in this repository publishes its shape, so
-    // the four family keys are read (they are the family's construction, not a
-    // guess about this file) and no counter name is invented for it. A lane that
-    // renders its state and admits it cannot measure a rate is honest; one that
-    // reads a key nobody writes would render a confident zero.
-    livePhases: ['starting', 'syncing', 'sleeping', 'backoff', 'transcribing'],
-  },
+
 ];
 
 /* ----------------------------------------------------------------- paths -- */

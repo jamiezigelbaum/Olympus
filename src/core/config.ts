@@ -132,6 +132,14 @@ export interface OlympusConfig {
       reportPath?: string;
       environmentPath?: string;
     };
+    transcriptionCleanup: {
+      enabled: boolean;
+      bashPath: string;
+      tempRoot?: string;
+      intervalSeconds: number;
+      minAgeMinutes: number;
+      maxRuntimeSeconds: number;
+    };
     scheduler: {
       enabled: boolean;
       sourceIds: string[];
@@ -197,6 +205,7 @@ const DEFAULT_CONFIG: OlympusConfig = {
       enabled: false,
       credentials: {},
     },
+    transcriptionCleanup: { enabled: false, bashPath: '/bin/bash', intervalSeconds: 1800, minAgeMinutes: 1440, maxRuntimeSeconds: 120 },
     scheduler: {
       enabled: false,
       sourceIds: [],
@@ -601,6 +610,23 @@ export function configFromPluginConfig(
       );
     }
   }
+  const transcriptionCleanup = asRecord(worker?.transcriptionCleanup);
+  if (transcriptionCleanup) {
+    for (const key of Object.keys(transcriptionCleanup)) {
+      if (!['enabled', 'bashPath', 'tempRoot', 'intervalSeconds', 'minAgeMinutes', 'maxRuntimeSeconds'].includes(key)) throw new OperationError('config_error', 'worker.transcriptionCleanup contains an unsupported setting.');
+    }
+    if (transcriptionCleanup.enabled !== undefined && typeof transcriptionCleanup.enabled !== 'boolean') throw new OperationError('config_error', 'worker.transcriptionCleanup.enabled must be boolean.');
+    if (typeof transcriptionCleanup.enabled === 'boolean') config.worker.transcriptionCleanup.enabled = transcriptionCleanup.enabled;
+    for (const key of ['bashPath', 'tempRoot'] as const) {
+      const value = transcriptionCleanup[key];
+      if (value !== undefined && (typeof value !== 'string' || !value.trim())) throw new OperationError('config_error', `worker.transcriptionCleanup.${key} must be a nonempty path.`);
+      if (typeof value === 'string') config.worker.transcriptionCleanup[key] = value.trim();
+    }
+    for (const key of ['intervalSeconds', 'minAgeMinutes', 'maxRuntimeSeconds'] as const) {
+      if (transcriptionCleanup[key] !== undefined && typeof transcriptionCleanup[key] !== 'number') throw new OperationError('config_error', `worker.transcriptionCleanup.${key} must be numeric.`);
+      if (typeof transcriptionCleanup[key] === 'number') config.worker.transcriptionCleanup[key] = transcriptionCleanup[key];
+    }
+  }
   const scheduler = asRecord(worker?.scheduler);
   if (scheduler) {
     if (typeof scheduler.enabled === 'boolean') {
@@ -831,6 +857,7 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.embeddingDrain ?? {}),
         credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials,
       },
+      transcriptionCleanup: { ...target.worker.transcriptionCleanup, ...(source.worker.transcriptionCleanup ?? {}) },
       scheduler: {
         ...target.worker.scheduler,
         ...(source.worker.scheduler ?? {}),
@@ -1052,6 +1079,16 @@ function validateConfig(config: OlympusConfig): void {
       throw new OperationError('config_error', `worker.service.${key} must be an absolute path.`);
     }
     config.worker.service[key] = value.trim();
+  }
+  assertBoolean(config.worker.transcriptionCleanup.enabled, 'worker.transcriptionCleanup.enabled');
+  for (const key of ['intervalSeconds', 'minAgeMinutes', 'maxRuntimeSeconds'] as const) {
+    assertPositiveInteger(config.worker.transcriptionCleanup[key], `worker.transcriptionCleanup.${key}`);
+  }
+  if (config.worker.transcriptionCleanup.intervalSeconds < 60 || config.worker.transcriptionCleanup.intervalSeconds > 86400) throw new OperationError('config_error', 'worker.transcriptionCleanup.intervalSeconds must be between 60 and 86400.');
+  if (config.worker.transcriptionCleanup.maxRuntimeSeconds > 3600) throw new OperationError('config_error', 'worker.transcriptionCleanup.maxRuntimeSeconds must be at most 3600.');
+  for (const key of ['bashPath', 'tempRoot'] as const) {
+    const value = config.worker.transcriptionCleanup[key];
+    if (value !== undefined && !isAbsolutePath(value)) throw new OperationError('config_error', `worker.transcriptionCleanup.${key} must be an absolute path.`);
   }
   assertBoolean(config.worker.scheduler.enabled, 'worker.scheduler.enabled');
   // An enabled scheduler with an empty allowlist is valid and idle. `olympus
