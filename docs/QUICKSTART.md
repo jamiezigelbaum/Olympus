@@ -598,3 +598,51 @@ content, and does not inherit other provider credentials. A successful credit
 check does not prove that every model is available. Stop the old monitor before
 enabling its replacement; preserve the report and pause paths so existing
 consumers keep using the same files.
+
+### Optional native WhatsApp capture
+
+The package includes the read-only bridge source under `tools/whatsapp-bridge`.
+Building it requires Go 1.26.4 or newer and a C compiler for SQLite. From that
+directory run `go build -o olympus-whatsapp-bridge .`, then use the absolute
+binary path for `worker.whatsappCapture.binaryPath`. The plugin does not download
+or compile a binary during Gateway startup.
+
+Pair the bridge separately with WhatsApp Linked devices before enabling native
+capture. Use the same `OLYMPUS_WHATSAPP_STATE_DIR` for pairing as
+`worker.whatsappCapture.stateDir`; the default is
+`~/.local/share/olympus/whatsapp-live`. Run the built bridge interactively for
+pairing, stop that process after authentication, then enable
+`worker.whatsappCapture.enabled` through the host's supported configuration
+command. Stop any prior capture service before activating its replacement.
+Archive import alone is a historical snapshot; ongoing updates require this
+paired live capture and the source worker's automatic import.
+
+The native WhatsApp bridge keeps its existing connection backoff during a network
+outage. Service health stays initializing until the session authenticates; stopping
+the service still cancels the pending child. An unpaired session refuses startup
+without initiating login and requires the separate pairing flow.
+
+### Optional native embedding drain
+
+After verifying the existing embedding policy, enable `worker.embeddingDrain.enabled`
+through the host's supported configuration command. The packaged Bun drain keeps
+its existing corpus selection, provider routing, limits, and vector identities.
+Native supervision does not enable an embedding lane or approve a new backfill.
+
+Preserve existing nonsecret settings before activation. By default the child reads
+the managed `worker.env`; `environmentPath` can select a separate absolute settings
+file when a drain has different database paths or limits from the source worker.
+The file is parsed as data. Configure required Gemini credentials with native
+SecretRefs under `worker.embeddingDrain.credentials`, using `GEMINI_API_KEY` or
+`OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`. A drain with only secure-local lanes needs no cloud credential.
+Password-manager and Gateway bootstrap tokens are excluded from the child.
+
+Optional `runtimePath` and `reportPath` select the Bun executable and status report.
+The report directory must be controlled by the current user. Stop an existing
+standalone drain before enabling its native replacement. Readiness proves that
+the exact child validated its options; inspect a real bounded pass to verify
+provider operation before allowing broader work.
+
+The installation-specific legacy decision-ledger observer remains in the private
+runtime. Public release artifacts exclude that observer, as they already do for
+the source worker and dashboard.

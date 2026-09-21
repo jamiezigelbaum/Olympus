@@ -3002,6 +3002,15 @@ function mergeConfig(target, source) {
         ...source.worker.telegramCapture ?? {},
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
       },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...source.worker.whatsappCapture ?? {}
+      },
+      embeddingDrain: {
+        ...target.worker.embeddingDrain,
+        ...source.worker.embeddingDrain ?? {},
+        credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -3128,6 +3137,30 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, "worker.whatsappCapture.enabled");
+  for (const key of ["binaryPath", "stateDir"]) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError("config_error", "worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.");
+  }
+  assertBoolean(config.worker.embeddingDrain.enabled, "worker.embeddingDrain.enabled");
+  config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(config.worker.embeddingDrain.credentials, config.worker.embeddingDrain.enabled);
+  for (const key of ["runtimePath", "reportPath", "environmentPath"]) {
+    const value = config.worker.embeddingDrain[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.embeddingDrain.${key} must be an absolute path.`);
+    }
+    config.worker.embeddingDrain[key] = value.trim();
   }
   for (const [key, value] of [
     ["runtimePath", config.worker.service.runtimePath],
@@ -3257,6 +3290,25 @@ function parseNativeTelegramCredentials(value, serviceEnabled) {
   }
   return parsed;
 }
+function parseNativeEmbeddingDrainCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError("config_error", `worker.embeddingDrain.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.embeddingDrain.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.embeddingDrain.credentials.${name} must be resolved to a string before the native source embedding drain starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
   if (typeof value === "string" && value.trim() === "")
     return [];
@@ -3340,7 +3392,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
     throw error;
   }
 }
-var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -3360,6 +3412,10 @@ var init_config = __esm(() => {
     "OLYMPUS_TELEGRAM_API_ID",
     "OLYMPUS_TELEGRAM_API_HASH"
   ]);
+  NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES = new Set([
+    "GEMINI_API_KEY",
+    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
       service: {
@@ -3369,6 +3425,13 @@ var init_config = __esm(() => {
       },
       creditMonitor: { enabled: false, provider: "venice", intervalSeconds: 600, credentials: {} },
       telegramCapture: {
+        enabled: false,
+        credentials: {}
+      },
+      whatsappCapture: {
+        enabled: false
+      },
+      embeddingDrain: {
         enabled: false,
         credentials: {}
       },

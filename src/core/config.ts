@@ -74,6 +74,11 @@ const NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES = new Set([
   'OLYMPUS_TELEGRAM_API_HASH',
 ]);
 
+const NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES = new Set([
+  'GEMINI_API_KEY',
+  'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
+]);
+
 export interface OlympusConfig {
   sovereignty?: {
     configPath?: string;
@@ -112,6 +117,20 @@ export interface OlympusConfig {
       stateDir?: string;
       spoolDir?: string;
       reportPath?: string;
+    };
+    /** Opt-in Gateway supervision of the operator-provisioned WhatsApp bridge. */
+    whatsappCapture: {
+      enabled: boolean;
+      binaryPath?: string;
+      stateDir?: string;
+    };
+    /** Opt-in Gateway supervision of the packaged source embedding drain. */
+    embeddingDrain: {
+      enabled: boolean;
+      credentials: Record<string, string>;
+      runtimePath?: string;
+      reportPath?: string;
+      environmentPath?: string;
     };
     scheduler: {
       enabled: boolean;
@@ -168,6 +187,13 @@ const DEFAULT_CONFIG: OlympusConfig = {
     },
     creditMonitor: { enabled: false, provider: 'venice', intervalSeconds: 600, credentials: {} },
     telegramCapture: {
+      enabled: false,
+      credentials: {},
+    },
+    whatsappCapture: {
+      enabled: false,
+    },
+    embeddingDrain: {
       enabled: false,
       credentials: {},
     },
@@ -539,6 +565,33 @@ export function configFromPluginConfig(
       if (typeof value === 'string' && value.trim()) config.worker.telegramCapture[key] = value.trim();
     }
   }
+  const whatsappCapture = asRecord(worker?.whatsappCapture);
+  if (whatsappCapture) {
+    if (typeof whatsappCapture.enabled === 'boolean') {
+      config.worker.whatsappCapture.enabled = whatsappCapture.enabled;
+    }
+    for (const key of ['binaryPath', 'stateDir'] as const) {
+      const value = whatsappCapture[key];
+      if (typeof value === 'string' && value.trim()) config.worker.whatsappCapture[key] = value.trim();
+    }
+  }
+  const embeddingDrain = asRecord(worker?.embeddingDrain);
+  if (embeddingDrain) {
+    if (typeof embeddingDrain.enabled === 'boolean') {
+      config.worker.embeddingDrain.enabled = embeddingDrain.enabled;
+    }
+    const credentials = asRecord(embeddingDrain.credentials);
+    if (credentials) {
+      config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(
+        credentials,
+        requireResolvedWorkerSecrets && config.worker.embeddingDrain.enabled,
+      );
+    }
+    for (const key of ['runtimePath', 'reportPath', 'environmentPath'] as const) {
+      const value = embeddingDrain[key];
+      if (typeof value === 'string' && value.trim()) config.worker.embeddingDrain[key] = value.trim();
+    }
+  }
   if (worker && Object.prototype.hasOwnProperty.call(worker, 'authToken') && typeof worker.authToken !== 'string') {
     config.worker.authTokenSecretRefUnresolved = true;
     if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
@@ -769,6 +822,15 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.telegramCapture ?? {}),
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials,
       },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...(source.worker.whatsappCapture ?? {}),
+      },
+      embeddingDrain: {
+        ...target.worker.embeddingDrain,
+        ...(source.worker.embeddingDrain ?? {}),
+        credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials,
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...(source.worker.scheduler ?? {}),
@@ -949,6 +1011,34 @@ function validateConfig(config: OlympusConfig): void {
     }
     config.worker.telegramCapture[key] = value.trim();
   }
+  assertBoolean(config.worker.whatsappCapture.enabled, 'worker.whatsappCapture.enabled');
+  for (const key of ['binaryPath', 'stateDir'] as const) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError(
+      'config_error',
+      'worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.',
+    );
+  }
+  assertBoolean(config.worker.embeddingDrain.enabled, 'worker.embeddingDrain.enabled');
+  config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(
+    config.worker.embeddingDrain.credentials,
+    config.worker.embeddingDrain.enabled,
+  );
+  for (const key of ['runtimePath', 'reportPath', 'environmentPath'] as const) {
+    const value = config.worker.embeddingDrain[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.embeddingDrain.${key} must be an absolute path.`);
+    }
+    config.worker.embeddingDrain[key] = value.trim();
+  }
   for (const [key, value] of [
     ['runtimePath', config.worker.service.runtimePath],
     ['executablePath', config.worker.service.executablePath],
@@ -1126,6 +1216,38 @@ function parseNativeTelegramCredentials(
       throw new OperationError(
         'config_error',
         `worker.telegramCapture.credentials.${name} must be resolved to a string before the native Telegram capture service starts.`,
+      );
+    }
+  }
+  return parsed;
+}
+
+function parseNativeEmbeddingDrainCredentials(
+  value: Record<string, unknown>,
+  serviceEnabled: boolean,
+): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError(
+        'config_error',
+        `worker.embeddingDrain.credentials does not allow environment name ${name}.`,
+      );
+    }
+    if (typeof credential === 'string') {
+      if (!credential.trim()) {
+        throw new OperationError(
+          'config_error',
+          `worker.embeddingDrain.credentials.${name} must not be empty.`,
+        );
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError(
+        'config_error',
+        `worker.embeddingDrain.credentials.${name} must be resolved to a string before the native source embedding drain starts.`,
       );
     }
   }

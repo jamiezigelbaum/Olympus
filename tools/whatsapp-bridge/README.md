@@ -92,6 +92,42 @@ If pairing times out before a scan, the daemon exits; just start it again.
 If the phone ever removes the linked device, the daemon exits with a
 "logged out" message — delete nothing, restart it, and pair again.
 
+## Native capture mode (managed service)
+
+`OLYMPUS_WHATSAPP_NATIVE_CAPTURE=true` turns the same binary into a managed
+capture service whose startup is provable to its owner. It is off by default,
+and **a service instance nonce alone never enables it**:
+
+- `OLYMPUS_WHATSAPP_NATIVE_CAPTURE=true` — the explicit switch. Only `1`,
+  `true`, `yes`, or `on` (case-insensitive) enable native capture; anything
+  else, including a nonce left in the environment by a source worker, leaves
+  the daemon in the ordinary manual pairing path.
+- `OLYMPUS_NATIVE_SERVICE_INSTANCE_ID` — required **only** in native mode, and
+  it must be a canonical lower-case UUID (`8-4-4-4-12`, lower-case hex). An
+  unset, upper-case, braced, or otherwise non-canonical nonce is refused before
+  the state dir, session store, or provider is touched, and the refused value
+  is never echoed to logs. In ordinary mode the same variable is ignored.
+
+Native mode **never** starts QR pairing or a login flow. If `session.db` has no
+paired device, startup fails categorically with an actionable error telling the
+operator to pair manually first; run once without the switch, scan the QR, then
+start the service again. A paired store is reused exactly like an ordinary
+restart — same spool, cursors, media, reactions, sends/read-receipt policy, and
+auto-reconnect behaviour.
+
+After the provider has authenticated the reused session and reported
+`Connected`, the daemon publishes `${OLYMPUS_WHATSAPP_STATE_DIR}/native-service-readiness.json`
+atomically (temp file + rename) with mode `0600`:
+
+```json
+{"kind":"whatsapp_capture_service_readiness","instance_id":"019f6ff4-…","pid":12345,"paired":true,"connected":true}
+```
+
+The receipt is process identity only — no phone number, JID, device keys, or
+captured content. It is written strictly after authentication, so it can never
+outrun the provider handshake. If the receipt cannot be written, startup fails
+categorically rather than advertising a service that is not actually ready.
+
 ## Run as a service (systemd)
 
 The private host uses the repo-owned user-systemd installer. It runs the Go tests,

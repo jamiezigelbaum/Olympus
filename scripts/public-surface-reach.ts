@@ -32,6 +32,7 @@ export const PUBLIC_ENTRYPOINTS = [
   'src/native-plugin.ts',
   'src/cli.ts',
   'src/mcp/server.ts',
+  'scripts/source-embedding-drain.ts',
 ] as const;
 
 export interface PublicReachability {

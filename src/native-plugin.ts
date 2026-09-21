@@ -12,6 +12,8 @@ import {
   type NativeWorkerServiceDefinition,
 } from './core/native-worker-service.ts';
 import { createNativeTelegramService } from './core/native-telegram-service.ts';
+import { createNativeWhatsAppService } from './core/native-whatsapp-service.ts';
+import { createNativeEmbeddingDrainService } from './core/native-embedding-drain-service.ts';
 import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
@@ -226,11 +228,26 @@ const plugin = {
       moduleUrl: import.meta.url,
     });
     const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
+    const whatsappService = createNativeWhatsAppService({
+      initialPluginConfig: api.pluginConfig,
+    });
+    const embeddingDrainService = createNativeEmbeddingDrainService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url,
+    });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled) {
+      api.registerService(backgroundNativeProcessService(whatsappService));
+      api.registerService(backgroundNativeProcessService(embeddingDrainService));
+    } else if (
+      config.worker.service.enabled
+      || config.worker.telegramCapture.enabled
+      || config.worker.creditMonitor.enabled
+      || config.worker.whatsappCapture.enabled
+      || config.worker.embeddingDrain.enabled
+    ) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }
     const ctx: OperationContext = {

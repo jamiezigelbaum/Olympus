@@ -46,6 +46,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -55,6 +56,7 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -62,12 +64,23 @@ import (
 )
 
 const (
-	stateDirEnv     = "OLYMPUS_WHATSAPP_STATE_DIR"
-	qrStdoutEnv     = "OLYMPUS_WHATSAPP_QR_STDOUT"
+	stateDirEnv = "OLYMPUS_WHATSAPP_STATE_DIR"
+	qrStdoutEnv = "OLYMPUS_WHATSAPP_QR_STDOUT"
+	// nativeCaptureEnv is the ONLY switch that turns this daemon into a
+	// managed native capture service. The service instance nonce below is
+	// inherited by ordinary pairing runs too, so the nonce alone must never
+	// decide the mode.
+	nativeCaptureEnv = "OLYMPUS_WHATSAPP_NATIVE_CAPTURE"
+	instanceIDEnv    = "OLYMPUS_NATIVE_SERVICE_INSTANCE_ID"
+
 	defaultStateRel = ".local/share/olympus/whatsapp-live"
 	spoolDirName    = "spool"
 	qrFileName      = "qr.txt"
 	sessionDBName   = "session.db"
+	readinessName   = "native-service-readiness.json"
+
+	whatsappCaptureReadinessKind = "whatsapp_capture_service_readiness"
+	readinessFileMode            = 0o600
 
 	spoolQueueSize    = 4096
 	connectBackoffMin = 2 * time.Second
@@ -88,6 +101,62 @@ const (
 	reactionTargetIDMaxBytes      = 128
 	reactionTargetChatJIDMaxBytes = 256
 )
+
+// nativeCaptureConfig is the resolved startup mode. Native capture is active
+// only when OLYMPUS_WHATSAPP_NATIVE_CAPTURE is explicitly truthy; a service
+// instance nonce is REQUIRED in that mode and ignored otherwise.
+type nativeCaptureConfig struct {
+	Active     bool
+	InstanceID string
+}
+
+// readNativeCaptureConfig decides the startup mode before any state-directory,
+// session-store, or network work happens. An instance nonce on its own never
+// activates native capture: ordinary service or manual runs can inherit a
+// source worker's nonce, and hijacking them out of QR pairing would strand a
+// fresh install with no way to pair.
+func readNativeCaptureConfig() (nativeCaptureConfig, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(nativeCaptureEnv))) {
+	case "", "0", "false", "no", "off":
+		return nativeCaptureConfig{}, nil
+	case "1", "true", "yes", "on":
+	default:
+		return nativeCaptureConfig{}, fmt.Errorf("%s must explicitly select true or false", nativeCaptureEnv)
+	}
+	instanceID := os.Getenv(instanceIDEnv)
+	if !isCanonicalLowerUUID(instanceID) {
+		// Never echo the value: the nonce is an operator-supplied instance
+		// identity and logging it back is how it leaks into journals.
+		return nativeCaptureConfig{}, fmt.Errorf(
+			"%s=true requires a canonical lower-case UUID in %s",
+			nativeCaptureEnv, instanceIDEnv,
+		)
+	}
+	return nativeCaptureConfig{Active: true, InstanceID: instanceID}, nil
+}
+
+// isCanonicalLowerUUID accepts exactly the 8-4-4-4-12 hex form with lower-case
+// hex digits and no surrounding whitespace. Uppercase, braces, or a missing
+// version nibble would let two spellings of one nonce disagree with the
+// service's registration, so they are refused instead of normalized.
+func isCanonicalLowerUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // spoolRecord is the wire format of one spool line. Field names are a frozen
 // contract with src/workers/whatsapp/live-connector.ts — do not rename.
@@ -133,6 +202,14 @@ func main() {
 	// manually instead of through the systemd unit (which also sets UMask=0077).
 	syscall.Umask(0o077)
 
+	// Resolve the startup mode before touching the state dir, the session
+	// store, or the provider: an unusable native-mode request must fail without
+	// creating state or opening a session.
+	native, err := readNativeCaptureConfig()
+	if err != nil {
+		log.Fatalf("olympus-whatsapp-bridge: %v", err)
+	}
+
 	stateDir, err := resolveStateDir()
 	if err != nil {
 		log.Fatalf("olympus-whatsapp-bridge: %v", err)
@@ -142,25 +219,55 @@ func main() {
 		log.Fatalf("olympus-whatsapp-bridge: creating spool dir %s: %v", spoolDir, err)
 	}
 
-	ctx := context.Background()
 	dbPath := filepath.Join(stateDir, sessionDBName)
-	container, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Stdout("Database", "WARN", true))
+	container, err := openSessionContainer(dbPath)
 	if err != nil {
 		log.Fatalf("olympus-whatsapp-bridge: opening session store %s: %v", dbPath, err)
 	}
+
+	if native.Active {
+		client, writer, fatalEvents, err := startNativeCapture(stateDir, spoolDir, native, container, newWhatsmeowClient)
+		if err != nil {
+			log.Fatalf("olympus-whatsapp-bridge: %v", err)
+		}
+		runUntilExit(client, writer, fatalEvents)
+		return
+	}
+
+	client, writer, fatalEvents := startManualPairing(stateDir, spoolDir, container)
+	runUntilExit(client, writer, fatalEvents)
+}
+
+// openSessionContainer opens (and migrates) the upstream session store. It is
+// split out so startup routing can be exercised without a live provider.
+func openSessionContainer(dbPath string) (*sqlstore.Container, error) {
+	return sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Stdout("Database", "WARN", true))
+}
+
+// newWhatsmeowClient is the only place a capture client is constructed, so the
+// startup paths can be exercised with a stub that can never reach a provider.
+func newWhatsmeowClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
+	return whatsmeow.NewClient(device, logger)
+}
+
+// startManualPairing is the historic operator path: reuse a paired session, or
+// run QR pairing when the store has no device yet. It returns the fatal-exit
+// channel for the steady-state loop.
+func startManualPairing(stateDir string, spoolDir string, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string) {
+	ctx := context.Background()
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		log.Fatalf("olympus-whatsapp-bridge: loading device from session store: %v", err)
 	}
 
-	client := whatsmeow.NewClient(device, waLog.Stdout("Client", "INFO", true))
+	client := newWhatsmeowClient(device, waLog.Stdout("Client", "INFO", true))
 	writer := newSpoolWriter(spoolDir)
 	audioStore := newAudioMediaStore(stateDir, client)
 	go writer.run()
 
 	fatalEvents := make(chan string, 1)
 	client.AddEventHandler(func(evt any) {
-		handleEvent(ctx, client, audioStore, writer, fatalEvents, evt)
+		handleEvent(ctx, client, audioStore, writer, fatalEvents, nil, evt)
 	})
 
 	if client.Store.ID == nil {
@@ -199,12 +306,13 @@ func main() {
 		// Never put a WhatsApp account identifier into operational logs.
 		log.Print(existingSessionConnectedLogLine())
 	}
+	return client, writer, fatalEvents
+}
 
-	// Steady state: whatsmeow's auto-reconnect (enabled by default) handles
-	// transient drops with its own backoff. We only exit on signals or on
-	// fatal session events (logged out, stream replaced) — systemd's
-	// Restart=always brings the daemon back, which re-enters pairing if the
-	// session is gone.
+// steady state: whatsmeow's auto-reconnect handles transient drops with its own
+// backoff. We only exit on signals or on fatal session events (logged out,
+// stream replaced) — systemd's Restart=always brings the daemon back.
+func runUntilExit(client *whatsmeow.Client, writer *spoolWriter, fatalEvents chan string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	select {
@@ -221,6 +329,119 @@ func main() {
 
 func existingSessionConnectedLogLine() string {
 	return "olympus-whatsapp-bridge: connected with existing session"
+}
+
+// sessionFactory builds the capture client from an already paired device.
+type sessionFactory func(device *store.Device, logger waLog.Logger) *whatsmeow.Client
+
+// startNativeCapture is the managed-service startup path. It NEVER initiates QR
+// pairing: an unpaired session store is a categorical configuration error, not
+// something to "fix" by starting a login flow a service must not drive. The
+// readiness receipt is published only after the provider has authenticated the
+// reused session and reported Connected.
+func startNativeCapture(stateDir string, spoolDir string, native nativeCaptureConfig, container *sqlstore.Container, newSession sessionFactory) (*whatsmeow.Client, *spoolWriter, chan string, error) {
+	ctx := context.Background()
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading device from session store: %w", err)
+	}
+	if device == nil || device.ID == nil {
+		return nil, nil, nil, fmt.Errorf(
+			"native capture requires an already paired WhatsApp session in the session store, but the store is unpaired; pair it manually first (run without %s=true and scan the QR), then start the service again",
+			nativeCaptureEnv,
+		)
+	}
+
+	// Only a paired store reaches the provider, and only the factory below can
+	// open a connection.
+	client := newSession(device, waLog.Stdout("Client", "INFO", true))
+	writer := newSpoolWriter(spoolDir)
+	audioStore := newAudioMediaStore(stateDir, client)
+	go writer.run()
+
+	fatalEvents := make(chan string, 1)
+	markReady := nativeReadinessPublisher(stateDir, native.InstanceID, client.IsLoggedIn, fatalEvents)
+	client.AddEventHandler(func(evt any) {
+		handleEvent(ctx, client, audioStore, writer, fatalEvents, markReady, evt)
+	})
+
+	connectWithBackoff(client)
+	log.Print(existingSessionConnectedLogLine())
+	return client, writer, fatalEvents, nil
+}
+
+// Readiness requires the library's authenticated session state, never just an
+// open socket. The callback is invoked only for the Connected event.
+func nativeReadinessPublisher(stateDir, instanceID string, authenticated func() bool, fatalEvents chan string) func() {
+	var readyOnce sync.Once
+	return func() {
+		if !authenticated() {
+			return
+		}
+		readyOnce.Do(func() {
+			if err := writeReadinessReceipt(stateDir, instanceID); err != nil {
+				reportFatal(fatalEvents, "could not publish native capture readiness; check the private state directory")
+			}
+		})
+	}
+}
+
+// nativeServiceReadiness is the startup-proof receipt the Olympus native
+// service reads from the state dir. It carries process identity only: no phone
+// number, JID, device keys, or any captured content may be added here.
+type nativeServiceReadiness struct {
+	Kind       string `json:"kind"`
+	InstanceID string `json:"instance_id"`
+	PID        int    `json:"pid"`
+	Paired     bool   `json:"paired"`
+	Connected  bool   `json:"connected"`
+}
+
+// writeReadinessReceipt publishes the receipt atomically (temp file + rename)
+// with 0600 mode so a reader never observes a partially written file and no
+// other local user can read the service identity.
+func writeReadinessReceipt(stateDir string, instanceID string) error {
+	payload, err := json.Marshal(nativeServiceReadiness{
+		Kind:       whatsappCaptureReadinessKind,
+		InstanceID: instanceID,
+		PID:        os.Getpid(),
+		Paired:     true,
+		Connected:  true,
+	})
+	if err != nil {
+		return fmt.Errorf("encoding readiness receipt: %w", err)
+	}
+	payload = append(payload, '\n')
+	return writeFileAtomicPrivate(filepath.Join(stateDir, readinessName), payload)
+}
+
+func writeFileAtomicPrivate(path string, payload []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(readinessFileMode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, readinessFileMode)
 }
 
 func qrStdoutEnabled() bool {
@@ -266,7 +487,7 @@ func connectWithBackoff(client *whatsmeow.Client) {
 
 // --- Event handling ----------------------------------------------------------
 
-func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, fatalEvents chan<- string, evt any) {
+func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audioMediaStore, writer *spoolWriter, fatalEvents chan<- string, markReady func(), evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
 		if rec, ok := recordFromMessage(ctx, client, audioStore, v); ok {
@@ -276,6 +497,12 @@ func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audi
 		log.Printf("olympus-whatsapp-bridge: disconnected; whatsmeow auto-reconnect will retry with backoff")
 	case *events.Connected:
 		log.Printf("olympus-whatsapp-bridge: connected")
+		// Native capture publishes its startup proof here and nowhere earlier:
+		// Connected means this process authenticated the reused session, so a
+		// receipt can never outrun provider authentication.
+		if markReady != nil {
+			markReady()
+		}
 	case *events.LoggedOut:
 		reportFatal(fatalEvents, "logged out by the phone (Linked Devices); restart the daemon and re-pair")
 	case *events.StreamReplaced:
