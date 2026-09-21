@@ -2324,6 +2324,30 @@ function configFromPluginConfig(pluginConfig, options = {}) {
       throw new OperationError("config_error", "worker.authToken must be resolved to a string before the native worker service starts.");
     }
   }
+  const transcriptionCleanup = asRecord4(worker?.transcriptionCleanup);
+  if (transcriptionCleanup) {
+    for (const key of Object.keys(transcriptionCleanup)) {
+      if (!["enabled", "bashPath", "tempRoot", "intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"].includes(key))
+        throw new OperationError("config_error", "worker.transcriptionCleanup contains an unsupported setting.");
+    }
+    if (transcriptionCleanup.enabled !== undefined && typeof transcriptionCleanup.enabled !== "boolean")
+      throw new OperationError("config_error", "worker.transcriptionCleanup.enabled must be boolean.");
+    if (typeof transcriptionCleanup.enabled === "boolean")
+      config.worker.transcriptionCleanup.enabled = transcriptionCleanup.enabled;
+    for (const key of ["bashPath", "tempRoot"]) {
+      const value = transcriptionCleanup[key];
+      if (value !== undefined && (typeof value !== "string" || !value.trim()))
+        throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be a nonempty path.`);
+      if (typeof value === "string")
+        config.worker.transcriptionCleanup[key] = value.trim();
+    }
+    for (const key of ["intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"]) {
+      if (transcriptionCleanup[key] !== undefined && typeof transcriptionCleanup[key] !== "number")
+        throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be numeric.`);
+      if (typeof transcriptionCleanup[key] === "number")
+        config.worker.transcriptionCleanup[key] = transcriptionCleanup[key];
+    }
+  }
   const scheduler = asRecord4(worker?.scheduler);
   if (scheduler) {
     if (typeof scheduler.enabled === "boolean") {
@@ -2610,6 +2634,19 @@ function validateConfig(config) {
     }
     config.worker.service[key] = value.trim();
   }
+  assertBoolean(config.worker.transcriptionCleanup.enabled, "worker.transcriptionCleanup.enabled");
+  for (const key of ["intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"]) {
+    assertPositiveInteger(config.worker.transcriptionCleanup[key], `worker.transcriptionCleanup.${key}`);
+  }
+  if (config.worker.transcriptionCleanup.intervalSeconds < 60 || config.worker.transcriptionCleanup.intervalSeconds > 86400)
+    throw new OperationError("config_error", "worker.transcriptionCleanup.intervalSeconds must be between 60 and 86400.");
+  if (config.worker.transcriptionCleanup.maxRuntimeSeconds > 3600)
+    throw new OperationError("config_error", "worker.transcriptionCleanup.maxRuntimeSeconds must be at most 3600.");
+  for (const key of ["bashPath", "tempRoot"]) {
+    const value = config.worker.transcriptionCleanup[key];
+    if (value !== undefined && !isAbsolutePath(value))
+      throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be an absolute path.`);
+  }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
   assertPositiveNumber(config.worker.scheduler.tickSeconds, "worker.scheduler.tickSeconds");
@@ -2876,6 +2913,7 @@ var init_config = __esm(() => {
         enabled: false,
         credentials: {}
       },
+      transcriptionCleanup: { enabled: false, bashPath: "/bin/bash", intervalSeconds: 1800, minAgeMinutes: 1440, maxRuntimeSeconds: 120 },
       scheduler: {
         enabled: false,
         sourceIds: [],
@@ -3536,11 +3574,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord11(record.retrieval);
-  const trustDomainsRecord = asRecord11(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord12(record.retrieval);
+  const trustDomainsRecord = asRecord12(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord11(trustDomainsRecord?.[domain]);
+    const policy = asRecord12(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3552,19 +3590,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord11(value);
-  if (record?.sovereignty && asRecord11(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord12(value);
+  if (record?.sovereignty && asRecord12(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord11(value);
+  const record = asRecord12(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord11(item);
+    const profile = asRecord12(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3587,16 +3625,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord11(value);
+  const record = asRecord12(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord11(record[domain]);
+    const route = asRecord12(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord11(route.pool);
+    const poolRecord = asRecord12(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3806,7 +3844,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -6215,7 +6253,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname11(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord12(rawMap);
+  const root = asRecord13(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6274,11 +6312,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord12(value);
+  const record = asRecord13(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord12(record[tierName]);
+    const mapped = asRecord13(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6286,7 +6324,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord12(value);
+  const record = asRecord13(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6307,7 +6345,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord12(record.match);
+  const matchRecord = asRecord13(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6329,7 +6367,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord12(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7225,9 +7263,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord13(json, "Gmail messages list response");
+    const record = asRecord14(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord13(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord14(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7403,7 +7441,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord13(value, label) {
+function asRecord14(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7844,16 +7882,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord14(json, "Google Drive files list response");
+    const record = asRecord15(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord14(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord15(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord14(json, "Google Drive folder");
+    const record = asRecord15(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7948,7 +7986,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord14(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord15(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7976,7 +8014,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord14(value, label) {
+function asRecord15(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -9921,9 +9959,490 @@ var init_source_ingestion_ledger = __esm(() => {
   SAMPLE_RETENTION_MS2 = 24 * 60 * 60000;
 });
 
+// src/core/native-transcription-cleanup-service.ts
+init_config();
+import { tmpdir } from "node:os";
+import { isAbsolute as isAbsolute2 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// src/core/native-process-service.ts
+import { spawn as spawnProcess } from "node:child_process";
+var DEFAULT_READINESS_POLL_MS = 100;
+var DEFAULT_STOP_GRACE_MS = 2000;
+var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
+function backgroundNativeProcessService(service) {
+  return {
+    ...service,
+    async start(context) {
+      service.start(context).catch((error) => {
+        if (error instanceof NativeProcessReportedStartError)
+          return;
+        try {
+          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
+        } catch {}
+      });
+    }
+  };
+}
+
+class NativeProcessServiceStoppedError extends Error {
+}
+
+class NativeProcessConfigurationError extends Error {
+}
+
+class NativeProcessReportedStartError extends Error {
+}
+function createNativeProcessService(options) {
+  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
+  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const restartOnCleanExit = options.restartOnCleanExit ?? true;
+  const spawnChild = options.spawn ?? spawnProcess;
+  let generation = 0;
+  let current;
+  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  const clearFailure = (lifetime) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.clearFailure();
+    } catch {}
+  };
+  const scheduleRestart = (lifetime) => {
+    if (!isCurrent(lifetime) || lifetime.restartTimer)
+      return;
+    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    const delay = restartDelaysMs[index] ?? 30000;
+    lifetime.restartAttempt += 1;
+    lifetime.restartTimer = setTimeout(() => {
+      lifetime.restartTimer = undefined;
+      if (!isCurrent(lifetime))
+        return;
+      launch(lifetime).catch(async (error) => {
+        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
+        scheduleRestart(lifetime);
+      });
+    }, delay);
+    lifetime.restartTimer.unref?.();
+  };
+  const completeCleanExit = (lifetime, child) => {
+    return terminateChild(lifetime, stopGraceMs, child).then(() => {
+      if (!isCurrent(lifetime))
+        return;
+      clearFailure(lifetime);
+      try {
+        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
+      } catch {}
+    });
+  };
+  const launch = async (lifetime) => {
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const settings = await options.prepareStart({
+      serviceId: options.id,
+      serviceLabel: options.label,
+      context: lifetime.context,
+      initialConfig: options.initialConfig
+    });
+    if (!settings)
+      return;
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (settings.endpointOccupied) {
+      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
+    }
+    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!isCurrent(lifetime))
+      throw new NativeProcessServiceStoppedError;
+    const child = spawnChild(settings.command, [...settings.args], {
+      env: settings.env,
+      stdio: "ignore",
+      detached: process.platform !== "win32",
+      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
+    });
+    lifetime.child = child;
+    lifetime.childReady = false;
+    let spawnFailed = false;
+    child.once("exit", (code, signal) => {
+      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
+        return;
+      lifetime.childReady = false;
+      if (!restartOnCleanExit && code === 0 && signal === null) {
+        completeCleanExit(lifetime, child).catch(() => {
+          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        });
+        return;
+      }
+      const cleanup = terminateChild(lifetime, stopGraceMs, child);
+      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
+      cleanup.then(() => {
+        scheduleRestart(lifetime);
+      }).catch(() => {
+        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
+      });
+    });
+    child.once("error", () => {
+      spawnFailed = true;
+    });
+    const outcome = await waitForChildReadiness({
+      lifetime,
+      child,
+      settings,
+      isCurrent,
+      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+      readinessPollMs,
+      restartOnCleanExit,
+      spawnFailed: () => spawnFailed
+    });
+    if (!isCurrent(lifetime) || lifetime.child !== child)
+      throw new NativeProcessServiceStoppedError;
+    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
+      await completeCleanExit(lifetime, child);
+      return;
+    }
+    if (spawnFailed || childExited(child))
+      throw new Error(`Olympus ${options.label} exited during startup.`);
+    lifetime.childReady = true;
+    lifetime.restartAttempt = 0;
+    clearFailure(lifetime);
+    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
+  };
+  return {
+    id: options.id,
+    reload: { configPrefixes: [...options.reload.configPrefixes] },
+    async start(context) {
+      await stopCurrent();
+      const lifetime = {
+        generation: ++generation,
+        context,
+        child: undefined,
+        childReady: false,
+        stopping: false,
+        restartAttempt: 0,
+        restartTimer: undefined,
+        cleanupPromise: undefined
+      };
+      current = lifetime;
+      try {
+        await launch(lifetime);
+      } catch (error) {
+        if (error instanceof NativeProcessServiceStoppedError)
+          return;
+        await terminateChild(lifetime, stopGraceMs);
+        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
+        reportFailure(lifetime, message);
+        if (current === lifetime)
+          current = undefined;
+        throw new NativeProcessReportedStartError(message);
+      }
+    },
+    async stop() {
+      await stopCurrent();
+    }
+  };
+  async function stopCurrent() {
+    const lifetime = current;
+    if (!lifetime)
+      return;
+    current = undefined;
+    lifetime.stopping = true;
+    if (lifetime.restartTimer) {
+      clearTimeout(lifetime.restartTimer);
+      lifetime.restartTimer = undefined;
+    }
+    await terminateChild(lifetime, stopGraceMs);
+  }
+}
+async function waitForChildReadiness(input) {
+  const deadline = Date.now() + input.startupTimeoutMs;
+  const acceptsCleanExit = !input.restartOnCleanExit;
+  while (Date.now() < deadline) {
+    if (!input.isCurrent(input.lifetime))
+      throw new NativeProcessServiceStoppedError;
+    if (input.spawnFailed())
+      throw new Error("Child exited during startup.");
+    if (childExited(input.child)) {
+      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input))
+        return "cleanCompletion";
+      throw new Error("Child exited during startup.");
+    }
+    const ready = await input.settings.readinessProbe(input.child);
+    if (ready) {
+      if (!input.isCurrent(input.lifetime))
+        throw new NativeProcessServiceStoppedError;
+      if (input.spawnFailed())
+        throw new Error("Child exited during startup.");
+      if (childExited(input.child)) {
+        if (acceptsCleanExit && isCleanExit(input.child))
+          return "cleanCompletion";
+        throw new Error("Child exited during startup.");
+      }
+      return "ready";
+    }
+    await delay(input.readinessPollMs);
+  }
+  throw new Error("Child readiness timed out.");
+}
+async function readinessReceiptAfterExit(input) {
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  const ready = await input.settings.readinessProbe(input.child);
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  return ready;
+}
+async function terminateChild(lifetime, graceMs, expectedChild) {
+  if (lifetime.cleanupPromise)
+    return await lifetime.cleanupPromise;
+  const child = lifetime.child;
+  if (expectedChild && child !== expectedChild)
+    return;
+  lifetime.child = undefined;
+  lifetime.childReady = false;
+  if (!child?.pid)
+    return;
+  const cleanup = terminateChildProcessGroup(child, graceMs);
+  lifetime.cleanupPromise = cleanup;
+  try {
+    await cleanup;
+  } finally {
+    if (lifetime.cleanupPromise === cleanup)
+      lifetime.cleanupPromise = undefined;
+  }
+}
+async function terminateChildProcessGroup(child, graceMs) {
+  const processGroupId = child.pid;
+  if (!processGroupId)
+    return;
+  signalChildTree(child, "SIGTERM");
+  await waitForChildExit(child, graceMs);
+  signalChildTree(child, "SIGKILL");
+  await waitForChildExit(child, 1000);
+}
+function signalChildTree(child, signal) {
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, signal);
+    else
+      child.kill(signal);
+  } catch (error) {
+    if (error.code !== "ESRCH")
+      throw error;
+  }
+}
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+function isCleanExit(child) {
+  return child.exitCode === 0 && child.signalCode === null;
+}
+async function waitForChildExit(child, timeoutMs) {
+  if (childExited(child))
+    return;
+  await new Promise((resolve3) => {
+    const timeout = setTimeout(done, timeoutMs);
+    timeout.unref?.();
+    child.once("exit", done);
+    function done() {
+      clearTimeout(timeout);
+      child.removeListener("exit", done);
+      resolve3();
+    }
+  });
+}
+function delay(ms) {
+  return new Promise((resolve3) => {
+    const timeout = setTimeout(resolve3, ms);
+    timeout.unref?.();
+  });
+}
+
+// src/core/native-transcription-cleanup-service.ts
+var SERVICE_ID = "olympus-transcription-temp-cleanup";
+var RELOAD_PREFIX = "plugins.entries.olympus.config.worker.transcriptionCleanup";
+function createNativeTranscriptionCleanupService(options) {
+  const scriptPath = options.scriptPath ?? fileURLToPath(new URL("../config/systemd/user/olympus-whisper-transcribe.sh", options.moduleUrl ?? import.meta.url));
+  let current;
+  let generation = 0;
+  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopped;
+  const reportFailure = (lifetime, message) => {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      lifetime.context.serviceHealth?.reportFailure(new Error(message));
+    } catch {}
+  };
+  async function runSweepOnce(lifetime, kernel) {
+    if (!isCurrent(lifetime))
+      return;
+    try {
+      await kernel.start(lifetime.context);
+    } catch {
+      reportFailure(lifetime, "Olympus transcription temp cleanup failed to complete.");
+    }
+  }
+  async function runLoop(lifetime, kernel, settings) {
+    while (isCurrent(lifetime)) {
+      await runSweepOnce(lifetime, kernel);
+      if (!isCurrent(lifetime))
+        return;
+      const waited = await waitInterval(lifetime, settings.intervalSeconds);
+      if (!waited || !isCurrent(lifetime))
+        return;
+    }
+  }
+  function waitInterval(lifetime, seconds) {
+    if (!isCurrent(lifetime))
+      return Promise.resolve(false);
+    return new Promise((resolve3) => {
+      const timer = setTimeout(() => {
+        lifetime.timer = undefined;
+        lifetime.cancelInterval = undefined;
+        resolve3(isCurrent(lifetime));
+      }, options.intervalMs ?? seconds * 1000);
+      timer.unref?.();
+      lifetime.timer = timer;
+      lifetime.cancelInterval = () => {
+        lifetime.timer = undefined;
+        lifetime.cancelInterval = undefined;
+        resolve3(false);
+      };
+    });
+  }
+  function buildSettings(settings) {
+    return {
+      command: settings.bashPath,
+      args: [scriptPath, "--sweep"],
+      env: sweepEnvironment(settings),
+      startupTimeoutMs: settings.maxRuntimeSeconds * 1000,
+      endpointOccupied: false,
+      readinessProbe: async (child) => child.exitCode === 0 && child.signalCode === null
+    };
+  }
+  return {
+    id: SERVICE_ID,
+    reload: { configPrefixes: [RELOAD_PREFIX] },
+    async start(context) {
+      const startGeneration = ++generation;
+      await stopCurrent();
+      if (startGeneration !== generation)
+        return;
+      let settings;
+      try {
+        const configured = configFromPluginConfig(freshPluginConfig(context.config, options.initialPluginConfig)).worker.transcriptionCleanup;
+        settings = { ...configured, tempRoot: configured.tempRoot ?? tmpdir() };
+      } catch {
+        try {
+          context.serviceHealth?.reportFailure(new Error("Olympus transcription temp cleanup configuration is invalid."));
+        } catch {}
+        return;
+      }
+      if (!settings.enabled)
+        return;
+      const problem = cleanupConfigurationProblem(settings);
+      if (problem) {
+        reportStandalone(context, problem);
+        return;
+      }
+      const kernel = createNativeProcessService({
+        id: SERVICE_ID,
+        label: "transcription temp cleanup",
+        initialConfig: options.initialPluginConfig,
+        reload: { configPrefixes: [RELOAD_PREFIX] },
+        restartOnCleanExit: false,
+        prepareStart: async () => isCurrent(lifetime) ? buildSettings(settings) : undefined,
+        ...options.spawn ? { spawn: options.spawn } : {}
+      });
+      const lifetime = {
+        context,
+        kernel,
+        timer: undefined,
+        cancelInterval: undefined,
+        tick: undefined,
+        stopped: false
+      };
+      current = lifetime;
+      try {
+        context.logger?.info?.("Olympus transcription temp cleanup is running.");
+      } catch {}
+      lifetime.tick = runLoop(lifetime, kernel, settings);
+    },
+    async stop() {
+      generation += 1;
+      await stopCurrent();
+    }
+  };
+  async function stopCurrent() {
+    const lifetime = current;
+    if (!lifetime)
+      return;
+    current = undefined;
+    lifetime.stopped = true;
+    if (lifetime.timer) {
+      clearTimeout(lifetime.timer);
+      lifetime.timer = undefined;
+    }
+    lifetime.cancelInterval?.();
+    await lifetime.kernel.stop();
+    try {
+      await lifetime.tick;
+    } catch {}
+  }
+}
+function cleanupConfigurationProblem(settings) {
+  if (!isAbsolute2(settings.bashPath)) {
+    return "Olympus transcription temp cleanup requires an absolute worker.transcriptionCleanup.bashPath.";
+  }
+  if (!isAbsolute2(settings.tempRoot)) {
+    return "Olympus transcription temp cleanup requires an absolute worker.transcriptionCleanup.tempRoot.";
+  }
+  return;
+}
+function sweepEnvironment(settings) {
+  return {
+    HOME: process.env.HOME ?? "",
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    LANG: process.env.LANG ?? "C",
+    OLYMPUS_TRANSCRIBE_TMP_ROOT: settings.tempRoot,
+    OLYMPUS_TRANSCRIBE_SWEEP_AGE_MINUTES: String(settings.minAgeMinutes)
+  };
+}
+function reportStandalone(context, message) {
+  try {
+    context.serviceHealth?.reportFailure(new Error(message));
+  } catch {}
+}
+function freshPluginConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord5(contextConfig);
+  const entries = asRecord5(asRecord5(root?.plugins)?.entries);
+  const olympus = asRecord5(entries?.olympus);
+  if (entries) {
+    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  }
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+    return root;
+  }
+  return initialPluginConfig;
+}
+function asRecord5(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
 // src/core/native-credit-monitor-service.ts
 init_config();
-import { isAbsolute as isAbsolute2 } from "node:path";
+import { isAbsolute as isAbsolute3 } from "node:path";
 
 // src/core/provider-credit-status.ts
 init_atomic_file();
@@ -10321,8 +10840,8 @@ function isVeniceProviderPauseFile(path) {
 }
 
 // src/core/native-credit-monitor-service.ts
-var SERVICE_ID = "olympus-provider-credit-monitor";
-var RELOAD_PREFIX = "plugins.entries.olympus.config.worker.creditMonitor";
+var SERVICE_ID2 = "olympus-provider-credit-monitor";
+var RELOAD_PREFIX2 = "plugins.entries.olympus.config.worker.creditMonitor";
 var API_KEY_CREDENTIAL_NAME = "VENICE_API_KEY";
 function createNativeCreditMonitorService(options) {
   let current;
@@ -10411,8 +10930,8 @@ function createNativeCreditMonitorService(options) {
     } catch {}
   }
   return {
-    id: SERVICE_ID,
-    reload: { configPrefixes: [RELOAD_PREFIX] },
+    id: SERVICE_ID2,
+    reload: { configPrefixes: [RELOAD_PREFIX2] },
     async start(context) {
       const startGeneration = ++generation;
       await stopCurrent();
@@ -10420,7 +10939,7 @@ function createNativeCreditMonitorService(options) {
         return;
       let settings;
       try {
-        settings = configFromPluginConfig(freshPluginConfig(context.config, options.initialPluginConfig)).worker.creditMonitor;
+        settings = configFromPluginConfig(freshPluginConfig2(context.config, options.initialPluginConfig)).worker.creditMonitor;
       } catch {
         try {
           context.serviceHealth?.reportFailure(new Error("Olympus credit monitor configuration is invalid or contains unresolved credentials."));
@@ -10459,7 +10978,7 @@ function creditMonitorConfigurationProblem(settings) {
   if (settings.provider !== "venice") {
     return "Olympus credit monitor is configured with an unsupported provider.";
   }
-  if (!settings.reportPath || !isAbsolute2(settings.reportPath)) {
+  if (!settings.reportPath || !isAbsolute3(settings.reportPath)) {
     return "Olympus Venice credit monitor requires an absolute worker.creditMonitor.reportPath.";
   }
   if (!settings.credentials[API_KEY_CREDENTIAL_NAME]) {
@@ -10467,10 +10986,10 @@ function creditMonitorConfigurationProblem(settings) {
   }
   return;
 }
-function freshPluginConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord5(contextConfig);
-  const entries = asRecord5(asRecord5(root?.plugins)?.entries);
-  const olympus = asRecord5(entries?.olympus);
+function freshPluginConfig2(contextConfig, initialPluginConfig) {
+  const root = asRecord6(contextConfig);
+  const entries = asRecord6(asRecord6(root?.plugins)?.entries);
+  const olympus = asRecord6(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -10479,311 +10998,8 @@ function freshPluginConfig(contextConfig, initialPluginConfig) {
   }
   return initialPluginConfig;
 }
-function asRecord5(value) {
+function asRecord6(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-
-// src/core/native-process-service.ts
-import { spawn as spawnProcess } from "node:child_process";
-var DEFAULT_READINESS_POLL_MS = 100;
-var DEFAULT_STOP_GRACE_MS = 2000;
-var DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
-function backgroundNativeProcessService(service) {
-  return {
-    ...service,
-    async start(context) {
-      service.start(context).catch((error) => {
-        if (error instanceof NativeProcessReportedStartError)
-          return;
-        try {
-          context.serviceHealth?.reportFailure(new Error(`Olympus service ${service.id} failed to start.`));
-        } catch {}
-      });
-    }
-  };
-}
-
-class NativeProcessServiceStoppedError extends Error {
-}
-
-class NativeProcessConfigurationError extends Error {
-}
-
-class NativeProcessReportedStartError extends Error {
-}
-function createNativeProcessService(options) {
-  const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
-  const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
-  const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
-  const restartOnCleanExit = options.restartOnCleanExit ?? true;
-  const spawnChild = options.spawn ?? spawnProcess;
-  let generation = 0;
-  let current;
-  const isCurrent = (lifetime) => current === lifetime && !lifetime.stopping;
-  const reportFailure = (lifetime, message) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.reportFailure(new Error(message));
-    } catch {}
-  };
-  const clearFailure = (lifetime) => {
-    if (!isCurrent(lifetime))
-      return;
-    try {
-      lifetime.context.serviceHealth?.clearFailure();
-    } catch {}
-  };
-  const scheduleRestart = (lifetime) => {
-    if (!isCurrent(lifetime) || lifetime.restartTimer)
-      return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
-    const delay = restartDelaysMs[index] ?? 30000;
-    lifetime.restartAttempt += 1;
-    lifetime.restartTimer = setTimeout(() => {
-      lifetime.restartTimer = undefined;
-      if (!isCurrent(lifetime))
-        return;
-      launch(lifetime).catch(async (error) => {
-        if (error instanceof NativeProcessServiceStoppedError || !isCurrent(lifetime))
-          return;
-        await terminateChild(lifetime, stopGraceMs);
-        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        scheduleRestart(lifetime);
-      });
-    }, delay);
-    lifetime.restartTimer.unref?.();
-  };
-  const completeCleanExit = (lifetime, child) => {
-    return terminateChild(lifetime, stopGraceMs, child).then(() => {
-      if (!isCurrent(lifetime))
-        return;
-      clearFailure(lifetime);
-      try {
-        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
-      } catch {}
-    });
-  };
-  const launch = async (lifetime) => {
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    const settings = await options.prepareStart({
-      serviceId: options.id,
-      serviceLabel: options.label,
-      context: lifetime.context,
-      initialConfig: options.initialConfig
-    });
-    if (!settings)
-      return;
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (settings.endpointOccupied) {
-      throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
-    }
-    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
-    if (!isCurrent(lifetime))
-      throw new NativeProcessServiceStoppedError;
-    const child = spawnChild(settings.command, [...settings.args], {
-      env: settings.env,
-      stdio: "ignore",
-      detached: process.platform !== "win32",
-      ...options.workingDirectory ? { cwd: options.workingDirectory } : {}
-    });
-    lifetime.child = child;
-    lifetime.childReady = false;
-    let spawnFailed = false;
-    child.once("exit", (code, signal) => {
-      if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
-        return;
-      lifetime.childReady = false;
-      if (!restartOnCleanExit && code === 0 && signal === null) {
-        completeCleanExit(lifetime, child).catch(() => {
-          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
-        });
-        return;
-      }
-      const cleanup = terminateChild(lifetime, stopGraceMs, child);
-      reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
-      cleanup.then(() => {
-        scheduleRestart(lifetime);
-      }).catch(() => {
-        reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit.`);
-      });
-    });
-    child.once("error", () => {
-      spawnFailed = true;
-    });
-    const outcome = await waitForChildReadiness({
-      lifetime,
-      child,
-      settings,
-      isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-      readinessPollMs,
-      restartOnCleanExit,
-      spawnFailed: () => spawnFailed
-    });
-    if (!isCurrent(lifetime) || lifetime.child !== child)
-      throw new NativeProcessServiceStoppedError;
-    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
-      await completeCleanExit(lifetime, child);
-      return;
-    }
-    if (spawnFailed || childExited(child))
-      throw new Error(`Olympus ${options.label} exited during startup.`);
-    lifetime.childReady = true;
-    lifetime.restartAttempt = 0;
-    clearFailure(lifetime);
-    lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
-  };
-  return {
-    id: options.id,
-    reload: { configPrefixes: [...options.reload.configPrefixes] },
-    async start(context) {
-      await stopCurrent();
-      const lifetime = {
-        generation: ++generation,
-        context,
-        child: undefined,
-        childReady: false,
-        stopping: false,
-        restartAttempt: 0,
-        restartTimer: undefined,
-        cleanupPromise: undefined
-      };
-      current = lifetime;
-      try {
-        await launch(lifetime);
-      } catch (error) {
-        if (error instanceof NativeProcessServiceStoppedError)
-          return;
-        await terminateChild(lifetime, stopGraceMs);
-        const message = error instanceof NativeProcessConfigurationError ? error.message : `Olympus ${options.label} failed to become ready.`;
-        reportFailure(lifetime, message);
-        if (current === lifetime)
-          current = undefined;
-        throw new NativeProcessReportedStartError(message);
-      }
-    },
-    async stop() {
-      await stopCurrent();
-    }
-  };
-  async function stopCurrent() {
-    const lifetime = current;
-    if (!lifetime)
-      return;
-    current = undefined;
-    lifetime.stopping = true;
-    if (lifetime.restartTimer) {
-      clearTimeout(lifetime.restartTimer);
-      lifetime.restartTimer = undefined;
-    }
-    await terminateChild(lifetime, stopGraceMs);
-  }
-}
-async function waitForChildReadiness(input) {
-  const deadline = Date.now() + input.startupTimeoutMs;
-  const acceptsCleanExit = !input.restartOnCleanExit;
-  while (Date.now() < deadline) {
-    if (!input.isCurrent(input.lifetime))
-      throw new NativeProcessServiceStoppedError;
-    if (input.spawnFailed())
-      throw new Error("Child exited during startup.");
-    if (childExited(input.child)) {
-      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input))
-        return "cleanCompletion";
-      throw new Error("Child exited during startup.");
-    }
-    const ready = await input.settings.readinessProbe(input.child);
-    if (ready) {
-      if (!input.isCurrent(input.lifetime))
-        throw new NativeProcessServiceStoppedError;
-      if (input.spawnFailed())
-        throw new Error("Child exited during startup.");
-      if (childExited(input.child)) {
-        if (acceptsCleanExit && isCleanExit(input.child))
-          return "cleanCompletion";
-        throw new Error("Child exited during startup.");
-      }
-      return "ready";
-    }
-    await delay(input.readinessPollMs);
-  }
-  throw new Error("Child readiness timed out.");
-}
-async function readinessReceiptAfterExit(input) {
-  if (!input.isCurrent(input.lifetime))
-    throw new NativeProcessServiceStoppedError;
-  const ready = await input.settings.readinessProbe(input.child);
-  if (!input.isCurrent(input.lifetime))
-    throw new NativeProcessServiceStoppedError;
-  return ready;
-}
-async function terminateChild(lifetime, graceMs, expectedChild) {
-  if (lifetime.cleanupPromise)
-    return await lifetime.cleanupPromise;
-  const child = lifetime.child;
-  if (expectedChild && child !== expectedChild)
-    return;
-  lifetime.child = undefined;
-  lifetime.childReady = false;
-  if (!child?.pid)
-    return;
-  const cleanup = terminateChildProcessGroup(child, graceMs);
-  lifetime.cleanupPromise = cleanup;
-  try {
-    await cleanup;
-  } finally {
-    if (lifetime.cleanupPromise === cleanup)
-      lifetime.cleanupPromise = undefined;
-  }
-}
-async function terminateChildProcessGroup(child, graceMs) {
-  const processGroupId = child.pid;
-  if (!processGroupId)
-    return;
-  signalChildTree(child, "SIGTERM");
-  await waitForChildExit(child, graceMs);
-  signalChildTree(child, "SIGKILL");
-  await waitForChildExit(child, 1000);
-}
-function signalChildTree(child, signal) {
-  try {
-    if (process.platform !== "win32" && child.pid)
-      process.kill(-child.pid, signal);
-    else
-      child.kill(signal);
-  } catch (error) {
-    if (error.code !== "ESRCH")
-      throw error;
-  }
-}
-function childExited(child) {
-  return child.exitCode !== null || child.signalCode !== null;
-}
-function isCleanExit(child) {
-  return child.exitCode === 0 && child.signalCode === null;
-}
-async function waitForChildExit(child, timeoutMs) {
-  if (childExited(child))
-    return;
-  await new Promise((resolve3) => {
-    const timeout = setTimeout(done, timeoutMs);
-    timeout.unref?.();
-    child.once("exit", done);
-    function done() {
-      clearTimeout(timeout);
-      child.removeListener("exit", done);
-      resolve3();
-    }
-  });
-}
-function delay(ms) {
-  return new Promise((resolve3) => {
-    const timeout = setTimeout(resolve3, ms);
-    timeout.unref?.();
-  });
 }
 
 // src/native-plugin.ts
@@ -11257,7 +11473,7 @@ class EmailClient {
         ...options.timeoutMs !== undefined ? { timeout_ms: options.timeoutMs } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
-    const data = asRecord6(response);
+    const data = asRecord7(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexAnswerResult(data);
@@ -11299,7 +11515,7 @@ class EmailClient {
         ...options.query ? { query: options.query } : {}
       })
     });
-    const data = asRecord6(response);
+    const data = asRecord7(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexStatusResult(data);
@@ -11316,7 +11532,7 @@ class EmailClient {
         ...options.limit !== undefined ? { limit: options.limit } : {}
       })
     });
-    const data = asRecord6(response);
+    const data = asRecord7(response);
     assertNoRawEmailFields(data);
     return data;
   }
@@ -11355,7 +11571,7 @@ class EmailClient {
         ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}
       })
     });
-    const data = asRecord6(response);
+    const data = asRecord7(response);
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
     return parseSourceIndexSearchResult(data, {
@@ -11608,7 +11824,7 @@ function hasUniqueJsonObjectMembers(input) {
     return false;
   }
 }
-function asRecord6(value) {
+function asRecord7(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new OperationError("email_error", "Private email lane response was not a JSON object.");
   }
@@ -11638,8 +11854,8 @@ function parseSourceIndexAnswerResult(value) {
   if (!Array.isArray(value.evidence)) {
     throw new OperationError("email_error", "source answer evidence must be an array.");
   }
-  const audit = asRecord6(value.audit);
-  const policy = asRecord6(value.policy);
+  const audit = asRecord7(value.audit);
+  const policy = asRecord7(value.policy);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer audit must be raw-source-safe.");
   }
@@ -11676,7 +11892,7 @@ function parseSourceIndexAnswerResult(value) {
   };
 }
 function parseSourceAnswerSelfHealAudit(value) {
-  const audit = asRecord6(value);
+  const audit = asRecord7(value);
   const outcome = audit.outcome;
   if (outcome !== "healed" && outcome !== "in_progress" && outcome !== "failed" && outcome !== "skipped") {
     return;
@@ -11703,7 +11919,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   if (typeof audit.reason === "string")
     parsed.reason = audit.reason;
   if (audit.prior_state !== undefined) {
-    const prior = asRecord6(audit.prior_state);
+    const prior = asRecord7(audit.prior_state);
     parsed.prior_state = {
       ...typeof prior.extraction_status === "string" ? { extraction_status: prior.extraction_status } : {},
       ...typeof prior.extraction_completeness === "string" ? { extraction_completeness: prior.extraction_completeness } : {}
@@ -11712,7 +11928,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   return parsed;
 }
 function parseSourceAnswerPhaseTimings(value) {
-  const timings = asRecord6(value);
+  const timings = asRecord7(value);
   const parsed = {
     lane_setup_ms: requiredNonNegativeNumber(timings.lane_setup_ms, "audit.phase_timings.lane_setup_ms"),
     bulk_gate_ms: requiredNonNegativeNumber(timings.bulk_gate_ms, "audit.phase_timings.bulk_gate_ms"),
@@ -11733,7 +11949,7 @@ function parseSourceAnswerPhaseTimings(value) {
   return parsed;
 }
 function parseSourceAnswerSynthesisAudit(value) {
-  const audit = asRecord6(value);
+  const audit = asRecord7(value);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer synthesis audit must be raw-source-safe.");
   }
@@ -11752,7 +11968,7 @@ function parseSourceAnswerSynthesisAudit(value) {
   };
 }
 function parseSourceAnswerAnalystFallback(value) {
-  const fallback = asRecord6(value);
+  const fallback = asRecord7(value);
   const from = fallback.from === "venice" || fallback.from === "cloud" ? fallback.from : undefined;
   const reason = fallback.reason === "timeout" || fallback.reason === "escalation" || fallback.reason === "unavailable" || isSanitizedAnalystFallbackReason(fallback.reason) ? fallback.reason : undefined;
   if (!from || fallback.to !== "local" || !reason) {
@@ -11773,7 +11989,7 @@ function parseSourceIndexStatusResult(value) {
   if (value.kind !== "source_index_status") {
     throw new OperationError("email_error", "source index status result must have kind=source_index_status.");
   }
-  const policy = asRecord6(value.policy);
+  const policy = asRecord7(value.policy);
   if (policy.read_only !== true || policy.raw_source_exposed !== false || policy.source_packets_exposed !== false || policy.source_text_returned !== false || policy.secure_local_item_metadata_exposed !== false || policy.castor_visible !== true) {
     throw new OperationError("email_error", "source index status policy must describe a read-only calling-assistant-visible result.");
   }
@@ -11817,8 +12033,8 @@ function parseSourceIndexSearchResult(value, context) {
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
-  const audit = asRecord6(value.audit);
-  const policy = asRecord6(value.policy);
+  const audit = asRecord7(value.audit);
+  const policy = asRecord7(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
   if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || corpus.trustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== corpus.trustDomain) {
@@ -11898,13 +12114,13 @@ function withSourceWatchHeaders(route) {
   return headers;
 }
 function parseSourceWatchResult(value, kind) {
-  const record = asRecord6(value);
+  const record = asRecord7(value);
   assertNoRawEmailFields(record);
   assertNoSourceIndexOperationalLeakFields(record);
   if (record.kind !== kind) {
     throw new OperationError("email_error", `Source watch result must have kind=${kind}.`);
   }
-  const policy = asRecord6(record.policy);
+  const policy = asRecord7(record.policy);
   if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.message_bodies_returned !== false || policy.evidence_pointers_only !== true) {
     throw new OperationError("email_error", "Source watch result must be content-free and evidence-pointer-only.");
   }
@@ -11917,7 +12133,7 @@ function parseSourceWatchResult(value, kind) {
   if (kind === "source_watch") {
     return {
       kind,
-      watch: asRecord6(record.watch),
+      watch: asRecord7(record.watch),
       policy: safePolicy
     };
   }
@@ -11926,7 +12142,7 @@ function parseSourceWatchResult(value, kind) {
   }
   return {
     kind,
-    watches: record.watches.map(asRecord6),
+    watches: record.watches.map(asRecord7),
     ...typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor } : {},
     policy: safePolicy
   };
@@ -12069,14 +12285,14 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
   }
 }
 function parseSourceAnswerOpsec(value) {
-  const opsec = asRecord6(value);
+  const opsec = asRecord7(value);
   if (opsec.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer OPSEC audit must be raw-source-safe.");
   }
   if (!Array.isArray(opsec.structured_evidence)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include structured evidence.");
   }
-  const releaseDecision = asRecord6(opsec.release_decision);
+  const releaseDecision = asRecord7(opsec.release_decision);
   if (typeof releaseDecision.decision !== "string" || !Array.isArray(releaseDecision.reasons)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include a release decision.");
   }
@@ -12117,9 +12333,9 @@ function shouldExposeOperation(operation, context) {
 init_config();
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync3 } from "node:fs";
-import { basename, delimiter, isAbsolute as isAbsolute3, join as join4 } from "node:path";
-import { fileURLToPath } from "node:url";
-var SERVICE_ID2 = "olympus-worker";
+import { basename, delimiter, isAbsolute as isAbsolute4, join as join4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var SERVICE_ID3 = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
 var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
@@ -12127,7 +12343,7 @@ var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
 function createNativeWorkerService(options) {
   const fetchWorker = options.fetch ?? globalThis.fetch;
   return createNativeProcessService({
-    id: SERVICE_ID2,
+    id: SERVICE_ID3,
     label: SERVICE_LABEL,
     reload: {
       configPrefixes: [
@@ -12171,17 +12387,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord7(contextConfig);
-  const plugins = asRecord7(root?.plugins);
-  const entries = asRecord7(plugins?.entries);
-  const olympus = asRecord7(entries?.olympus);
+  const root = asRecord8(contextConfig);
+  const plugins = asRecord8(root?.plugins);
+  const entries = asRecord8(plugins?.entries);
+  const olympus = asRecord8(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord7(asRecord7(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord8(asRecord8(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -12252,7 +12468,7 @@ function resolveBunRuntimePath(configured, env) {
     ...(env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join4(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!isAbsolute3(candidate) || !isBunExecutableName(candidate))
+    if (!isAbsolute4(candidate) || !isBunExecutableName(candidate))
       continue;
     try {
       if (statSync3(candidate).isFile())
@@ -12262,11 +12478,11 @@ function resolveBunRuntimePath(configured, env) {
   throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
 }
 function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath(new URL("./cli.js", moduleUrl));
+  const candidate = configured ?? fileURLToPath2(new URL("./cli.js", moduleUrl));
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
-  if (!isAbsolute3(path))
+  if (!isAbsolute4(path))
     throw new Error(`Olympus ${label} path must be absolute.`);
   try {
     if (statSync3(path).isFile())
@@ -12343,7 +12559,7 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key];
   }
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -12352,9 +12568,9 @@ init_config();
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-var SERVICE_ID3 = "olympus-telegram-capture";
+import { isAbsolute as isAbsolute5, join as join5 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+var SERVICE_ID4 = "olympus-telegram-capture";
 var SERVICE_LABEL2 = "Telegram capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS = 30000;
 var READINESS_FILE = "native-service-readiness.json";
@@ -12381,7 +12597,7 @@ var MANAGED_TELEGRAM_ENV_NAMES = new Set([
 ]);
 function createNativeTelegramService(options) {
   return createNativeProcessService({
-    id: SERVICE_ID3,
+    id: SERVICE_ID4,
     label: SERVICE_LABEL2,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.telegramCapture"] },
     initialConfig: options.initialPluginConfig,
@@ -12397,7 +12613,7 @@ function createNativeTelegramService(options) {
 async function prepareTelegramStart(input, options) {
   let config;
   try {
-    config = configFromPluginConfig(freshPluginConfig2(input.context.config, input.initialConfig));
+    config = configFromPluginConfig(freshPluginConfig3(input.context.config, input.initialConfig));
   } catch {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service configuration is invalid or contains unresolved credentials.");
   }
@@ -12408,7 +12624,7 @@ async function prepareTelegramStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires an absolute worker.telegramCapture.pythonPath.");
   }
   assertUsableFile(capture.pythonPath, "Python interpreter");
-  const scriptPath = fileURLToPath2(new URL("../scripts/telegram-telethon-reader.py", options.moduleUrl));
+  const scriptPath = fileURLToPath3(new URL("../scripts/telegram-telethon-reader.py", options.moduleUrl));
   assertUsableFile(scriptPath, "packaged Telegram reader");
   const loadedEnv = baseEnvironment();
   applyWorkerSetupEnv({
@@ -12451,10 +12667,10 @@ async function prepareTelegramStart(input, options) {
     readinessProbe: (child) => telegramReadinessProbe(stateDir, instanceId, approvedChatCount, child)
   };
 }
-function freshPluginConfig2(contextConfig, initialPluginConfig) {
-  const root = asRecord8(contextConfig);
-  const entries = asRecord8(asRecord8(root?.plugins)?.entries);
-  const olympus = asRecord8(entries?.olympus);
+function freshPluginConfig3(contextConfig, initialPluginConfig) {
+  const root = asRecord9(contextConfig);
+  const entries = asRecord9(asRecord9(root?.plugins)?.entries);
+  const olympus = asRecord9(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -12490,7 +12706,7 @@ function applyConfiguredPaths(config, env) {
     env.OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH = capture.reportPath;
 }
 function assertUsableFile(path, label) {
-  if (!isAbsolute4(path)) {
+  if (!isAbsolute5(path)) {
     throw new NativeProcessConfigurationError(`Olympus Telegram capture service ${label} path must be absolute.`);
   }
   try {
@@ -12515,7 +12731,7 @@ async function telegramReadinessProbe(stateDir, instanceId, approvedChatCount, c
 function firstPresent(...values) {
   return values.find((value) => value?.trim())?.trim();
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -12524,8 +12740,8 @@ init_config();
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { accessSync, constants, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { isAbsolute as isAbsolute5, join as join6 } from "node:path";
-var SERVICE_ID4 = "olympus-whatsapp-capture";
+import { isAbsolute as isAbsolute6, join as join6 } from "node:path";
+var SERVICE_ID5 = "olympus-whatsapp-capture";
 var SERVICE_LABEL3 = "WhatsApp capture service";
 var DEFAULT_STARTUP_TIMEOUT_MS2 = Number.POSITIVE_INFINITY;
 var DEFAULT_STATE_RELATIVE_PATH = ".local/share/olympus/whatsapp-live";
@@ -12533,7 +12749,7 @@ var READINESS_FILE2 = "native-service-readiness.json";
 var SESSION_FILE = "session.db";
 function createNativeWhatsAppService(options) {
   return createNativeProcessService({
-    id: SERVICE_ID4,
+    id: SERVICE_ID5,
     label: SERVICE_LABEL3,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.whatsappCapture"] },
     initialConfig: options.initialPluginConfig,
@@ -12549,7 +12765,7 @@ function createNativeWhatsAppService(options) {
 async function prepareWhatsAppStart(input) {
   let config;
   try {
-    config = configFromPluginConfig(freshPluginConfig3(input.context.config, input.initialConfig));
+    config = configFromPluginConfig(freshPluginConfig4(input.context.config, input.initialConfig));
   } catch {
     throw new NativeProcessConfigurationError("Olympus WhatsApp capture service configuration is invalid.");
   }
@@ -12579,10 +12795,10 @@ async function prepareWhatsAppStart(input) {
     readinessProbe: (child) => whatsappReadinessProbe(stateDir, instanceId, child)
   };
 }
-function freshPluginConfig3(contextConfig, initialPluginConfig) {
-  const root = asRecord9(contextConfig);
-  const entries = asRecord9(asRecord9(root?.plugins)?.entries);
-  const olympus = asRecord9(entries?.olympus);
+function freshPluginConfig4(contextConfig, initialPluginConfig) {
+  const root = asRecord10(contextConfig);
+  const entries = asRecord10(asRecord10(root?.plugins)?.entries);
+  const olympus = asRecord10(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -12595,7 +12811,7 @@ function baseEnvironment2() {
   return Object.fromEntries(["HOME", "PATH", "TMPDIR", "LANG"].map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
 }
 function assertExecutableFile2(path) {
-  if (!isAbsolute5(path)) {
+  if (!isAbsolute6(path)) {
     throw new NativeProcessConfigurationError("Olympus WhatsApp capture service binary path must be absolute.");
   }
   try {
@@ -12626,7 +12842,7 @@ async function whatsappReadinessProbe(stateDir, instanceId, child) {
     return false;
   }
 }
-function asRecord9(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -12634,8 +12850,8 @@ function asRecord9(value) {
 init_config();
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { readFileSync as readFileSync8, statSync as statSync6 } from "node:fs";
-import { delimiter as delimiter2, dirname as dirname6, isAbsolute as isAbsolute6, join as join8 } from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { delimiter as delimiter2, dirname as dirname6, isAbsolute as isAbsolute7, join as join8 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/workers/dashboard/embedding-runtime.ts
 import { dirname as dirname5, join as join7 } from "node:path";
@@ -12654,7 +12870,7 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
 }
 
 // src/core/native-embedding-drain-service.ts
-var SERVICE_ID5 = "olympus-source-embedding-drain";
+var SERVICE_ID6 = "olympus-source-embedding-drain";
 var SERVICE_LABEL4 = "source embedding drain";
 var DEFAULT_STARTUP_TIMEOUT_MS3 = 30000;
 var READINESS_FILE3 = "source-embedding-drain-native-readiness.json";
@@ -12737,7 +12953,7 @@ for (const lane of EMBEDDING_LANE_NAMES) {
 }
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
-    id: SERVICE_ID5,
+    id: SERVICE_ID6,
     label: SERVICE_LABEL4,
     restartOnCleanExit: false,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
@@ -12754,7 +12970,7 @@ function createNativeEmbeddingDrainService(options) {
 async function prepareEmbeddingDrainStart(input, options) {
   let config;
   try {
-    config = configFromPluginConfig(freshPluginConfig4(input.context.config, input.initialConfig));
+    config = configFromPluginConfig(freshPluginConfig5(input.context.config, input.initialConfig));
   } catch {
     throw new NativeProcessConfigurationError("Olympus source embedding drain configuration is invalid or contains unresolved credentials.");
   }
@@ -12776,9 +12992,9 @@ async function prepareEmbeddingDrainStart(input, options) {
   env.GEMINI_API_KEY ??= env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY;
   env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY ??= env.GEMINI_API_KEY;
   const runtimePath = resolveBunRuntimePath2(drain.runtimePath, env);
-  const executablePath = assertUsableFile2(fileURLToPath3(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
+  const executablePath = assertUsableFile2(fileURLToPath4(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute6(reportPath)) {
+  if (!isAbsolute7(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join8(dirname6(reportPath), READINESS_FILE3);
@@ -12796,10 +13012,10 @@ async function prepareEmbeddingDrainStart(input, options) {
     readinessProbe: (child) => embeddingDrainReadinessProbe(readinessPath, instanceId, child)
   };
 }
-function freshPluginConfig4(contextConfig, initialPluginConfig) {
-  const root = asRecord10(contextConfig);
-  const entries = asRecord10(asRecord10(root?.plugins)?.entries);
-  const olympus = asRecord10(entries?.olympus);
+function freshPluginConfig5(contextConfig, initialPluginConfig) {
+  const root = asRecord11(contextConfig);
+  const entries = asRecord11(asRecord11(root?.plugins)?.entries);
+  const olympus = asRecord11(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -12828,7 +13044,7 @@ function resolveBunRuntimePath2(configured, env) {
     ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((dir) => join8(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute6(candidate))
+    if (!candidate || !isAbsolute7(candidate))
       continue;
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
@@ -12840,7 +13056,7 @@ function resolveBunRuntimePath2(configured, env) {
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
 }
 function assertUsableFile2(path, label) {
-  if (!isAbsolute6(path)) {
+  if (!isAbsolute7(path)) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
@@ -12860,7 +13076,7 @@ async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
     return false;
   }
 }
-function asRecord10(value) {
+function asRecord11(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -13614,14 +13830,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord15(await response.json());
-    const readiness = asRecord15(body.credential_readiness);
-    const policy = asRecord15(readiness.policy);
+    const body = asRecord16(await response.json());
+    const readiness = asRecord16(body.credential_readiness);
+    const policy = asRecord16(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord15(entry);
+      const profile = asRecord16(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -13674,7 +13890,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord15(await response.json());
+  const health = asRecord16(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -13727,7 +13943,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord15(await response.json());
+  const status = asRecord16(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -13735,7 +13951,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord15(entry);
+    const corpus = asRecord16(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -13749,8 +13965,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord15(corpus.counts);
-    const embeddingParity = asRecord15(corpus.embedding_parity);
+    const counts = asRecord16(corpus.counts);
+    const embeddingParity = asRecord16(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -13810,7 +14026,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord15(await response.json());
+  const status = asRecord16(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -13855,7 +14071,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord15(await response.json());
+  const status = asRecord16(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -13867,8 +14083,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord15(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord15(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord16(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord16(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -13925,7 +14141,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord15(value);
+  const record = asRecord16(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -13938,7 +14154,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord15(entry);
+    const credential = asRecord16(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -13990,7 +14206,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord15(await response.json());
+  const status = asRecord16(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -14018,7 +14234,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord15(entry);
+    const source = asRecord16(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -14028,7 +14244,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord15(taskEntry);
+      const task = asRecord16(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -14164,7 +14380,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord15(await response.json());
+    return asRecord16(await response.json());
   } catch {
     return;
   }
@@ -14174,7 +14390,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord15(await response.json());
+    const status = asRecord16(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -14183,7 +14399,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord15(status.ingestion_ledger);
+  const ledger = asRecord16(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -14215,12 +14431,12 @@ function readIngestionHealthState(path) {
     if (!existsSync10(path))
       return;
     const parsed = JSON.parse(readFileSync13(path, "utf8"));
-    const record = asRecord15(parsed);
-    const sources = asRecord15(record.sources);
+    const record = asRecord16(parsed);
+    const sources = asRecord16(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord15(sourceValue);
-      const terminal = asRecord15(source.failed_terminal_by_class);
+      const source = asRecord16(sourceValue);
+      const terminal = asRecord16(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -14248,9 +14464,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord15(await response.json());
+    const status = asRecord16(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord15(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord16(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -14391,7 +14607,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord15(corpus.last_refresh);
+  const lastRefresh = asRecord16(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -14406,13 +14622,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord15(corpus.last_refresh);
+  const lastRefresh = asRecord16(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord15(corpus.last_sync);
+  const lastSync = asRecord16(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord15(corpus.counts);
+  const counts = asRecord16(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -14449,7 +14665,7 @@ function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord15(value) {
+function asRecord16(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -15246,13 +15462,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord16(payload);
+  const result = asRecord17(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord16(result.audit);
-  const policy = asRecord16(result.policy);
-  const synthesis = asRecord16(audit?.answer_synthesis);
-  const timings = asRecord16(audit?.phase_timings);
+  const audit = asRecord17(result.audit);
+  const policy = asRecord17(result.policy);
+  const synthesis = asRecord17(audit?.answer_synthesis);
+  const timings = asRecord17(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -15262,7 +15478,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord16(item);
+    const record = asRecord17(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -15273,7 +15489,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord16(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord17(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -15325,7 +15541,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord16(value) {
+function asRecord17(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -15353,13 +15569,15 @@ var plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
+    const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
       api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled || config.worker.whatsappCapture.enabled || config.worker.embeddingDrain.enabled) {
+      api.registerService(transcriptionCleanupService);
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.creditMonitor.enabled || config.worker.whatsappCapture.enabled || config.worker.embeddingDrain.enabled || config.worker.transcriptionCleanup.enabled) {
       throw new Error("This OpenClaw host does not support native Olympus services.");
     }
     const ctx = {
@@ -15566,7 +15784,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord16(value);
+  const record = asRecord17(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

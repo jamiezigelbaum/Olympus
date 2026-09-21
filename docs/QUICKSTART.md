@@ -646,3 +646,20 @@ provider operation before allowing broader work.
 The installation-specific legacy decision-ledger observer remains in the private
 runtime. Public release artifacts exclude that observer, as they already do for
 the source worker and dashboard.
+
+### Optional transcription-temp cleanup
+
+The shared source scheduler owns WhatsApp transcription and stores transcript
+chunks directly in the canonical store. The standalone sidecar drain is retired;
+existing audio and sidecars are preserved, not deleted or silently re-imported.
+
+Enable `worker.transcriptionCleanup.enabled` to replace an external sweep timer.
+It runs the packaged transcription wrapper's existing `--sweep` mode, keeping
+its age threshold and live-process-reference checks. Defaults are a 30-minute
+interval, a 24-hour minimum age, the OS temp directory, and a 120-second maximum
+run. `bashPath`, `tempRoot`, `intervalSeconds`, `minAgeMinutes`, and
+`maxRuntimeSeconds` can preserve an existing installation's settings. Only
+matching transcription-temp directory prefixes are considered; stop an existing
+sweep timer before enabling its replacement. Bash and the wrapper's process
+inspection tools must already be available; unavailable liveness checks never
+authorize removing a directory.

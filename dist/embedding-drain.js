@@ -2127,6 +2127,7 @@ function mergeConfig(target, source) {
         ...source.worker.embeddingDrain ?? {},
         credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials
       },
+      transcriptionCleanup: { ...target.worker.transcriptionCleanup, ...source.worker.transcriptionCleanup ?? {} },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -2292,6 +2293,19 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.service.${key} must be an absolute path.`);
     }
     config.worker.service[key] = value.trim();
+  }
+  assertBoolean(config.worker.transcriptionCleanup.enabled, "worker.transcriptionCleanup.enabled");
+  for (const key of ["intervalSeconds", "minAgeMinutes", "maxRuntimeSeconds"]) {
+    assertPositiveInteger(config.worker.transcriptionCleanup[key], `worker.transcriptionCleanup.${key}`);
+  }
+  if (config.worker.transcriptionCleanup.intervalSeconds < 60 || config.worker.transcriptionCleanup.intervalSeconds > 86400)
+    throw new OperationError("config_error", "worker.transcriptionCleanup.intervalSeconds must be between 60 and 86400.");
+  if (config.worker.transcriptionCleanup.maxRuntimeSeconds > 3600)
+    throw new OperationError("config_error", "worker.transcriptionCleanup.maxRuntimeSeconds must be at most 3600.");
+  for (const key of ["bashPath", "tempRoot"]) {
+    const value = config.worker.transcriptionCleanup[key];
+    if (value !== undefined && !isAbsolutePath(value))
+      throw new OperationError("config_error", `worker.transcriptionCleanup.${key} must be an absolute path.`);
   }
   assertBoolean(config.worker.scheduler.enabled, "worker.scheduler.enabled");
   config.worker.scheduler.sourceIds = parseSchedulerSourceIds(config.worker.scheduler.sourceIds);
@@ -2555,6 +2569,7 @@ var init_config = __esm(() => {
         enabled: false,
         credentials: {}
       },
+      transcriptionCleanup: { enabled: false, bashPath: "/bin/bash", intervalSeconds: 1800, minAgeMinutes: 1440, maxRuntimeSeconds: 120 },
       scheduler: {
         enabled: false,
         sourceIds: [],

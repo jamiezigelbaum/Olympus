@@ -210,7 +210,7 @@ describe('guard arbitration', () => {
     expect(parked.lanes[0]?.governing?.text).toContain('source-processing supervisors own the machine');
   });
 
-  test('attributes a park line to no retained lane the guard did not name', () => {
+  test('ignores the retired standalone transcription report', () => {
     const { env, reportDir, stateDir } = host();
     write(reportDir, 'whatsapp-transcribe-drain-current.json', {
       updated_at: NOW.toISOString(),
@@ -226,10 +226,7 @@ describe('guard arbitration', () => {
 
     const facts = readBackgroundRuntime({ env, now: NOW, sampleStore: new LaneSampleStore() });
 
-    // The guard does not arbitrate transcription, so none of its decisions
-    // may be read as an explanation for it.
-    expect(facts.lanes[0]?.id).toBe('whatsapp-transcribe-drain');
-    expect(facts.lanes[0]?.governing).toBeUndefined();
+    expect(facts.lanes).toEqual([]);
   });
 });
 

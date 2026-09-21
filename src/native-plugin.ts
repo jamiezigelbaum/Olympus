@@ -1,3 +1,4 @@
+import { createNativeTranscriptionCleanupService } from './core/native-transcription-cleanup-service.ts';
 import { createNativeCreditMonitorService } from './core/native-credit-monitor-service.ts';
 import { backgroundNativeProcessService } from './core/native-process-service.ts';
 import { createHash } from 'node:crypto';
@@ -235,18 +236,21 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
       api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
+      api.registerService(transcriptionCleanupService);
     } else if (
       config.worker.service.enabled
       || config.worker.telegramCapture.enabled
       || config.worker.creditMonitor.enabled
       || config.worker.whatsappCapture.enabled
       || config.worker.embeddingDrain.enabled
+      || config.worker.transcriptionCleanup.enabled
     ) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }

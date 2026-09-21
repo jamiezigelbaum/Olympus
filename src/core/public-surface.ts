@@ -198,6 +198,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/cli.js',
   'dist/embedding-drain.js',
   'scripts/telegram-telethon-reader.py',
+  'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
   'tools/whatsapp-bridge/go.mod',
   'tools/whatsapp-bridge/go.sum',

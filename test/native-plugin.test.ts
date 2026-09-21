@@ -95,7 +95,7 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(5);
+      expect(services).toHaveLength(6);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
@@ -186,6 +186,11 @@ describe('native OpenClaw plugin adapter', () => {
         },
         start: expect.any(Function),
         stop: expect.any(Function),
+      },
+      {
+        id: 'olympus-transcription-temp-cleanup',
+        reload: { configPrefixes: ['plugins.entries.olympus.config.worker.transcriptionCleanup'] },
+        start: expect.any(Function), stop: expect.any(Function),
       },
     ]);
   });
@@ -401,6 +406,7 @@ describe('native OpenClaw plugin adapter', () => {
       'telegramCapture',
       'whatsappCapture',
       'embeddingDrain',
+      'transcriptionCleanup',
       'scheduler',
     ]));
     expect(Object.keys(configSchemaProperties(['worker', 'service']))).toEqual(expect.arrayContaining([

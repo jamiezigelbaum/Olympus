@@ -3,12 +3,12 @@ set -euo pipefail
 
 # Olympus transcription wrapper: the single local transcription command that
 # every caller shares (extraction scheduler via OLYMPUS_TRANSCRIBE_COMMAND, the
-# WhatsApp transcribe drain, manual castor-sendfile runs).
+# WhatsApp transcribe drain, manual transcription runs).
 #
 #   olympus-whisper-transcribe <media-file>   # transcript on stdout
 #   olympus-whisper-transcribe --sweep        # remove stale temp dirs only
 #
-# Why it looks like this (sparta incident, 2026-09-08): the previous wrapper
+# Why it looks like this (deployment incident, 2026-09-08): the previous wrapper
 # ran an unbounded number of CPU whisper jobs in parallel on unconverted
 # multi-hour video, and a killed wrapper left its whisper grandchild running.
 # This version gates every caller through one flock semaphore, lowers its own
