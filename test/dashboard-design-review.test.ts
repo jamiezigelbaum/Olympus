@@ -55,7 +55,7 @@ test('dashboard implementation is guarded and visual approval cannot survive cha
       'src/workers/source-dispositions.ts',
       'src/workers/source-ingestion-ledger.ts',
     ],
-    implementation_guard_sha256: '5c8543cac40d7c6e5bab8fe614b82ae951ecc95565a1f7be6599eec64918ec0e',
+    implementation_guard_sha256: '78d2872cc53fa95fa94f77c7ef932a8b25afc422d3f136d5a90cee2a6ee0c83d',
     pending_review: {
       requested_on: '2026-09-02',
       reason: 'The persistent In Olympus totals line and the current-pass bars with a real batch denominator (owner decision, 2026-09-02) changed the source page, and Unpair adds a paired-session custody control to the setup rows plus new not-connected unpaired, Unpair-incomplete and unpair-state-unreadable card states, so the reviewed states await owner acceptance. A source reconnected since the last nightly probe no longer renders as a reconnect demand, and the OAuth landing pages now point back at the dashboard tab the flow started in (owner-reported, 2026-09-04), which changes those states again. The second clean-install rehearsal (2026-09-05) then changed the unconnected-source states again: every not-connected card reads one readiness, a never-run source says it is waiting for the first sync, a publisher setup sheet leads from the one-click sentence the action itself carries, and the worker-token gate names the plugin bin path.',
