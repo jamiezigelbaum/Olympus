@@ -2997,6 +2997,11 @@ function mergeConfig(target, source) {
         ...source.worker.telegramCapture ?? {},
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
       },
+      embeddingDrain: {
+        ...target.worker.embeddingDrain,
+        ...source.worker.embeddingDrain ?? {},
+        credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -3109,6 +3114,17 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.embeddingDrain.enabled, "worker.embeddingDrain.enabled");
+  config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(config.worker.embeddingDrain.credentials, config.worker.embeddingDrain.enabled);
+  for (const key of ["runtimePath", "reportPath", "environmentPath"]) {
+    const value = config.worker.embeddingDrain[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.embeddingDrain.${key} must be an absolute path.`);
+    }
+    config.worker.embeddingDrain[key] = value.trim();
   }
   for (const [key, value] of [
     ["runtimePath", config.worker.service.runtimePath],
@@ -3226,6 +3242,25 @@ function parseNativeTelegramCredentials(value, serviceEnabled) {
   }
   return parsed;
 }
+function parseNativeEmbeddingDrainCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (!NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES.has(name)) {
+      throw new OperationError("config_error", `worker.embeddingDrain.credentials does not allow environment name ${name}.`);
+    }
+    if (typeof credential === "string") {
+      if (!credential.trim()) {
+        throw new OperationError("config_error", `worker.embeddingDrain.credentials.${name} must not be empty.`);
+      }
+      parsed[name] = credential;
+      continue;
+    }
+    if (serviceEnabled) {
+      throw new OperationError("config_error", `worker.embeddingDrain.credentials.${name} must be resolved to a string before the native source embedding drain starts.`);
+    }
+  }
+  return parsed;
+}
 function parseSchedulerSourceIds(value) {
   if (typeof value === "string" && value.trim() === "")
     return [];
@@ -3309,7 +3344,7 @@ function parseOptionalBooleanEnv(value, name, options = {}) {
     throw error;
   }
 }
-var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
+var NATIVE_WORKER_FIXED_CREDENTIAL_ENV_NAMES, NATIVE_TELEGRAM_CREDENTIAL_ENV_NAMES, NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES, DEFAULT_CONFIG, ARGUS_MODEL_PROFILES;
 var init_config = __esm(() => {
   init_operation_error();
   init_source_corpus_registry();
@@ -3329,6 +3364,10 @@ var init_config = __esm(() => {
     "OLYMPUS_TELEGRAM_API_ID",
     "OLYMPUS_TELEGRAM_API_HASH"
   ]);
+  NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES = new Set([
+    "GEMINI_API_KEY",
+    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"
+  ]);
   DEFAULT_CONFIG = {
     worker: {
       service: {
@@ -3337,6 +3376,10 @@ var init_config = __esm(() => {
         credentials: {}
       },
       telegramCapture: {
+        enabled: false,
+        credentials: {}
+      },
+      embeddingDrain: {
         enabled: false,
         credentials: {}
       },
@@ -73927,6 +73970,7 @@ __export(exports_server2, {
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
   createSourceIndexEmbeddingProviderFromEnv: () => createSourceIndexEmbeddingProviderFromEnv,
+  createRefreshableXBookmarksConnectorStoreRuntime: () => createRefreshableXBookmarksConnectorStoreRuntime,
   createReadwiseConnectorStoreRuntime: () => createReadwiseConnectorStoreRuntime,
   createEmailSourceConnectorFromEnv: () => createEmailSourceConnectorFromEnv,
   createCloudSourceIndexEmbeddingProviderFromEnv: () => createCloudSourceIndexEmbeddingProviderFromEnv,
@@ -74666,14 +74710,15 @@ async function main() {
   });
   const readwiseConnectorStore = readwiseConnectorStoreRuntime?.store;
   const readwiseConnectorStoreSync = readwiseConnectorStoreRuntime?.sync;
-  const xBookmarksConnectorStoreRuntime = createXBookmarksConnectorStoreRuntime({
-    enabled: xBookmarksHandle !== undefined,
-    ...xBookmarksHandle ? { handle: xBookmarksHandle } : {},
+  const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
+  const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
+    enabled: xBookmarksConnectorStoreLane.enabled,
     ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
     ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
     env: process.env
   });
-  const xBookmarksConnectorStore = xBookmarksConnectorStoreRuntime?.store;
+  const xBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime?.runtimeForHandle(xBookmarksHandle);
+  const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
   const xBookmarksConnectorStoreSync = xBookmarksConnectorStoreRuntime?.sync;
   const xBookmarksContentRecovery = xBookmarksConnectorStoreRuntime?.contentRecovery;
   const gmailConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
@@ -75142,8 +75187,12 @@ async function main() {
       credentialHandle: currentDropboxHandle.handle,
       ...dropboxFilesEmbeddingProvider?.backend === "local" ? { embeddingProvider: dropboxFilesEmbeddingProvider } : {}
     }) : undefined;
+    const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime?.runtimeForHandle(currentXBookmarksHandle);
+    if (currentXBookmarksConnectorStoreRuntime) {
+      connectorStoreAccountScopes.set(currentXBookmarksConnectorStoreRuntime.store.corpusId, sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || "personal");
+    }
     const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined && currentReadwiseHandle.handle === readwiseHandle?.handle && readwiseConnectorStoreSync !== undefined;
-    const xBookmarksSkipReason = !currentXBookmarksHandle ? "no_handle" : !xBookmarksConnectorStoreSync ? "no_store_sync" : currentXBookmarksHandle.handle !== xBookmarksHandle?.handle ? "handle_rebound" : undefined;
+    const xBookmarksSkipReason = !currentXBookmarksHandle ? "no_handle" : !currentXBookmarksConnectorStoreRuntime ? "no_store_sync" : undefined;
     const sources = [
       recordLane(SCHEDULER_SOURCE_IDS.gmail, currentGmailHandle ? undefined : "no_handle", () => createGmailConnectorStoreSchedulerSource({
         config: olympusConfig,
@@ -75170,9 +75219,9 @@ async function main() {
         ...readwiseStoreLaneEnabled && readwiseConnectorStoreSync ? { liveSync: readwiseConnectorStoreSync } : {},
         ...sourceIndexAccount ? { account: sourceIndexAccount } : currentReadwiseHandle?.accountRole ? { account: currentReadwiseHandle.accountRole } : {}
       })),
-      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => xBookmarksConnectorStoreSync ? createXBookmarksSchedulerSource({
+      recordLane(SCHEDULER_SOURCE_IDS.xBookmarks, xBookmarksSkipReason, () => currentXBookmarksConnectorStoreRuntime ? createXBookmarksSchedulerSource({
         config: olympusConfig,
-        liveSync: xBookmarksConnectorStoreSync
+        liveSync: currentXBookmarksConnectorStoreRuntime.sync
       }) : undefined),
       recordLane(SCHEDULER_SOURCE_IDS.telegram, !currentTelegramHandle ? "no_handle" : !telegramConnectorStoreSync ? "no_store_sync" : undefined, () => createTelegramSchedulerSource({
         config: olympusConfig,
@@ -75437,42 +75486,93 @@ function createReadwiseConnectorStoreRuntime(options) {
   return { store, sync };
 }
 function createXBookmarksConnectorStoreRuntime(options) {
+  if (!xBookmarksRuntimeBinding(options))
+    return;
+  return createRefreshableXBookmarksConnectorStoreRuntime(options)?.runtimeForHandle(options.handle);
+}
+function createRefreshableXBookmarksConnectorStoreRuntime(options) {
+  const embeddingProvider = options.embeddingProvider;
+  if (!options.enabled || !embeddingProvider)
+    return;
+  const env = options.env ?? process.env;
+  const store = createXBookmarksConnectorStore(options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env));
+  let usageStore = options.usageStore;
+  let reconcileStateStore = options.reconcileStateStore;
+  let cachedKey;
+  let cachedRuntime;
+  return {
+    store,
+    runtimeForHandle(handle) {
+      const binding = xBookmarksRuntimeBinding({
+        enabled: options.enabled,
+        ...handle ? { handle } : {},
+        embeddingProvider,
+        ...options.account ? { account: options.account } : {},
+        env
+      });
+      if (!binding) {
+        cachedKey = undefined;
+        cachedRuntime = undefined;
+        return;
+      }
+      const key = [binding.handle.handle, binding.principalAccount, binding.providerUserId].join("\x00");
+      if (cachedKey === key && cachedRuntime)
+        return cachedRuntime;
+      usageStore ??= new LocalXBookmarksApiUsageStore;
+      reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath));
+      cachedRuntime = bindXBookmarksConnectorStoreRuntime({
+        ...binding,
+        store,
+        usageStore,
+        reconcileStateStore,
+        env
+      });
+      cachedKey = key;
+      return cachedRuntime;
+    }
+  };
+}
+function xBookmarksRuntimeBinding(options) {
   const handle = options.handle;
   const env = options.env ?? process.env;
-  const principalAccount = options.account?.trim() || handle?.accountRole?.trim() || "personal";
   const providerUserId = env.OLYMPUS_SOURCE_INDEX_X_USER_ID?.trim() || handle?.providerAccountId?.trim();
-  if (!options.enabled || !handle || handle.provider !== "x" || !handle.allowedCapabilities.includes("x.bookmarks.sync") || handle.backendState?.status === "reauth_required" || !options.embeddingProvider || !providerUserId) {
+  if (!options.enabled || !handle || handle.provider !== "x" || !handle.allowedCapabilities.includes("x.bookmarks.sync") || handle.backendState?.status === "reauth_required" || !options.embeddingProvider || !providerUserId)
     return;
-  }
-  const store = createXBookmarksConnectorStore(options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env));
-  const usageStore = options.usageStore ?? new LocalXBookmarksApiUsageStore;
-  const reconcileStateStore = new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath));
+  return {
+    handle,
+    embeddingProvider: options.embeddingProvider,
+    principalAccount: options.account?.trim() || handle.accountRole?.trim() || "personal",
+    providerUserId
+  };
+}
+function bindXBookmarksConnectorStoreRuntime(options) {
+  const env = options.env;
   const credentialBroker = createEnvCredentialBroker({ env });
   const sync = createXBookmarksConnectorStoreSyncHandler({
-    store,
+    store: options.store,
     embeddingProvider: options.embeddingProvider,
-    credentialHandle: handle.handle,
-    account: principalAccount,
-    userId: providerUserId,
+    credentialHandle: options.handle.handle,
+    account: options.principalAccount,
+    userId: options.providerUserId,
     credentialBroker,
     ...env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim() ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() } : {},
-    usageStore,
-    reconcileStateStore,
+    usageStore: options.usageStore,
+    reconcileStateStore: options.reconcileStateStore,
     env
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
-    store,
-    usageStore,
-    reconcileStateStore,
+    store: options.store,
+    usageStore: options.usageStore,
+    reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
-    credentialHandle: handle.handle,
+    credentialHandle: options.handle.handle,
     credentialBroker,
-    account: principalAccount,
-    userId: providerUserId,
+    account: options.principalAccount,
+    userId: options.providerUserId,
     ...env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim() ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() } : {},
     env
   });
-  return { store, sync, contentRecovery };
+  return { store: options.store, sync, contentRecovery };
 }
 function activeLaneHandles(handles, env) {
   const registryPath = handleRegistryPathFromEnv(env, true);

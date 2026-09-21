@@ -124,7 +124,7 @@ const stagingDir = join(releaseRoot, `${V0_4_PUBLIC_PACKAGE_NAME}-${manifest.ver
 const npmCacheDir = join(releaseRoot, 'npm-cache');
 
 run('bun', ['run', 'dist:check'], {
-  failureMessage: 'dist/index.js or dist/cli.js changed after rebuild. Commit rebuilt dist artifacts before creating a release tarball.',
+  failureMessage: 'A dist entrypoint changed after rebuild. Commit rebuilt dist artifacts before creating a release tarball.',
 });
 
 rmSync(releaseRoot, { recursive: true, force: true });
@@ -137,16 +137,18 @@ for (const path of V0_4_PUBLIC_PACKAGE_FILES) {
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
     throw new Error(`Public package entry must be a regular non-symlink file: ${path}.`);
   }
-  if (path === 'dist/index.js' || path === 'dist/cli.js') continue;
+  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js') continue;
   mkdirSync(dirname(join(stagingDir, path)), { recursive: true });
   copyFileSync(source, join(stagingDir, path));
 }
 await buildPublicRuntime('src/native-plugin.ts', 'dist/index.js');
 await buildPublicRuntime('src/cli.ts', 'dist/cli.js');
+await buildPublicRuntime('scripts/source-embedding-drain.ts', 'dist/embedding-drain.js');
 run('bun', [
   join(rootDir, 'scripts/strip-generated-trailing-whitespace.ts'),
   join(stagingDir, 'dist/index.js'),
   join(stagingDir, 'dist/cli.js'),
+  join(stagingDir, 'dist/embedding-drain.js'),
 ]);
 assertStagedEntrypointsAreSynchronouslyLoadable(stagingDir);
 assertStagedManifestIsPublic(stagingDir);

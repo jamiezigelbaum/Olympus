@@ -11,6 +11,7 @@ import {
   type NativeWorkerServiceDefinition,
 } from './core/native-worker-service.ts';
 import { createNativeTelegramService } from './core/native-telegram-service.ts';
+import { createNativeEmbeddingDrainService } from './core/native-embedding-drain-service.ts';
 import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
@@ -224,10 +225,19 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const embeddingDrainService = createNativeEmbeddingDrainService({
+      initialPluginConfig: api.pluginConfig,
+      moduleUrl: import.meta.url,
+    });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      api.registerService(backgroundNativeProcessService(embeddingDrainService));
+    } else if (
+      config.worker.service.enabled
+      || config.worker.telegramCapture.enabled
+      || config.worker.embeddingDrain.enabled
+    ) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }
     const ctx: OperationContext = {
