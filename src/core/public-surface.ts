@@ -196,6 +196,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'bin/olympus',
   'dist/index.js',
   'dist/cli.js',
+  'dist/embedding-drain.js',
   'scripts/telegram-telethon-reader.py',
   'skills/manifest.json',
   'skills/ask-argus/SKILL.md',

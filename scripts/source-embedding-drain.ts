@@ -1,6 +1,7 @@
+import { writePrivateFileAtomicSync } from '../src/core/atomic-file.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import { loadConfig, normalizeSourceWorkerBaseUrl } from '../src/core/config.ts';
 import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { resolveSecretRefValueSync } from '../src/core/secret-store.ts';
@@ -16,11 +17,13 @@ import {
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
 import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
+// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 import {
   recordEmbeddingLedgerObservations,
   type EmbeddingCorpusObservation,
 } from '../src/workers/embedding-ledger-observer.ts';
 import { resolveEmbeddingLedgerPath } from '../src/workers/embedding-ledger.ts';
+// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import {
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -70,6 +73,9 @@ const DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 15;
  * costs nothing a reader would notice and keeps the drain's own throughput.
  */
 const DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS = 300;
+const NATIVE_SERVICE_INSTANCE_ID_ENV = 'OLYMPUS_NATIVE_SERVICE_INSTANCE_ID';
+const NATIVE_SERVICE_READINESS_PATH_ENV = 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH';
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface DropboxEmbeddingResult {
   chunks_seen?: number;
@@ -723,7 +729,12 @@ export function optionsFromEnv(
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_READWISE_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED',
   ].some((name) => env[name] !== undefined);
-  const recordLedgerObservations = embeddingLedgerRecorderFromEnv(client, env);
+  let recordLedgerObservations: SourceEmbeddingDrainOptions['recordLedgerObservations'];
+  // The installation-specific legacy ledger stays in the private runtime,
+  // just as it does for the existing CLI and dashboard builds.
+  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
+  recordLedgerObservations = embeddingLedgerRecorderFromEnv(client, env);
+  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   return {
     client,
     ...(rosterEnabled
@@ -773,6 +784,7 @@ export function optionsFromEnv(
   };
 }
 
+// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 /**
  * The name the ledger knows each corpus by.
  *
@@ -848,6 +860,8 @@ export function embeddingLedgerRecorderFromEnv(
     }
   };
 }
+
+// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
 export function secureLocalBackfillDryRunFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -1386,6 +1400,43 @@ function parseArgs(argv: string[]): { reportPath?: string; dryRun?: boolean } {
   return options;
 }
 
+/**
+ * Publish startup readiness only after optionsFromEnv has validated the drain
+ * configuration and constructed its clients, but before runSourceEmbeddingDrain
+ * can perform a provider write. The receipt carries no source or credential
+ * data and binds readiness to the exact supervised process generation.
+ */
+export function publishNativeEmbeddingDrainReadiness(
+  env: Record<string, string | undefined> = process.env,
+  pid = process.pid,
+): void {
+  const instanceId = env[NATIVE_SERVICE_INSTANCE_ID_ENV]?.trim();
+  const readinessPath = env[NATIVE_SERVICE_READINESS_PATH_ENV]?.trim();
+  if (instanceId === undefined && readinessPath === undefined) return;
+  if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
+    throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
+  }
+  if (!readinessPath || !isAbsolute(readinessPath)) {
+    throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
+  }
+  const directory = dirname(readinessPath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const parent = lstatSync(directory);
+  if (!parent.isDirectory() || (process.platform !== 'win32'
+    && (parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0))) {
+    throw new Error('Native embedding readiness requires an owner-controlled report directory.');
+  }
+  const receipt = {
+    kind: 'source_embedding_drain_service_readiness',
+    schema_version: 1,
+    instance_id: instanceId,
+    pid,
+    options_validated: true,
+    content_free: true,
+  } as const;
+  writePrivateFileAtomicSync(readinessPath, `${JSON.stringify(receipt)}\n`);
+}
+
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   if (args.dryRun) {
@@ -1406,6 +1457,7 @@ if (import.meta.main) {
         writeFileSync(args.reportPath!, `${JSON.stringify(report, null, 2)}\n`);
       };
     }
+    publishNativeEmbeddingDrainReadiness(process.env);
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) writeFileSync(args.reportPath, `${json}\n`);

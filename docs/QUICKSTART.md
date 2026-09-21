@@ -583,3 +583,28 @@ Native capture never initiates interactive login. It reports ready only after
 an existing session authenticates, using a private receipt containing the child
 PID and a new instance ID. Capture freshness remains a separate check: a process
 ready to capture is not proof that new messages have arrived or been indexed.
+
+### Optional native embedding drain
+
+After verifying the existing embedding policy, enable `worker.embeddingDrain.enabled`
+through the host's supported configuration command. The packaged Bun drain keeps
+its existing corpus selection, provider routing, limits, and vector identities.
+Native supervision does not enable an embedding lane or approve a new backfill.
+
+Preserve existing nonsecret settings before activation. By default the child reads
+the managed `worker.env`; `environmentPath` can select a separate absolute settings
+file when a drain has different database paths or limits from the source worker.
+The file is parsed as data. Configure required Gemini credentials with native
+SecretRefs under `worker.embeddingDrain.credentials`, using `GEMINI_API_KEY` or
+`OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`. A drain with only secure-local lanes needs no cloud credential.
+Password-manager and Gateway bootstrap tokens are excluded from the child.
+
+Optional `runtimePath` and `reportPath` select the Bun executable and status report.
+The report directory must be controlled by the current user. Stop an existing
+standalone drain before enabling its native replacement. Readiness proves that
+the exact child validated its options; inspect a real bounded pass to verify
+provider operation before allowing broader work.
+
+The installation-specific legacy decision-ledger observer remains in the private
+runtime. Public release artifacts exclude that observer, as they already do for
+the source worker and dashboard.
