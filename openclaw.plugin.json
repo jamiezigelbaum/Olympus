@@ -99,6 +99,25 @@
               }
             }
           },
+          "whatsappCapture": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Opt-in Gateway supervision for an operator-provisioned native WhatsApp capture binary. Pairing remains a separate manual operation.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Run native WhatsApp capture as an OpenClaw plugin service. Defaults to false."
+              },
+              "binaryPath": {
+                "type": "string",
+                "description": "Absolute path to the operator-provisioned Olympus WhatsApp capture binary. Required when enabled."
+              },
+              "stateDir": {
+                "type": "string",
+                "description": "Optional absolute state directory containing an existing paired session.db. Defaults to ~/.local/share/olympus/whatsapp-live."
+              }
+            }
+          },
           "embeddingDrain": {
             "type": "object",
             "additionalProperties": false,

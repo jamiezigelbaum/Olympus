@@ -2274,6 +2274,17 @@ function configFromPluginConfig(pluginConfig, options = {}) {
         config.worker.telegramCapture[key] = value.trim();
     }
   }
+  const whatsappCapture = asRecord4(worker?.whatsappCapture);
+  if (whatsappCapture) {
+    if (typeof whatsappCapture.enabled === "boolean") {
+      config.worker.whatsappCapture.enabled = whatsappCapture.enabled;
+    }
+    for (const key of ["binaryPath", "stateDir"]) {
+      const value = whatsappCapture[key];
+      if (typeof value === "string" && value.trim())
+        config.worker.whatsappCapture[key] = value.trim();
+    }
+  }
   const embeddingDrain = asRecord4(worker?.embeddingDrain);
   if (embeddingDrain) {
     if (typeof embeddingDrain.enabled === "boolean") {
@@ -2527,6 +2538,19 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, "worker.whatsappCapture.enabled");
+  for (const key of ["binaryPath", "stateDir"]) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError("config_error", "worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.");
   }
   assertBoolean(config.worker.embeddingDrain.enabled, "worker.embeddingDrain.enabled");
   config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(config.worker.embeddingDrain.credentials, config.worker.embeddingDrain.enabled);
@@ -2795,6 +2819,9 @@ var init_config = __esm(() => {
       telegramCapture: {
         enabled: false,
         credentials: {}
+      },
+      whatsappCapture: {
+        enabled: false
       },
       embeddingDrain: {
         enabled: false,
@@ -3232,11 +3259,11 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync7, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { chmodSync, existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync8, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname6, join as join9 } from "node:path";
 function defaultSovereigntyConfigPath() {
-  return join8(homedir4(), ".olympus", "sovereignty.json");
+  return join9(homedir5(), ".olympus", "sovereignty.json");
 }
 function loadSovereigntyEngine(options = {}) {
   const env = options.env ?? process.env;
@@ -3248,7 +3275,7 @@ function loadSovereigntyEngine(options = {}) {
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
   if (existsSync4(configPath)) {
-    const parsed = JSON.parse(readFileSync7(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync8(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
       path: configPath
@@ -3460,11 +3487,11 @@ function parseSovereigntyConfig(value, label) {
   }
   const modelProfiles = parseProfiles(record.modelProfiles, label);
   const routes = parseRoutes(record.routes, label);
-  const retrievalRecord = asRecord9(record.retrieval);
-  const trustDomainsRecord = asRecord9(retrievalRecord?.trustDomains);
+  const retrievalRecord = asRecord10(record.retrieval);
+  const trustDomainsRecord = asRecord10(retrievalRecord?.trustDomains);
   const trustDomains = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const policy = asRecord9(trustDomainsRecord?.[domain]);
+    const policy = asRecord10(trustDomainsRecord?.[domain]);
     if (policy)
       trustDomains[domain] = parseTrustDomainPolicy(policy, `${label}.retrieval.trustDomains.${domain}`);
   }
@@ -3476,19 +3503,19 @@ function parseSovereigntyConfig(value, label) {
   };
 }
 function unwrapSovereignty(value) {
-  const record = asRecord9(value);
-  if (record?.sovereignty && asRecord9(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
+  const record = asRecord10(value);
+  if (record?.sovereignty && asRecord10(record.sovereignty)?.schemaVersion === SOVEREIGNTY_SCHEMA_VERSION) {
     return record.sovereignty;
   }
   return value;
 }
 function parseProfiles(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord10(value);
   if (!record)
     throw new OperationError("config_error", `${label}.modelProfiles must be an object.`);
   const profiles = {};
   for (const [id, item] of Object.entries(record)) {
-    const profile = asRecord9(item);
+    const profile = asRecord10(item);
     if (!profile)
       throw new OperationError("config_error", `${label}.modelProfiles.${id} must be an object.`);
     if (profile.apiKey !== undefined || profile.secret !== undefined) {
@@ -3511,16 +3538,16 @@ function parseProfiles(value, label) {
   return profiles;
 }
 function parseRoutes(value, label) {
-  const record = asRecord9(value);
+  const record = asRecord10(value);
   if (!record)
     throw new OperationError("config_error", `${label}.routes must be an object.`);
   const routes = {};
   for (const domain of BUILTIN_DOMAINS) {
-    const route = asRecord9(record[domain]);
+    const route = asRecord10(record[domain]);
     if (!route)
       continue;
     const legacyAnalyst = route.analyst;
-    const poolRecord = asRecord9(route.pool);
+    const poolRecord = asRecord10(route.pool);
     if (legacyAnalyst !== undefined && poolRecord) {
       throw new OperationError("config_error", `${label}.routes.${domain} must use either legacy analyst or pool, not both.`);
     }
@@ -3730,7 +3757,7 @@ function firstExistingSecretRef(env, names) {
 function hasAnyEnv(env, names) {
   return names.some((name) => Boolean(env[name]?.trim()));
 }
-function asRecord9(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function stringField(record, field, label) {
@@ -5616,11 +5643,11 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync8 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { dirname as dirname8, join as join9 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname8, join as join10 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join9(homedir5(), ".config", "olympus", "handles.json");
+  return join10(homedir6(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
@@ -5629,7 +5656,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync6(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync8(path, "utf8"));
+  const parsed = JSON.parse(readFileSync9(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -6110,11 +6137,11 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync10 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { dirname as dirname10, join as join11 } from "node:path";
+import { chmodSync as chmodSync2, existsSync as existsSync8, lstatSync as lstatSync2, readFileSync as readFileSync11 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { dirname as dirname10, join as join12 } from "node:path";
 function defaultSensitivityMapPath() {
-  return join11(homedir7(), ".olympus", "sensitivity-map.json");
+  return join12(homedir8(), ".olympus", "sensitivity-map.json");
 }
 function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
@@ -6128,7 +6155,7 @@ function loadSensitivityMap(options = {}) {
     throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
   }
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync10(path, "utf8")), path);
+    return parseSensitivityMap(JSON.parse(readFileSync11(path, "utf8")), path);
   } catch (error) {
     if (options.ignoreInvalid)
       return;
@@ -6139,7 +6166,7 @@ function sensitivityMapRemedy(path) {
   return `Write the map to ${path}. Run olympus setup first if ${dirname10(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord10(rawMap);
+  const root = asRecord11(rawMap);
   if (!root)
     throw new OperationError("config_error", `${label} must be an object.`);
   if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
@@ -6198,11 +6225,11 @@ function categoryMatches(category, input) {
   return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
 }
 function assertUserFacingTierMapping(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord11(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord10(record[tierName]);
+    const mapped = asRecord11(record[tierName]);
     const expected = USER_FACING_TIER_MAPPING[tierName];
     if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
       throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
@@ -6210,7 +6237,7 @@ function assertUserFacingTierMapping(value, label) {
   }
 }
 function parseCategory(value, label) {
-  const record = asRecord10(value);
+  const record = asRecord11(value);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -6231,7 +6258,7 @@ function parseCategory(value, label) {
     min: 1,
     max: MAX_EXAMPLES_PER_CATEGORY
   });
-  const matchRecord = asRecord10(record.match);
+  const matchRecord = asRecord11(record.match);
   if (!matchRecord)
     throw new OperationError("config_error", `${label}.match must be an object.`);
   const match = {
@@ -6253,7 +6280,7 @@ function parseCategory(value, label) {
     match
   };
 }
-function asRecord10(value) {
+function asRecord11(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function enumString2(value, allowed, label) {
@@ -7149,9 +7176,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord11(json, "Gmail messages list response");
+    const record = asRecord12(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord11(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord12(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7327,7 +7354,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord11(value, label) {
+function asRecord12(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7768,16 +7795,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive files list response");
+    const record = asRecord13(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord12(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord13(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive folder");
+    const record = asRecord13(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -7872,7 +7899,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord12(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord13(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -7900,7 +7927,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord12(value, label) {
+function asRecord13(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -8867,7 +8894,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -8913,7 +8940,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join12(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join13(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -9213,11 +9240,11 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { homedir as homedir8 } from "node:os";
-import { dirname as dirname11, join as join13 } from "node:path";
+import { homedir as homedir9 } from "node:os";
+import { dirname as dirname11, join as join14 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir8(), ".local", "share");
-  return join13(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir9(), ".local", "share");
+  return join14(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
 var init_source_dashboard = __esm(() => {
@@ -11881,15 +11908,126 @@ function asRecord7(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
-// src/core/native-embedding-drain-service.ts
+// src/core/native-whatsapp-service.ts
 init_config();
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
-import { delimiter as delimiter2, dirname as dirname5, isAbsolute as isAbsolute4, join as join7 } from "node:path";
+import { accessSync, constants, readFileSync as readFileSync6, statSync as statSync5 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { isAbsolute as isAbsolute4, join as join6 } from "node:path";
+var SERVICE_ID3 = "olympus-whatsapp-capture";
+var SERVICE_LABEL3 = "WhatsApp capture service";
+var DEFAULT_STARTUP_TIMEOUT_MS2 = Number.POSITIVE_INFINITY;
+var DEFAULT_STATE_RELATIVE_PATH = ".local/share/olympus/whatsapp-live";
+var READINESS_FILE2 = "native-service-readiness.json";
+var SESSION_FILE = "session.db";
+function createNativeWhatsAppService(options) {
+  return createNativeProcessService({
+    id: SERVICE_ID3,
+    label: SERVICE_LABEL3,
+    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.whatsappCapture"] },
+    initialConfig: options.initialPluginConfig,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
+    prepareStart: prepareWhatsAppStart
+  });
+}
+async function prepareWhatsAppStart(input) {
+  let config;
+  try {
+    config = configFromPluginConfig(freshPluginConfig2(input.context.config, input.initialConfig));
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service configuration is invalid.");
+  }
+  const capture = config.worker.whatsappCapture;
+  if (!capture.enabled)
+    return;
+  if (!capture.binaryPath) {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service requires an absolute worker.whatsappCapture.binaryPath.");
+  }
+  assertExecutableFile2(capture.binaryPath);
+  const env = baseEnvironment2();
+  const stateDir = capture.stateDir ?? join6(env.HOME ?? homedir4(), DEFAULT_STATE_RELATIVE_PATH);
+  assertUsableSession(join6(stateDir, SESSION_FILE));
+  const instanceId = randomUUID5();
+  env.OLYMPUS_WHATSAPP_STATE_DIR = stateDir;
+  env.OLYMPUS_WHATSAPP_QR_STDOUT = "false";
+  env.OLYMPUS_WHATSAPP_NATIVE_CAPTURE = "true";
+  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  return {
+    command: capture.binaryPath,
+    args: [],
+    env,
+    startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
+    endpointOccupied: false,
+    stateDir,
+    instanceId,
+    readinessProbe: (child) => whatsappReadinessProbe(stateDir, instanceId, child)
+  };
+}
+function freshPluginConfig2(contextConfig, initialPluginConfig) {
+  const root = asRecord8(contextConfig);
+  const entries = asRecord8(asRecord8(root?.plugins)?.entries);
+  const olympus = asRecord8(entries?.olympus);
+  if (entries) {
+    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  }
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key))) {
+    return root;
+  }
+  return initialPluginConfig;
+}
+function baseEnvironment2() {
+  return Object.fromEntries(["HOME", "PATH", "TMPDIR", "LANG"].map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
+}
+function assertExecutableFile2(path) {
+  if (!isAbsolute4(path)) {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service binary path must be absolute.");
+  }
+  try {
+    if (!statSync5(path).isFile())
+      throw new Error("not_file");
+    accessSync(path, constants.X_OK);
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service binary is missing or not executable.");
+  }
+}
+function assertUsableSession(path) {
+  try {
+    if (!statSync5(path).isFile())
+      throw new Error("not_file");
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service requires an existing session.db; pair it manually first.");
+  }
+}
+async function whatsappReadinessProbe(stateDir, instanceId, child) {
+  try {
+    const path = join6(stateDir, READINESS_FILE2);
+    const stat2 = statSync5(path);
+    if (!stat2.isFile() || stat2.size > 16 * 1024)
+      return false;
+    const receipt = JSON.parse(readFileSync6(path, "utf8"));
+    return receipt.kind === "whatsapp_capture_service_readiness" && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.paired === true && receipt.connected === true;
+  } catch {
+    return false;
+  }
+}
+function asRecord8(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+// src/core/native-embedding-drain-service.ts
+init_config();
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { readFileSync as readFileSync7, statSync as statSync6 } from "node:fs";
+import { delimiter as delimiter2, dirname as dirname5, isAbsolute as isAbsolute5, join as join8 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/workers/dashboard/embedding-runtime.ts
-import { dirname as dirname4, join as join6 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 var EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH";
 var EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR";
 var EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor";
@@ -11901,14 +12039,14 @@ function resolveEmbeddingDrainReportPath(env = process.env) {
   if (explicit)
     return explicit;
   const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join6(dir, "source-embedding-drain-current.json");
+  return join7(dir, "source-embedding-drain-current.json");
 }
 
 // src/core/native-embedding-drain-service.ts
-var SERVICE_ID3 = "olympus-source-embedding-drain";
-var SERVICE_LABEL3 = "source embedding drain";
-var DEFAULT_STARTUP_TIMEOUT_MS2 = 30000;
-var READINESS_FILE2 = "source-embedding-drain-native-readiness.json";
+var SERVICE_ID4 = "olympus-source-embedding-drain";
+var SERVICE_LABEL4 = "source embedding drain";
+var DEFAULT_STARTUP_TIMEOUT_MS3 = 30000;
+var READINESS_FILE3 = "source-embedding-drain-native-readiness.json";
 var EMBEDDING_CREDENTIAL_NAMES = [
   "GEMINI_API_KEY",
   "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"
@@ -11988,12 +12126,12 @@ for (const lane of EMBEDDING_LANE_NAMES) {
 }
 function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
-    id: SERVICE_ID3,
-    label: SERVICE_LABEL3,
+    id: SERVICE_ID4,
+    label: SERVICE_LABEL4,
     restartOnCleanExit: false,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
     initialConfig: options.initialPluginConfig,
-    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
     ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
     ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
@@ -12005,14 +12143,14 @@ function createNativeEmbeddingDrainService(options) {
 async function prepareEmbeddingDrainStart(input, options) {
   let config;
   try {
-    config = configFromPluginConfig(freshPluginConfig2(input.context.config, input.initialConfig));
+    config = configFromPluginConfig(freshPluginConfig3(input.context.config, input.initialConfig));
   } catch {
     throw new NativeProcessConfigurationError("Olympus source embedding drain configuration is invalid or contains unresolved credentials.");
   }
   const drain = config.worker.embeddingDrain;
   if (!drain.enabled)
     return;
-  const loadedEnv = baseEnvironment2();
+  const loadedEnv = baseEnvironment3();
   const workerEnvPath = drain.environmentPath ?? options.workerEnvPath;
   applyWorkerSetupEnv({
     env: loadedEnv,
@@ -12029,28 +12167,28 @@ async function prepareEmbeddingDrainStart(input, options) {
   const runtimePath = resolveBunRuntimePath2(drain.runtimePath, env);
   const executablePath = assertUsableFile2(fileURLToPath3(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
   const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute4(reportPath)) {
+  if (!isAbsolute5(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join7(dirname5(reportPath), READINESS_FILE2);
-  const instanceId = randomUUID5();
+  const readinessPath = join8(dirname5(reportPath), READINESS_FILE3);
+  const instanceId = randomUUID6();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
     command: runtimePath,
     args: ["--no-env-file", executablePath, "--report", reportPath],
     env,
-    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS2,
+    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS3,
     endpointOccupied: false,
     readinessPath,
     instanceId,
     readinessProbe: (child) => embeddingDrainReadinessProbe(readinessPath, instanceId, child)
   };
 }
-function freshPluginConfig2(contextConfig, initialPluginConfig) {
-  const root = asRecord8(contextConfig);
-  const entries = asRecord8(asRecord8(root?.plugins)?.entries);
-  const olympus = asRecord8(entries?.olympus);
+function freshPluginConfig3(contextConfig, initialPluginConfig) {
+  const root = asRecord9(contextConfig);
+  const entries = asRecord9(asRecord9(root?.plugins)?.entries);
+  const olympus = asRecord9(entries?.olympus);
   if (entries) {
     return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   }
@@ -12059,11 +12197,11 @@ function freshPluginConfig2(contextConfig, initialPluginConfig) {
   }
   return initialPluginConfig;
 }
-function baseEnvironment2() {
+function baseEnvironment3() {
   return Object.fromEntries(SYSTEM_ENV_NAMES.map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
 }
 function selectedEmbeddingEnvironment(loadedEnv) {
-  const env = baseEnvironment2();
+  const env = baseEnvironment3();
   for (const [name, value] of Object.entries(loadedEnv)) {
     if (!value || !EMBEDDING_SETTING_ENV_NAMES.has(name))
       continue;
@@ -12076,42 +12214,42 @@ function resolveBunRuntimePath2(configured, env) {
     return assertUsableFile2(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((dir) => join7(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((dir) => join8(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute4(candidate))
+    if (!candidate || !isAbsolute5(candidate))
       continue;
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync5(candidate).isFile())
+      if (statSync6(candidate).isFile())
         return candidate;
     } catch {}
   }
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
 }
 function assertUsableFile2(path, label) {
-  if (!isAbsolute4(path)) {
+  if (!isAbsolute5(path)) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync5(path).isFile())
+    if (statSync6(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat2 = statSync5(readinessPath);
+    const stat2 = statSync6(readinessPath);
     if (!stat2.isFile() || stat2.size > 16 * 1024)
       return false;
-    const receipt = JSON.parse(readFileSync6(readinessPath, "utf8"));
+    const receipt = JSON.parse(readFileSync7(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child.pid && receipt.options_validated === true && receipt.content_free === true;
   } catch {
     return false;
   }
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
@@ -12183,8 +12321,8 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync11, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname12, join as join14 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname12, join as join15 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
@@ -12500,9 +12638,9 @@ function unique(values) {
 init_connected_handles();
 
 // src/core/connect.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync9, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { dirname as dirname9, join as join10 } from "node:path";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync10, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { dirname as dirname9, join as join11 } from "node:path";
 init_secret_store();
 
 // src/core/worker-service.ts
@@ -12541,11 +12679,11 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "redirect_uri_mismatch"
 ]);
 function defaultDetachedOAuthStateDir() {
-  return join10(homedir6(), ".olympus", "pending-oauth");
+  return join11(homedir7(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
-    return sanitizeDetachedOAuthState(JSON.parse(readFileSync9(path, "utf8")));
+    return sanitizeDetachedOAuthState(JSON.parse(readFileSync10(path, "utf8")));
   } catch {
     return;
   }
@@ -12689,7 +12827,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join14(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join15(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -12865,14 +13003,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord13(await response.json());
-    const readiness = asRecord13(body.credential_readiness);
-    const policy = asRecord13(readiness.policy);
+    const body = asRecord14(await response.json());
+    const readiness = asRecord14(body.credential_readiness);
+    const policy = asRecord14(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord13(entry);
+      const profile = asRecord14(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -12925,7 +13063,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord13(await response.json());
+  const health = asRecord14(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -12978,7 +13116,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord14(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -12986,7 +13124,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord13(entry);
+    const corpus = asRecord14(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -13000,8 +13138,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord13(corpus.counts);
-    const embeddingParity = asRecord13(corpus.embedding_parity);
+    const counts = asRecord14(corpus.counts);
+    const embeddingParity = asRecord14(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -13061,7 +13199,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord14(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -13106,7 +13244,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord14(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -13118,8 +13256,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord13(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord13(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord14(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord14(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -13176,7 +13314,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord13(value);
+  const record = asRecord14(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -13189,7 +13327,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord13(entry);
+    const credential = asRecord14(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -13241,7 +13379,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord13(await response.json());
+  const status = asRecord14(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -13269,7 +13407,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord13(entry);
+    const source = asRecord14(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -13279,7 +13417,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord13(taskEntry);
+      const task = asRecord14(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -13415,7 +13553,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord13(await response.json());
+    return asRecord14(await response.json());
   } catch {
     return;
   }
@@ -13425,7 +13563,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord13(await response.json());
+    const status = asRecord14(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -13434,7 +13572,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord13(status.ingestion_ledger);
+  const ledger = asRecord14(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -13442,7 +13580,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join14(dirname12(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join15(dirname12(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -13465,13 +13603,13 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync9(path))
       return;
-    const parsed = JSON.parse(readFileSync11(path, "utf8"));
-    const record = asRecord13(parsed);
-    const sources = asRecord13(record.sources);
+    const parsed = JSON.parse(readFileSync12(path, "utf8"));
+    const record = asRecord14(parsed);
+    const sources = asRecord14(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord13(sourceValue);
-      const terminal = asRecord13(source.failed_terminal_by_class);
+      const source = asRecord14(sourceValue);
+      const terminal = asRecord14(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -13499,9 +13637,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord13(await response.json());
+    const status = asRecord14(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord13(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord14(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -13642,7 +13780,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord14(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -13657,13 +13795,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord13(corpus.last_refresh);
+  const lastRefresh = asRecord14(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord13(corpus.last_sync);
+  const lastSync = asRecord14(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord13(corpus.counts);
+  const counts = asRecord14(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -13694,13 +13832,13 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join14(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join15(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord13(value) {
+function asRecord14(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -14497,13 +14635,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord14(payload);
+  const result = asRecord15(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord14(result.audit);
-  const policy = asRecord14(result.policy);
-  const synthesis = asRecord14(audit?.answer_synthesis);
-  const timings = asRecord14(audit?.phase_timings);
+  const audit = asRecord15(result.audit);
+  const policy = asRecord15(result.policy);
+  const synthesis = asRecord15(audit?.answer_synthesis);
+  const timings = asRecord15(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -14513,7 +14651,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord14(item);
+    const record = asRecord15(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -14524,7 +14662,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord14(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord15(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -14576,7 +14714,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord14(value) {
+function asRecord15(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -14596,6 +14734,9 @@ var plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
+    const whatsappService = createNativeWhatsAppService({
+      initialPluginConfig: api.pluginConfig
+    });
     const embeddingDrainService = createNativeEmbeddingDrainService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
@@ -14603,8 +14744,9 @@ var plugin = {
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
+      api.registerService(backgroundNativeProcessService(whatsappService));
       api.registerService(backgroundNativeProcessService(embeddingDrainService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.embeddingDrain.enabled) {
+    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled || config.worker.whatsappCapture.enabled || config.worker.embeddingDrain.enabled) {
       throw new Error("This OpenClaw host does not support native Olympus services.");
     }
     const ctx = {
@@ -14811,7 +14953,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord(value, allowed) {
-  const record = asRecord14(value);
+  const record = asRecord15(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

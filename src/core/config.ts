@@ -110,6 +110,12 @@ export interface OlympusConfig {
       spoolDir?: string;
       reportPath?: string;
     };
+    /** Opt-in Gateway supervision of the operator-provisioned WhatsApp bridge. */
+    whatsappCapture: {
+      enabled: boolean;
+      binaryPath?: string;
+      stateDir?: string;
+    };
     /** Opt-in Gateway supervision of the packaged source embedding drain. */
     embeddingDrain: {
       enabled: boolean;
@@ -174,6 +180,9 @@ const DEFAULT_CONFIG: OlympusConfig = {
     telegramCapture: {
       enabled: false,
       credentials: {},
+    },
+    whatsappCapture: {
+      enabled: false,
     },
     embeddingDrain: {
       enabled: false,
@@ -533,6 +542,16 @@ export function configFromPluginConfig(
       if (typeof value === 'string' && value.trim()) config.worker.telegramCapture[key] = value.trim();
     }
   }
+  const whatsappCapture = asRecord(worker?.whatsappCapture);
+  if (whatsappCapture) {
+    if (typeof whatsappCapture.enabled === 'boolean') {
+      config.worker.whatsappCapture.enabled = whatsappCapture.enabled;
+    }
+    for (const key of ['binaryPath', 'stateDir'] as const) {
+      const value = whatsappCapture[key];
+      if (typeof value === 'string' && value.trim()) config.worker.whatsappCapture[key] = value.trim();
+    }
+  }
   const embeddingDrain = asRecord(worker?.embeddingDrain);
   if (embeddingDrain) {
     if (typeof embeddingDrain.enabled === 'boolean') {
@@ -775,6 +794,10 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.telegramCapture ?? {}),
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials,
       },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...(source.worker.whatsappCapture ?? {}),
+      },
       embeddingDrain: {
         ...target.worker.embeddingDrain,
         ...(source.worker.embeddingDrain ?? {}),
@@ -946,6 +969,21 @@ function validateConfig(config: OlympusConfig): void {
       throw new OperationError('config_error', `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, 'worker.whatsappCapture.enabled');
+  for (const key of ['binaryPath', 'stateDir'] as const) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError(
+      'config_error',
+      'worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.',
+    );
   }
   assertBoolean(config.worker.embeddingDrain.enabled, 'worker.embeddingDrain.enabled');
   config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(
