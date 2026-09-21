@@ -1451,10 +1451,7 @@ export async function main(): Promise<void> {
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
   });
-  const xBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime?.runtimeForHandle(xBookmarksHandle);
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
-  const xBookmarksConnectorStoreSync = xBookmarksConnectorStoreRuntime?.sync;
-  const xBookmarksContentRecovery = xBookmarksConnectorStoreRuntime?.contentRecovery;
   const gmailConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   const googleDriveConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   // Exactly one Gmail day counter per runtime, durable across restart.
@@ -2159,6 +2156,24 @@ export async function main(): Promise<void> {
   const sourceIngestionLedger = sourceIndexReadEnabled
     ? new SqliteSourceIngestionLedgerStore()
     : undefined;
+  const currentXBookmarksRuntime = () => {
+    const handle = connectorStoreLaneHandle({
+      env: process.env,
+      laneEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
+      pinEnvName: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE',
+      provider: 'x',
+      capability: 'x.bookmarks.sync',
+      handles: readActiveConnectedHandles(process.env),
+    });
+    const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
+    if (runtime) {
+      connectorStoreAccountScopes.set(
+        runtime.store.corpusId,
+        sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
+      );
+    }
+    return runtime;
+  };
   const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
@@ -2406,8 +2421,7 @@ export async function main(): Promise<void> {
     ...(sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {}),
     ...(sourceIndexStatus ? { sourceIndexStatus } : {}),
     ...(readwiseConnectorStoreSync ? { readwiseConnectorStoreSync } : {}),
-    ...(xBookmarksConnectorStoreSync ? { xBookmarksConnectorStoreSync } : {}),
-    ...(xBookmarksContentRecovery ? { xBookmarksContentRecovery } : {}),
+    currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
