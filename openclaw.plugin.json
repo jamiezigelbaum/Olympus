@@ -59,6 +59,21 @@
               }
             }
           },
+          "creditMonitor": {
+            "type": "object", "additionalProperties": false,
+            "description": "Optional native provider-credit monitoring; presently supports Venice billing.",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "provider": { "type": "string", "enum": ["venice"] },
+              "intervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+              "reportPath": { "type": "string", "description": "Absolute path for the private billing status report." },
+              "pauseFile": { "type": "string", "description": "Optional absolute path for the existing Venice pause marker." },
+              "credentials": {
+                "type": "object", "additionalProperties": false,
+                "properties": { "VENICE_API_KEY": { "$ref": "#/$defs/secretInput" } }
+              }
+            }
+          },
           "telegramCapture": {
             "type": "object",
             "additionalProperties": false,
@@ -96,6 +111,25 @@
               "reportPath": {
                 "type": "string",
                 "description": "Optional absolute capture status report path. Native config overrides worker.env."
+              }
+            }
+          },
+          "whatsappCapture": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Opt-in Gateway supervision for an operator-provisioned native WhatsApp capture binary. Pairing remains a separate manual operation.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Run native WhatsApp capture as an OpenClaw plugin service. Defaults to false."
+              },
+              "binaryPath": {
+                "type": "string",
+                "description": "Absolute path to the operator-provisioned Olympus WhatsApp capture binary. Required when enabled."
+              },
+              "stateDir": {
+                "type": "string",
+                "description": "Optional absolute state directory containing an existing paired session.db. Defaults to ~/.local/share/olympus/whatsapp-live."
               }
             }
           },
@@ -813,6 +847,7 @@
         { "path": "worker.authToken", "expected": "string" },
         { "path": "worker.service.credentials.*", "expected": "string" },
         { "path": "worker.telegramCapture.credentials.*", "expected": "string" },
+        { "path": "worker.creditMonitor.credentials.*", "expected": "string" },
         { "path": "worker.embeddingDrain.credentials.*", "expected": "string" }
       ]
     }

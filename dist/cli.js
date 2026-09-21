@@ -2829,7 +2829,7 @@ var init_secret_store = __esm(() => {
 // src/core/config.ts
 import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { isAbsolute as isAbsolutePath, join as join4 } from "node:path";
+import { isAbsolute as isAbsolutePath, join as join4, resolve as resolve2 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -2992,10 +2992,19 @@ function mergeConfig(target, source) {
         ...source.worker.service ?? {},
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials
       },
+      creditMonitor: {
+        ...target.worker.creditMonitor,
+        ...source.worker.creditMonitor ?? {},
+        credentials: source.worker.creditMonitor?.credentials ?? target.worker.creditMonitor.credentials
+      },
       telegramCapture: {
         ...target.worker.telegramCapture,
         ...source.worker.telegramCapture ?? {},
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
+      },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...source.worker.whatsappCapture ?? {}
       },
       embeddingDrain: {
         ...target.worker.embeddingDrain,
@@ -3104,6 +3113,24 @@ function validateConfig(config) {
     throw new OperationError("config_error", "worker.service.startupTimeoutSeconds must be at most 600.");
   }
   config.worker.service.credentials = parseNativeWorkerCredentials(config.worker.service.credentials, config.worker.service.enabled);
+  assertBoolean(config.worker.creditMonitor.enabled, "worker.creditMonitor.enabled");
+  if (config.worker.creditMonitor.provider !== "venice")
+    throw new OperationError("config_error", "worker.creditMonitor.provider must be venice.");
+  assertPositiveInteger(config.worker.creditMonitor.intervalSeconds, "worker.creditMonitor.intervalSeconds");
+  if (config.worker.creditMonitor.intervalSeconds < 60 || config.worker.creditMonitor.intervalSeconds > 86400) {
+    throw new OperationError("config_error", "worker.creditMonitor.intervalSeconds must be between 60 and 86400.");
+  }
+  config.worker.creditMonitor.credentials = parseNativeCreditCredentials(config.worker.creditMonitor.credentials, config.worker.creditMonitor.enabled);
+  for (const key of ["reportPath", "pauseFile"]) {
+    const value = config.worker.creditMonitor[key];
+    if (value !== undefined && (typeof value !== "string" || !isAbsolutePath(value))) {
+      throw new OperationError("config_error", `worker.creditMonitor.${key} must be an absolute path.`);
+    }
+  }
+  const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
+  if (creditReportPath && creditPausePath && resolve2(creditReportPath) === resolve2(creditPausePath)) {
+    throw new OperationError("config_error", "worker.creditMonitor reportPath and pauseFile must be different paths.");
+  }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
   for (const key of ["pythonPath", "sessionPath", "stateDir", "spoolDir", "reportPath"]) {
@@ -3114,6 +3141,19 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, "worker.whatsappCapture.enabled");
+  for (const key of ["binaryPath", "stateDir"]) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError("config_error", "worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.");
   }
   assertBoolean(config.worker.embeddingDrain.enabled, "worker.embeddingDrain.enabled");
   config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(config.worker.embeddingDrain.credentials, config.worker.embeddingDrain.enabled);
@@ -3220,6 +3260,18 @@ function parseNativeWorkerCredentials(value, serviceEnabled) {
     if (serviceEnabled) {
       throw new OperationError("config_error", `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`);
     }
+  }
+  return parsed;
+}
+function parseNativeCreditCredentials(value, serviceEnabled) {
+  const parsed = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (name !== "VENICE_API_KEY")
+      throw new OperationError("config_error", `worker.creditMonitor.credentials does not allow environment name ${name}.`);
+    if (typeof credential === "string" && credential.trim())
+      parsed[name] = credential;
+    else if (typeof credential === "string" || serviceEnabled)
+      throw new OperationError("config_error", "worker.creditMonitor.credentials.VENICE_API_KEY must be a resolved nonempty string.");
   }
   return parsed;
 }
@@ -3375,9 +3427,13 @@ var init_config = __esm(() => {
         startupTimeoutSeconds: 180,
         credentials: {}
       },
+      creditMonitor: { enabled: false, provider: "venice", intervalSeconds: 600, credentials: {} },
       telegramCapture: {
         enabled: false,
         credentials: {}
+      },
+      whatsappCapture: {
+        enabled: false
       },
       embeddingDrain: {
         enabled: false,
@@ -6253,7 +6309,7 @@ class DropboxApiMetadataClient {
     this.fetchImpl = options.fetch ?? fetch;
     this.baseUrl = options.baseUrl?.replace(/\/+$/, "") || "https://api.dropboxapi.com/2";
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_DROPBOX_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   }
   async listFolder(request) {
     return this.postMetadataPage("/files/list_folder", {
@@ -7399,7 +7455,7 @@ function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.ki
 }
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn(request.command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
@@ -7441,7 +7497,7 @@ async function runExtractionCommand(request, internals = {}) {
         stderr: Buffer2.concat(stderr).toString("utf8")
       };
       if (code === 0) {
-        resolve2(result);
+        resolve3(result);
         return;
       }
       reject(new ExtractionCommandError({
@@ -9942,7 +9998,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve3) => setTimeout(resolve3, 0));
 }
 function normalizeSemanticRelevanceBar(value) {
   if (value === undefined)
@@ -11384,7 +11440,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve3) => setTimeout(resolve3, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -16484,8 +16540,8 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId) {
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve2) => {
-    timer = setTimeout(() => resolve2({ kind: "timeout" }), timeoutMs);
+  const deadline = new Promise((resolve3) => {
+    timer = setTimeout(() => resolve3({ kind: "timeout" }), timeoutMs);
   });
   try {
     const settled = await Promise.race([laneSettled, deadline]);
@@ -18521,7 +18577,7 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
           }, () => {
             return;
           }),
-          new Promise((resolve2) => setTimeout(resolve2, cancellationSettleMs))
+          new Promise((resolve3) => setTimeout(resolve3, cancellationSettleMs))
         ]);
       } else {
         await Promise.resolve();
@@ -19896,7 +19952,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -20903,7 +20959,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -28628,7 +28684,7 @@ import {
   rmSync as rmSync2,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { resolve as resolve2 } from "node:path";
+import { resolve as resolve3 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty3(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty3(options.userId, "X bookmark content-recovery provider user id");
@@ -28824,7 +28880,7 @@ function contentRecoveryEmbeddingJournalId(restoreItems) {
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve2(`${storePath}.content-recovery-receipt.json`);
+  return resolve3(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = requireBearerTokenCredentialSession(await input.broker.issueSession({
@@ -28912,7 +28968,7 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve2(pathValue);
+  const path = resolve3(pathValue);
   const temporary = `${path}.tmp-${randomUUID9()}`;
   try {
     writeFileSync5(temporary, `${JSON.stringify(receipt, null, 2)}
@@ -29823,7 +29879,7 @@ var init_file_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile4, realpath, stat as stat2 } from "node:fs/promises";
-import { basename, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
+import { basename, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -29842,7 +29898,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty5(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve3(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve4(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -29955,7 +30011,7 @@ var init_whatsapp = __esm(() => {
 // src/core/pairing-session-paths.ts
 import { lstatSync as lstatSync6, realpathSync, rmSync as rmSync3 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
-import { basename as basename2, dirname as dirname14, join as join21, relative as relative3, resolve as resolve4, sep as sep3 } from "node:path";
+import { basename as basename2, dirname as dirname14, join as join21, relative as relative3, resolve as resolve5, sep as sep3 } from "node:path";
 function resolveHomeDir(context) {
   return context.homeDir?.trim() || homedir18();
 }
@@ -30018,7 +30074,7 @@ function pairingSessionPathOverridden(source, context = {}) {
   return (value?.trim() ?? "") !== "";
 }
 function planPairingSessionRemoval(paths, context = {}) {
-  const roots = olympusDataRoots(context).map((root) => resolve4(root));
+  const roots = olympusDataRoots(context).map((root) => resolve5(root));
   const canonicalRoots = canonicalOlympusDataRoots(roots);
   const targets = [];
   const absent = [];
@@ -30027,7 +30083,7 @@ function planPairingSessionRemoval(paths, context = {}) {
     if ("refusal" in validated)
       return { ok: false, refusal: validated.refusal };
     if (validated.target === undefined) {
-      absent.push(resolve4(path));
+      absent.push(resolve5(path));
       continue;
     }
     targets.push(validated.target);
@@ -30049,7 +30105,7 @@ function isInsideCanonicalRoot(path, canonicalRoots) {
   return canonicalRoots.some((root) => path === root || path.startsWith(`${root}${sep3}`));
 }
 function validatePairingPath(path, roots, canonicalRoots) {
-  const absolute = resolve4(path);
+  const absolute = resolve5(path);
   const root = roots.find((candidate) => absolute === candidate || absolute.startsWith(`${candidate}${sep3}`));
   if (root === undefined || absolute === root) {
     return { refusal: { reason: "outside_root", path: absolute, component: absolute } };
@@ -34859,8 +34915,8 @@ function buildAuthorizationUrl(options) {
 async function createLoopbackCallbackServer(options) {
   let resolveCode;
   let rejectCode;
-  const waitForCode = new Promise((resolve6, reject) => {
-    resolveCode = resolve6;
+  const waitForCode = new Promise((resolve7, reject) => {
+    resolveCode = resolve7;
     rejectCode = reject;
   });
   const server = createServer((request, response) => {
@@ -34888,9 +34944,9 @@ async function createLoopbackCallbackServer(options) {
       rejectCode(new Error("OAuth callback failed."));
     }
   });
-  await new Promise((resolve6, reject) => {
+  await new Promise((resolve7, reject) => {
     server.once("error", reject);
-    server.listen(options.port ?? 0, "127.0.0.1", () => resolve6());
+    server.listen(options.port ?? 0, "127.0.0.1", () => resolve7());
   });
   const address = server.address();
   if (!address || typeof address === "string")
@@ -35044,7 +35100,7 @@ async function waitForDetachedPendingState(options) {
       return state;
     if (state && state.status !== "pending")
       return state;
-    await new Promise((resolve6) => setTimeout(resolve6, 25));
+    await new Promise((resolve7) => setTimeout(resolve7, 25));
   }
   return {
     source: options.source,
@@ -48610,7 +48666,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+        await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -48622,7 +48678,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -48700,7 +48756,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve6(parseResult.data);
+            resolve7(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -48891,12 +48947,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve6, interval);
+      const timeoutId = setTimeout(resolve7, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -51881,7 +51937,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve6.call(this, root, ref);
+    let _sch = resolve7.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a3 = root.localRefs) === null || _a3 === undefined ? undefined : _a3[ref];
       const { schemaId } = this.opts;
@@ -51908,7 +51964,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve6(root, ref) {
+  function resolve7(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -52438,7 +52494,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve6(baseURI, relativeURI, options) {
+  function resolve7(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse6(baseURI, schemelessOptions), parse6(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -52666,7 +52722,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize,
-    resolve: resolve6,
+    resolve: resolve7,
     resolveComponent,
     equal,
     serialize,
@@ -56049,12 +56105,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve6) => {
+    return new Promise((resolve7) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve6();
+        resolve7();
       } else {
-        this._stdout.once("drain", resolve6);
+        this._stdout.once("drain", resolve7);
       }
     });
   }
@@ -56143,7 +56199,7 @@ var init_server3 = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile5, realpath as realpath2, stat as stat3 } from "node:fs/promises";
-import { relative as relative6, resolve as resolve6, sep as sep6 } from "node:path";
+import { relative as relative6, resolve as resolve7, sep as sep6 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -56282,7 +56338,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve6(rootRealPath, relativePath);
+    const candidatePath = resolve7(rootRealPath, relativePath);
     const relativeToRoot = relative6(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
       return;
@@ -59485,7 +59541,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve7) => setTimeout(resolve7, pageRetryDelayMs));
+            await new Promise((resolve8) => setTimeout(resolve8, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -62550,7 +62606,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -62573,7 +62629,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve7(response);
+      resolve8(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -68842,12 +68898,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve7) => {
+        new Promise((resolve8) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve7({
+              resolve8({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -68874,7 +68930,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 import { createHash as createHash34, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 import { readFileSync as readFileSync29, statSync as statSync9 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { join as join45, resolve as resolve7 } from "node:path";
+import { join as join45, resolve as resolve8 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -70138,8 +70194,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve8) => {
-      release = resolve8;
+    dashboardGrantMutationTail = new Promise((resolve9) => {
+      release = resolve9;
     });
     await previous;
     try {
@@ -70367,7 +70423,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep2(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 async function parseSourceIndexAnswerRequest(request) {
   const record3 = await parseObjectBody(request);
@@ -71318,10 +71374,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve7(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve8(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize = (paths) => [...new Set(paths.map((path) => resolve7(path)))].sort();
+  const normalize = (paths) => [...new Set(paths.map((path) => resolve8(path)))].sort();
   const a = normalize(left);
   const b = normalize(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -72608,7 +72664,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve9) => setTimeout(resolve9, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -75933,7 +75989,7 @@ import { randomBytes as randomBytes6 } from "node:crypto";
 import { readFileSync as readFileSync30 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve8 } from "node:path";
+import { resolve as resolve9 } from "node:path";
 
 // src/data-lifecycle.ts
 init_atomic_file();
@@ -75966,7 +76022,7 @@ import {
   statSync as statSync7
 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
-import { basename as basename4, dirname as dirname16, join as join24, relative as relative5, resolve as resolve5, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname16, join as join24, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store";
 var DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA";
@@ -76165,7 +76221,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped, artifacts };
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve5(requirePath(options.destination, "--input"));
+  const destination = resolve6(requirePath(options.destination, "--input"));
   const manifestPath = join24(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync15(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 || !Array.isArray(parsed.artifacts)) {
@@ -76174,7 +76230,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve5(destination, artifact.relativePath);
+    const path = resolve6(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -76442,7 +76498,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative5(resolve5(exportRoot), resolve5(path)),
+    relativePath: relative5(resolve6(exportRoot), resolve6(path)),
     bytes: stats.size,
     sha256: sha256File(path)
   };
@@ -76495,7 +76551,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current = dirname16(resolve5(destination));
+  let current = dirname16(resolve6(destination));
   for (;; ) {
     if (existsSync14(current))
       return current;
@@ -76507,7 +76563,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync13(path, { recursive: true });
-  let current = resolve5(path);
+  let current = resolve6(path);
   for (;; ) {
     syncDirectorySync2(current);
     if (current === boundary)
@@ -76635,8 +76691,8 @@ function isInsideKnownOlympusRoot(path, context) {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve5(path);
-  const absoluteRoot = resolve5(root);
+  const absolutePath = resolve6(path);
+  const absoluteRoot = resolve6(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep5}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -78884,7 +78940,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count,
-    out_dir: resolve8(out),
+    out_dir: resolve9(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -78934,7 +78990,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync30(resolve8(input2), "utf8");
+    raw = readFileSync30(resolve9(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -79159,7 +79215,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve8(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve9(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };

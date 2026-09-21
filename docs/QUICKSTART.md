@@ -584,6 +584,44 @@ an existing session authenticates, using a private receipt containing the child
 PID and a new instance ID. Capture freshness remains a separate check: a process
 ready to capture is not proof that new messages have arrived or been indexed.
 
+### Optional provider-credit monitoring
+
+`worker.creditMonitor` runs a native periodic billing probe; the currently
+supported provider is `venice`. It is disabled by default. Set an absolute
+`reportPath`, provide `credentials.VENICE_API_KEY` through a Gateway SecretRef,
+and enable it through the host's supported configuration command. The default
+interval is 600 seconds (allowed range: 60–86,400). An optional absolute
+`pauseFile` preserves the existing provider pause-marker behavior.
+
+The monitor checks the official billing endpoint, never processes source
+content, and does not inherit other provider credentials. A successful credit
+check does not prove that every model is available. Stop the old monitor before
+enabling its replacement; preserve the report and pause paths so existing
+consumers keep using the same files.
+
+### Optional native WhatsApp capture
+
+The package includes the read-only bridge source under `tools/whatsapp-bridge`.
+Building it requires Go 1.26.4 or newer and a C compiler for SQLite. From that
+directory run `go build -o olympus-whatsapp-bridge .`, then use the absolute
+binary path for `worker.whatsappCapture.binaryPath`. The plugin does not download
+or compile a binary during Gateway startup.
+
+Pair the bridge separately with WhatsApp Linked devices before enabling native
+capture. Use the same `OLYMPUS_WHATSAPP_STATE_DIR` for pairing as
+`worker.whatsappCapture.stateDir`; the default is
+`~/.local/share/olympus/whatsapp-live`. Run the built bridge interactively for
+pairing, stop that process after authentication, then enable
+`worker.whatsappCapture.enabled` through the host's supported configuration
+command. Stop any prior capture service before activating its replacement.
+Archive import alone is a historical snapshot; ongoing updates require this
+paired live capture and the source worker's automatic import.
+
+The native WhatsApp bridge keeps its existing connection backoff during a network
+outage. Service health stays initializing until the session authenticates; stopping
+the service still cancels the pending child. An unpaired session refuses startup
+without initiating login and requires the separate pairing flow.
+
 ### Optional native embedding drain
 
 After verifying the existing embedding policy, enable `worker.embeddingDrain.enabled`

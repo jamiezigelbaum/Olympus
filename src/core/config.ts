@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute as isAbsolutePath, join } from 'node:path';
+import { isAbsolute as isAbsolutePath, join, resolve } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import {
   defaultSourceCorpusRegistryConfig,
@@ -100,6 +100,14 @@ export interface OlympusConfig {
       runtimePath?: string;
       executablePath?: string;
     };
+    creditMonitor: {
+      enabled: boolean;
+      provider: 'venice';
+      intervalSeconds: number;
+      reportPath?: string;
+      pauseFile?: string;
+      credentials: Record<string, string>;
+    };
     /** Opt-in Gateway supervision of the local Telethon capture process. */
     telegramCapture: {
       enabled: boolean;
@@ -109,6 +117,12 @@ export interface OlympusConfig {
       stateDir?: string;
       spoolDir?: string;
       reportPath?: string;
+    };
+    /** Opt-in Gateway supervision of the operator-provisioned WhatsApp bridge. */
+    whatsappCapture: {
+      enabled: boolean;
+      binaryPath?: string;
+      stateDir?: string;
     };
     /** Opt-in Gateway supervision of the packaged source embedding drain. */
     embeddingDrain: {
@@ -171,9 +185,13 @@ const DEFAULT_CONFIG: OlympusConfig = {
       startupTimeoutSeconds: 180,
       credentials: {},
     },
+    creditMonitor: { enabled: false, provider: 'venice', intervalSeconds: 600, credentials: {} },
     telegramCapture: {
       enabled: false,
       credentials: {},
+    },
+    whatsappCapture: {
+      enabled: false,
     },
     embeddingDrain: {
       enabled: false,
@@ -516,6 +534,20 @@ export function configFromPluginConfig(
       config.worker.service.executablePath = service.executablePath.trim();
     }
   }
+  const creditMonitor = asRecord(worker?.creditMonitor);
+  if (creditMonitor) {
+    if (typeof creditMonitor.enabled === 'boolean') config.worker.creditMonitor.enabled = creditMonitor.enabled;
+    if (creditMonitor.provider !== undefined && creditMonitor.provider !== 'venice') {
+      throw new OperationError('config_error', 'worker.creditMonitor.provider must be venice.');
+    }
+    if (typeof creditMonitor.intervalSeconds === 'number') config.worker.creditMonitor.intervalSeconds = creditMonitor.intervalSeconds;
+    const credentials = asRecord(creditMonitor.credentials);
+    if (credentials) config.worker.creditMonitor.credentials = parseNativeCreditCredentials(credentials, requireResolvedWorkerSecrets && config.worker.creditMonitor.enabled);
+    for (const key of ['reportPath', 'pauseFile'] as const) {
+      const value = creditMonitor[key];
+      if (typeof value === 'string' && value.trim()) config.worker.creditMonitor[key] = value.trim();
+    }
+  }
   const telegramCapture = asRecord(worker?.telegramCapture);
   if (telegramCapture) {
     if (typeof telegramCapture.enabled === 'boolean') {
@@ -531,6 +563,16 @@ export function configFromPluginConfig(
     for (const key of ['pythonPath', 'sessionPath', 'stateDir', 'spoolDir', 'reportPath'] as const) {
       const value = telegramCapture[key];
       if (typeof value === 'string' && value.trim()) config.worker.telegramCapture[key] = value.trim();
+    }
+  }
+  const whatsappCapture = asRecord(worker?.whatsappCapture);
+  if (whatsappCapture) {
+    if (typeof whatsappCapture.enabled === 'boolean') {
+      config.worker.whatsappCapture.enabled = whatsappCapture.enabled;
+    }
+    for (const key of ['binaryPath', 'stateDir'] as const) {
+      const value = whatsappCapture[key];
+      if (typeof value === 'string' && value.trim()) config.worker.whatsappCapture[key] = value.trim();
     }
   }
   const embeddingDrain = asRecord(worker?.embeddingDrain);
@@ -770,10 +812,19 @@ function mergeConfig(target: OlympusConfig, source: Partial<OlympusConfig>): voi
         ...(source.worker.service ?? {}),
         credentials: source.worker.service?.credentials ?? target.worker.service.credentials,
       },
+      creditMonitor: {
+        ...target.worker.creditMonitor,
+        ...(source.worker.creditMonitor ?? {}),
+        credentials: source.worker.creditMonitor?.credentials ?? target.worker.creditMonitor.credentials,
+      },
       telegramCapture: {
         ...target.worker.telegramCapture,
         ...(source.worker.telegramCapture ?? {}),
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials,
+      },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...(source.worker.whatsappCapture ?? {}),
       },
       embeddingDrain: {
         ...target.worker.embeddingDrain,
@@ -934,6 +985,23 @@ function validateConfig(config: OlympusConfig): void {
     config.worker.service.credentials,
     config.worker.service.enabled,
   );
+  assertBoolean(config.worker.creditMonitor.enabled, 'worker.creditMonitor.enabled');
+  if (config.worker.creditMonitor.provider !== 'venice') throw new OperationError('config_error', 'worker.creditMonitor.provider must be venice.');
+  assertPositiveInteger(config.worker.creditMonitor.intervalSeconds, 'worker.creditMonitor.intervalSeconds');
+  if (config.worker.creditMonitor.intervalSeconds < 60 || config.worker.creditMonitor.intervalSeconds > 86400) {
+    throw new OperationError('config_error', 'worker.creditMonitor.intervalSeconds must be between 60 and 86400.');
+  }
+  config.worker.creditMonitor.credentials = parseNativeCreditCredentials(config.worker.creditMonitor.credentials, config.worker.creditMonitor.enabled);
+  for (const key of ['reportPath', 'pauseFile'] as const) {
+    const value = config.worker.creditMonitor[key];
+    if (value !== undefined && (typeof value !== 'string' || !isAbsolutePath(value))) {
+      throw new OperationError('config_error', `worker.creditMonitor.${key} must be an absolute path.`);
+    }
+  }
+  const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
+  if (creditReportPath && creditPausePath && resolve(creditReportPath) === resolve(creditPausePath)) {
+    throw new OperationError('config_error', 'worker.creditMonitor reportPath and pauseFile must be different paths.');
+  }
   assertBoolean(config.worker.telegramCapture.enabled, 'worker.telegramCapture.enabled');
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(
     config.worker.telegramCapture.credentials,
@@ -946,6 +1014,21 @@ function validateConfig(config: OlympusConfig): void {
       throw new OperationError('config_error', `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, 'worker.whatsappCapture.enabled');
+  for (const key of ['binaryPath', 'stateDir'] as const) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError('config_error', `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError(
+      'config_error',
+      'worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.',
+    );
   }
   assertBoolean(config.worker.embeddingDrain.enabled, 'worker.embeddingDrain.enabled');
   config.worker.embeddingDrain.credentials = parseNativeEmbeddingDrainCredentials(
@@ -1097,6 +1180,16 @@ function parseNativeWorkerCredentials(
         `worker.service.credentials.${name} must be resolved to a string before the native worker service starts.`,
       );
     }
+  }
+  return parsed;
+}
+
+function parseNativeCreditCredentials(value: Record<string, unknown>, serviceEnabled: boolean): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  for (const [name, credential] of Object.entries(value)) {
+    if (name !== 'VENICE_API_KEY') throw new OperationError('config_error', `worker.creditMonitor.credentials does not allow environment name ${name}.`);
+    if (typeof credential === 'string' && credential.trim()) parsed[name] = credential;
+    else if (typeof credential === 'string' || serviceEnabled) throw new OperationError('config_error', 'worker.creditMonitor.credentials.VENICE_API_KEY must be a resolved nonempty string.');
   }
   return parsed;
 }
