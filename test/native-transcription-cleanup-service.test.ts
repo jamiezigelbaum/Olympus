@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
+import * as childProcess from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -80,7 +81,7 @@ function pluginConfig(fx: Fixture, overrides: Record<string, unknown> = {}): Rec
 function serviceFor(
   fx: Fixture,
   config: unknown,
-  options: { scriptPath?: string; spawn?: typeof spawnProcess } = {},
+  options: { scriptPath?: string; spawn?: typeof childProcess.spawn } = {},
 ): NativeProcessServiceDefinition {
   return track(createNativeTranscriptionCleanupService({
     initialPluginConfig: config,
@@ -115,13 +116,13 @@ function shellQuote(value: string): string {
 function countingSpawn(
   calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }>,
   spawned: ChildProcess[] = [],
-): typeof spawnProcess {
+): typeof childProcess.spawn {
   return ((command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
     calls.push({ command, args: [...args], env: options.env ?? {} });
-    const child = spawnProcess(command, args as string[], options as Parameters<typeof spawnProcess>[2]) as ChildProcess;
+    const child = childProcess.spawn(command, args as string[], options as Parameters<typeof childProcess.spawn>[2]) as ChildProcess;
     spawned.push(child);
     return child;
-  }) as unknown as typeof spawnProcess;
+  }) as unknown as typeof childProcess.spawn;
 }
 
 function context(): { context: NativeProcessServiceContext; events: string[] } {
@@ -481,10 +482,10 @@ describe('native transcription temp cleanup service', () => {
     const fx = fixture();
     const spawned: ChildProcess[] = [];
     const spawn = ((command: string, args: readonly string[], options: object) => {
-      const child = spawnProcess(command, args as string[], options as Parameters<typeof spawnProcess>[2]);
+      const child = childProcess.spawn(command, args as string[], options as Parameters<typeof childProcess.spawn>[2]);
       spawned.push(child);
       return child;
-    }) as unknown as typeof spawnProcess;
+    }) as unknown as typeof childProcess.spawn;
     const service = serviceFor(fx, pluginConfig(fx, { intervalSeconds: 60 }), {
       scriptPath: fixtureScript(fx, 'exit 0'),
       spawn,
@@ -539,7 +540,7 @@ function syntheticCleanupHarness(options: { denied?: boolean; delayMs?: number }
     live += 1;
     maxLive = Math.max(maxLive, live);
     return child;
-  }) as unknown as typeof spawnProcess;
+  }) as unknown as typeof childProcess.spawn;
   return {
     children, spawn,
     maxLive: () => maxLive,
