@@ -71,7 +71,7 @@ describe('native OpenClaw plugin adapter', () => {
     let requests = 0;
     const ambient = process.env.OLYMPUS_WORKER_AUTH_TOKEN;
     process.env.OLYMPUS_WORKER_AUTH_TOKEN = 'ambient-credential';
-    globalThis.fetch = (async () => { requests += 1; throw new Error('unexpected transport'); }) as typeof fetch;
+    globalThis.fetch = (async () => { requests += 1; throw new Error('unexpected transport'); }) as unknown as typeof fetch;
     try {
       plugin.register({
         pluginConfig,
