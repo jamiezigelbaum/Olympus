@@ -21,6 +21,18 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-21 — Finish fixes, then release the beta.** The owner accepts the
+  successful tester installation/source-use report as sufficient beta feedback
+  and authorizes publication after the agreed Olympus installation and native
+  service fixes are complete. Do not publish the intermediate green build or
+  require another broad multi-platform, seven-source qualification campaign
+  before this beta. Relevant regression tests, required CI, public-artifact
+  privacy/integrity checks, and honest release notes remain required. Record
+  unperformed qualification as unproven rather than successful. This decision
+  supersedes the broader Slice 4 pre-publication evidence requirements for this
+  beta only; those remain longer-term product qualification work. Bulk email
+  embedding and the owner-source/PDF coverage audit are deferred separately.
+
 - **2026-09-09 — Native macOS HTTPS pilot.** An isolated Gateway trial proved
   that the Mac app activates the published Olympus UI over trusted loopback
   HTTPS and reads its worker view. The authorized Air rollout preserves the
@@ -611,8 +623,10 @@ must never fall back to ambient credentials. The installed host gives hot-replac
 service start callbacks five seconds, so slow child initialization runs in the
 background and reports pending/failure/recovery through native service health.
 
-Remaining live account actions: X bookmarks requires renewed OAuth consent;
-WhatsApp requires relinking the device. The unpaired WhatsApp producer's retry
+Live account status (2026-09-21): X bookmarks OAuth consent is renewed and
+the dashboard reports connected, but the running scheduler has no X task.
+Reconcile the renewed grant with native scheduling and prove a bounded read
+before calling ingestion restored. WhatsApp still requires relinking the device. The unpaired WhatsApp producer's retry
 loop is stopped pending pairing, with session and spool data preserved. Neither
 an active service unit nor a successful empty spool import proves fresh capture.
 The shared cache remains because operator callers still exist and one other-host
@@ -629,6 +643,62 @@ Gateway configuration, installs, reloads and restarts follow the canonical host
 protocol under the explicitly transferred custody. Preserve the completed CPU
 fixes and avoid unrelated host tuning. Shared caches
 and service accounts remain until other-host dependencies are checked.
+
+### Release focus (owner decision, 2026-09-21)
+
+Finish the native Olympus service migrations and installation fixes before
+starting the owner's bulk ingestion remediation. Deliver a public plugin whose
+normal install, connection, background work, restart/resume, and cited-answer
+flows work without private host launchers. Keep host-specific transport and
+credentials in private ops; generic capability adapters must not bake in the
+owner's hosts or network. Preserve the standalone MCP contract.
+
+Next proof: close the embedding drain's policy-precedence and bounded-completion
+review blockers, then complete and qualify the remaining native capabilities.
+Retire each old caller only after its replacement works; retain shared caches
+until all known host dependencies are cleared. Incorporate incoming plugin test
+reports into the existing release register, fixing product blockers through the
+normal delivery path. Build and check one exact public artifact after the agreed fixes pass, then
+publish under the September 21 owner decision. Do not claim clean-install or
+all-source qualification from installed-host health.
+
+### Beta feedback received (2026-09-21)
+
+One tester reports installation completed smoothly and plans to try a business
+use case. Their useful data is concentrated in messaging rather than email;
+initial value must not depend on connecting every source or a mailbox. This is
+qualitative installation feedback only: artifact identity, OS, normal source
+setup, cited-answer behavior, and restart/resume were not supplied in the report.
+
+Qualification action: prove the documented Telegram/WhatsApp archive-import
+journey and any supported live connection on the same candidate. An archive
+alone is a snapshot; promise continuing updates only after live pairing/capture
+and automatic import are working. Show the connected scope and historical gaps,
+and distinguish stale capture from a successful empty import. Do not add Signal
+or require this tester to connect additional sources for coverage.
+
+### Deferred: source coverage and PDF ingestion inventory
+
+Track as future owner-installation work, not a bulk-data prerequisite for the
+native migration. Reconcile the existing file catalogue, extracted text,
+extraction jobs, and page-level evidence into complete, partial, unattempted,
+policy-excluded, unsupported, and failed categories. Count missing PDF pages
+where evidence supports it and show unknown completeness explicitly. Separate
+files from directories and unsupported formats in coverage denominators.
+Diagnose PDF extractor routing and the vision page cap before retrying work;
+preserve existing content, embeddings, scopes, and privacy policy.
+
+The September 21 aggregate audit found a substantial Dropbox file-level gap,
+with incomplete coverage in the current job ledger; it does not establish a
+complete page-level backlog or a completion estimate. Also track Drive content
+coverage and Readwise reconciliation. Preserve private inventory counts and
+paths in operator evidence, not the distributable package.
+
+Product truthfulness remains a release requirement: distinguish upstream
+capture freshness from importer activity, catalogue presence from readable
+content, and readable text from complete extraction and vector coverage.
+Reproduce any misleading status on synthetic fixtures and fix the product
+without expanding the owner's selected ingestion scope.
 
 ### Deferred: high-value email embeddings
 
