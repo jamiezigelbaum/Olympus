@@ -455,7 +455,7 @@ that clean-install real-provider or pilot qualification has passed.
   and its SHA-256 and byte count from GitHub without a file/receipt handoff
   or a tester GitHub login. It verifies the downloaded bytes before using
   the packaged guide and installs through the documented managed
-  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
+  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.2.tgz --force --accept-capabilities`
   command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
   hosts `--force` also overwrites an existing plugin, so the install guide's
   existing-install checks still apply. No tester builds a package or installs
@@ -609,35 +609,45 @@ file edits or an agent-only repair.
 
 ## Installation remediation (2026-09-20)
 
-Progress (2026-09-21): PR47 and PR48 are activated on the owner installation.
-The source worker now runs as a native Gateway service with its prior seven-source
-scheduler selection preserved. Native validation/restart and a real source-index
-status turn passed: ten corpora retained, two credential profiles ready, and no
-degraded worker credentials. Its separate process receives no Connect bootstrap
-or Gateway token. The superseded email-source unit and drop-ins are archived. Successful native
-Gmail, Drive, and Readwise pulls also qualified retirement of the duplicate
-email/cloud freshness timers; their definitions and logs remain recoverable.
-Retained source credential consumers use the separate read-only Connect identity;
-shared cache and service-account retirement still requires dependency clearance.
-Expert Agents PR122 was separately authorized, activated, and verified with a real
-domain status tool call. The CPU workstream has ended and the owner has transferred
-Gateway custody to this remediation task. PR49 restored native Telegram capture:
-one approved-chat probe captured one message; activation preserved all 661 approved
-scopes, authenticated the existing session, and verified child credential isolation.
-A real Castor source-index status call succeeded with ten corpora and both Telegram
-corpora present. Remaining background-service migrations are in progress. Unresolved explicit worker references
-must never fall back to ambient credentials. The installed host gives hot-replacement
-service start callbacks five seconds, so slow child initialization runs in the
-background and reports pending/failure/recovery through native service health.
+Completed (2026-09-21): the installation fixes are activated and the exact
+public `0.4.0-beta.2` package is released on GitHub. Native OpenClaw services now
+own the source worker, Telegram and paired WhatsApp capture, the embedding drain,
+provider-credit monitoring, and transcription-temp cleanup. Shared extraction
+owns WhatsApp transcripts; the duplicate sidecar writer is retired. The worker
+retained its configured corpora and credential profiles. Real source-status and
+live model-discovery tool calls passed, and installed runtime files match the
+public archive. Standalone MCP support is retained.
 
-Live account status (2026-09-21): X bookmarks OAuth consent is renewed and
-the dashboard reports connected, but the running scheduler has no X task.
-Reconcile the renewed grant with native scheduling and prove a bounded read
-before calling ingestion restored. WhatsApp still requires relinking the device. The unpaired WhatsApp producer's retry
-loop is stopped pending pairing, with session and spool data preserved. Neither
-an active service unit nor a successful empty spool import proves fresh capture.
-The shared cache remains because operator callers still exist and one other-host
-dependency check cannot complete while that host is locked.
+The remaining old Olympus service/timer definitions and orphan drop-ins are
+archived, with data and recovery copies preserved. Only the verified SSH tunnel
+remains in private ops under the owner decision above. The cosmetic display
+writer is replaced by native model discovery and a stable route label. Argus's
+retired email-tool entries and inactive exec section are removed without granting
+additional host tools. Its one empty missing-transcript entry was retired through
+the native single-session API after backup; unrelated artifacts were not pruned.
+
+X authorization is renewed and a bounded head sync succeeded. Reconnect now
+refreshes scheduler, manual, post-connect, and recovery consumers without a worker
+restart. Full-history reconciliation remains subject to existing provider-budget
+guards; no complete-history claim is made. WhatsApp pairing and native capture
+are verified. Archive-only imports remain snapshots until live capture is active.
+
+Olympus credentials use the separate read-only Connect identity. Billing uses its
+own reference to the existing billing credential; inference/source credentials and
+Castor permissions are unchanged. The shared cache and old service accounts remain
+intentionally retained until other-host and operator dependencies are cleared.
+Bulk source/PDF coverage work and high-value email selection remain deferred below.
+
+Release receipt: source commit `5ea9ca260accaee333f07cfcb8f4dff54f62e94e`,
+exact-main verify run `35658364460`, GitHub tag `v0.4.0-beta.2`, asset
+`579981183`, SHA-256
+`fb8d176d34b530c438ee567e1e74efa2a584a45ae5d6885b64eb91f391aef922`,
+968,934 bytes. Anonymous download and checksum/size verification passed. The exact
+archive passed isolated managed install/uninstall and live activation; its dated
+packaged plan is the pre-activation snapshot, while this register records closeout.
+ClawHub publication is on explicit owner hold (September 21); do not publish until the owner reopens it. GitHub is the available beta channel.
+The owner accepted the existing tester feedback instead of another broad source
+and platform qualification campaign. Unperformed qualification is not claimed.
 
 Owner-authorized work: complete the Olympus credential migration to the existing
 1Password Connect installation with a separate read-only token and minimum vault
@@ -660,8 +670,8 @@ flows work without private host launchers. Keep host-specific transport and
 credentials in private ops; generic capability adapters must not bake in the
 owner's hosts or network. Preserve the standalone MCP contract.
 
-Next proof: close the embedding drain's policy-precedence and bounded-completion
-review blockers, then complete and qualify the remaining native capabilities.
+The embedding policy-precedence, bounded-completion, and process-retirement
+review blockers are closed. The native capabilities are activated and verified.
 Retire each old caller only after its replacement works; retain shared caches
 until all known host dependencies are cleared. Incorporate incoming plugin test
 reports into the existing release register, fixing product blockers through the
@@ -730,7 +740,7 @@ measurement. Deferred mail should remain honestly represented in status.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | pending | Agent-led model/account setup is documented, and shipped-model dimension defaults resolve the fresh-key startup failure. The prompt-only install handoff delegates package download and verification to the agent; publication of the designated GitHub pilot asset and its anonymous download proof remain required before that handoff is usable. Custom model settings and real-provider/pilot qualification remain open. Review corrections cover applied setup-policy activation, managed-worker credential readiness, multi-query corpus-budget coverage, exchange-service CI/review coverage, and consistent exact-artifact pilot instructions. Every source still needs clean-install proof on macOS and Linux, fluid beta testing, and exact-artifact publication/install proof. |
+| 4. Pilot and release | beta released | `v0.4.0-beta.2` is published with verified anonymous download, exact-main CI, and live public-package acceptance. The September 21 owner decision accepts the existing tester feedback for this beta; broader source/platform qualification remains future work, not a completed proof. ClawHub publication is on explicit owner hold until separately reopened. |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,

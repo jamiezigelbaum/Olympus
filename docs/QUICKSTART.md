@@ -69,8 +69,8 @@ Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
 receipt to request. For a manual download, open the
-[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-pilot.2)
-and choose `olympus-0.4.0.tgz` under Assets, not a source-code archive. Compare
+[pilot release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v0.4.0-beta.2)
+and choose `olympus-0.4.0-beta.2.tgz` under Assets, not a source-code archive. Compare
 its SHA-256 and byte count with the pin in the linked download procedure and
 record the release tag, asset ID, digest, and size with your install results.
 Stop if the download is
@@ -78,8 +78,8 @@ unavailable or either value differs. Do not build a replacement or substitute
 a Git checkout.
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-0.4.0.tgz
-wc -c < /absolute/path/to/olympus-0.4.0.tgz
+shasum -a 256 /absolute/path/to/olympus-0.4.0-beta.2.tgz
+wc -c < /absolute/path/to/olympus-0.4.0-beta.2.tgz
 ```
 
 Check for an existing installation with `openclaw plugins inspect olympus
@@ -88,7 +88,7 @@ If Olympus is already installed or has saved state, follow that guide's
 existing-install procedure before continuing. On a clean machine:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.2.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
@@ -283,7 +283,7 @@ olympus worker install      # idempotent; also the repair for an interrupted ins
 olympus worker start
 olympus worker stop
 olympus worker restart
-olympus worker upgrade --artifact /absolute/path/to/olympus-0.4.0.tgz
+olympus worker upgrade --artifact /absolute/path/to/olympus-0.4.0-beta.2.tgz
 olympus worker uninstall
 ```
 
@@ -588,7 +588,8 @@ ready to capture is not proof that new messages have arrived or been indexed.
 
 `worker.creditMonitor` runs a native periodic billing probe; the currently
 supported provider is `venice`. It is disabled by default. Set an absolute
-`reportPath`, provide `credentials.VENICE_API_KEY` through a Gateway SecretRef,
+`reportPath`, provide the billing/admin key as `credentials.VENICE_API_KEY`
+through a Gateway SecretRef,
 and enable it through the host's supported configuration command. The default
 interval is 600 seconds (allowed range: 60–86,400). An optional absolute
 `pauseFile` preserves the existing provider pause-marker behavior.
