@@ -63,6 +63,44 @@ afterEach(() => {
 });
 
 describe('native OpenClaw plugin adapter', () => {
+  test('inspects an enabled native service with opaque refs without using ambient worker auth', async () => {
+    const ref = { source: 'env', provider: 'default', id: 'WORKER_SECRET' };
+    const pluginConfig = { worker: { authToken: ref, service: { enabled: true, credentials: { GEMINI_API_KEY: ref } } } };
+    const tools: NativeTool[] = [];
+    const services: NativeWorkerServiceDefinition[] = [];
+    let requests = 0;
+    const ambient = process.env.OLYMPUS_WORKER_AUTH_TOKEN;
+    process.env.OLYMPUS_WORKER_AUTH_TOKEN = 'ambient-credential';
+    globalThis.fetch = (async () => { requests += 1; throw new Error('unexpected transport'); }) as typeof fetch;
+    try {
+      plugin.register({
+        pluginConfig,
+        registerTool(tool: NativeTool) { tools.push(materializeTool(tool)); },
+        registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
+      });
+      expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+      expect(services).toHaveLength(1);
+      const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).toContain('has not been resolved');
+      expect(JSON.stringify(result)).not.toContain('ambient-credential');
+      expect(requests).toBe(0);
+      await expect(services[0]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } })).rejects.toThrow('failed to become ready');
+    } finally {
+      if (ambient === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
+      else process.env.OLYMPUS_WORKER_AUTH_TOKEN = ambient;
+      await services[0]?.stop();
+    }
+  });
+
+  test('inspects opaque provider credentials but refuses them at native startup', async () => {
+    const pluginConfig = { worker: { authToken: 'explicit-worker-credential', service: { enabled: true, credentials: { GEMINI_API_KEY: { source: 'env', provider: 'default', id: 'GEMINI_SECRET' } } } } };
+    const services: NativeWorkerServiceDefinition[] = [];
+    expect(registeredToolNames(pluginConfig, { registerService(service: NativeWorkerServiceDefinition) { services.push(service); } })).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+    await expect(services[0]!.start({ config: { plugins: { entries: { olympus: { config: pluginConfig } } } } })).rejects.toThrow('failed to become ready');
+    await services[0]!.stop();
+  });
+
   test('registers the opt-in worker supervisor with config reload ownership', () => {
     const services: NativeWorkerServiceDefinition[] = [];
     plugin.register({
