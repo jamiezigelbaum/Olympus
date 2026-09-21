@@ -26,6 +26,10 @@ describe('pilot installation entry points', () => {
     expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v0.4.0-beta.2/olympus-0.4.0-beta.2.tgz');
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
+    const selectedAsset = /Select exactly one uploaded asset named `([^`]+)`/.exec(install)?.[1];
+    expect(selectedAsset).toBeDefined();
+    const manualAsset = /choose `([^`]+)` under Assets/.exec(readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8'))?.[1];
+    expect(manualAsset).toBe(selectedAsset);
     expect(download).toContain('Do not use `/releases/latest`');
     expect(download).toContain('fb8d176d34b530c438ee567e1e74efa2a584a45ae5d6885b64eb91f391aef922');
     expect(download).toContain('Byte count: `968934`');

@@ -455,7 +455,7 @@ that clean-install real-provider or pilot qualification has passed.
   and its SHA-256 and byte count from GitHub without a file/receipt handoff
   or a tester GitHub login. It verifies the downloaded bytes before using
   the packaged guide and installs through the documented managed
-  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0.tgz --force --accept-capabilities`
+  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.2.tgz --force --accept-capabilities`
   command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
   hosts `--force` also overwrites an existing plugin, so the install guide's
   existing-install checks still apply. No tester builds a package or installs
