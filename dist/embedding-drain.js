@@ -1960,7 +1960,7 @@ var init_secret_store = __esm(() => {
 // src/core/config.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { isAbsolute as isAbsolutePath, join as join2 } from "node:path";
+import { isAbsolute as isAbsolutePath, join as join2, resolve as resolve2 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -2242,6 +2242,10 @@ function validateConfig(config) {
     if (value !== undefined && (typeof value !== "string" || !isAbsolutePath(value))) {
       throw new OperationError("config_error", `worker.creditMonitor.${key} must be an absolute path.`);
     }
+  }
+  const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
+  if (creditReportPath && creditPausePath && resolve2(creditReportPath) === resolve2(creditPausePath)) {
+    throw new OperationError("config_error", "worker.creditMonitor reportPath and pauseFile must be different paths.");
   }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
@@ -7893,7 +7897,7 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
 function yieldConnectorStoreVectorScan() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve3) => setTimeout(resolve3, 0));
 }
 function assertConnectorStoreStorageProfile(profile) {
   if (profile.trustDomain !== "secure_local")
@@ -9208,7 +9212,7 @@ function normalizeLocatorIdentityConvergenceWindows(value) {
   return value;
 }
 function yieldConnectorSyncTurn() {
-  return new Promise((resolve2) => setTimeout(resolve2, 0));
+  return new Promise((resolve3) => setTimeout(resolve3, 0));
 }
 function normalizeRepairCursor(value) {
   if (value === undefined)
@@ -13694,7 +13698,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -14223,7 +14227,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -15044,7 +15048,7 @@ init_connector_store2();
 // src/workers/dropbox-files/extraction-source.ts
 init_dropbox_content_hash();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
+import { relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash6 } from "node:crypto";
@@ -15234,7 +15238,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve2(rootRealPath, relativePath);
+    const candidatePath = resolve3(rootRealPath, relativePath);
     const relativeToRoot = relative2(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep2}`)) {
       return;
@@ -16829,7 +16833,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -18072,7 +18076,7 @@ async function runSourceEmbeddingDrain(options) {
   const maxConsecutiveFailures = positiveIntOrUnboundedOption(options.maxConsecutiveFailures, DEFAULT_MAX_CONSECUTIVE_FAILURES, "maxConsecutiveFailures");
   const stopWhenIdle = options.stopWhenIdle ?? false;
   const ledgerObservationIntervalMs = nonNegativeIntOption(options.ledgerObservationIntervalMs, DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS * 1000, "ledgerObservationIntervalMs");
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
   const startedAt = Date.now();
   const deadlineMs = startedAt + maxRuntimeSeconds * 1000;
   let runs = 0;

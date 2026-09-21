@@ -2103,7 +2103,7 @@ var init_secret_store = __esm(() => {
 
 // src/core/config.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
-import { isAbsolute as isAbsolutePath, join as join2 } from "node:path";
+import { isAbsolute as isAbsolutePath, join as join2, resolve as resolve2 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
 }
@@ -2559,6 +2559,10 @@ function validateConfig(config) {
     if (value !== undefined && (typeof value !== "string" || !isAbsolutePath(value))) {
       throw new OperationError("config_error", `worker.creditMonitor.${key} must be an absolute path.`);
     }
+  }
+  const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
+  if (creditReportPath && creditPausePath && resolve2(creditReportPath) === resolve2(creditPausePath)) {
+    throw new OperationError("config_error", "worker.creditMonitor reportPath and pauseFile must be different paths.");
   }
   assertBoolean(config.worker.telegramCapture.enabled, "worker.telegramCapture.enabled");
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(config.worker.telegramCapture.credentials, config.worker.telegramCapture.enabled);
@@ -7209,7 +7213,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -7827,7 +7831,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -10275,8 +10279,7 @@ function trimTrailingSlash2(value) {
   return value.replace(/\/+$/, "");
 }
 function safeErrorMessage(error) {
-  const message = error instanceof Error && error.message.trim() ? error.message.trim() : "unknown Venice billing probe failure";
-  return message.length > 300 ? `${message.slice(0, 300)}...truncated` : message;
+  return error instanceof Error && error.name === "AbortError" ? "Venice billing request timed out or was cancelled." : "Venice billing request failed.";
 }
 function writeReport(path, report) {
   mkdirSync4(dirname4(path), { recursive: true });
@@ -10765,20 +10768,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve2) => {
+  await new Promise((resolve3) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve2();
+      resolve3();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve2) => {
-    const timeout = setTimeout(resolve2, ms);
+  return new Promise((resolve3) => {
+    const timeout = setTimeout(resolve3, ms);
     timeout.unref?.();
   });
 }

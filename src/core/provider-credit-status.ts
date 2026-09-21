@@ -507,8 +507,11 @@ function trimTrailingSlash(value: string): string {
 }
 
 function safeErrorMessage(error: unknown): string {
-  const message = error instanceof Error && error.message.trim() ? error.message.trim() : 'unknown Venice billing probe failure';
-  return message.length > 300 ? `${message.slice(0, 300)}...truncated` : message;
+  // Fetch/Headers exceptions may echo a malformed Authorization header. Only
+  // categorical text may reach the persisted report or the standalone CLI.
+  return error instanceof Error && error.name === 'AbortError'
+    ? 'Venice billing request timed out or was cancelled.'
+    : 'Venice billing request failed.';
 }
 
 /**

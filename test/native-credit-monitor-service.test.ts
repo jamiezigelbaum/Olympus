@@ -49,6 +49,37 @@ describe('native provider credit monitor service', () => {
     expect(events).toEqual(['failure:Olympus credit monitor configuration is invalid or contains unresolved credentials.']);
   });
 
+  test('malformed credentials cannot be echoed into a persisted billing report', async () => {
+    const reportPath = join(tempRoot(), 'report.json');
+    const key = 'synthetic-secret\ninvalid';
+    const cfg = pluginConfig({ enabled: true, reportPath, credentials: { VENICE_API_KEY: key } });
+    const service = track(createNativeCreditMonitorService({
+      initialPluginConfig: cfg,
+      fetchImpl: async (_url, init) => { new Headers(init.headers); throw new Error('unreachable'); },
+    }));
+    await service.start({});
+    await waitFor(() => existsSync(reportPath));
+    const raw = readFileSync(reportPath, 'utf8');
+    expect(raw).not.toContain('synthetic-secret');
+    expect(raw).not.toContain('invalid header');
+    expect(JSON.parse(raw).error_message).toBe('Venice billing request failed.');
+  });
+
+  test('report and pause path collisions are rejected before any fetch or write', async () => {
+    const root = tempRoot();
+    const pauseFile = join(root, 'status.json');
+    const previous = JSON.stringify({ kind: 'venice', active: true });
+    writeFileSync(pauseFile, previous);
+    let calls = 0;
+    const events: string[] = [];
+    const cfg = pluginConfig({ enabled: true, reportPath: root + '/nested/../status.json', pauseFile, credentials: { VENICE_API_KEY: 'fixture' } });
+    const service = track(createNativeCreditMonitorService({ initialPluginConfig: cfg, fetchImpl: countingFetch(() => { calls += 1; }, fixture.balance) }));
+    await service.start(context(events, cfg));
+    expect(calls).toBe(0);
+    expect(readFileSync(pauseFile, 'utf8')).toBe(previous);
+    expect(events).toEqual(['failure:Olympus credit monitor configuration is invalid or contains unresolved credentials.']);
+  });
+
   test('declares the credit-monitor identity and reload prefix', () => {
     const service = createNativeCreditMonitorService({ initialPluginConfig: {} });
     expect(service.id).toBe('olympus-provider-credit-monitor');

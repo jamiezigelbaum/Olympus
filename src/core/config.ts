@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute as isAbsolutePath, join } from 'node:path';
+import { isAbsolute as isAbsolutePath, join, resolve } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import {
   defaultSourceCorpusRegistryConfig,
@@ -997,6 +997,10 @@ function validateConfig(config: OlympusConfig): void {
     if (value !== undefined && (typeof value !== 'string' || !isAbsolutePath(value))) {
       throw new OperationError('config_error', `worker.creditMonitor.${key} must be an absolute path.`);
     }
+  }
+  const { reportPath: creditReportPath, pauseFile: creditPausePath } = config.worker.creditMonitor;
+  if (creditReportPath && creditPausePath && resolve(creditReportPath) === resolve(creditPausePath)) {
+    throw new OperationError('config_error', 'worker.creditMonitor reportPath and pauseFile must be different paths.');
   }
   assertBoolean(config.worker.telegramCapture.enabled, 'worker.telegramCapture.enabled');
   config.worker.telegramCapture.credentials = parseNativeTelegramCredentials(
