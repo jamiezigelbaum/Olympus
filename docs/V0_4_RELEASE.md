@@ -590,6 +590,15 @@ file edits or an agent-only repair.
 
 ## Installation remediation (2026-09-20)
 
+Progress (2026-09-21): the PR47 bundle is activated on the owner installation;
+native validation/restart and a real source-index status turn passed, with ten
+corpora retained and no degraded worker credentials. The retained source
+credential consumers use the separately scoped Connect identity. Expert Agents
+activation remains independently owned and does not change this product's scope.
+Native worker supervision remains off until its environment and scheduler
+selection are preserved and inspection can register opaque SecretRefs safely.
+Unresolved explicit worker references must never fall back to ambient credentials.
+
 Owner-authorized work: complete the Olympus credential migration to the existing
 1Password Connect installation with a separate read-only token and minimum vault
 grants; verify retained consumers before retiring their cache dependencies;

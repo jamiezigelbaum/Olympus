@@ -191,6 +191,15 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
 }
 
 describe('runDoctor', () => {
+  test('does not probe the worker when an explicit credential remains unresolved', async () => {
+    const config = enabledEmailConfig();
+    config.worker.authTokenSecretRefUnresolved = true;
+    const { fetchImpl, requestedPaths } = fakeWorkerFetch({});
+    const result = await runDoctor(doctorDeps({ config, delphi: healthyDelphi(), fetchImpl }));
+    expect(requestedPaths).toEqual([]);
+    expect(result.checks.find((check) => check.name === 'email_worker')).toMatchObject({ ok: false });
+    expect(JSON.stringify(result)).toContain('has not been resolved');
+  });
   test('reports all green when lanes, worker, and source index are healthy', async () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },

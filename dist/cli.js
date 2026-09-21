@@ -30188,6 +30188,8 @@ import { readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { join as join22 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
+  if (config.worker.authTokenSecretRefUnresolved)
+    return;
   return optionalToken2(config.worker.authToken) ?? optionalToken2((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
 function withWorkerAuthHeader(init, authToken) {
@@ -32668,6 +32670,13 @@ class EmailClient {
   }
 }
 function createEmailTransport(config) {
+  if (config.worker.authTokenSecretRefUnresolved) {
+    return {
+      async requestJson() {
+        throw new OperationError("config_error", "The configured worker credential has not been resolved by the host.");
+      }
+    };
+  }
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
 function effectiveEmailRequestTimeoutMs(configuredMs, requestedMs) {
@@ -40266,6 +40275,9 @@ function staleTaskAttempt(task, deps) {
   return now.getTime() - attemptedAtMs > deps.config.worker.scheduler.tickSeconds * 3 * 1000;
 }
 function workerRequestInit(deps) {
+  if (deps.config.worker.authTokenSecretRefUnresolved) {
+    throw new Error("The configured worker credential has not been resolved by the host.");
+  }
   return withWorkerAuthHeader({ method: "GET" }, workerAuthTokenFromConfig(deps.config));
 }
 function readRegistrySafely(deps) {

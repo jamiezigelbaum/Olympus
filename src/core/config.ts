@@ -76,6 +76,8 @@ export interface OlympusConfig {
   };
   worker: {
     authToken?: string;
+    /** Internal marker: an explicit host SecretRef must never use ambient auth. */
+    authTokenSecretRefUnresolved?: boolean;
     /**
      * Opt-in OpenClaw supervision of the packaged worker subprocess. The
      * native child loads the same ~/.config/olympus/worker.env written by
@@ -429,7 +431,11 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
   }
 }
 
-export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
+export function configFromPluginConfig(
+  pluginConfig: unknown,
+  options: { requireResolvedWorkerSecrets?: boolean } = {},
+): OlympusConfig {
+  const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
   const config = defaultConfig();
   const root = asRecord(pluginConfig);
   const sovereignty = asRecord(root?.sovereignty);
@@ -464,7 +470,7 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
     if (credentials) {
       config.worker.service.credentials = parseNativeWorkerCredentials(
         credentials,
-        config.worker.service.enabled,
+        requireResolvedWorkerSecrets && config.worker.service.enabled,
       );
     }
     if (typeof service.runtimePath === 'string' && service.runtimePath.trim()) {
@@ -475,7 +481,8 @@ export function configFromPluginConfig(pluginConfig: unknown): OlympusConfig {
     }
   }
   if (worker && Object.prototype.hasOwnProperty.call(worker, 'authToken') && typeof worker.authToken !== 'string') {
-    if (config.worker.service.enabled) {
+    config.worker.authTokenSecretRefUnresolved = true;
+    if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
       throw new OperationError(
         'config_error',
         'worker.authToken must be resolved to a string before the native worker service starts.',

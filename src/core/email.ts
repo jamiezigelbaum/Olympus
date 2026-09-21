@@ -608,6 +608,13 @@ export class EmailClient {
 }
 
 export function createEmailTransport(config: OlympusConfig): EmailTransport {
+  if (config.worker.authTokenSecretRefUnresolved) {
+    return {
+      async requestJson() {
+        throw new OperationError('config_error', 'The configured worker credential has not been resolved by the host.');
+      },
+    };
+  }
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
 

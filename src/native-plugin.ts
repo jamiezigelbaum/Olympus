@@ -211,7 +211,9 @@ const plugin = {
   name: 'Olympus',
   description: 'Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.',
   register(api: OpenClawPluginApi) {
-    const config = configFromPluginConfig(api.pluginConfig);
+    // CLI inventory may receive source SecretRefs. Service startup re-parses
+    // the materialized runtime config strictly before spawning a worker.
+    const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
     const workerService = createNativeWorkerService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,

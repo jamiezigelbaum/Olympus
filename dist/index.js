@@ -2217,7 +2217,8 @@ function applyEnvironmentOverrides(config, env) {
     };
   }
 }
-function configFromPluginConfig(pluginConfig) {
+function configFromPluginConfig(pluginConfig, options = {}) {
+  const requireResolvedWorkerSecrets = options.requireResolvedWorkerSecrets !== false;
   const config = defaultConfig();
   const root = asRecord4(pluginConfig);
   const sovereignty = asRecord4(root?.sovereignty);
@@ -2249,7 +2250,7 @@ function configFromPluginConfig(pluginConfig) {
     }
     const credentials = asRecord4(service.credentials);
     if (credentials) {
-      config.worker.service.credentials = parseNativeWorkerCredentials(credentials, config.worker.service.enabled);
+      config.worker.service.credentials = parseNativeWorkerCredentials(credentials, requireResolvedWorkerSecrets && config.worker.service.enabled);
     }
     if (typeof service.runtimePath === "string" && service.runtimePath.trim()) {
       config.worker.service.runtimePath = service.runtimePath.trim();
@@ -2259,7 +2260,8 @@ function configFromPluginConfig(pluginConfig) {
     }
   }
   if (worker && Object.prototype.hasOwnProperty.call(worker, "authToken") && typeof worker.authToken !== "string") {
-    if (config.worker.service.enabled) {
+    config.worker.authTokenSecretRefUnresolved = true;
+    if (requireResolvedWorkerSecrets && config.worker.service.enabled) {
       throw new OperationError("config_error", "worker.authToken must be resolved to a string before the native worker service starts.");
     }
   }
@@ -10058,6 +10060,8 @@ import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
+  if (config.worker.authTokenSecretRefUnresolved)
+    return;
   return optionalToken(config.worker.authToken) ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv(options);
 }
 function withWorkerAuthHeader(init, authToken) {
@@ -10362,6 +10366,13 @@ class EmailClient {
   }
 }
 function createEmailTransport(config) {
+  if (config.worker.authTokenSecretRefUnresolved) {
+    return {
+      async requestJson() {
+        throw new OperationError("config_error", "The configured worker credential has not been resolved by the host.");
+      }
+    };
+  }
   return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
 }
 var MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000;
@@ -13048,6 +13059,9 @@ function staleTaskAttempt(task, deps) {
   return now.getTime() - attemptedAtMs > deps.config.worker.scheduler.tickSeconds * 3 * 1000;
 }
 function workerRequestInit(deps) {
+  if (deps.config.worker.authTokenSecretRefUnresolved) {
+    throw new Error("The configured worker credential has not been resolved by the host.");
+  }
   return withWorkerAuthHeader({ method: "GET" }, workerAuthTokenFromConfig(deps.config));
 }
 function readRegistrySafely(deps) {
@@ -13952,7 +13966,7 @@ var plugin = {
   name: "Olympus",
   description: "Sovereignty-aware local model access for OpenClaw. v0.1 exposes Argus through the configured local model lane.",
   register(api) {
-    const config = configFromPluginConfig(api.pluginConfig);
+    const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
     const workerService = createNativeWorkerService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url

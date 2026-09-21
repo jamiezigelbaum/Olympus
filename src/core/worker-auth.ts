@@ -20,6 +20,7 @@ export function workerAuthTokenFromConfig(
   config: OlympusConfig,
   options: WorkerAuthTokenLookupOptions = {},
 ): string | undefined {
+  if (config.worker.authTokenSecretRefUnresolved) return undefined;
   return (
     optionalToken(config.worker.authToken)
     ?? optionalToken((options.env ?? process.env).OLYMPUS_WORKER_AUTH_TOKEN)

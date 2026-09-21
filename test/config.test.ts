@@ -11,8 +11,14 @@ import {
   parseLane,
   parseModelProfile,
 } from '../src/core/config.ts';
+import { workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 
 describe('config', () => {
+  test('opaque explicit worker refs never inherit ambient credentials in inspection mode', () => {
+    const config = configFromPluginConfig({ worker: { authToken: { source: 'file', provider: 'fixture', id: '/worker' }, service: { enabled: true } } }, { requireResolvedWorkerSecrets: false });
+    expect(config.worker.authTokenSecretRefUnresolved).toBe(true);
+    expect(workerAuthTokenFromConfig(config, { env: { OLYMPUS_WORKER_AUTH_TOKEN: 'ambient' } })).toBeUndefined();
+  });
   test('parses canonical boolean env vocabulary with trim and case normalization', () => {
     expect(parseBoolean(' true ', 'TEST_FLAG')).toBe(true);
     expect(parseBoolean('True', 'TEST_FLAG')).toBe(true);
