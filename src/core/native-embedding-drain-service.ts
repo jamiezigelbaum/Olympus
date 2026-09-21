@@ -125,6 +125,7 @@ export function createNativeEmbeddingDrainService(
   return createNativeProcessService<EmbeddingDrainLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
+    restartOnCleanExit: false,
     reload: { configPrefixes: ['plugins.entries.olympus.config.worker.embeddingDrain'] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
@@ -182,7 +183,7 @@ async function prepareEmbeddingDrainStart(
   }
   const readinessPath = join(dirname(reportPath), READINESS_FILE);
   const instanceId = randomUUID();
-  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
 
   return {

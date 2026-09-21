@@ -9877,6 +9877,7 @@ function createNativeProcessService(options) {
   const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const restartOnCleanExit = options.restartOnCleanExit ?? true;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current;
@@ -9915,6 +9916,16 @@ function createNativeProcessService(options) {
     }, delay);
     lifetime.restartTimer.unref?.();
   };
+  const completeCleanExit = (lifetime, child) => {
+    return terminateChild(lifetime, stopGraceMs, child).then(() => {
+      if (!isCurrent(lifetime))
+        return;
+      clearFailure(lifetime);
+      try {
+        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
+      } catch {}
+    });
+  };
   const launch = async (lifetime) => {
     if (!isCurrent(lifetime))
       throw new NativeProcessServiceStoppedError;
@@ -9943,10 +9954,16 @@ function createNativeProcessService(options) {
     lifetime.child = child;
     lifetime.childReady = false;
     let spawnFailed = false;
-    child.once("exit", () => {
+    child.once("exit", (code, signal) => {
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady)
         return;
       lifetime.childReady = false;
+      if (!restartOnCleanExit && code === 0 && signal === null) {
+        completeCleanExit(lifetime, child).catch(() => {
+          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        });
+        return;
+      }
       const cleanup = terminateChild(lifetime, stopGraceMs, child);
       reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
       cleanup.then(() => {
@@ -9958,17 +9975,22 @@ function createNativeProcessService(options) {
     child.once("error", () => {
       spawnFailed = true;
     });
-    await waitForChildReadiness({
+    const outcome = await waitForChildReadiness({
       lifetime,
       child,
       settings,
       isCurrent,
       startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
       readinessPollMs,
+      restartOnCleanExit,
       spawnFailed: () => spawnFailed
     });
     if (!isCurrent(lifetime) || lifetime.child !== child)
       throw new NativeProcessServiceStoppedError;
+    if (outcome === "cleanCompletion" || !restartOnCleanExit && !spawnFailed && isCleanExit(child)) {
+      await completeCleanExit(lifetime, child);
+      return;
+    }
     if (spawnFailed || childExited(child))
       throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
@@ -10024,22 +10046,41 @@ function createNativeProcessService(options) {
 }
 async function waitForChildReadiness(input) {
   const deadline = Date.now() + input.startupTimeoutMs;
+  const acceptsCleanExit = !input.restartOnCleanExit;
   while (Date.now() < deadline) {
     if (!input.isCurrent(input.lifetime))
       throw new NativeProcessServiceStoppedError;
-    if (input.spawnFailed() || childExited(input.child))
+    if (input.spawnFailed())
       throw new Error("Child exited during startup.");
+    if (childExited(input.child)) {
+      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input))
+        return "cleanCompletion";
+      throw new Error("Child exited during startup.");
+    }
     const ready = await input.settings.readinessProbe(input.child);
     if (ready) {
       if (!input.isCurrent(input.lifetime))
         throw new NativeProcessServiceStoppedError;
-      if (input.spawnFailed() || childExited(input.child))
+      if (input.spawnFailed())
         throw new Error("Child exited during startup.");
-      return;
+      if (childExited(input.child)) {
+        if (acceptsCleanExit && isCleanExit(input.child))
+          return "cleanCompletion";
+        throw new Error("Child exited during startup.");
+      }
+      return "ready";
     }
     await delay(input.readinessPollMs);
   }
   throw new Error("Child readiness timed out.");
+}
+async function readinessReceiptAfterExit(input) {
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  const ready = await input.settings.readinessProbe(input.child);
+  if (!input.isCurrent(input.lifetime))
+    throw new NativeProcessServiceStoppedError;
+  return ready;
 }
 async function terminateChild(lifetime, graceMs, expectedChild) {
   if (lifetime.cleanupPromise)
@@ -10082,6 +10123,9 @@ function signalChildTree(child, signal) {
 }
 function childExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
+}
+function isCleanExit(child) {
+  return child.exitCode === 0 && child.signalCode === null;
 }
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
@@ -11946,6 +11990,7 @@ function createNativeEmbeddingDrainService(options) {
   return createNativeProcessService({
     id: SERVICE_ID3,
     label: SERVICE_LABEL3,
+    restartOnCleanExit: false,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
@@ -11989,7 +12034,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   }
   const readinessPath = join7(dirname5(reportPath), READINESS_FILE2);
   const instanceId = randomUUID5();
-  env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
+  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
     command: runtimePath,

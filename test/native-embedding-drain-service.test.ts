@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createNativeEmbeddingDrainService } from '../src/core/native-embedding-drain-service.ts';
-import { configFromPluginConfig } from '../src/core/config.ts';
+import { configFromPluginConfig, configWithEnvironmentOverrides } from '../src/core/config.ts';
 
 const services: Array<ReturnType<typeof createNativeEmbeddingDrainService>> = [];
 const roots: string[] = [];
@@ -59,7 +59,15 @@ describe('native source embedding drain service', () => {
     expect(starts[0]?.env.OLYMPUS_WORKER_AUTH_TOKEN).toBeUndefined();
     expect(starts[0]?.env.OP_CONNECT_TOKEN).toBeUndefined();
     expect(starts[0]?.env.UNRELATED_VALUE).toBeUndefined();
-    expect(starts[0]?.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID)
+    expect(starts[0]?.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID).toBeUndefined();
+    const baseline = configFromPluginConfig({ sovereignty: { policy: { schemaVersion: 1 } } });
+    const env = { ...starts[0]!.env, OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/private/tmp/unused-conflicting-policy.json' };
+    const standaloneEnv = { ...env };
+    delete standaloneEnv.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID;
+    expect(configWithEnvironmentOverrides(baseline, env).sovereignty)
+      .toEqual(configWithEnvironmentOverrides(baseline, standaloneEnv).sovereignty);
+    expect(configWithEnvironmentOverrides(baseline, env).sovereignty?.policy).toBeDefined();
+    expect(starts[0]?.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID)
       .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
@@ -221,7 +229,7 @@ function fakeBunSource(startsPath: string, publishReadiness: boolean): string {
   return `#!/bin/sh
 printf '${format}\\n' "$$" "$1" "$2" "$3" "$4" ${values} >> ${shellQuote(startsPath)}
 mkdir -p "$(dirname "$OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH")"
-${publishReadiness ? `printf '{"kind":"source_embedding_drain_service_readiness","schema_version":1,"instance_id":"%s","pid":%s,"options_validated":true,"content_free":true}\\n' "$OLYMPUS_NATIVE_SERVICE_INSTANCE_ID" "$$" > "$OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH"` : ''}
+${publishReadiness ? `printf '{"kind":"source_embedding_drain_service_readiness","schema_version":1,"instance_id":"%s","pid":%s,"options_validated":true,"content_free":true}\\n' "$OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID" "$$" > "$OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH"` : ''}
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `;
@@ -256,7 +264,7 @@ function fixtureEnvNames(): string[] {
     'OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL',
     'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
     'GEMINI_API_KEY',
-    'OLYMPUS_NATIVE_SERVICE_INSTANCE_ID',
+    'OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID',
     'OLYMPUS_WORKER_AUTH_TOKEN',
     'OP_CONNECT_TOKEN',
     'UNRELATED_VALUE',

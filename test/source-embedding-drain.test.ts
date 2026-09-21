@@ -146,7 +146,7 @@ describe('canonical connector-store embedding drain', () => {
     const path = join(root, 'state', 'readiness.json');
     try {
       publishNativeEmbeddingDrainReadiness({
-        OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
         OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: path,
       }, 4242);
       expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
@@ -169,7 +169,7 @@ describe('canonical connector-store embedding drain', () => {
     try {
       chmodSync(root, 0o777);
       expect(() => publishNativeEmbeddingDrainReadiness({
-        OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
+        OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: '85f6c04a-e3cd-4d0c-91d4-d38954bd90dd',
         OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: path,
       })).toThrow('owner-controlled report directory');
       expect(existsSync(path)).toBe(false);
@@ -199,7 +199,7 @@ describe('canonical connector-store embedding drain', () => {
           OLYMPUS_CONFIG: join(root, 'missing-config.json'),
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
-          OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'not-a-uuid',
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID: 'not-a-uuid',
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH: join(root, 'readiness.json'),
         },
         stdout: 'pipe',
