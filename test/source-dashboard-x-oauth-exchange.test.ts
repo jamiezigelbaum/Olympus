@@ -213,6 +213,27 @@ describe('dashboard X OAuth exchange', () => {
     expect(fixture.runtimeCalls).toEqual(callsBeforeDisconnectChecks);
   });
 
+  test('recovery rechecks authorization after receiving a delayed request body', async () => {
+    const calls: string[] = [];
+    const runtime = xRuntimeFixture(calls);
+    let connected = true;
+    const worker = createEmailSourceWorker({ currentXBookmarksRuntime: () => connected ? runtime : undefined });
+    let releaseBody!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        releaseBody = () => { controller.enqueue(new TextEncoder().encode('{"execute":true}')); controller.close(); };
+      },
+    });
+    const pending = worker.fetch(new Request('http://worker.test/v1/source/index/x-bookmarks/content/recover', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    }));
+    connected = false;
+    releaseBody();
+    const response = await pending;
+    expect(response.status).toBe(501);
+    expect(calls).toEqual([]);
+  });
+
   test('provider error prose never reaches the failure page in any encoding', async () => {
     // R61/R61B: the provider echoes the stored secrets in forms no value list
     // fully enumerates — short raw, base64url, lowercase percent-encoding, and

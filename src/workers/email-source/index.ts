@@ -2023,6 +2023,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           request.method === 'POST'
           && url.pathname === `${basePath}/source/index/x-bookmarks/content/recover`
         ) {
+          const record = await parseObjectBody(request);
+          const execute = asOptionalBoolean(record.execute);
+          const limit = asOptionalNumber(record.limit);
           const contentRecovery = currentXBookmarksRuntime()?.contentRecovery;
           if (!contentRecovery) {
             throw new EmailSourceWorkerError(
@@ -2031,9 +2034,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not support X bookmark content recovery.',
             );
           }
-          const record = await parseObjectBody(request);
-          const execute = asOptionalBoolean(record.execute);
-          const limit = asOptionalNumber(record.limit);
           const result = await contentRecovery.recover({
             ...(execute !== undefined ? { execute } : {}),
             ...(limit !== undefined ? { limit } : {}),

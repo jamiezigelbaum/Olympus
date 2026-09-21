@@ -69748,13 +69748,13 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/x-bookmarks/content/recover`) {
+          const record3 = await parseObjectBody(request);
+          const execute = asOptionalBoolean(record3.execute);
+          const limit = asOptionalNumber(record3.limit);
           const contentRecovery = currentXBookmarksRuntime()?.contentRecovery;
           if (!contentRecovery) {
             throw new EmailSourceWorkerError(501, "x_bookmarks_content_recovery_not_supported", "Private source worker does not support X bookmark content recovery.");
           }
-          const record3 = await parseObjectBody(request);
-          const execute = asOptionalBoolean(record3.execute);
-          const limit = asOptionalNumber(record3.limit);
           const result = await contentRecovery.recover({
             ...execute !== undefined ? { execute } : {},
             ...limit !== undefined ? { limit } : {}
