@@ -103,6 +103,7 @@ describe('release artifact packaging', () => {
       expect(listing.stdout).toContain('package/bin/olympus');
       expect(listing.stdout).toContain('package/INSTALL_FOR_AGENTS.md');
       expect(listing.stdout).toContain('package/dist/cli.js');
+      expect(listing.stdout).toContain('package/dist/embedding-drain.js');
       expect(listing.stdout).toContain('package/docs/QUICKSTART.md');
       expect(listing.stdout).not.toContain('package/docs/ARCHITECTURE.md');
       expect(listing.stdout).toContain('package/docs/TRUST_MODEL.md');
@@ -131,6 +132,10 @@ describe('release artifact packaging', () => {
       expect(packagedReadme).not.toContain('bun install &&');
       expect(packagedReadme).not.toContain('0.3.0-alpha.1');
       expect(packagedReadme).not.toContain('~/.openclaw/git/');
+      const packagedDrain = readFileSync(join(packageDir, 'dist', 'embedding-drain.js'), 'utf8');
+      expect(packagedDrain).not.toMatch(/\bjamie\b/i);
+      expect(packagedDrain).not.toContain('recordEmbeddingLedgerObservations');
+      expect(packagedDrain).toContain('embedding_drain_service_readiness');
       const packagedRuntime = readFileSync(join(packageDir, 'dist', 'cli.js'), 'utf8');
       expect(packagedRuntime).toContain(GOOGLE_PILOT_CLIENT_ID_FIXTURE);
       expect(packagedRuntime).not.toContain('__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__');

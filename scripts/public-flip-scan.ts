@@ -117,6 +117,13 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     match: /^jamie$/i,
     reason: "Embedding-ledger approver enum value 'jamie', compiled from src/workers/embedding-ledger.ts.",
   },
+
+  {
+    path: 'dist/embedding-drain.js',
+    label: 'a tenant or host identity',
+    match: /^jamie$/i,
+    reason: "Embedding-ledger approver enum value 'jamie', compiled from src/workers/embedding-ledger.ts in the repository-only private bundle; stripped from the public release.",
+  },
   {
     path: 'config/critical-review.json',
     label: 'a tenant or host identity',

@@ -76,6 +76,14 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
   readinessPollMs?: number;
   stopGraceMs?: number;
   restartDelaysMs?: readonly number[];
+  /**
+   * Whether a healthy child that exits cleanly (code 0, no signal) is
+   * supervised as a crash. Defaults to `true`, which restarts it. `false` opts
+   * into completion semantics: no replacement is scheduled, the child's
+   * process group is still terminated before the supervisor settles, and a zero
+   * exit without an exact-instance readiness receipt stays a startup failure.
+   */
+  restartOnCleanExit?: boolean;
 }
 
 /** OpenClaw replacement starts have a five-second deadline. Keep the host
@@ -138,6 +146,9 @@ class NativeProcessReportedStartError extends Error {}
  * - restart backoff is bounded and cancels with the lifetime;
  * - child cleanup is a single shared promise, so stop() waits for an in-flight
  *   crash cleanup instead of racing it;
+ * - with `restartOnCleanExit: false`, a clean exit is completion rather than a
+ *   crash: it schedules no replacement, keeps health clear for the current
+ *   lifetime only, and still terminates the child's process group;
  * - SIGTERM then a bounded SIGKILL go to the whole detached group. There is no
  *   `kill(-pgid, 0)` liveness gate: a live zombie would defeat it and leak real
  *   descendants;
@@ -150,6 +161,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   const readinessPollMs = options.readinessPollMs ?? DEFAULT_READINESS_POLL_MS;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartDelaysMs = options.restartDelaysMs ?? DEFAULT_RESTART_DELAYS_MS;
+  const restartOnCleanExit = options.restartOnCleanExit ?? true;
   const spawnChild = options.spawn ?? spawnProcess;
   let generation = 0;
   let current: ServiceLifetime<TSettings> | undefined;
@@ -193,6 +205,24 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     lifetime.restartTimer.unref?.();
   };
 
+  /**
+   * Settle an opted-in clean exit: the group is stopped first (a descendant can
+   * outlive its leader, so completion never skips cleanup), then health is
+   * cleared for the current lifetime only. Rejects with the cleanup error, which
+   * callers report categorically.
+   */
+  const completeCleanExit = (lifetime: ServiceLifetime<TSettings>, child: ChildProcess): Promise<void> => {
+    return terminateChild(lifetime, stopGraceMs, child).then(() => {
+      if (!isCurrent(lifetime)) return;
+      clearFailure(lifetime);
+      try {
+        lifetime.context.logger?.info?.(`Olympus ${options.label} completed a clean exit.`);
+      } catch {
+        // A retired logger must not turn completion into a failure.
+      }
+    });
+  };
+
   const launch = async (lifetime: ServiceLifetime<TSettings>): Promise<void> => {
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const settings = await options.prepareStart({
@@ -220,12 +250,21 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     lifetime.childReady = false;
     let spawnFailed = false;
 
-    child.once('exit', () => {
+    child.once('exit', (code, signal) => {
       // Startup and intentional-stop paths retain or clear this ownership
       // themselves. A ready crash must keep the exact child/PGID long enough
       // to terminate descendants before any replacement can be scheduled.
       if (lifetime.child !== child || !isCurrent(lifetime) || !lifetime.childReady) return;
       lifetime.childReady = false;
+      if (!restartOnCleanExit && code === 0 && signal === null) {
+        // Opt-in completion: finished work is not a crash, so no replacement is
+        // scheduled and health stays clear. Descendant cleanup is still
+        // mandatory. terminateChild is entered synchronously to keep the PGID.
+        void completeCleanExit(lifetime, child).catch(() => {
+          reportFailure(lifetime, `Olympus ${options.label} descendants could not be stopped after a clean exit.`);
+        });
+        return;
+      }
       const cleanup = terminateChild(lifetime, stopGraceMs, child);
       reportFailure(lifetime, `Olympus ${options.label} exited unexpectedly.`);
       void cleanup.then(() => {
@@ -241,16 +280,21 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       // platform errors can include command arguments and environment detail.
     });
 
-    await waitForChildReadiness({
+    const outcome = await waitForChildReadiness({
       lifetime,
       child,
       settings,
       isCurrent,
       startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
       readinessPollMs,
+      restartOnCleanExit,
       spawnFailed: () => spawnFailed,
     });
     if (!isCurrent(lifetime) || lifetime.child !== child) throw new NativeProcessServiceStoppedError();
+    if (outcome === 'cleanCompletion' || (!restartOnCleanExit && !spawnFailed && isCleanExit(child))) {
+      await completeCleanExit(lifetime, child);
+      return;
+    }
     if (spawnFailed || childExited(child)) throw new Error(`Olympus ${options.label} exited during startup.`);
     lifetime.childReady = true;
     lifetime.restartAttempt = 0;
@@ -312,21 +356,51 @@ async function waitForChildReadiness<TSettings extends NativeProcessStartSetting
   isCurrent(lifetime: ServiceLifetime<TSettings>): boolean;
   startupTimeoutMs: number;
   readinessPollMs: number;
+  restartOnCleanExit: boolean;
   spawnFailed(): boolean;
-}): Promise<void> {
+}): Promise<'ready' | 'cleanCompletion'> {
   const deadline = Date.now() + input.startupTimeoutMs;
+  const acceptsCleanExit = !input.restartOnCleanExit;
   while (Date.now() < deadline) {
     if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
-    if (input.spawnFailed() || childExited(input.child)) throw new Error('Child exited during startup.');
+    if (input.spawnFailed()) throw new Error('Child exited during startup.');
+    if (childExited(input.child)) {
+      // A one-shot child can finish before the first poll observes its receipt.
+      // Only an exact-instance readiness receipt turns that zero exit into
+      // completion; zero without a receipt is the startup failure it looks like.
+      if (acceptsCleanExit && isCleanExit(input.child) && await readinessReceiptAfterExit(input)) return 'cleanCompletion';
+      throw new Error('Child exited during startup.');
+    }
     const ready = await input.settings.readinessProbe(input.child);
     if (ready) {
       if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
-      if (input.spawnFailed() || childExited(input.child)) throw new Error('Child exited during startup.');
-      return;
+      if (input.spawnFailed()) throw new Error('Child exited during startup.');
+      if (childExited(input.child)) {
+        if (acceptsCleanExit && isCleanExit(input.child)) return 'cleanCompletion';
+        throw new Error('Child exited during startup.');
+      }
+      return 'ready';
     }
     await delay(input.readinessPollMs);
   }
   throw new Error('Child readiness timed out.');
+}
+
+/**
+ * Last readiness chance for an opted-in one-shot child that exited before any
+ * poll observed it. Only `true` for this exact instance is completion; a probe
+ * error or a retired lifetime is not.
+ */
+async function readinessReceiptAfterExit<TSettings extends NativeProcessStartSettings>(input: {
+  lifetime: ServiceLifetime<TSettings>;
+  child: ChildProcess;
+  settings: TSettings;
+  isCurrent(lifetime: ServiceLifetime<TSettings>): boolean;
+}): Promise<boolean> {
+  if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
+  const ready = await input.settings.readinessProbe(input.child);
+  if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
+  return ready;
 }
 
 async function terminateChild<TSettings extends NativeProcessStartSettings>(
@@ -373,6 +447,10 @@ function signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
 
 function childExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
+}
+
+function isCleanExit(child: ChildProcess): boolean {
+  return child.exitCode === 0 && child.signalCode === null;
 }
 
 async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
