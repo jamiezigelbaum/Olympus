@@ -2997,6 +2997,10 @@ function mergeConfig(target, source) {
         ...source.worker.telegramCapture ?? {},
         credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
       },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...source.worker.whatsappCapture ?? {}
+      },
       scheduler: {
         ...target.worker.scheduler,
         ...source.worker.scheduler ?? {}
@@ -3109,6 +3113,19 @@ function validateConfig(config) {
       throw new OperationError("config_error", `worker.telegramCapture.${key} must be an absolute path.`);
     }
     config.worker.telegramCapture[key] = value.trim();
+  }
+  assertBoolean(config.worker.whatsappCapture.enabled, "worker.whatsappCapture.enabled");
+  for (const key of ["binaryPath", "stateDir"]) {
+    const value = config.worker.whatsappCapture[key];
+    if (value === undefined)
+      continue;
+    if (typeof value !== "string" || !value.trim() || !isAbsolutePath(value.trim())) {
+      throw new OperationError("config_error", `worker.whatsappCapture.${key} must be an absolute path.`);
+    }
+    config.worker.whatsappCapture[key] = value.trim();
+  }
+  if (config.worker.whatsappCapture.enabled && !config.worker.whatsappCapture.binaryPath) {
+    throw new OperationError("config_error", "worker.whatsappCapture.binaryPath is required when worker.whatsappCapture.enabled is true.");
   }
   for (const [key, value] of [
     ["runtimePath", config.worker.service.runtimePath],
@@ -3339,6 +3356,9 @@ var init_config = __esm(() => {
       telegramCapture: {
         enabled: false,
         credentials: {}
+      },
+      whatsappCapture: {
+        enabled: false
       },
       scheduler: {
         enabled: false,

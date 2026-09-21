@@ -91,7 +91,7 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(2);
+      expect(services).toHaveLength(3);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
@@ -157,6 +157,14 @@ describe('native OpenClaw plugin adapter', () => {
         id: 'olympus-telegram-capture',
         reload: {
           configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'],
+        },
+        start: expect.any(Function),
+        stop: expect.any(Function),
+      },
+      {
+        id: 'olympus-whatsapp-capture',
+        reload: {
+          configPrefixes: ['plugins.entries.olympus.config.worker.whatsappCapture'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),
@@ -372,6 +380,7 @@ describe('native OpenClaw plugin adapter', () => {
       'authToken',
       'service',
       'telegramCapture',
+      'whatsappCapture',
       'scheduler',
     ]));
     expect(Object.keys(configSchemaProperties(['worker', 'service']))).toEqual(expect.arrayContaining([
@@ -392,6 +401,11 @@ describe('native OpenClaw plugin adapter', () => {
     ]));
     expect(Object.keys(asRecord(configSchemaProperties(['worker', 'telegramCapture']).credentials).properties as Record<string, unknown>))
       .toEqual(['OLYMPUS_TELEGRAM_API_ID', 'OLYMPUS_TELEGRAM_API_HASH']);
+    expect(Object.keys(configSchemaProperties(['worker', 'whatsappCapture']))).toEqual([
+      'enabled',
+      'binaryPath',
+      'stateDir',
+    ]);
     expect(Object.keys(configSchemaProperties(['worker', 'scheduler']))).toEqual(expect.arrayContaining([
       'enabled',
       'sourceIds',

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -15,9 +16,268 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+// nativeInstance and otherNativeInstance are canonical lower-case UUIDs; the
+// daemon refuses anything else.
+const (
+	nativeInstance  = "019f6ff4-2fb0-70a3-91dd-3ef3ada9354f"
+	otherInstance   = "019f6ff4-2fb0-70a3-91dd-3ef3ada93550"
+	rejectedPhonish = "15551230003@s.whatsapp.net"
+)
+
+func TestNativeCaptureRequiresExplicitModeFlag(t *testing.T) {
+	for _, explicit := range []string{"1", "true", "TRUE", " Yes ", "on"} {
+		t.Run("explicit "+explicit, func(t *testing.T) {
+			t.Setenv(nativeCaptureEnv, explicit)
+			t.Setenv(instanceIDEnv, nativeInstance)
+			config, err := readNativeCaptureConfig()
+			if err != nil {
+				t.Fatalf("explicit native mode rejected: %v", err)
+			}
+			if !config.Active || config.InstanceID != nativeInstance {
+				t.Fatalf("config = %#v, want active native capture for %s", config, nativeInstance)
+			}
+		})
+	}
+	for _, disabled := range []string{"", "0", "false", "no"} {
+		t.Run("disabled "+disabled, func(t *testing.T) {
+			t.Setenv(nativeCaptureEnv, disabled)
+			t.Setenv(instanceIDEnv, nativeInstance)
+			config, err := readNativeCaptureConfig()
+			if err != nil {
+				t.Fatalf("manual mode must never error on the nonce: %v", err)
+			}
+			if config.Active {
+				t.Fatalf("config = %#v, want native capture inactive", config)
+			}
+		})
+	}
+}
+
+// An ordinary pairing run can inherit a source worker's nonce through its
+// environment. That must never move it off the manual QR path.
+func TestInheritedServiceNonceAloneDoesNotActivateNativeCapture(t *testing.T) {
+	t.Setenv(instanceIDEnv, nativeInstance)
+	config, err := readNativeCaptureConfig()
+	if err != nil {
+		t.Fatalf("inherited nonce rejected manual mode: %v", err)
+	}
+	if config.Active {
+		t.Fatalf("config = %#v, want native capture inactive with only %s set", config, instanceIDEnv)
+	}
+	if config.InstanceID != "" {
+		t.Fatalf("inactive config carried an instance id: %#v", config)
+	}
+}
+
+func TestNativeCaptureRejectsNonCanonicalInstanceNonce(t *testing.T) {
+	tests := []struct {
+		name   string
+		nonce  string
+		reason string
+	}{
+		{name: "missing", nonce: "", reason: "unset nonce"},
+		{name: "whitespace only", nonce: "   ", reason: "blank nonce"},
+		{name: "not a uuid", nonce: "not-an-instance", reason: "opaque string"},
+		{name: "uppercase", nonce: strings.ToUpper(nativeInstance), reason: "non-canonical case"},
+		{name: "padded", nonce: " " + nativeInstance + "\n", reason: "surrounding whitespace"},
+		{name: "braced", nonce: "{" + nativeInstance + "}", reason: "braced form"},
+		{name: "urn", nonce: "urn:uuid:" + nativeInstance, reason: "urn form"},
+		{name: "bad separator", nonce: strings.Replace(nativeInstance, "-", "_", 1), reason: "wrong separator"},
+		{name: "non hex digit", nonce: strings.Replace(nativeInstance, "f", "z", 1), reason: "non-hex digit"},
+		{name: "short", nonce: nativeInstance[:35], reason: "truncated"},
+		{name: "long", nonce: nativeInstance + "f", reason: "over-long"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(nativeCaptureEnv, "true")
+			t.Setenv(instanceIDEnv, test.nonce)
+			config, err := readNativeCaptureConfig()
+			if err == nil {
+				t.Fatalf("nonce %q (%s) was accepted: %#v", test.nonce, test.reason, config)
+			}
+			if config.Active {
+				t.Fatalf("rejected nonce %q still produced an active config", test.nonce)
+			}
+			if !strings.Contains(err.Error(), instanceIDEnv) || !strings.Contains(err.Error(), "UUID") {
+				t.Fatalf("error %q must name %s and the required UUID shape", err, instanceIDEnv)
+			}
+			trimmed := strings.TrimSpace(test.nonce)
+			if trimmed != "" && strings.Contains(err.Error(), trimmed) {
+				t.Fatalf("error %q echoed the rejected nonce", err)
+			}
+		})
+	}
+}
+
+// trackedFactory records whether a capture client was ever built. Tests wire it
+// in so "refused before provider connection" is observable instead of implied.
+func trackedFactory() (sessionFactory, *int32) {
+	var calls int32
+	return func(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
+		atomic.AddInt32(&calls, 1)
+		return whatsmeow.NewClient(device, logger)
+	}, &calls
+}
+
+func TestNativeCaptureRefusesUnpairedStoreBeforeConnecting(t *testing.T) {
+	stateDir := t.TempDir()
+	spoolDir := filepath.Join(stateDir, spoolDirName)
+	factory, calls := trackedFactory()
+	container, err := openSessionContainer(filepath.Join(stateDir, sessionDBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = container.Close() })
+
+	_, _, _, err = startNativeCapture(stateDir, spoolDir, nativeCaptureConfig{
+		Active:     true,
+		InstanceID: nativeInstance,
+	}, container, factory)
+	if err == nil {
+		t.Fatal("unpaired store must refuse to start native capture")
+	}
+	for _, want := range []string{"unpaired", "pair it manually", nativeCaptureEnv} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must tell the operator about %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), nativeInstance) {
+		t.Fatalf("error %q leaked the service instance nonce", err)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("capture client constructed %d times, want 0 before a paired store", got)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, readinessName)); !os.IsNotExist(err) {
+		t.Fatalf("readiness receipt exists after a refused start: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, qrFileName)); !os.IsNotExist(err) {
+		t.Fatalf("QR artifact exists after a refused native start: %v", err)
+	}
+}
+
+func TestNativeCaptureRefusalPrecedesSpoolSideEffects(t *testing.T) {
+	stateDir := t.TempDir()
+	factory, calls := trackedFactory()
+	container, err := openSessionContainer(filepath.Join(stateDir, sessionDBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = container.Close() })
+	// Deliberately point the spool at an unwritable path: native mode must
+	// refuse before it touches capture state at all.
+	if _, _, _, err := startNativeCapture(stateDir, filepath.Join(stateDir, "missing", spoolDirName), nativeCaptureConfig{
+		Active:     true,
+		InstanceID: nativeInstance,
+	}, container, factory); err == nil {
+		t.Fatal("unpaired store must refuse before opening capture state")
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("capture client constructed %d times, want 0", got)
+	}
+}
+
+func TestNativeReadinessWaitsForAuthenticatedSession(t *testing.T) {
+	stateDir := t.TempDir()
+	authenticated := false
+	fatalEvents := make(chan string, 1)
+	publish := nativeReadinessPublisher(stateDir, nativeInstance, func() bool { return authenticated }, fatalEvents)
+	publish()
+	if _, err := os.Stat(filepath.Join(stateDir, readinessName)); !os.IsNotExist(err) {
+		t.Fatal("unauthenticated session published readiness")
+	}
+	authenticated = true
+	publish()
+	if _, err := os.Stat(filepath.Join(stateDir, readinessName)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fatalEvents) != 0 {
+		t.Fatal("unexpected readiness failure")
+	}
+}
+
+func TestMalformedNativeModeNeverFallsBackToPairing(t *testing.T) {
+	t.Setenv(nativeCaptureEnv, "tru")
+	t.Setenv(instanceIDEnv, nativeInstance)
+	if _, err := readNativeCaptureConfig(); err == nil {
+		t.Fatal("malformed native mode was accepted")
+	}
+}
+
+func TestNativeReadinessReceiptCarriesIdentityOnly(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := writeReadinessReceipt(stateDir, nativeInstance); err != nil {
+		t.Fatalf("writeReadinessReceipt: %v", err)
+	}
+	path := filepath.Join(stateDir, readinessName)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat readiness: %v", err)
+	}
+	if info.Mode().Perm() != readinessFileMode {
+		t.Fatalf("readiness mode = %o, want %o", info.Mode().Perm(), readinessFileMode)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read readiness: %v", err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatalf("readiness is not valid JSON: %v", err)
+	}
+	if receipt["kind"] != whatsappCaptureReadinessKind {
+		t.Fatalf("kind = %v, want %s", receipt["kind"], whatsappCaptureReadinessKind)
+	}
+	if receipt["instance_id"] != nativeInstance {
+		t.Fatalf("instance_id = %v, want %s", receipt["instance_id"], nativeInstance)
+	}
+	if receipt["paired"] != true || receipt["connected"] != true {
+		t.Fatalf("receipt must assert paired+connected: %s", raw)
+	}
+	pid, ok := receipt["pid"].(float64)
+	if !ok || int(pid) != os.Getpid() {
+		t.Fatalf("pid = %v, want %d", receipt["pid"], os.Getpid())
+	}
+	// Closed shape: no identifier, key material, or captured content may appear.
+	if len(receipt) != 5 {
+		t.Fatalf("unexpected receipt fields: %s", raw)
+	}
+	for _, forbidden := range []string{"@s.whatsapp.net", "@lid", "@g.us", "15551230003", "media_key", "session", "phone", "jid", "text"} {
+		if strings.Contains(strings.ToLower(string(raw)), strings.ToLower(forbidden)) {
+			t.Fatalf("readiness contains %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestNativeReadinessReceiptReplacesExistingFileAtomically(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, readinessName)
+	if err := os.WriteFile(path, []byte("{\"kind\":\"stale\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeReadinessReceipt(stateDir, otherInstance); err != nil {
+		t.Fatalf("writeReadinessReceipt over existing file: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), otherInstance) || strings.Contains(string(raw), "stale") {
+		t.Fatalf("receipt was not replaced: %s", raw)
+	}
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != readinessName {
+		t.Fatalf("temp artifacts left behind: %v", entries)
+	}
+}
 
 func TestOperationalLogsDoNotExposeWhatsAppIdentifiers(t *testing.T) {
 	line := existingSessionConnectedLogLine()

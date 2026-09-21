@@ -11,6 +11,7 @@ import {
   type NativeWorkerServiceDefinition,
 } from './core/native-worker-service.ts';
 import { createNativeTelegramService } from './core/native-telegram-service.ts';
+import { createNativeWhatsAppService } from './core/native-whatsapp-service.ts';
 import {
   SOURCE_WATCH_DELIVERY_HEADLINE,
   SOURCE_WATCH_DELIVERY_ROUTE,
@@ -224,10 +225,18 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const whatsappService = createNativeWhatsAppService({
+      initialPluginConfig: api.pluginConfig,
+    });
     if (api.registerService) {
       api.registerService(backgroundNativeProcessService(workerService));
       api.registerService(backgroundNativeProcessService(telegramService));
-    } else if (config.worker.service.enabled || config.worker.telegramCapture.enabled) {
+      api.registerService(backgroundNativeProcessService(whatsappService));
+    } else if (
+      config.worker.service.enabled
+      || config.worker.telegramCapture.enabled
+      || config.worker.whatsappCapture.enabled
+    ) {
       throw new Error('This OpenClaw host does not support native Olympus services.');
     }
     const ctx: OperationContext = {
