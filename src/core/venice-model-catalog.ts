@@ -22,6 +22,7 @@ export type VeniceModelCatalogFetch = (
 
 export interface VeniceModelCatalogOptions {
   cachePath?: string;
+  type?: 'text' | 'embedding';
   ttlMs?: number;
   refreshMinIntervalMs?: number;
   timeoutMs?: number;
@@ -44,6 +45,7 @@ const MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 
 interface VeniceModelCatalog {
   fetchedAtMs: number;
+  type: 'text' | 'embedding';
   models: Readonly<Record<string, VenicePrivacyCategory>>;
 }
 
@@ -64,12 +66,15 @@ const REFRESH_GATES = new Map<string, RefreshGate>();
 export function defaultVeniceModelCatalogCachePath(
   env: Record<string, string | undefined> = process.env,
   homeDir = homedir(),
+  type: 'text' | 'embedding' = 'text',
 ): string {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
   const cacheRoot = configuredRoot && isAbsolute(configuredRoot)
     ? configuredRoot
     : join(homeDir, '.cache');
-  return join(cacheRoot, 'olympus', 'venice-model-catalog-v1.json');
+  return join(cacheRoot, 'olympus', type === 'embedding'
+    ? 'venice-embedding-model-catalog-v1.json'
+    : 'venice-model-catalog-v1.json');
 }
 
 export function createVenicePrivacyCategoryResolver(input: {
@@ -78,7 +83,9 @@ export function createVenicePrivacyCategoryResolver(input: {
   catalog?: VeniceModelCatalogOptions;
 }): VenicePrivacyCategoryResolver {
   const options = input.catalog ?? {};
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath();
+  const type = options.type ?? 'text';
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir(), type);
+  const cacheKey = `${cachePath}\n${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
   const refreshMinIntervalMs = boundedNonNegativeMs(
     options.refreshMinIntervalMs,
@@ -91,17 +98,17 @@ export function createVenicePrivacyCategoryResolver(input: {
   );
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetchImpl ?? ((url: string, init: RequestInit) => fetch(url, init));
-  const catalogUrl = `${input.baseUrl.replace(/\/+$/, '')}/models?type=text`;
-  let cachedCatalog = readCatalogCache(cachePath);
+  const catalogUrl = `${input.baseUrl.replace(/\/+$/, '')}/models?type=${type}`;
+  let cachedCatalog = readCatalogCache(cachePath, type);
 
   return async (
     rawModelId: string,
     signal?: AbortSignal,
   ): Promise<VenicePrivacyCategory | undefined> => {
     throwIfAborted(signal);
-    const modelId = normalizeVeniceAnalystModelId(rawModelId);
+    const modelId = type === 'embedding' ? rawModelId.trim() : normalizeVeniceAnalystModelId(rawModelId);
     const resolvedAtMs = now();
-    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath));
+    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
 
     if (catalogIsFresh(cachedCatalog, resolvedAtMs, ttlMs)) {
       const cachedCategory = catalogCategory(cachedCatalog, modelId);
@@ -113,6 +120,8 @@ export function createVenicePrivacyCategoryResolver(input: {
       const refreshed = await refreshCatalog({
         apiKey: input.apiKey,
         cachePath,
+        cacheKey,
+        type,
         catalogUrl,
         fetchImpl,
         now,
@@ -124,7 +133,7 @@ export function createVenicePrivacyCategoryResolver(input: {
         cachedCatalog = refreshed.catalog;
         return catalogCategory(refreshed.catalog, modelId);
       }
-      cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath));
+      cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
       return catalogIsFresh(cachedCatalog, now(), ttlMs)
         ? catalogCategory(cachedCatalog, modelId)
         : undefined;
@@ -135,6 +144,8 @@ export function createVenicePrivacyCategoryResolver(input: {
     const refreshed = await refreshCatalog({
       apiKey: input.apiKey,
       cachePath,
+      cacheKey,
+      type,
       catalogUrl,
       fetchImpl,
       now,
@@ -146,11 +157,11 @@ export function createVenicePrivacyCategoryResolver(input: {
       cachedCatalog = refreshed.catalog;
       return catalogCategory(refreshed.catalog, modelId);
     }
-    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath));
+    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
     if (catalogIsFresh(cachedCatalog, now(), ttlMs)) {
       return catalogCategory(cachedCatalog, modelId);
     }
-    return venicePrivacyCategoryForModel(modelId);
+    return type === 'embedding' ? undefined : venicePrivacyCategoryForModel(modelId);
   };
 }
 
@@ -196,6 +207,8 @@ function catalogIsFresh(
 async function refreshCatalog(input: {
   apiKey: string;
   cachePath: string;
+  cacheKey: string;
+  type: 'text' | 'embedding';
   catalogUrl: string;
   fetchImpl: VeniceModelCatalogFetch;
   now: () => number;
@@ -204,8 +217,8 @@ async function refreshCatalog(input: {
   signal?: AbortSignal;
 }): Promise<CatalogRefreshOutcome> {
   throwIfAborted(input.signal);
-  const gate = REFRESH_GATES.get(input.cachePath) ?? {};
-  REFRESH_GATES.set(input.cachePath, gate);
+  const gate = REFRESH_GATES.get(input.cacheKey) ?? {};
+  REFRESH_GATES.set(input.cacheKey, gate);
 
   if (gate.inFlight) return awaitWithAbort(gate.inFlight, input.signal);
 
@@ -231,6 +244,7 @@ async function fetchCatalog(
   input: {
     apiKey: string;
     cachePath: string;
+    type: 'text' | 'embedding';
     catalogUrl: string;
     fetchImpl: VeniceModelCatalogFetch;
     timeoutMs: number;
@@ -247,6 +261,7 @@ async function fetchCatalog(
   try {
     response = await input.fetchImpl(input.catalogUrl, {
       method: 'GET',
+      redirect: 'error',
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${input.apiKey}`,
@@ -272,7 +287,7 @@ async function fetchCatalog(
   const models = parseCatalogModels(payload);
   if (!models) return { status: 'failed' };
 
-  const catalog: VeniceModelCatalog = { fetchedAtMs, models };
+  const catalog: VeniceModelCatalog = { fetchedAtMs, type: input.type, models };
   writeCatalogCache(input.cachePath, catalog);
   return { status: 'success', catalog };
 }
@@ -293,7 +308,7 @@ function parseCatalogModels(payload: unknown): Readonly<Record<string, VenicePri
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 
-function readCatalogCache(path: string): VeniceModelCatalog | undefined {
+function readCatalogCache(path: string, type: 'text' | 'embedding'): VeniceModelCatalog | undefined {
   if (!existsSync(path)) return undefined;
   let payload: unknown;
   try {
@@ -302,6 +317,8 @@ function readCatalogCache(path: string): VeniceModelCatalog | undefined {
     return undefined;
   }
   if (!isRecord(payload) || payload.schema_version !== CACHE_SCHEMA_VERSION) return undefined;
+  if (payload.catalog_type !== undefined && payload.catalog_type !== type) return undefined;
+  if (type === 'embedding' && payload.catalog_type !== 'embedding') return undefined;
   if (typeof payload.fetched_at !== 'string' || !isRecord(payload.models)) return undefined;
   const fetchedAtMs = Date.parse(payload.fetched_at);
   if (!Number.isFinite(fetchedAtMs)) return undefined;
@@ -323,7 +340,7 @@ function readCatalogCache(path: string): VeniceModelCatalog | undefined {
     models[modelId] = category;
   }
   if (Object.keys(models).length === 0) return undefined;
-  return { fetchedAtMs, models: Object.freeze(models) };
+  return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 
 function writeCatalogCache(path: string, catalog: VeniceModelCatalog): void {
@@ -333,6 +350,7 @@ function writeCatalogCache(path: string, catalog: VeniceModelCatalog): void {
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
+      catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
       models,
     }, null, 2)}\n`, { mode: 0o600 });

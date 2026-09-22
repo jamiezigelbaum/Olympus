@@ -230,6 +230,7 @@ describe('file-extraction roster follows the live handle registry', () => {
     const asked: string[] = [];
     // Nothing is connected yet — the state the pilot boots in.
     let connectedHandle: string | undefined;
+    let connectedScopes: string[] = [];
 
     try {
       const runtime = createFileExtractionRuntime({
@@ -239,7 +240,8 @@ describe('file-extraction roster follows the live handle registry', () => {
         corpora: fileExtractionCorporaRoster({
           configured: [],
           dropbox: {
-            extractionScopes: [DROPBOX_EXTRACTION_SCOPE],
+            extractionScopes: [],
+            resolveExtractionScopes: () => connectedScopes,
             resolveCredentialHandle: () => connectedHandle,
           },
         }),
@@ -253,6 +255,7 @@ describe('file-extraction roster follows the live handle registry', () => {
 
       // The owner connects Dropbox; the dashboard rebuilds the scheduler source.
       connectedHandle = 'dropbox.personal.connected';
+      connectedScopes = [DROPBOX_EXTRACTION_SCOPE];
       const source = createCanonicalDropboxSchedulerSource({
         policy: dropboxExtractionPolicy(),
         config: schedulerConfig(),

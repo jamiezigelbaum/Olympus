@@ -1,7 +1,7 @@
 /**
  * Which `src/**` modules the public product actually reaches.
  *
- * The public product is what `scripts/release-artifact.ts` builds: the three
+ * The public product is what `scripts/release-artifact.ts` builds: the runtime
  * entrypoints below, bundled with `PUBLIC_RUNTIME_BUILD = true` and the
  * `OLYMPUS_PUBLIC_RUNTIME_EXCLUDE` spans stripped from the modules listed in
  * `scripts/public-runtime-strip.ts`. Anything in `src/` that no entrypoint
@@ -30,6 +30,7 @@ import { PUBLIC_RUNTIME_STRIPPED_MODULES, stripPublicRuntimeExcludedBlocks } fro
 
 export const PUBLIC_ENTRYPOINTS = [
   'src/native-plugin.ts',
+  'src/control-ui.ts',
   'src/cli.ts',
   'src/mcp/server.ts',
   'scripts/source-embedding-drain.ts',

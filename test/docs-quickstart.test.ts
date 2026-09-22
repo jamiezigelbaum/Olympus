@@ -13,8 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Secure search remains lexical-only in `private-cloud-only`');
-    expect(docs).toContain('local presets configure local secure embeddings');
+    expect(docs).toContain('Private search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Existing lexical-only installations require an approved');
+    expect(docs).toContain('Local presets configure local Private embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -22,9 +23,9 @@ describe('first-run docs', () => {
     expect(docs).toContain('olympus setup --preset no-sensitive --yes --dry-run');
     expect(docs).toContain('olympus sensitivity validate');
     expect(docs).toContain('olympus connect google --client-id <google-oauth-client-id>');
-    expect(docs).toContain('olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready');
+    expect(docs).toContain('olympus connect telegram --pair');
     expect(docs).toContain("printf '%s' \"$VENICE_API_KEY\" | olympus connect venice --api-key-stdin");
-    expect(docs).toContain('secure answers are served by the approved Venice');
+    expect(docs).toContain('Private answers are served by the approved Venice');
     expect(docs).not.toContain('E2EE secure-answer ids remain gated until');
     expect(docs).toContain('raise-only guidance');
 
@@ -41,9 +42,9 @@ describe('first-run docs', () => {
 
     const normalizedInstall = install.replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(normalizedInstall).toContain('So tell me about your data: what do you want your assistant to know about, and what are you protective of?');
-    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your secure data?'));
+    expect(install.indexOf('olympus sensitivity validate')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
     expect(install).toContain('Gmail already lives on Google\'s servers');
-    expect(normalizedInstall).toContain('Default categories to **secure** unless the operator explicitly says **secrets**');
+    expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
     expect(install).toContain('Run only the command for the source currently being connected.');
     expect(normalizedInstall).toContain('Setup is complete. In the Olympus dashboard, connect the sources you use.');
     expect(normalizedInstall).toContain('Source selection happens in the dashboard.');
@@ -189,6 +190,8 @@ function relativeMarkdownLinks(markdown: string): Array<{ href: string; path: st
   const links: Array<{ href: string; path: string }> = [];
   for (const match of markdown.matchAll(/!?\[[^\]\n]*\]\(([^)\n]+)\)/g)) {
     const href = match[1]!.trim();
+    // This required response template is replaced with a verified URL at handoff.
+    if (href === '<verified-dashboard-url>') continue;
     if (isExternalOrAnchorHref(href)) continue;
     links.push({ href, path: href.split('#')[0]! });
   }

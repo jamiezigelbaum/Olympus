@@ -37,7 +37,10 @@ import {
   type ReadwiseConnectorStoreTaskOutcome,
   type ReadwiseLiveSyncConfig,
 } from './readwise/index.ts';
-import type { SourceEmbeddingProvider } from './source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from './source-index/embeddings.ts';
 import {
   X_BOOKMARKS_CORPUS_ID,
   XBookmarksLiveSyncError,
@@ -116,6 +119,7 @@ export type SourceSchedulerConstructionReason =
   | 'lane_ready'
   | 'no_handle'
   | 'lane_disabled'
+  | 'scope_pending'
   | 'handle_rebound'
   | 'no_store_sync'
   | 'no_tasks';
@@ -1024,8 +1028,8 @@ export function createCanonicalDropboxSchedulerSource(input: {
   embeddingProvider?: SourceEmbeddingProvider;
 }): SourceSchedulerSource | undefined {
   if (!input.providerSync || !input.store) return undefined;
-  if (input.embeddingProvider && input.embeddingProvider.backend !== 'local') {
-    throw new Error('Dropbox secure_local embeddings require a local/private embedding provider.');
+  if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
+    throw new Error('Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
 
   const metadataScopes = dropboxPolicyApprovedScopeKeys(input.policy);

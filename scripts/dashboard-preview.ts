@@ -1,3 +1,5 @@
+import { ModelSetupService } from '../src/core/model-setup.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 // Local design-iteration harness for the source dashboard.
 // Serves renderDashboardHtmlRoute with fixture data in three states so the
 // pages can be audited in a real browser without a live worker or real
@@ -27,14 +29,15 @@ import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { buildSourceDashboardViewModel, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { renderDashboardHtmlRoute } from '../src/workers/dashboard/index.ts';
 import { renderEmbeddingLedgerPage } from '../src/workers/dashboard/pages/embedding-ledger.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 
-const NOW = new Date('2026-07-07T21:00:00.000Z');
+export const DASHBOARD_PREVIEW_NOW = new Date('2026-07-07T21:00:00.000Z');
+const NOW = DASHBOARD_PREVIEW_NOW;
 // A corpus no dashboard card owns. Every registry corpus has a card today, so
 // the fixture names a store-only corpus id directly.
 const UNCLAIMED_CORPUS_ID = 'internal.fixture-library.derivatives';
@@ -236,7 +239,12 @@ function connectPreview(
   });
 }
 
-function view(state: string) {
+export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'models') {
+    const view = buildDashboardPreviewView('fresh');
+    view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'missing' }).getStatus();
+    return view;
+  }
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -336,6 +344,8 @@ function view(state: string) {
     now: NOW,
   });
 }
+
+const view = buildDashboardPreviewView;
 
 /**
  * What the sample history would have recorded for the /full fixture: Gmail's
@@ -447,8 +457,9 @@ function dropboxPreview(mode: 'initial' | 'update') {
   return result;
 }
 
-const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
-Bun.serve({
+if (import.meta.main) {
+  const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
+  Bun.serve({
   port,
   fetch(request) {
     const url = new URL(request.url);
@@ -482,7 +493,7 @@ Bun.serve({
       || /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
@@ -528,8 +539,9 @@ Bun.serve({
     });
     return new Response(page.html, { status: page.status, headers: { 'content-type': 'text/html; charset=utf-8' } });
   },
-});
-console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-console.log('  states: /fresh /partial /full /dropbox-initial /dropbox-update');
-console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
-console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
+  });
+  console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
+  console.log('  states: /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
+  console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
+}

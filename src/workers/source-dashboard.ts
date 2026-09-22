@@ -1,3 +1,5 @@
+import type { ModelSetupView } from '../core/model-setup.ts';
+import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -173,6 +175,7 @@ export interface DashboardAdvancedByoInstructions {
 }
 
 export interface SourceDashboardViewModel {
+  model_setup?: ModelSetupView;
   kind: 'source_dashboard';
   generated_at: string;
   degraded_credentials?: WorkerCredentialDegradation[];
@@ -311,6 +314,8 @@ export interface DashboardSourceRun {
   duration_seconds?: number;
   items_seen: number;
   items_indexed: number;
+  /** Provider traversal truth; false means this bounded pass did not finish the walk. */
+  traversal_complete?: boolean;
 }
 
 /**
@@ -598,6 +603,13 @@ export interface DashboardSourceCard {
   trust_domain: string;
   /** Shared seven-source capability metadata; always emitted by the builder. */
   capabilities?: PublicSourceDashboardCapability;
+  /** Counts-only declaration that this connected source requires an explicit folder scope. */
+  scope_selection?: {
+    required: true;
+    status: 'scope_pending' | 'approved';
+    connected: boolean;
+    ingestion_enabled?: boolean;
+  };
   setup?: DashboardSourceSetupStatus;
   configured: boolean;
   freshness: {
@@ -649,6 +661,8 @@ export interface DashboardSourceCard {
   ingestion_selection?: {
     metadata_only_files: number;
     full_ingestion_files: number;
+    /** Full-selected files still deferred by a separate standing item policy. */
+    policy_deferred_files?: number;
   };
   /** The only ingestion phase currently proven to be doing work. */
   active_ingestion_phase?: 'metadata_sync' | 'extraction' | 'embedding';
@@ -936,9 +950,9 @@ export type DashboardSourceAction =
  */
 export function dashboardGuidedSessionAgentPrompt(source: 'telegram' | 'whatsapp'): string {
   if (source === 'telegram') {
-    return 'Connect Telegram to Olympus using the supported pairing flow. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.';
+    return 'Connect Telegram to Olympus using the packaged olympus connect telegram --pair command. The dashboard has no Connect/Pair button or login form; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Tell me when the local pairing prompt needs my phone number, login code, or two-factor password so I can enter it there myself. Never ask me to paste a login code or password into this conversation, and never repeat one back. Then help me choose the chats Olympus may read and start the initial sync. Do not ask me to edit files, configuration, or code.';
   }
-  return 'Connect WhatsApp to Olympus using the supported QR pairing flow. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.';
+  return 'Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.';
 }
 
 export interface SourceDashboardHistory {
@@ -977,6 +991,7 @@ export interface SourceDashboardHistorySample {
 }
 
 export interface SourceDashboardBuildOptions {
+  modelSetup?: ModelSetupView;
   sourceIndexStatus: SourceIndexStatusResult;
   ingestionLedger?: SourceIngestionLedgerSnapshot;
   schedulerStatus?: SourceSchedulerStatus;
@@ -1048,6 +1063,9 @@ export interface SourceDashboardBuildOptions {
    * unknown, and unknown keeps today's behaviour of offering the control.
    */
   syncNowAvailable?: (source: DashboardConnectSource) => boolean;
+  /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
+  fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
+  fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
   /**
    * The owner's sensitivity map, already loaded and parsed by the caller.
    *
@@ -1302,7 +1320,7 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
   policy_basis: 'enforced',
   tiers: [
     {
-      name: 'Secrets',
+      name: SENSITIVITY_TIER_LABELS.secrets,
       tier_label: 'S5',
       meaning: 'Refused before storage — content never stored and never reaches any model',
       local: false,
@@ -1310,15 +1328,15 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
       frontier: false,
     },
     {
-      name: 'Secure',
+      name: SENSITIVITY_TIER_LABELS.secure,
       tier_label: 'S4',
-      meaning: 'Kept in your secure store — local models and Venice only, never frontier cloud',
+      meaning: 'Sensitive personal material — local models and Venice only, never frontier cloud',
       local: true,
       venice: true,
       frontier: false,
     },
     {
-      name: 'Private',
+      name: SENSITIVITY_TIER_LABELS.private,
       tier_label: 'S1–S3',
       meaning: 'Everyday mail, files, and notes',
       local: true,
@@ -1326,7 +1344,7 @@ export const DASHBOARD_SENSITIVITY_TIERS: DashboardSensitivityTiers = {
       frontier: true,
     },
     {
-      name: 'Public',
+      name: SENSITIVITY_TIER_LABELS.public,
       tier_label: 'S0',
       meaning: 'Freely shareable material',
       local: true,
@@ -1856,6 +1874,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.contentExtractionStallThresholdHours,
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
+      options.fileSourceScopeStatus?.[definition.source_id],
+      options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
     );
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
@@ -1934,6 +1954,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
 
   return {
     kind: 'source_dashboard',
+    ...(options.modelSetup ? { model_setup: options.modelSetup } : {}),
     generated_at: now.toISOString(),
     ...(degradedCredentials.length
       ? { degraded_credentials: degradedCredentials }
@@ -2020,6 +2041,8 @@ function sourceCardFromDefinition(
   contentExtractionStallThresholdHours: number | undefined,
   registryUnreadable: boolean,
   unpaired: DashboardUnpairedSourceState | undefined,
+  fileSourceScopeStatus: 'scope_pending' | 'approved' | undefined,
+  fileSourceScopeIngestionEnabled: boolean,
 ): DashboardSourceCard {
   const corpusCards = withoutCustodialDoubleCount(
     corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)),
@@ -2093,8 +2116,14 @@ function sourceCardFromDefinition(
   const pairedSession = definition.connect_action.kind === 'guided_session';
   const unpairable = pairedSession && unpaired === undefined
     && (baseConnection.handles.length > 0 || baseConnection.state !== 'not_connected');
+  const connectedFolderSource = fileSourceScopeStatus !== undefined
+    && baseConnection.handles.length > 0
+    && baseConnection.state !== 'reauth_required';
   const connection = {
     ...baseConnection,
+    ...(connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
+      ? { state: 'connected' as const, label: 'connected · choose folders to start', action: { kind: 'none' as const } }
+      : {}),
     ...(!pairedSession && baseConnection.handles.length > 0
       ? { disconnect: dashboardDisconnectAction(definition.source_id as V04PublicSourceId, definition.label) }
       : {}),
@@ -2119,6 +2148,10 @@ function sourceCardFromDefinition(
     ? { state: 'disconnected' as const, label: 'Connect this source' }
     : connection.state === 'reauth_required'
       ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
+      : connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
+        ? { state: 'empty' as const, label: 'Choose folders to start' }
+      : connectedFolderSource && fileSourceScopeStatus === 'approved' && !fileSourceScopeIngestionEnabled
+        ? { state: 'empty' as const, label: 'Ingestion is off for this source' }
       : embeddingLaneDisabled
         ? { state: 'needs_attention' as const, label: 'Embedding lane needs attention' }
         : throughput?.state === 'stalled'
@@ -2129,10 +2162,31 @@ function sourceCardFromDefinition(
             // header, the control and the detail sentence read one pause.
             : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, throughput);
-  const lastRun = lastRunFromCorpora(corpora);
+  const lastRunBase = lastRunFromCorpora(corpora);
+  const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
+  const lastRun = lastRunBase
+    ? {
+        ...lastRunBase,
+        ...(traversalComplete === undefined ? {} : { traversal_complete: traversalComplete }),
+      }
+    : undefined;
   const embeddingBacklog = embeddingBacklogFromCorpora(corpora);
   const embeddingRequired = embeddingRequiredFromCorpora(corpora);
   const vlmQueued = vlmExtractionQueued(ingestionLedgerRow);
+  const exactScopeSelection = scopeSelectionFromCorpora(corpora);
+  const ingestionSelection = exactScopeSelection ?? (
+    ingestionLedgerRow
+      && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined
+      && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined
+      ? {
+          metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
+          full_ingestion_files: Math.max(
+            0,
+            ingestionLedgerRow.items - ingestionLedgerRow.ingestion_health.not_read_by_policy_items,
+          ),
+        }
+      : undefined
+  );
   const card: DashboardSourceCard = {
     corpus_id: definition.primary_corpus_id,
     source_id: definition.source_id,
@@ -2141,23 +2195,20 @@ function sourceCardFromDefinition(
     family: definition.family,
     trust_domain: trustDomain,
     capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
-    configured,
-    freshness,
-    coverage,
-    ...(ingestionLedgerRow
-      && ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items !== undefined
-      && ingestionLedgerRow.ingestion_health.not_read_by_policy_items !== undefined
+    ...(fileSourceScopeStatus !== undefined
       ? {
-          ingestion_selection: {
-            metadata_only_files: Math.max(0, ingestionLedgerRow.ingestion_health.metadata_only_by_policy_items),
-            full_ingestion_files: Math.max(
-              0,
-              ingestionLedgerRow.items
-                - ingestionLedgerRow.ingestion_health.not_read_by_policy_items,
-            ),
+          scope_selection: {
+            required: true as const,
+            status: fileSourceScopeStatus,
+            connected: connectedFolderSource,
+            ingestion_enabled: fileSourceScopeIngestionEnabled,
           },
         }
       : {}),
+    configured,
+    freshness,
+    coverage,
+    ...(ingestionSelection ? { ingestion_selection: ingestionSelection } : {}),
     // Summed from the same corpus cards `coverage` was, so the total here is
     // that field and not a second reading of it.
     needs_review: needsReviewFromReasonCounts(coverage.needs_review_items, needsReviewCounts(corpusCards)),
@@ -2195,7 +2246,6 @@ function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardView
 function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceSetupStatus {
   const connection = card.connection;
   const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
-  const dependenciesReady = synced;
   // A source whose embedding lane is switched off, or which is served without
   // embeddings at all, does not depend on an embedding lane. Listing it anyway
   // put "Approved local embedding lane" on a Dropbox card under a posture with
@@ -2204,17 +2254,30 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
     && card.embedding_required !== false;
   const dependencies = (card.capabilities?.dependencies ?? [])
     .filter((dependency) => dependency.id !== 'local_embedding_lane' || embeddingLaneApplies)
-    .map((dependency) => ({
-      id: dependency.id,
-      label: dependency.label,
-      // Unchecked is not broken. "Run Olympus doctor and repair X" named a
-      // repair for a dependency nothing had yet had reason to exercise, on a
-      // card that had never synced; the first sync is what checks it.
-      status: dependenciesReady ? 'ready' as const : 'check_required' as const,
-      next_action: dependenciesReady
-        ? 'No action needed; a completed source read proves this dependency path.'
-        : 'Checked after the first sync.',
-    }));
+    .map((dependency) => {
+      const ready = dependency.id === 'local_document_extractors'
+        ? card.coverage.content_ready_items > 0
+        : dependency.id === 'local_embedding_lane'
+          ? (card.coverage.embedded_files ?? 0) > 0
+          : synced;
+      return {
+        id: dependency.id,
+        label: dependency.label,
+        status: ready ? 'ready' as const : 'check_required' as const,
+        next_action: ready
+          ? dependency.id === 'local_document_extractors'
+            ? 'No action needed; extracted document text proves this dependency path.'
+            : dependency.id === 'local_embedding_lane'
+              ? 'No action needed; the current embedding lane reports file-level parity.'
+              : 'No action needed; a completed source read proves this dependency path.'
+          : dependency.id === 'local_document_extractors'
+            ? 'Checked when the first selected document produces text.'
+            : dependency.id === 'local_embedding_lane'
+              ? 'Checked when the current embedding lane reports an embedded file.'
+              : 'Checked after the first sync.',
+      };
+    });
+  const dependenciesReady = dependencies.every((dependency) => dependency.status === 'ready');
   if (connection.state === 'not_connected' || connection.state === 'needs_setup') {
     const action = connection.action;
     const pairing = action.kind === 'guided_session';
@@ -2242,6 +2305,14 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       stage: 'credential_or_pairing',
       condition: 'blocked',
       next_action: `Reauthenticate ${card.label} from this page, then run the initial sync again.`,
+      dependencies,
+    };
+  }
+  if (card.scope_selection?.connected && card.scope_selection.status === 'scope_pending') {
+    return {
+      stage: 'scope',
+      condition: 'blocked',
+      next_action: `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
       dependencies,
     };
   }
@@ -2978,7 +3049,8 @@ function connectionStateFromDefinition(
   if (coverage.indexed_items === 0 && coverage.content_ready_items === 0) {
     return {
       state: 'waiting_for_first_sync',
-      label: 'connected, waiting for first sync',
+      label: definition.source_id === 'whatsapp.personal.messages'
+        ? 'connected · waiting for new messages' : 'connected, waiting for first sync',
       action,
       handles: handleIds,
       ...connectedAt,
@@ -3727,6 +3799,30 @@ function numericCounts(corpus: SourceIndexStatusCorpus): Record<string, number> 
   return output;
 }
 
+function scopeSelectionFromCorpora(
+  corpora: readonly SourceIndexStatusCorpus[],
+): DashboardSourceCard['ingestion_selection'] | undefined {
+  const selected = corpora.map(numericCounts).filter((counts) => (
+    counts.scope_full_ingestion_files !== undefined
+    && counts.scope_metadata_only_files !== undefined
+  ));
+  if (selected.length === 0) return undefined;
+  return {
+    full_ingestion_files: selected.reduce(
+      (total, counts) => total + counts.scope_full_ingestion_files!,
+      0,
+    ),
+    metadata_only_files: selected.reduce(
+      (total, counts) => total + counts.scope_metadata_only_files!,
+      0,
+    ),
+    policy_deferred_files: selected.reduce(
+      (total, counts) => total + (counts.scope_policy_deferred_files ?? 0),
+      0,
+    ),
+  };
+}
+
 function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard['coverage'] {
   const indexedItems = firstCount(counts, ['indexed_items', 'files', 'reader_documents']) + firstCount(counts, ['folders'], 0);
   // Items-with-text is the "ready" unit, and the ONLY unit: a chunk count is
@@ -3902,6 +3998,16 @@ function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined)
     }
   }
   return output;
+}
+
+function metadataTraversalCompleteFromSchedulers(
+  schedulers: readonly SourceSchedulerSourceStatus[],
+): boolean | undefined {
+  const tasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'sync'));
+  if (tasks.length === 0) return undefined;
+  const signals = tasks.map((task) => task.last_result?.counts?.traversal_complete);
+  if (signals.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return false;
+  return signals.every((value) => value === 1);
 }
 
 function freshnessFrom(
@@ -4339,7 +4445,7 @@ const DASHBOARD_TRUST_DOMAINS = ['secure_local', 'internal', 'public_safe'];
  * pool carries no explicit order its members are equals — dispatch picks from
  * recent health and latency (`selection: 'health_latency'` in the worker's
  * route plan). Reading `.members` and printing it as a "then" chain asserted a
- * try-this-first order that does not exist, which on the Secure card claimed
+ * try-this-first order that does not exist, which on the Private card claimed
  * the on-device model always answers before the encrypted-cloud one.
  */
 function modelLaneLabels(sovereigntyEngine: SovereigntyEngine, trustDomain: string): {
@@ -4443,11 +4549,11 @@ function familyLabel(family: string): string {
 function trustDomainLabel(trustDomain: string): string {
   switch (trustDomain) {
     case 'secure_local':
-      return 'Secure';
+      return SENSITIVITY_TIER_LABELS.secure;
     case 'internal':
-      return 'Private';
+      return SENSITIVITY_TIER_LABELS.private;
     case 'public_safe':
-      return 'Public';
+      return SENSITIVITY_TIER_LABELS.public;
     default:
       return titleCase(trustDomain.replace(/[_-]/g, ' '));
   }

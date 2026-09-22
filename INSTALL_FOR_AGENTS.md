@@ -457,11 +457,11 @@ sensitivity conversation:
 > **Public** — things that are public or meant to be: your published
 > writing, posts, public links. Any model can work with these.
 >
-> **Private** — ordinary personal and work life: schedules, newsletters,
+> **Personal** — ordinary personal and work life: schedules, newsletters,
 > routine email, most projects. Your assistant's regular models can reason
 > over this — the same models you'd paste it into today.
 >
-> **Secure** — the things you'd only tell someone you trust: health, money,
+> **Private** — the things you'd only tell someone you trust: health, money,
 > legal matters, therapy, your family. This tier is the reason Olympus
 > exists. It never goes to ordinary cloud models, full stop. What *can*
 > happen with it is the one big choice you'll make in a few minutes:
@@ -472,13 +472,13 @@ sensitivity conversation:
 > these, in any lane. Olympus will only ever tell you *where* a secret
 > lives, never what it says.
 >
-> Two rules are hard-wired and not up for configuration: secure data never
+> Two rules are hard-wired and not up for configuration: Private data never
 > touches ordinary cloud models, and when Olympus isn't allowed to answer
 > something, it tells you so instead of quietly downgrading your privacy to
 > get an answer.
 >
 > The tiers are fixed, but what goes *in* them is personal — one person's
-> "eh, whatever" is another person's secure. So tell me about your data:
+> "eh, whatever" is another person's Private. So tell me about your data:
 > what do you want your assistant to know about, and what are you
 > protective of? Talk normally — I'll turn what you say into your personal
 > sensitivity map and read it back to you before anything gets saved.
@@ -499,14 +499,14 @@ Reflect back a proposed map before writing anything — in sentences, in
 the operator's own words, never as a `tier: item, item, item` cram-list:
 
 > Here's what I heard. Your blog and anything you've published stays
-> public. Day-to-day email, calendars, and work projects are private —
+> Public. Day-to-day email, calendars, and work projects are Personal —
 > your regular assistant keeps working with those like it does now.
 > Anything about your health, your finances, and your kids gets the
-> secure treatment we just talked about. And passwords or keys — no model
+> Private treatment we just talked about. And passwords or keys — no model
 > ever sees those. Did I get that right, and is there anything you'd move?
 
-Keep revising until the operator says yes. Default categories to **secure**
-unless the operator explicitly says **secrets**. The map is written before
+Keep revising until the operator says yes. Default categories to **Private**
+unless the operator explicitly says **Secrets**. The map is written before
 `olympus setup` runs, so its directory does not exist yet on a fresh
 machine — create it first, or the write fails with `ENOENT`. Create it
 **owner-only**: this directory holds the operator's sensitivity map, and a
@@ -567,9 +567,27 @@ it.) Then write `~/.olympus/sensitivity-map.json` using schemaVersion 1:
 }
 ```
 
-For this phase, do not write public/private categories into the map: Olympus
-uses it only as raise-only guidance. It may raise matching items to secure or
-secrets, never downgrade them. Validate it before continuing:
+**Stored keys are legacy; labels are display-only.** The JSON above uses the
+legacy machine keys. Never write a key you invented to match a display label:
+the stored `private` key means **Personal** data, and sensitive **Private**
+data is still written as `secure`. Never write `private` (or `targetTierName`
+`private`) for sensitive Private data. The validator rejects Personal
+raise-only categories and mismatched target fields; preserve this exact mapping:
+
+| Stored key (JSON) | Trust tier / domain | Display label |
+|---|---|---|
+| `public` | `S0` / `public_safe` | Public |
+| `private` | `S3` / `internal` | Personal |
+| `secure` | `S4` / `secure_local` | Private |
+| `secrets` | `S5` / `secure_local` | Secrets |
+
+So a therapy category is written with `"targetTierName": "secure"` — never
+`"targetTierName": "private"` — even though you will describe that result to
+the operator as Private.
+
+For this phase, do not write Public/Personal categories into the map: Olympus
+uses it only as raise-only guidance. It may raise matching items to Private or
+Secrets, never downgrade them. Validate it before continuing:
 
 ```bash
 olympus sensitivity validate
@@ -606,6 +624,10 @@ for them, then present all four.
 The operator has likely never heard of Venice, so introduce it once,
 before the options name it:
 
+Use these display labels in conversation and setup summaries. Preset IDs in
+parentheses are command values; keep those IDs in commands and configuration.
+The setup result also supplies `presetLabel` for its human-facing name.
+
 > Two of these options use Venice (venice.ai) — a privacy-focused AI
 > cloud. What it offers is a provider that does not train on your
 > conversations or retain them the way an ordinary cloud model does.
@@ -615,10 +637,10 @@ before the options name it:
 > to read a question. Olympus does not provide or qualify
 > end-to-end-encrypted inference in this version.
 >
-> How do you want to handle your secure data?
+> How do you want to handle your Private data?
 >
-> 1. **Local models and private cloud** (`local-first`) — recommended if
->    you run local models. Secure questions are answered on your own
+> 1. **Local models with Venice fallback** (`local-first`) — recommended if
+>    you run local models. Private questions are answered on your own
 >    machine first; Venice is the approved second step when the local lane
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
@@ -627,26 +649,27 @@ before the options name it:
 >    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
-> 2. **Local models only** (`local-only`) — secure questions are answered
+> 2. **Local models** (`local-only`) — Private questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
 >    runtime with lots of fast memory, plus a Gemini API key (free tier
 >    available) for public and ordinary-private search indexing. Trade-off: no
 >    sensitive-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
-> 3. **Private cloud only** (`private-cloud-only`) — recommended if you do
->    not run local models. Secure content goes only to Venice, on its
->    Private model path — currently `kimi-k3`. Requires: a
+> 3. **Venice** (`private-cloud-only`) — recommended if you do
+>    not run local models. Private content goes only to Venice, on its
+>    Private model path — `kimi-k3` for answers and a separately approved
+>    Private embedding model for Private search. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
 >    available) for public and ordinary-private search indexing. Secure search
 >    stays on this machine as keyword search; secure content never goes to
 >    Gemini. “Only” describes secure-data handling, not all Olympus traffic.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
->    for secure answers, on that provider's word rather than on
+>    for Private answers and embeddings, on that provider's word rather than on
 >    encryption.
 >
-> 4. **Do not add secure data to Olympus** (`no-sensitive`) — Olympus
->    keeps its hands off secure data entirely: it is not imported, not
+> 4. **Don't ingest Private data** (`no-sensitive`) — Olympus
+>    keeps its hands off Private data entirely: it is not imported, not
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
@@ -699,14 +722,29 @@ olympus setup --preset <chosen-preset> --cloud-lane subscription --yes
 
 **Reading the summary: an honest gap looks like a leak until you know the
 shape.** On `no-sensitive` the summary and later `olympus doctor` output
-still show the secure corpora as configured with nothing in them, and the
+still show the Private corpora as configured with nothing in them, and the
 sovereignty policy shows `secure_local` with `"mode": "disabled"` and an
 empty pool. That is `no-sensitive` working: the tier exists so Olympus can
 answer "that's not indexed" honestly, and it is routed nowhere. Do not
 report it to the operator as a problem, and do not try to "fix" it by
 adding a lane they did not choose.
 
-## Step 3 — Prerequisites and secrets
+## Step 3 — Model setup in the dashboard
+
+For the normal browser flow, continue through base-worker and Gateway
+activation in Steps 4–5, then hand over the Setup link in Step 6. Do not require
+keys to be present before that link: the operator enters them in **Models**.
+Connect validates and stores the key privately. After all required keys are
+saved, the managed worker applies them automatically; wait for the Models
+cards to show Ready. Source buttons remain disabled until then. Local-model
+users choose **Connect existing local models**, follow the concrete agent
+prompt, and use **Check readiness** after their configuration is applied.
+
+### Headless credential fallback — only when explicitly chosen
+
+The remaining terminal/password-manager instructions in this step apply only
+when the operator chooses a headless workflow. They are not the normal browser
+installation path.
 
 **Code-block contract:** a code block in your message means exactly one
 thing to the operator — "copy this and run it yourself." Show one only
@@ -722,10 +760,12 @@ report "your keys are set up" after the fact.
 
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
-before this step. It separates Gemini non-secure embeddings, local secure
-embeddings, Venice secure reasoning, and private-cloud-only's keyword search.
+before this step. It separates Gemini Public and Personal embeddings, local Private
+embeddings, Venice Private reasoning, and the approved Venice Private embedding
+fallback when no local provider is configured.
 The worker uses registered dimensions for shipped models when there is no
-override (Gemini Embedding 2: 3072; registered local embedding model: 2560).
+override (Gemini Embedding 2: 3072; registered local embedding model: 2560;
+Venice Qwen3 Embedding 8B: 4096).
 Do not add a dimension flag or edit `worker.env` for those defaults. An unknown
 model still needs a verified explicit dimension; report unsupported custom
 configuration rather than inventing flags or declaring readiness from key
@@ -786,7 +826,7 @@ knowing where a credential lives never authorizes fetching it. Hard limits:
   restarts; the worker env is written once at setup and workers must
   not re-read the manager at runtime.
 - If the operator prefers to paste, that is their call: the dashboard
-  field and stdin flow remain the paste paths, and secrets never go
+  field and built-in masked prompt remain the paste paths, and secrets never go
   through chat.
 
 Setup prints `unmet_prerequisites` with an exact remedy per item. Follow
@@ -803,15 +843,25 @@ them. Typical items:
 printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
 ```
 
-  `$KEY` must be populated without the value reaching your shell history,
-  a log, or chat. Two supported ways, per the credential-sourcing rule
-  above: read it out of the operator's password manager with that
-  manager's CLI, after their per-credential yes and by the exact item name
-  they gave you (`KEY="$(op read '<their reference>')"`, or the Keychain's
-  `security find-generic-password … -w`); or have the operator type it
-  into a silent read in a shell they control (`read -rs KEY`), which
-  echoes nothing. Never `export` it, never echo it back to confirm it, and
-  unset it when the connect returns.
+  The pipeline above is for the authenticated password-manager route only.
+  For manual entry, resolve the installed executable yourself and give the
+  operator one command, using its actual absolute path:
+
+```bash
+"$OLYMPUS_BIN" connect gemini --api-key-prompt
+```
+
+  Substitute the resolved path before handing this to the operator; do not ask
+  them to discover `rootDir` or define `$OLYMPUS_BIN`. Run it in a real terminal
+  on the machine hosting Olympus, under the same user as the worker. For a
+  remote host, identify that host and account explicitly and use the operator's
+  existing SSH access; do not tell them to run a remote path on their laptop.
+  An agent's captured terminal is not a user input surface unless it genuinely
+  hands control to the operator. Never provide a heredoc, `read -rs` function,
+  regex redaction wrapper, or generated helper script. The command reads from
+  the controlling terminal with echo disabled, rejects malformed input, waits
+  again on an empty Enter, and restores terminal settings when it exits.
+  The key is never an argument, environment variable, or chat message.
 
   The command itself is the remedy setup prints for this item, verbatim. The
   command validates the key against Gemini before storing anything, writes
@@ -834,8 +884,10 @@ printf '%s' "$KEY" | olympus connect gemini --api-key-stdin
   [Venice account and API setup](docs/SOVEREIGNTY_CONFIG.md#venice-create-an-account-with-api-access)
   instructions. The operator needs a usable API balance and an Inference Only
   key with an agreed consumption limit; a chat subscription alone is not proof
-  of API readiness. Then connect it via stdin so it never appears in
-  shell history or logs (you run this; do not show it as a copy block):
+  of API readiness. For manual entry, give the resolved equivalent of
+  `"$OLYMPUS_BIN" connect venice --api-key-prompt`; the same terminal rules above
+  apply. For an authenticated manager pipeline, connect via stdin (you run
+  this; do not show it as a copy block):
 
 ```bash
 printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
@@ -910,7 +962,7 @@ three checks are reporting the same gap", or "no mailbox is connected yet"
 — never as a count of failures.
 
 **Translate doctor output; never leak lane jargon.** "Argus" is Olympus's
-internal name for the analyst that serves the secure tier (local models
+internal name for the analyst that serves the Private tier (local models
 or Venice, per the posture) — operators have never heard it. If the
 operator's posture has no local lane, say nothing about Argus, local
 models, or local endpoints: a "note about local models" to someone who
@@ -920,14 +972,19 @@ lanes only for `local-first`/`local-only` postures, in plain words
 
 ## Step 4 — Verify the worker
 
+Separate base activation from model readiness. A running worker and reachable
+dashboard are enough to hand over Models in Setup. Missing model credentials
+are pending dashboard work, not a reason to loop through terminal commands or
+reinstall. Source ingestion remains gated until Models is ready.
+
 **This step verifies; it does not install.** `olympus setup` in Step 2
 already registered the background service, wrote `worker.env`, AND started
 it. Setup's own output says so, under `worker`: `worker.state` is the state
 the service manager reported when setup returned, `worker.next` is the step
 that state calls for, and `worker.activation_detail` appears only when the
 start did not take. On the healthy path `worker.state` is `active` and
-`worker.next` reads `The managed worker is running; open the dashboard with
-olympus dashboard.` Read those three fields before you run anything here —
+`worker.next` reads `The managed worker is running; open Olympus in OpenClaw.
+Use olympus dashboard for standalone access.` Read those three fields before you run anything here —
 they usually make this step a confirmation.
 
 Also check setup's `ok` and `worker.activation`: a failed start or policy
@@ -1189,7 +1246,42 @@ activation. An import failure is a browser/asset delivery failure, not a reason
 to reconnect sources or reinstall the package blindly:
 
 ```bash
-olympus dashboard
+openclaw config validate
+openclaw doctor --lint
+openclaw gateway restart
+```
+
+**Only `openclaw config validate` is the gate.** It must exit green; if it
+does not, stop and fix the config before restarting (MUST NOT #3).
+
+`openclaw doctor --lint` is a report you read, not a gate you must clear.
+It lints the operator's whole OpenClaw install and routinely exits 1 on
+pre-existing warnings that have nothing to do with Olympus — another
+plugin's config, a deprecated key, an unrelated agent. Findings that are
+not about Olympus are **reported to the operator and left alone**: do not
+fix them (you did not cause them and nobody consented to those changes)
+and do not let them block the restart. A lint finding that IS about
+Olympus is a different matter — treat it as a real defect and resolve it
+before restarting.
+
+After the restart, verify the plugin actually loaded. The honest checks
+are:
+
+- the gateway boot line names olympus among the loaded plugins — read it
+  where it actually is, see below, and
+- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
+  and
+- one real tool call succeeds — `olympus source index status`.
+
+**Where the gateway boot line actually lives.** Do not go looking in
+`openclaw logs` or `~/.openclaw/logs/gateway.log`. On `2026.9.1` the
+former printed nothing, and the latter is a stale file that can be months
+old — believing it will tell you the plugin failed to load on a machine
+where it loaded fine. On macOS the live gateway log is a per-day
+JSON-lines file under `/tmp/openclaw/`, so grep the newest one:
+
+```bash
+grep -h 'http server listening' "$(ls -t /tmp/openclaw/openclaw-*.log | head -1)"
 ```
 
 Use the required handoff above once the selected dashboard is open.
@@ -1199,11 +1291,210 @@ opened a browser), and `hint`. Hand the printed `url` to the operator exactly
 as printed, including `?token=dash_…`. The bare `/dashboard` path returns 401;
 do not remove the read-only view token.
 
-The `hint` is the sentence that explains the split, and it is worth
-reading to the operator almost verbatim:
+For a selected native dashboard, also verify `plugins.controlUi.list` includes
+Olympus without a diagnostic and `plugins.controlUi.status` reports successful
+activation from the actual connected browser. Confirm the sidebar entry and
+page render there. A loaded backend and HTTP health alone do not prove browser
+activation. An unusable selected dashboard keeps the handoff incomplete;
+diagnose its asset/transport error without connecting an unrelated source.
 
+**Do not verify by reading `toolNames` from `plugins inspect`.** It is
+`[]` for olympus by design: the tools (`source_answer`,
+`source_index_status`, `source_index_search`) register at runtime when the
+plugin initializes, not in the static manifest inspect reads. An empty
+`toolNames` on a healthy install proves nothing is wrong, and chasing it
+sends you re-installing a plugin that already works.
+
+### Native agent tool access
+
+**Required before setup completion.** A loaded
+plugin, a working dashboard, and a successful CLI status command prove the
+backend; they do not prove the assistant can call Olympus. OpenClaw's `coding`
+profile can filter all Olympus tools while those checks remain green.
+
+Inspect the installed host's schema and the target agent's current tool policy.
+For a fresh configuration with `tools.profile: "coding"` and no existing
+`tools.allow` or `tools.alsoAllow`, enable only the approved Olympus plugin:
+
+```bash
+openclaw gateway call config.schema.lookup --params '{"path":"tools.alsoAllow"}' --json
+openclaw config get tools
+openclaw config set tools.alsoAllow '["olympus"]'
+openclaw config validate
 ```
-This URL carries the read-only view token, not the worker token; unlocking the controls still needs <rootDir>/bin/olympus dashboard token.
+
+Preserve the selected profile and all existing entries. When `alsoAllow` already
+exists, append `olympus` only if absent; when `allow` exists, extend that list
+instead, because OpenClaw rejects `allow` and `alsoAllow` in the same scope.
+Inspect applicable agent, provider, channel, and sandbox restrictions as well.
+Do not remove explicit denies, switch to `full`, grant `group:plugins`, or enable
+unrelated plugins to make Olympus work. An intentional policy restriction is a
+boundary to explain to the operator, not a reason to bypass it. Use the host's
+supported config path and reload procedure; a hot-applied tool-policy change
+does not require another Gateway restart.
+
+Use `tools.catalog` for registration diagnostics and `tools.effective` with the
+actual target `sessionKey` for its projected inventory. Finish with a real
+`source_index_status` call from the operator's intended assistant session and
+check the successful tool result. If the inventory and actual run disagree,
+inspect the run's tool-call evidence; do not repeatedly reinstall or restart to
+make a diagnostic listing change. A CLI fallback, the model saying a tool is
+available, and an empty or truncated diagnostic export do not satisfy this
+check. No source must be connected for the status call. If the call fails,
+report agent integration as incomplete and repair the named failure before the
+source handoff. After a chosen source is ready, Step 7 also requires a native
+`source_answer` call through this same assistant.
+
+For a Hermes Agent install, use the package's narrower MCP-only lane:
+
+```bash
+openclaw plugins inspect olympus --json
+hermes mcp add olympus --command /absolute/managed/olympus/bin/olympus --args serve
+hermes mcp test olympus
+```
+
+Take `plugin.rootDir` from the inspect response and append `/bin/olympus`; do
+not guess OpenClaw's managed storage path and do not assume a global `olympus`
+command exists.
+
+Configure the `olympus` server with
+`tools: { include: [source_answer, source_index_status] }` (the packaged
+`config/hermes/olympus.mcp.yaml` shows the complete YAML), reload MCP, and
+verify the only discovered names are `mcp_olympus_source_answer` and
+`mcp_olympus_source_index_status`. In Step 7, after the chosen source is ready,
+exercise a cited answer through the discovered `mcp_olympus_source_answer`. Do not enable
+`source_index_search`, `source_watch_*`, prompts, or resources for v0.4 Hermes.
+
+The optional `integrations/hermes/ask-sources` adaptation may be copied to
+`~/.hermes/skills/ask-sources` or loaded through `skills.external_dirs`. No
+`hermes://mcp/install` link is published because current Hermes documentation
+does not define that handler, and no external catalog submission is authorized.
+
+## Step 6 — Finish installation: dashboard handoff
+
+**Pre-source completion receipt — mandatory before inviting Connect.** This
+gate applies to source connections, not to opening the Models section. Always
+provide the Setup link after base activation, even when model keys are still
+missing. Do not invite a source Connect until Models is Ready. It proves that the selected posture's
+model/provider wiring is usable by the worker; it does not choose a source,
+and it does not require any source to be connected yet.
+
+Use the provider-specific connect and readiness checks already documented in
+Step 3, then prove the worker consumes that wiring with the existing
+`olympus doctor` and `olympus worker status` checks. The receipt must name:
+
+- **Gemini — every posture.** Its wiring is for Public and Personal
+  embeddings. Gemini is not the Private-answer provider and is never a Private
+  embedding requirement.
+- **Venice — only when the posture uses it.** `local-first` uses Venice as
+  the approved Private-answer escalation; `private-cloud-only` uses Venice for
+  Private answers and, without a local provider, Private embeddings. Verify the
+  embedding model separately: Private catalog classification, endpoint
+  readiness, matching dimensions, and approved cost. `local-only` and
+  `no-sensitive` do not require Venice, so do not ask for or block on a Venice
+  key for those postures. Preserve existing vectors and obtain activation or
+  backfill approval before changing a saved embedding profile.
+- **Native assistant proof (OpenClaw).** The Step 5 `source_index_status` call
+  must succeed from the intended assistant session through the native tool.
+  Worker or dashboard success alone cannot satisfy this check.
+- **Worker consumer proof.** The existing Doctor output must show the relevant
+  `sovereignty_prerequisites`, `worker_credential_lanes`, `source_index_status`,
+  and `email_worker` checks green, and `olympus worker status` must show the
+  worker reachable without degraded credentials. Use the posture's existing
+  remedies when one is red, then rerun the same checks.
+
+A provider key being present, a configured model profile, or a check reported
+as **Skipped** is not readiness. A Venice key also does not prove usable API
+balance. Do not add a new CLI/API/billing probe or a source connection to make
+the receipt look complete. If a required check is not green, say which provider
+wiring remains open and keep source Connect unopened.
+
+Give the operator this honest summary before the source handoff, adapting only
+the observed facts:
+
+> Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
+> for Public and Personal embeddings: `<verified or still open>`.
+> Venice Private-answer and Private-embedding wiring, reported separately:
+> `<verified, not required for this posture, or
+> still open>`. Worker consumer checks: `<green or name the open check>`. No
+> source is connected yet, and I will wait to invite Connect until every
+> required provider check is green.
+
+Deliver the dashboard handoff below after base activation. If Models is not
+ready, direct the operator to finish that section before connecting sources.
+
+**Base installation is complete before source choice.** Report the selected
+posture, model prerequisites, worker health, and successful plugin/tool and
+selected-dashboard activation from Steps 1–5. No connected source is required.
+Resolve and verify the selected dashboard as described below. The final reply
+must contain the actual clickable link, even if the dashboard is already open.
+Replace `<verified-dashboard-url>` with the real operator-facing address; never
+send the placeholder, a host-only loopback URL, or only a terminal command.
+Then deliver this required user-facing handoff:
+
+> Olympus is installed. [Open your Olympus dashboard](<verified-dashboard-url>).
+> In **Setup**, finish any required **Models** cards at the top. Then connect
+> the sources you want below and choose their scope.
+> Use **Home** to see source readiness and anything needing attention, and
+> **Background** to monitor syncing, extraction, and embeddings.
+> You can add more sources whenever you like. Come back here if you have any
+> trouble connecting a source or understanding its progress.
+
+Source selection happens in the dashboard. Do not turn all supported providers
+into a checklist, choose Gmail to satisfy a health hint, or add a chat question
+asking which source to start before the user has chosen a card. Provide help
+for the source the operator selects and only its approved scope. If the
+operator explicitly needs the documented headless fallback, ask which source
+that fallback should connect.
+
+**Drive and Dropbox require scope approval before ingestion.** Connecting an
+account grants access for the folder browser; it does not approve indexing the
+account. Open **Choose folders** on the source card. Use the existing
+Finder-style tree and inspector to choose **Full ingestion**, **Metadata only**,
+or **No ingestion**, then have the operator press **Save scope and start**.
+Browsing lists folder names without indexing or reading file contents.
+Unselected folders stay out; using the entire account requires an explicit
+selection and confirmation. Never select the whole account, confirm scope, or
+press Start for the operator without their instruction.
+
+An empty rule set, a built-in root, a connected credential, or previously cached
+items are not scope approval. Unapproved cached file content remains unavailable
+to search and answers. Reconnection requires review of the current account's
+scope. Preserve retained data; changing scope is not permission to purge it.
+Do not reconnect a source the operator disconnected while resolving a problem.
+Provider/model readiness and any required cost approval remain separate from
+permission to use selected folders.
+
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, use **Olympus** in the Control UI sidebar. For the final reply,
+resolve that page against the same Gateway origin the operator is actually
+using: `/plugin?plugin=olympus&id=dashboard`. Copy the working page's URL; do
+not assume port 18789, reuse the agent host's localhost origin for a remote
+operator, or link only to the OpenClaw chat homepage. Verify that the page loads
+and exposes Setup, Home, and Background before handing it over. Native plugin pages need
+**Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
+managed procedure, and a browser reload. Explain this opt-in and obtain any
+uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
+  WebKit/Safari 26.2 runtime, Secure plugin cookies are rejected over plain
+  localhost/loopback HTTP even though the page is a secure context. For the
+  integrated UI, use Chrome on loopback or an already configured trusted HTTPS
+  route. Do not weaken cookie/authentication settings, expose a new listener,
+  or change certificate trust as an implicit plugin-install step. The integrated page uses the signed-in operator's
+permissions and keeps the worker bearer on the server; it needs no worker-token
+paste. See the [upstream contract](https://docs.openclaw.ai/plugins/feature-plugins).
+
+For native OAuth, verify that `gateway.publicOrigin` names that Gateway's
+HTTPS or literal localhost/loopback HTTP origin. Use the applicable live-change
+procedure for an authorized change; never edit runtime configuration directly
+or send a remote browser to the worker's loopback callback. If native support is absent, or the operator explicitly chooses direct access,
+explain that boundary and use the supported standalone dashboard. If a declared
+native UI fails to appear, inspect `plugins.controlUi.list` and
+`plugins.controlUi.status` first; a loaded backend does not prove browser
+activation. An import failure is a browser/asset delivery failure, not a reason
+to reconnect sources or reinstall the package blindly:
+
+```bash
+olympus dashboard
 ```
 
 (If no worker token exists yet, the hint instead says
@@ -1409,10 +1700,32 @@ locally; never ask them to paste the raw token into chat. Venice still uses the
 approved API-key secret-entry path for the current environment when needed for
 the selected posture.
 
-Telegram/WhatsApp need local pairing helpers. If the dashboard card says to
-pair via your agent, use the existing helper for that source. Omit
-`--session-ready` until the operator has actually paired the session; Olympus
-records the handle as `reauth_required` until then.
+Telegram and WhatsApp use the packaged pairing commands below. The dashboard
+has **Ask your agent**, not a Connect/Pair button or a phone/code form. Never
+send the operator back to a nonexistent control or regenerate a dashboard link
+as a substitute for starting pairing.
+
+```bash
+olympus connect telegram --pair
+olympus connect whatsapp --pair
+```
+
+Run only the selected command in a private terminal the operator can actually
+use on the Olympus host. If your captured tool terminal is not accessible to
+them, give one complete SSH command with the correct host, account, and
+resolved Olympus executable. Do not ask for login codes, API hashes, or 2FA
+passwords in chat. Telegram uses the operator's own app API ID/hash from
+https://my.telegram.org, then phone/code/2FA entry; it needs Python with
+Telethon. WhatsApp needs Go and a C compiler for the packaged bridge build;
+the command builds into an Olympus cache, never into the managed plugin.
+WhatsApp shows a scannable QR in the private terminal. This guided pairing
+flow treats messaging as Private data; it refuses under Don't ingest Private
+data rather than capturing it outside that policy. Pairing is verified
+before the operator approves chat/account capture scope. The command then
+registers the verified session and starts capture through the managed worker.
+
+`--session-path` / `--session-ready` remain advanced imports of an already
+verified session. Never use them to skip the normal pairing proof.
 
 **QR delivery (WhatsApp): render the QR as a local PNG image file and show
 that image to the operator.** Do not paste terminal QR blocks or ASCII art
@@ -1450,8 +1763,8 @@ stdout. Its exit status is the pass/fail signal — you do not have to grade
 the output yourself. Exit 0 is green.
 
 Confirm in the answer's audit block that `analyst_backend` matches the
-chosen posture (e.g. `venice` for private-cloud-only secure answers, `local`
-for local-only secure answers).
+chosen posture (e.g. `venice` for `private-cloud-only` Private answers, `local`
+for `local-only` Private answers).
 
 The private source worker lane is on by default, so a fresh install
 should not see `email_not_configured` at all. If it does, the lane was
@@ -1487,7 +1800,8 @@ The dashboard shows a credential alert for the same condition — it
 should be absent. Then return to the selected Olympus dashboard — a protected view of source
 freshness and where public, private, secure, and secrets are allowed to go.
 
-Report to the operator: what was installed, the chosen posture, which
+End with the required Step 6 dashboard link and connect/monitor instructions.
+Also report what was installed, the chosen posture, which
 sources are connected, which prerequisites remain open, and the doctor
 summary. Report base installation and cited-answer proof separately. Explain every
 non-green doctor check; resolve required model or worker failures before

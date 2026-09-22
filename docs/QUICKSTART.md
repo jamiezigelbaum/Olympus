@@ -44,10 +44,10 @@ The preset prerequisites are:
 
 | Preset | Required before first source answer |
 |---|---|
-| `local-first` | Gemini key for non-secure embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
-| `local-only` | Gemini key for non-secure embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
-| `private-cloud-only` | Gemini key for non-secure embeddings; a funded Venice API key for secure answers. Secure search is local keyword search, with no secure embedding model or local server required. |
-| `no-sensitive` | Gemini key for non-secure embeddings. Secure content is unavailable to answering. |
+| `local-first` — Local models with Venice fallback | Gemini key for Public and Personal embeddings; a funded Venice API key; local answer and embedding models with exact registered IDs and matching output dimensions. Both shipped local profiles use `http://127.0.0.1:28090/v1`. |
+| `local-only` — Local models | Gemini key for Public and Personal embeddings; local answer and embedding models with exact registered IDs and matching output dimensions, using `http://127.0.0.1:28090/v1` in the shipped preset. No Venice account is needed. |
+| `private-cloud-only` — Venice | Gemini key for Public and Personal embeddings; a funded Venice API key for Private answers and approved Private embeddings; no local server required. Confirm the embedding model, dimensions, and cost before activation. |
+| `no-sensitive` — Don't ingest Private data | Gemini key for Public and Personal embeddings. Private content is unavailable to answering. |
 
 A local runtime means a server actually answering at the effective policy's
 endpoints and serving its exact answer and embedding model IDs. An
@@ -58,7 +58,7 @@ Setup and `olympus doctor` print any missing preset prerequisites with the
 exact command or local-server action to take.
 
 Nothing in this guide sends your data anywhere until *you* describe what
-counts as public, private, secure, and secrets, then choose a privacy posture
+counts as Public, Personal, Private, and Secrets, then choose a privacy posture
 in step 2. That choice is the heart of Olympus.
 
 ---
@@ -156,10 +156,12 @@ change it. Setting it yourself first means it never has to.
 
 The installer-agent flow asks this conversationally: "Tell me about your data
 — what do you want your assistant to know about, and what are your privacy
-concerns?" For the hand path, write only secure/secrets categories in this
-phase. Public/private entries are not accepted yet because the map is
-raise-only guidance: it may raise matching items to secure or secrets, never
-downgrade them.
+concerns?" For the hand path, write only Private/Secrets categories in this
+phase. Public/Personal entries are not accepted yet because the map is
+raise-only guidance: it may raise matching items to Private or Secrets, never
+downgrade them. The stored keys keep their legacy names — `secure` is Private,
+and the legacy `private` key means Personal — so sensitive Private data is
+written with `"targetTierName": "secure"`, never `"private"`.
 
 ```bash
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes
@@ -170,8 +172,28 @@ user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
 worker rather than installing a second one.
 
-If setup reports unmet prerequisites, follow the printed remedies before your
-first indexing or `source_answer` call. Common examples:
+If setup reports missing model keys, finish base activation and open Setup.
+The Models section accepts the required Gemini/Venice keys and applies them;
+source connections unlock when it is ready. Existing local models use the
+agent-assisted starting point and Check readiness. No local model software is
+installed or maintained by Olympus.
+
+Only for an explicitly chosen headless workflow, run one key command at a time
+on the Olympus host, completing its private prompt before the next:
+
+```bash
+olympus connect gemini --api-key-prompt
+olympus connect venice --api-key-prompt
+```
+
+Each command opens a masked terminal prompt. Paste only when prompted; the key
+is not echoed or entered into shell history. Empty Enter waits again. The agent
+should provide the resolved executable path if `olympus` is not on PATH.
+
+For an already authenticated password-manager CLI, the existing stdin route
+remains available. These variables represent in-memory manager output, never
+keys pasted into commands:
+
 
 ```bash
 printf '%s' "$GEMINI_API_KEY" | olympus connect gemini --api-key-stdin
@@ -186,9 +208,9 @@ file — do not hand-edit it. A key containing a single quote is refused rather
 than stored; rotate it at the provider for one without.
 
 For `local-first` and `local-only`, start your local OpenAI-compatible model
-server before relying on secure source answers.
+server before relying on Private source answers.
 
-On `no-sensitive`, setup and doctor still list the secure corpora as configured
+On `no-sensitive`, setup and doctor still list the Private corpora as configured
 and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
 gap the preset promises, not a misconfiguration.
 
@@ -203,12 +225,12 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 
 - **Your privacy posture** — the one decision that matters. Four presets:
 
-  | Preset | Public/private content | Secure content: health, finance, legal, therapy, family |
+  | Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
   |---|---|---|
-  | `local-first` | frontier cloud | secure pool explicitly ordered local → Venice Private |
+  | `local-first` | frontier cloud | Private pool explicitly ordered local → Venice Private |
   | `local-only` | frontier cloud | your own local models only |
   | `private-cloud-only` | frontier cloud | Venice Private `kimi-k3` only |
-  | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a secure lane) |
+  | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a Private lane) |
 
   In `private-cloud-only`, secure answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. “Only” describes
@@ -217,12 +239,13 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
-  release claim. Secure search remains lexical-only in `private-cloud-only`;
-  local presets configure local secure embeddings. Olympus never falls back
-  to an ordinary cloud embedding provider for secure data. `local-only` never uses
+  release claim. Existing lexical-only installations require an approved
+  embedding activation/backfill; preserve their current vectors and settings.
+  Local presets configure local Private embeddings. Olympus never falls back
+  to an ordinary cloud embedding provider for Private data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
-  sees secure data.
-  Turning secure data off is
+  sees Private data.
+  Turning Private data off is
   always an explicit preset choice, never a silent default.
 - **Your cloud lane** — by default Olympus reasons through your existing
   OpenClaw subscription (no API key needed). API-key providers are the
@@ -318,12 +341,29 @@ openclaw gateway restart
 exits 1 on pre-existing warnings that have nothing to do with Olympus; read
 those, but they do not block the restart.
 
-This loads the Olympus tools into your agent: `source_answer`,
-`source_index_status`, and `source_index_search`. They register when the plugin
-initializes, so `openclaw plugins inspect olympus --json` reports an empty
-`toolNames` by design — that is not a failed load. Verify instead that the
-gateway boot line lists olympus, that inspect reports `"status": "loaded"`,
-and that `olympus source index status` returns.
+Olympus registers `source_answer`, `source_index_status`, and
+`source_index_search` when the plugin initializes. OpenClaw's tool profile must
+also permit them. A working dashboard or CLI does not prove agent access;
+`plugins inspect` can report an empty static `toolNames` list on a healthy install.
+
+For a fresh `coding` profile with no existing `tools.allow` or `tools.alsoAllow`:
+
+```bash
+openclaw config get tools
+openclaw config set tools.alsoAllow '["olympus"]'
+openclaw config validate
+```
+
+If a list already exists, preserve its entries and add `olympus` to that list;
+do not combine `allow` and `alsoAllow` in the same scope. Keep the current
+profile and intentional denies. Agent/provider/sandbox restrictions may also
+apply. Follow the [native tool-access check](../INSTALL_FOR_AGENTS.md#native-agent-tool-access)
+for the installed host's schema and policy diagnostics.
+
+Before declaring setup complete, ask your intended OpenClaw assistant to call
+`source_index_status` and verify a successful tool result. No connected source
+is needed for this check. A model's assurance or a CLI fallback is insufficient.
+The current host can hot-apply the tool-policy change without another restart.
 
 The boot line is not where you would guess. `openclaw logs` printed nothing
 on `2026.9.1`, and `~/.openclaw/logs/gateway.log` can be months stale. On

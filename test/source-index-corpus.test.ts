@@ -3,6 +3,7 @@ import {
   buildSourceIndexCorpusRegistry,
   defineSourceIndexCorpus,
 } from '../src/core/source-index/corpus.ts';
+import { defineConnectorCorpus } from '../src/workers/connector-store/local-index.ts';
 
 describe('source-index corpus registry', () => {
   test('defaults secure-local corpora to S4 local SQLite-family storage', () => {
@@ -59,6 +60,17 @@ describe('source-index corpus registry', () => {
     });
     expect(corpus.embeddingPolicy).toBe('cloud_allowed_by_policy');
     expect(corpus.defaultSensitivity.trustTier).toBe('S3');
+  });
+
+  test('forwards an explicit secure cloud embedding policy on dynamic connector corpora', () => {
+    const corpus = defineConnectorCorpus({
+      corpusId: 'secure_local.dynamic.files',
+      family: 'file',
+      trustDomain: 'secure_local',
+      embeddingPolicy: 'cloud_allowed_by_policy',
+    });
+
+    expect(corpus.embeddingPolicy).toBe('cloud_allowed_by_policy');
   });
 
   test('rejects mismatched storage and sensitivity trust domains', () => {

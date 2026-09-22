@@ -1,10 +1,15 @@
+import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
+import { olympusPackageRoot } from './core/package-root.ts';
+import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
+import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from './core/messaging-capture.ts';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
+import { DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY } from './core/dashboard-launch.ts';
 import {
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
@@ -53,6 +58,7 @@ import {
   SOVEREIGNTY_PRESETS,
   defaultSovereigntyConfigPath,
   loadSovereigntyPreset,
+  loadSovereigntyEngine,
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
@@ -240,8 +246,22 @@ async function main(): Promise<void> {
       console.log(runDashboardTokenCommand());
       return;
     }
-    const result = runDashboardCommand();
-    console.log(JSON.stringify(result, null, 2));
+    try {
+      // Async because the opening link is MINTED against this install's own
+      // configured worker, with a ticket that only that worker can redeem.
+      const noOpen = args.includes('--no-open');
+      const result = args.includes('--read-only')
+        ? runDashboardReadOnlyCommand({ noOpen })
+        : await runDashboardCommand({ noOpen });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
     return;
   }
 
@@ -1014,14 +1034,14 @@ function printHelp(): void {
   console.log('  olympus sensitivity validate [--path ~/.olympus/sensitivity-map.json]');
   console.log('  olympus worker install [--platform darwin|linux] [--dry-run]');
   console.log('  olympus worker start|stop|restart|status|foreground|upgrade|uninstall');
-  console.log('  olympus dashboard');
+  console.log('  olympus dashboard [--read-only] [--no-open]');
   console.log('  olympus dashboard token');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
-  console.log('  olympus connect telegram|whatsapp --session-path <path>');
-  console.log('  olympus connect venice|readwise --api-key-stdin');
-  console.log('  olympus connect gemini --api-key-stdin');
+  console.log('  olympus connect telegram|whatsapp --pair');
+  console.log('  olympus connect venice|readwise --api-key-prompt');
+  console.log('  olympus connect gemini --api-key-prompt');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
@@ -1047,13 +1067,13 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect gmail': 'olympus connect gmail --client-id <id>',
   'connect google-drive': 'olympus connect google-drive --client-id <id>',
   'connect dropbox': 'olympus connect dropbox --client-id <id>',
-  'connect telegram': 'olympus connect telegram --session-path <path>',
-  'connect whatsapp': 'olympus connect whatsapp --session-path <path>',
-  'connect venice': 'olympus connect venice --api-key-stdin',
-  'connect readwise': 'olympus connect readwise --api-key-stdin',
-  'connect gemini': 'olympus connect gemini --api-key-stdin',
+  'connect telegram': 'olympus connect telegram --pair',
+  'connect whatsapp': 'olympus connect whatsapp --pair',
+  'connect venice': 'olympus connect venice --api-key-prompt',
+  'connect readwise': 'olympus connect readwise --api-key-prompt',
+  'connect gemini': 'olympus connect gemini --api-key-prompt',
   'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
-  dashboard: 'olympus dashboard',
+  dashboard: 'olympus dashboard [--read-only] [--no-open]',
   'data export': 'olympus data export --output <dir> [--source <id>]',
   'data verify': 'olympus data verify --input <dir>',
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
@@ -1071,6 +1091,9 @@ function printPublicLeafCommandHelp(args: string[]): boolean {
   const usage = PUBLIC_LEAF_USAGE[commandName];
   if (!usage) throw new Error(`Missing public leaf help for ${commandName}.`);
   console.log(`Usage: ${usage}`);
+  if (['connect gemini', 'connect venice', 'connect readwise'].includes(commandName)) {
+    console.log('For an authenticated password-manager pipeline, use --api-key-stdin instead.');
+  }
   return true;
 }
 
@@ -1113,9 +1136,9 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     'Commands:',
     '  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin]',
     '  olympus connect dropbox --client-id <id>',
-    '  olympus connect telegram|whatsapp --session-path <path>',
-    '  olympus connect venice|readwise --api-key-stdin',
-    '  olympus connect gemini --api-key-stdin',
+    '  olympus connect telegram|whatsapp --pair',
+    '  olympus connect venice|readwise --api-key-prompt',
+    '  olympus connect gemini --api-key-prompt',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -1871,9 +1894,9 @@ async function runConnect(args: string[]): Promise<unknown> {
       usage: [
         'olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
-        'olympus connect telegram|whatsapp --session-path <path> [--session-ready]',
-        'olympus connect venice|readwise --api-key-stdin',
-        'olympus connect gemini --api-key-stdin',
+        'olympus connect telegram|whatsapp --pair',
+        'olympus connect venice|readwise --api-key-prompt',
+        'olympus connect gemini --api-key-prompt',
         'olympus connect status [google|gmail|google-drive|dropbox]',
       ],
     };
@@ -1904,6 +1927,18 @@ async function runConnect(args: string[]): Promise<unknown> {
   const source = rawSource as ConnectSource;
   const rest = args.slice(1);
   const options = parseConnectOptions(rest);
+  if (options.pair && source !== 'telegram' && source !== 'whatsapp') {
+    throw new OperationError('invalid_params', '--pair is supported only for Telegram and WhatsApp.');
+  }
+  if (options.pair && (options.sessionPath || options.sessionReady)) {
+    throw new OperationError('invalid_params', '--pair verifies its own session; do not combine it with session import flags.');
+  }
+  if (options.apiKeyPrompt && options.apiKeyStdin) {
+    throw new OperationError('invalid_params', 'Choose either --api-key-prompt or --api-key-stdin, not both.');
+  }
+  if (options.apiKeyPrompt && source !== 'gemini' && source !== 'venice' && source !== 'readwise') {
+    throw new OperationError('invalid_params', '--api-key-prompt is supported only for Gemini, Venice, and Readwise.');
+  }
   const secretStore = createDefaultSecretStore({
     env: {
       ...process.env,
@@ -1972,6 +2007,7 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'telegram' || source === 'whatsapp') {
+    if (options.pair) return await runMessagingPairing(source, secretStore, options.registryPath);
     if (!options.sessionPath) throw new OperationError('invalid_params', '--session-path is required.');
     return connectGuidedSession({
       source,
@@ -1983,24 +2019,76 @@ async function runConnect(args: string[]): Promise<unknown> {
     });
   }
   if (source === 'gemini') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
-    return connectGeminiApiKey({ apiKey: await readApiKeyFromStdin() });
+    return connectGeminiApiKey({ apiKey: options.apiKeyPrompt
+      ? await readSecretFromTerminal('Gemini API key (input hidden): ')
+      : await readApiKeyFromStdin() });
   }
   if (source === 'venice' || source === 'readwise') {
-    if (!options.apiKeyStdin) {
-      throw new OperationError('invalid_params', '--api-key-stdin is required so API keys are not exposed in shell history.');
+    if (!options.apiKeyStdin && !options.apiKeyPrompt) {
+      throw new OperationError('invalid_params', 'Use --api-key-prompt for masked terminal entry or --api-key-stdin for an authenticated manager pipeline.');
     }
     return connectPublicApiKeySource({
       source,
-      apiKey: await readApiKeyFromStdin(),
+      apiKey: options.apiKeyPrompt
+        ? await readSecretFromTerminal(`${source === 'venice' ? 'Venice' : 'Readwise'} API key (input hidden): `)
+        : await readApiKeyFromStdin(),
       ...(options.accountRole ? { accountRole: options.accountRole } : {}),
       ...(options.registryPath ? { registryPath: options.registryPath } : {}),
       secretStore,
     });
   }
   throw new OperationError('invalid_params', `Unsupported connect source: ${source}`);
+}
+
+async function runMessagingPairing(
+  source: 'telegram' | 'whatsapp',
+  secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
+  registryPath?: string,
+): Promise<unknown> {
+  const policy = loadSovereigntyEngine().config;
+  if (policy.routes.secure_local?.mode === 'disabled' || policy.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+    throw new OperationError('invalid_params', 'This pairing flow captures messaging as Private data. Your current privacy choice excludes it; ask your agent to review that choice before pairing.');
+  }
+  let terminal: number;
+  try { terminal = openSync('/dev/tty', 'r+'); }
+  catch { throw new OperationError('invalid_params', 'Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.'); }
+  const tell = (text: string) => writeSync(terminal, text);
+  try {
+    tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.\n`);
+    const paired = await pairMessagingSource({
+      source,
+      packageRoot: olympusPackageRoot(),
+      ...(secretStore ? { secretStore } : {}),
+      ...(registryPath ? { registryPath } : {}),
+      whatsappQrMode: 'terminal',
+      requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
+        if (source === 'telegram') {
+          if (chats.length === 0) { tell('No chats were available to select. Nothing will be captured.\n'); return undefined; }
+          chats.forEach((chat, index) => tell(`${index + 1}. ${chat.title.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '')}\n`));
+          const answer = await readSecretFromTerminal('Choose chat numbers separated by commas, or type CANCEL (input hidden): ');
+          if (answer.trim().toUpperCase() === 'CANCEL') return undefined;
+          const indices = answer.split(',').map((value) => Number(value.trim()) - 1);
+          if (indices.some((index) => !Number.isInteger(index) || index < 0 || index >= chats.length)) {
+            throw new OperationError('invalid_params', 'Chat selection was invalid; no capture scope was approved. Run pairing again to choose chats.');
+          }
+          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(indices.map((index) => chats[index]!.chatScope))] };
+        }
+        tell('WhatsApp captures new messages delivered for the linked account while its bridge runs; this does not import the full historical archive.\n');
+        const answer = await readSecretFromTerminal('Type ALL to approve this account, or CANCEL to leave capture off (input hidden): ');
+        return answer.trim() === 'ALL' ? { source: 'whatsapp', explicitApproval: true, wholeAccount: true } : undefined;
+      },
+    });
+    if (!paired.registered) return paired;
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });
+    tell('Pairing and scope verified. Restarting the managed Olympus worker to start capture.\n');
+    const activation = runWorkerLifecycle('restart');
+    return { ...paired, captureStarted: false, captureActivation: activation.ok ? 'requested' : 'needs_attention', next: activation.ok
+      ? 'Open this source in the Olympus dashboard to monitor capture and initial indexing.'
+      : 'Pairing is saved. Ask your agent to repair the managed worker before capture can start.' };
+  } finally { closeSync(terminal); }
 }
 
 function parseConnectOptions(args: string[]): {
@@ -2022,9 +2110,11 @@ function parseConnectOptions(args: string[]): {
   secretStoreKeyPath?: string;
   sessionPath?: string;
   sessionReady: boolean;
+  pair: boolean;
   apiKeyStdin: boolean;
+  apiKeyPrompt: boolean;
 } {
-  const options = { detach: false, noOpen: false, sessionReady: false, apiKeyStdin: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
+  const options = { detach: false, noOpen: false, sessionReady: false, pair: false, apiKeyStdin: false, apiKeyPrompt: false, clientSecretStdin: false } as ReturnType<typeof parseConnectOptions>;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -2086,8 +2176,14 @@ function parseConnectOptions(args: string[]): {
       case '--session-path':
         options.sessionPath = nextValue();
         break;
+      case '--pair':
+        options.pair = true;
+        break;
       case '--session-ready':
         options.sessionReady = true;
+        break;
+      case '--api-key-prompt':
+        options.apiKeyPrompt = true;
         break;
       case '--api-key-stdin':
         options.apiKeyStdin = true;
@@ -2282,42 +2378,210 @@ export function runDashboardTokenCommand(env: Record<string, string | undefined>
   return token;
 }
 
-function runDashboardCommand(): { url: string; opened: boolean; hint: string } {
+type DashboardFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface DashboardCommandDependencies {
+  /** The bearer-mint round trip. Injected by tests; production uses fetch. */
+  fetchImpl?: DashboardFetch;
+  /** The desktop opener. Injected by tests; production uses open/xdg-open. */
+  openImpl?: (url: string) => boolean;
+  /** Mint and return the link without consuming it in a local browser. */
+  noOpen?: boolean;
+}
+
+const DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The bounded standalone opening handoff (owner request, 2026-09-13).
+ *
+ * The reader runs one command and gets one link. Everything that used to be
+ * their problem is now this function's: it resolves the worker token the way
+ * `olympus dashboard token` already does (worker.env outranks a stale config),
+ * asks THIS install's OWN configured worker — never a host from a response,
+ * never a redirect — for a 120-second single-use ticket bound to that origin,
+ * and returns a link whose fragment carries only that ticket. The page at
+ * `/dashboard/launch` clears the fragment and redeems it, and the worker
+ * answers with the same origin-bound HttpOnly control cookie a manual unlock
+ * mints. So the reader never finds rootDir, never copies a durable token, and
+ * never pastes a secret into a page.
+ *
+ * There is no fallback on failure. A reader who is handed the old link without
+ * being told is a reader who cannot unlock the controls, which is the exact
+ * confusion this replaces; the error names the worker that refused. The legacy
+ * read-only view link stays available, by name, as `--read-only`.
+ */
+export async function runDashboardCommand(
+  dependencies: DashboardCommandDependencies = {},
+): Promise<{ url: string; opened: boolean; hint: string }> {
   const config = loadConfig();
-  const base = config.email.baseUrl.replace(/\/v1\/?$/, '');
-  // The same resolution `olympus dashboard token` uses, and for the same
-  // reason: this token is minted into a URL the reader is about to open.
+  const base = workerRootBaseUrl(config.email.baseUrl);
   const token = resolveWorkerAuthToken(process.env, config);
-  const url = `${base}/dashboard`;
-  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(token);
-  const openUrl = dashboardToken ? `${url}?token=${encodeURIComponent(dashboardToken)}` : url;
+  const openUrl = await mintDashboardOpeningUrl(base, token, dependencies);
   let opened = false;
-  try {
-    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    const child = Bun.spawnSync([opener, openUrl], { stdout: 'ignore', stderr: 'ignore' });
-    opened = child.exitCode === 0;
-  } catch {
-    opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
   }
-  // The URL printed is the URL that works. `dash_` is a DERIVED, read-only view
-  // token, not the worker bearer: workers/dashboard/index.ts states it is the
-  // only way a browser reaches this HTML, because a bearer header cannot be
-  // typed into an address bar. workers/http.ts admits it to GET /dashboard and
-  // GET /dashboard.json, and to nothing else — no control route, and no method
-  // but GET. Printing the bare path handed the reader a URL that 401s and no
-  // way to tell why (clean-install rehearsal, 2026-09-05). It carries no
-  // control authority, so it is not the secret the token command exists to hand
-  // over — that one still never appears here.
   return {
     url: openUrl,
     opened,
-    hint: dashboardToken
-      ? 'This URL carries the read-only view token, not the worker token;'
-        + ` unlocking the controls still needs ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token.`
-      : `No worker auth token found; run ${OLYMPUS_PLUGIN_BIN_HINT} setup first, then`
-        + ` ${OLYMPUS_PLUGIN_BIN_HINT} dashboard token for the unlock value`
-        + ' (rootDir comes from openclaw plugins inspect olympus --json).',
+    hint: dependencies.noOpen
+      ? 'This fresh single-use 120-second link was not opened locally and is ready to hand to the intended browser.'
+      : 'This link carries a single-use 120-second ticket, not the worker token;'
+        + ' open it in the browser you want unlocked, and the dashboard unlocks itself.'
+        + ` For the read-only view link instead, run ${OLYMPUS_PLUGIN_BIN_HINT} dashboard --read-only.`,
   };
+}
+
+/**
+ * The legacy read-only view link: `?token=dash_` on GET /dashboard.
+ *
+ * `dash_` is a DERIVED read token, not the worker bearer: `workers/http.ts`
+ * admits it to GET /dashboard and GET /dashboard.json and to nothing else — no
+ * control route, and no method but GET. It therefore authorizes reading and no
+ * control, which is why it is the right default for a heads-up view and the
+ * wrong one for "open my dashboard and let me act". Printing the bare path
+ * handed the reader a URL that 401s and no way to tell why (clean-install
+ * rehearsal, 2026-09-05), so a URL without a token is never printed.
+ */
+function runDashboardReadOnlyCommand(
+  dependencies: Pick<DashboardCommandDependencies, 'noOpen' | 'openImpl'> = {},
+): { url: string; opened: boolean; hint: string } {
+  const config = loadConfig();
+  const base = workerRootBaseUrl(config.email.baseUrl);
+  const dashboardToken = dashboardQueryTokenFromWorkerAuthToken(resolveWorkerAuthToken(process.env, config));
+  const openUrl = dashboardToken
+    ? `${base}/dashboard?token=${encodeURIComponent(dashboardToken)}`
+    : '';
+  if (!openUrl) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is no read-only view link to mint.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  let opened = false;
+  if (!dependencies.noOpen) {
+    try {
+      opened = dependencies.openImpl
+        ? dependencies.openImpl(openUrl)
+        : openInDesktopBrowser(openUrl);
+    } catch {
+      opened = false;
+    }
+  }
+  return {
+    url: openUrl,
+    opened,
+    hint: dependencies.noOpen
+      ? 'This read-only view link was not opened locally, so it is ready to hand to the intended browser.'
+      : 'This URL carries the read-only view token, not the worker token, so it cannot change anything;'
+        + ` open ${OLYMPUS_PLUGIN_BIN_HINT} dashboard (without --read-only) for a link that can.`,
+  };
+}
+
+/** The worker ROOT: the configured base without its /v1 API suffix. */
+function workerRootBaseUrl(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL is not a valid URL.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  if (url.username || url.password) {
+    throw new OperationError('config_error', 'The configured worker URL must not carry embedded credentials.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL must use HTTP or HTTPS.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+  if (path !== '/' && path !== '/v1') {
+    throw new OperationError(
+      'config_error',
+      'The configured worker URL path must be /v1 or the origin root.',
+      'Set OLYMPUS_EMAIL_BASE_URL to the worker origin, for example http://127.0.0.1:8010/v1.',
+    );
+  }
+  return url.origin;
+}
+
+/**
+ * Mint the opening ticket from this install's own worker.
+ *
+ * `redirect: 'error'` is the load-bearing part: the bearer travels with this
+ * request, so a worker (or anything answering as one) that tries to redirect
+ * it is refused outright rather than followed to a host the reader never
+ * configured. A refusal, an invalid body, or an unreachable worker is an
+ * error naming that worker — never a silent downgrade to the old link.
+ */
+async function mintDashboardOpeningUrl(
+  base: string,
+  token: string | undefined,
+  dependencies: DashboardCommandDependencies,
+): Promise<string> {
+  if (!token) {
+    throw new OperationError(
+      'config_error',
+      'No worker auth token is configured, so there is nothing to unlock.',
+      `Run ${OLYMPUS_PLUGIN_BIN_HINT} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`,
+    );
+  }
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/dashboard/control/launch`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, Origin: base },
+      redirect: 'error',
+      signal: AbortSignal.timeout(DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker did not answer the opening request.',
+      `Start the worker (${OLYMPUS_PLUGIN_BIN_HINT} worker status) and run this again.`,
+    );
+  }
+  if (!response.ok) {
+    throw new OperationError(
+      'email_unreachable',
+      `The configured Olympus worker refused the opening request with HTTP ${response.status}.`,
+      `Check ${OLYMPUS_PLUGIN_BIN_HINT} worker status, then run this again.`,
+    );
+  }
+  let ticket: unknown;
+  try {
+    ticket = (await response.json() as { ticket?: unknown }).ticket;
+  } catch {
+    ticket = undefined;
+  }
+  if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+    throw new OperationError(
+      'email_unreachable',
+      'The configured Olympus worker answered the opening request without a ticket.',
+      'This worker predates the standalone opening handoff; upgrade it, then run this again.',
+    );
+  }
+  return `${base}/dashboard/launch#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=${encodeURIComponent(ticket)}`;
+}
+
+/** Open in the desktop browser. Bun.spawnSync rather than a shell, always. */
+function openInDesktopBrowser(url: string): boolean {
+  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  return Bun.spawnSync([opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
 }
 
 /**

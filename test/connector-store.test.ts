@@ -2184,7 +2184,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(11);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(12);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -2218,6 +2218,9 @@ describe('LocalConnectorStore reactions', () => {
     // serve would take the answer path down for a purely additive column.
     const rewind = new Database(dbPath);
     try {
+      rewind.exec('ALTER TABLE items DROP COLUMN source_scope_folder_keys_json;');
+      rewind.exec('ALTER TABLE items DROP COLUMN source_scope_revision;');
+      rewind.exec('ALTER TABLE items DROP COLUMN source_scope_generation;');
       rewind.exec('ALTER TABLE items DROP COLUMN reactions_json;');
       rewind.query("UPDATE schema_version SET version = 8 WHERE store_id = 'connector-store'").run();
     } finally {
@@ -2599,6 +2602,7 @@ type FakeEmbeddingProvider = SourceEmbeddingProvider & { embedCalls: SourceEmbed
 function createFakeEmbeddingProvider(
   options: {
     backend?: 'local' | 'cloud';
+    provider?: string;
     modelId?: string;
     vectorFor?: (text: string, taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY') => number[];
   } = {},
@@ -2607,7 +2611,7 @@ function createFakeEmbeddingProvider(
   const backend = options.backend ?? 'local';
   const modelId = options.modelId ?? 'fake-embed-v1';
   return {
-    provider: 'fake-test-embeddings',
+    provider: options.provider ?? 'fake-test-embeddings',
     modelId,
     dimension: EMBED_DIMENSION,
     configHash: 'fake-test-embeddings-config',
@@ -2922,8 +2926,9 @@ describe('LocalConnectorStore embeddings', () => {
     store.close();
   });
 
-  test('secure_local stores ONLY embed via a local provider; internal stores may use cloud', async () => {
+  test('secure_local stores embed via local or approved Venice; internal stores may use cloud', async () => {
     const cloud = createFakeEmbeddingProvider({ backend: 'cloud' });
+    const venice = createFakeEmbeddingProvider({ backend: 'cloud', provider: 'venice', modelId: 'text-embedding-qwen3-8b' });
 
     // secure_local: both the embed lane and the vector search lane fail closed.
     const secureStore = newStore();
@@ -2932,6 +2937,14 @@ describe('LocalConnectorStore embeddings', () => {
     await expect(secureStore.vectorSearchItems('unified search', cloud, 5)).rejects.toThrow('local/private');
     expect(secureStore.status().counts.embeddedChunks).toBe(0);
     secureStore.close();
+
+    const secureVeniceStore = newStore();
+    await secureVeniceStore.syncFromConnector(createFakeConnector([[RETRO]]), { fetchContent: true });
+    const veniceSummary = await secureVeniceStore.embedChunks({ provider: venice });
+    expect(veniceSummary.chunksEmbedded).toBe(1);
+    expect(veniceSummary.embeddingBackend).toBe('cloud');
+    expect(await secureVeniceStore.vectorSearchItems('unified search', venice, 5)).toHaveLength(1);
+    secureVeniceStore.close();
 
     // internal trust domain: cloud embedding is eligible (the x-bookmarks posture).
     const internalStore = new LocalConnectorStore({

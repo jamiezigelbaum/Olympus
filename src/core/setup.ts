@@ -1,3 +1,4 @@
+import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -75,6 +76,7 @@ export interface SetupWizardResult {
     text: string[];
   };
   preset: SovereigntyPresetName;
+  presetLabel: string;
   secureTierDecision: SetupSecureTierDecision;
   unmet_prerequisites: SetupPrerequisite[];
   cloudLane: SetupCloudLane;
@@ -107,15 +109,17 @@ export interface SetupWizardResult {
   }>;
   dashboard: {
     url: string;
+    url_scope: 'worker_local';
+    handoff_required: true;
     next: string;
   };
 }
 
 export const VENICE_PITCH_TEXT = [
-  'Secure source answers follow the selected preset: local-first tries your local lane before Venice; private-cloud-only uses Venice without a local-model requirement.',
+  `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS['local-first']} tries your local lane first; ${PRIVACY_PRESET_LABELS['private-cloud-only']} has no local-model requirement.`,
   'In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.',
-  'Secure search is lexical-only with private-cloud-only; local presets use local secure embeddings. Olympus never falls back to an ordinary cloud embedding provider for secure data.',
-  'Turning the secure tier off is a deliberate choice after this screen.',
+  'Private semantic search uses local embeddings or an approved Venice Private embedding model. Gemini indexes Public and Personal content; Private content never goes to ordinary cloud embedding providers.',
+  `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} is a deliberate choice after this screen.`,
 ] as const;
 
 export function runSetupDependencyCheck(input: {
@@ -173,7 +177,7 @@ export function runSetupDependencyCheck(input: {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, 'telethon')),
       detail: 'Optional Telegram guided-session reader.',
-      repairHint: 'Install Python 3 and run python3 -m pip install telethon before connecting Telegram.',
+      repairHint: 'Create ~/.cache/olympus/telegram-python with python3 -m venv, then install Telethon in that environment before connecting Telegram.',
     }),
     dependencyFinding({
       id: 'go',
@@ -262,6 +266,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       text: [...VENICE_PITCH_TEXT],
     },
     preset: options.preset,
+    presetLabel: PRIVACY_PRESET_LABELS[options.preset],
     secureTierDecision: secureTierDecisionForPreset(options.preset),
     unmet_prerequisites: unmetPrerequisites,
     cloudLane,
@@ -278,7 +283,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       next: managedWorker.activation === 'failed' && workerState === 'active'
         ? 'The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status.'
         : workerState === 'active'
-          ? 'The managed worker is running; open the dashboard with olympus dashboard.'
+          ? 'The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access.'
           : workerState === 'not_started'
             ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
             : 'Run olympus worker install, then olympus worker status.',
@@ -287,7 +292,9 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
     connections,
     dashboard: {
       url: 'http://127.0.0.1:8010/dashboard',
-      next: 'Open the local dashboard after the worker is running.',
+      url_scope: 'worker_local',
+      handoff_required: true,
+      next: 'Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Setup connects sources and scopes, Home shows readiness and attention, Background monitors syncing/extraction/embeddings. Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.',
     },
   };
 }

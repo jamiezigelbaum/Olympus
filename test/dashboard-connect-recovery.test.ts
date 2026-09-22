@@ -15,7 +15,12 @@ import {
 } from '../src/core/sovereignty.ts';
 import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
+import { DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import {
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  withWorkerBearerAuth,
+} from '../src/workers/http.ts';
 import {
   upsertConnectedHandle,
   type ConnectedCredentialHandle,
@@ -26,6 +31,49 @@ const dirs: string[] = [];
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('native OpenClaw dashboard worker route', () => {
+  test('requires the worker bearer and renders inert controls with the trusted Gateway callback origin', async () => {
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: { async status() { return fixtureStatus(); } },
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        registryPath: fixtureRegistryPath(),
+        secretStore: memorySecretStore({}),
+      },
+    });
+    const guarded = withWorkerBearerAuth(worker.fetch, { authToken: 'worker-secret' });
+    const path = 'http://worker.test/dashboard/ui?native=1&view=setup&can_write=1';
+
+    expect((await guarded(new Request(path))).status).toBe(401);
+    expect((await guarded(new Request(`${path}&token=dash_forged`))).status).toBe(401);
+
+    const response = await guarded(new Request(path, {
+      headers: {
+        Authorization: 'Bearer worker-secret',
+        [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: 'https://gateway.example',
+      },
+    }));
+    expect(response.status).toBe(200);
+    const result = await response.json() as {
+      status: number;
+      body: string;
+      can_write: boolean;
+      controller: string;
+    };
+    expect(result).toMatchObject({ status: 200, can_write: true, controller: 'dashboard' });
+    expect(result.body).toContain('https://gateway.example/oauth/callback/dropbox');
+    expect(result.body).not.toMatch(/<(?:script|style)\b/i);
+    expect(result.body).not.toContain('worker-secret');
+
+    const missingOrigin = await guarded(new Request(path, {
+      headers: { Authorization: 'Bearer worker-secret' },
+    }));
+    const missingOriginResult = await missingOrigin.json() as { body: string };
+    expect(missingOriginResult.body).toContain('OAuth connections are unavailable until the Gateway has a trusted public origin.');
+    expect(missingOriginResult.body).not.toContain('http://worker.test/oauth/callback/');
+  });
 });
 
 describe('the dashboard renders over an unreadable handle registry', () => {
@@ -113,8 +161,8 @@ describe('a Google reconnect keeps the client secret its own registration was is
         sovereigntyEngine: fixtureSovereigntyEngine(),
         registryPath,
         // A secret left over from a registration whose client id is gone. The
-        // pilot client is a public client; pairing it with a stranger's secret
-        // is the one thing Google refuses outright.
+        // publisher Web client uses the server-held secret, never this
+        // unrelated local credential.
         secretStore: memorySecretStore({ 'gmail.personal.oauth.client_secret': 'stale-secret' }),
         startExternalOAuthConnection: async (options) => {
           starts.push({
@@ -127,19 +175,15 @@ describe('a Google reconnect keeps the client secret its own registration was is
     });
 
     try {
-      // Loopback, not `jsonRequest`'s `http://worker.test`: with the Google
-      // publisher Web client filled in (docs/ops/OAUTH_RELAY.md), a
-      // NON-loopback dashboard with nothing registered now takes the
-      // publisher relay flow instead of this fallback, exactly as intended —
-      // the packaged Desktop pilot client is reachable at all only on a
-      // loopback origin, because it cannot register an https redirect URI.
+      // HTTP loopback uses the publisher Web flow too, even when a legacy
+      // Desktop client is configured. No local secret accompanies the request.
       const response = await worker.fetch(new Request('http://127.0.0.1:8010/dashboard/connect/oauth/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'gmail' }),
       }));
       expect(response.status).toBe(200);
-      expect(starts).toEqual([{ clientId: 'pilot-client-id' }]);
+      expect(starts).toEqual([{ clientId: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID }]);
     } finally {
       if (previous === undefined) delete process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID;
       else process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = previous;

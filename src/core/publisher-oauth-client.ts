@@ -50,11 +50,11 @@ export const DEFAULT_DROPBOX_PUBLISHER_APP_KEY = '1y1l05nqd24xaaw';
  * into the local secret store — the same shape every other publisher client id
  * in this file ships in.
  *
- * Distinct from the Desktop pilot client in `google-pilot-client.ts`: a Desktop
- * client cannot register an https redirect URI, so a dashboard reached on
- * anything but loopback needs a web client. A Google Web-application client
- * must send `client_secret` at the token endpoint, which is not shipped here —
- * that leg goes through the publisher-side token-exchange endpoint instead
+ * Distinct from the Desktop pilot client in `google-pilot-client.ts`: every new
+ * publisher dashboard flow uses this Web client, including HTTP and HTTPS
+ * loopback dashboards. A Google Web-application client must send
+ * `client_secret` at the token endpoint, which is not shipped here — that leg
+ * goes through the publisher-side token-exchange endpoint instead
  * (`googlePublisherExchangeUrl()` in `core/oauth-relay.ts`;
  * `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md`). The one redirect URI registered on
  * this client is the relay (`https://auth.olympusplugin.ai/oauth/callback/`).

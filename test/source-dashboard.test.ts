@@ -141,7 +141,8 @@ describe('multi-source source dashboard', () => {
       .filter((dependency) => dependency.status === 'check_required');
     expect(unchecked.length).toBeGreaterThan(0);
     for (const dependency of unchecked) {
-      expect(dependency.next_action).toBe('Checked after the first sync.');
+      expect(dependency.next_action).toStartWith('Checked ');
+      expect(dependency.next_action.toLowerCase()).not.toContain('repair');
     }
   });
 
@@ -592,7 +593,7 @@ describe('multi-source source dashboard', () => {
     expect(setupResponse.status).toBe(200);
     expect(setupHtml).not.toContain(workerBearerToken);
     expect(setupHtml).toContain('id="dashboard-controls"');
-    expect(setupHtml).toContain('Input token');
+    expect(setupHtml).toContain('Open dashboard controls');
     // The field has no name, so a scriptless submit carries no token; the form
     // POSTs to the session route rather than putting a bearer in a URL.
     expect(setupHtml).toContain('data-dashboard-control-token');
@@ -1358,7 +1359,6 @@ describe('multi-source source dashboard', () => {
     });
     const worker = createEmailSourceWorker({
       sourceScheduler: scheduler,
-      readwiseConnectorStoreSync: readwiseStoreSyncFixture(syncRequests),
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
         connectApiKey: async (options) => ({
@@ -1394,6 +1394,9 @@ describe('multi-source source dashboard', () => {
     }));
 
     expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Initial sync requested');
+    // Connection acknowledgment does not await the complete import.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(syncRequests).toEqual(expect.arrayContaining([
       expect.objectContaining({ mode: 'pull' }),
       expect.objectContaining({ mode: 'reconcile' }),
@@ -1404,6 +1407,7 @@ describe('multi-source source dashboard', () => {
         corpus_id: READWISE_LIBRARY_CORPUS_ID,
       }),
     ]);
+    worker.close();
   });
 
   test('Gmail OAuth connect refreshes scheduler sources and syncs without restarting an empty worker', async () => {
@@ -1540,17 +1544,23 @@ describe('multi-source source dashboard', () => {
     const landingHtml = await landing.text();
     expect(landing.status).toBe(200);
     // The landing page is the live dashboard: connected Gmail on a card, and
-    // the control script that carries a later connect to the OAuth redirect.
+    // the shared standalone controller that carries a later connect to the
+    // OAuth redirect.
     expect(landingHtml).toContain('Gmail');
     // The provider now opens in its own tab, so the dashboard survives the
     // round trip instead of being navigated away from it.
     // A tab pre-opened inside the submit gesture, then pointed at the
     // provider. window.open(..., 'noopener') returns null by spec even on
     // success, so it could never tell a blocked tab from an opened one.
-    expect(landingHtml).toContain("window.open('', '_blank')");
-    expect(landingHtml).toContain('authorizationTab.location = payload.authorization_url');
-    expect(landingHtml).not.toContain('window.location.assign(payload.authorization_url)');
-    expect(landingHtml).toContain('dashboard-poll-signature');
+    expect(landingHtml).toMatch(/window\.open\((?:''|""),\s*(?:'_blank'|"_blank")\)/);
+    expect(landingHtml).toMatch(/tab\.opener\s*=\s*null/);
+    expect(landingHtml).toMatch(/authorizationTab\.location\.href\s*=\s*authorizationUrl/);
+    expect(landingHtml).toContain('/dashboard/connect/oauth/start');
+    // Polling now owns one inert root whose signature and session markers are
+    // data, while the shared controller is the only executable path.
+    expect(landingHtml).toContain('data-olympus-dashboard-root');
+    expect(landingHtml).toMatch(/data-signature="[0-9a-f]{64}"/);
+    expect(landingHtml).not.toContain('dashboard-poll-signature');
 
     const manual = await fetch(new Request('http://worker.test/dashboard/sync-now', {
       method: 'POST',
@@ -1644,6 +1654,7 @@ describe('multi-source source dashboard', () => {
     const worker = createEmailSourceWorker({
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
+        fileSourceScopes: approvedFolderScopesFixture(),
         async triggerSourceSync(request) {
           dashboardSyncRequests.push(request);
           return { status: 'started', source: request.source };
@@ -1719,6 +1730,7 @@ describe('multi-source source dashboard', () => {
       xBookmarksConnectorStoreSync: xStoreSyncFixture(xRequests),
       sourceDashboard: {
         sovereigntyEngine: fixtureSovereigntyEngine(),
+        fileSourceScopes: approvedFolderScopesFixture(),
         // The product server's hook, in miniature: it serves Dropbox and
         // declines everything else with the shared typed error.
         async triggerSourceSync(request) {
@@ -1778,7 +1790,7 @@ describe('multi-source source dashboard', () => {
 
   test('a worker with the scheduler switched off says so, rather than naming the source as unsupported', async () => {
     const worker = createEmailSourceWorker({
-      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine() },
+      sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine(), fileSourceScopes: approvedFolderScopesFixture() },
     });
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
 
@@ -1829,8 +1841,10 @@ describe('multi-source source dashboard', () => {
     );
     const hookStart = server.indexOf('triggerSourceSync: async (request) => {');
     expect(hookStart).toBeGreaterThanOrEqual(0);
-    const hook = server.slice(hookStart, server.indexOf('createCanonicalDropboxSchedulerSource({', hookStart));
+    const hook = server.slice(hookStart, server.indexOf("if (!source) throw new Error('Dropbox sync is not configured.');", hookStart));
     expect(hook).toContain('throw dashboardSourceSyncNotSupportedError(request.source);');
+    expect(hook).toContain('schedulerSourcesForHandles(activeLaneHandles(');
+    expect(hook).not.toContain('createDropboxProviderStoreSyncHandler({');
     expect(hook).not.toMatch(/throw new Error\(`Source \$\{request\.source\}/);
   });
 
@@ -1930,6 +1944,7 @@ describe('multi-source source dashboard', () => {
       'dropbox.personal.oauth.client_id': 'dropbox-client-id-fixture',
     });
     let tokenExchangeBody = '';
+    const syncRequests: unknown[] = [];
     const oauthFetch: OAuthFetch = async (_url, init) => {
       tokenExchangeBody = String(init?.body ?? '');
       return new Response(JSON.stringify({
@@ -1953,6 +1968,9 @@ describe('multi-source source dashboard', () => {
         registryPath,
         secretStore,
         oauthFetch,
+        async triggerSourceSync(request) {
+          syncRequests.push(request);
+        },
       },
     });
     const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
@@ -2003,6 +2021,7 @@ describe('multi-source source dashboard', () => {
       provider: 'dropbox',
       allowedCapabilities: ['dropbox.files.sync'],
     });
+    expect(syncRequests).toEqual([]);
 
     const dashboard = await fetch(new Request('http://worker.test/dashboard', {
       headers: { Authorization: 'Bearer dashboard-secret' },
@@ -2230,7 +2249,7 @@ describe('dashboard misreporting where private data lives', () => {
     expect(view.unassigned_corpora.corpus_count).toBe(0);
   });
 
-  test('the internal, cloud-answerable Dropbox band is a visible tier on the Dropbox card, not 100% Secure', () => {
+  test('the internal, cloud-answerable Dropbox band is a visible tier on the Dropbox card, not 100% Private', () => {
     const status = statusWithCorpora([
       dropboxFilesCorpus(4000, 4000),
       retiredLibraryCorpus(900, 900),
@@ -2246,8 +2265,8 @@ describe('dashboard misreporting where private data lives', () => {
 
     const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files');
     expect(dropbox?.tier_composition).toEqual(expect.arrayContaining([
-      { trust_domain: 'secure_local', label: 'Secure', indexed_items: 4000, content_ready_items: 4000 },
-      { trust_domain: 'internal', label: 'Private', indexed_items: 900, content_ready_items: 900 },
+      { trust_domain: 'secure_local', label: 'Private', indexed_items: 4000, content_ready_items: 4000 },
+      { trust_domain: 'internal', label: 'Personal', indexed_items: 900, content_ready_items: 900 },
     ]));
     expect(view.summary.total_indexed_items).toBe(4900);
     expect(view.where_your_data_lives.find((card) => card.trust_domain === 'secure_local')?.indexed_items).toBe(4000);
@@ -2353,8 +2372,8 @@ describe('dashboard misreporting where private data lives', () => {
     const gmail = view.sources.find((source) => source.source_id === 'gmail.email');
     expect(gmail?.coverage.indexed_items).toBe(13000);
     expect(gmail?.tier_composition).toEqual(expect.arrayContaining([
-      { trust_domain: 'secure_local', label: 'Secure', indexed_items: 10000, content_ready_items: 10000 },
-      { trust_domain: 'internal', label: 'Private', indexed_items: 3000, content_ready_items: 3000 },
+      { trust_domain: 'secure_local', label: 'Private', indexed_items: 10000, content_ready_items: 10000 },
+      { trust_domain: 'internal', label: 'Personal', indexed_items: 3000, content_ready_items: 3000 },
     ]));
     expect(view.summary.total_indexed_items).toBe(13000);
     expect(view.where_your_data_lives.find((card) => card.trust_domain === 'secure_local')?.indexed_items).toBe(10000);
@@ -4934,5 +4953,16 @@ function gmailSyncFixture(requests: unknown[], handle: string): GmailConnectorSt
     },
     lastStoreRunCompletedAt: () => undefined,
     requestBudgetStatus: () => undefined,
+  };
+}
+
+function approvedFolderScopesFixture() {
+  return {
+    summaries: () => ([
+      { source_id: 'google_drive.docs' as const, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'approved' as const, account_generation: 'a'.repeat(64), scope_revision: '11111111-1111-4111-8111-111111111111', selections: [{ key: 'approved-folder', state: 'metadata_only' as const }] },
+      { source_id: 'dropbox.files' as const, disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'approved' as const, account_generation: 'b'.repeat(64), scope_revision: '22222222-2222-4222-8222-222222222222', selections: [{ key: '/approved', state: 'metadata_only' as const }] },
+    ]),
+    async browse() { throw new Error('Browsing is not part of this dispatch fixture'); },
+    async approveAndStart() { throw new Error('Approval is not part of this dispatch fixture'); },
   };
 }

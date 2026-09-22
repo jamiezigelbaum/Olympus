@@ -75,6 +75,11 @@ const EMBEDDING_PROVIDER_FAMILIES: readonly EmbeddingProviderFamily[] = [
     epochProviderToken: 'google-gemini',
     dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN,
   },
+  {
+    providerKind: 'venice',
+    epochProviderToken: 'venice',
+    dimensionToken: 'declared',
+  },
 ];
 
 // Any provider without a declared family — the deterministic test providers,
@@ -168,6 +173,12 @@ export const CANONICAL_EMBEDDING_IDENTITIES: readonly CanonicalEmbeddingIdentity
     modelId: 'gemini-embedding-2',
     backend: 'cloud',
     dimension: 3072,
+  }),
+  canonicalIdentity({
+    provider: 'venice',
+    modelId: 'text-embedding-qwen3-8b',
+    backend: 'cloud',
+    dimension: 4096,
   }),
 ];
 

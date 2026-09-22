@@ -30,9 +30,13 @@ import {
   connectorStoreHashString,
   CONNECTOR_STORE_DEFAULT_MAX_CHUNK_CHARS,
 } from '../src/workers/connector-store/index.ts';
+import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
+import { dropboxCanonicalIngestionMatcher } from '../src/workers/dropbox-files/connector-store.ts';
 import {
   EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+  EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
   createConnectorStoreExtractionSink,
@@ -226,6 +230,83 @@ describe('extraction factory store sink', () => {
       // The stored content hash is now the hash of the extracted text, not the
       // provider's digest of the bytes.
       expect(snapshot.contentHash).toBe(connectorStoreHashString(text));
+    } finally {
+      store.close();
+    }
+  });
+
+  test('preserves the authoritative scoped path while enforcing metadata-only policy', async () => {
+    const generation = 'a'.repeat(64);
+    const revision = '11111111-1111-4111-8111-111111111111';
+    const integral = {
+      ...seededItem(),
+      metadata: { ...seededItem().metadata, pathDisplay: '/3 resources/integral theory/one.pdf' },
+    };
+    const book = {
+      ...seededItem(),
+      identity: {
+        ...seededItem().identity,
+        providerItemId: 'book-1',
+        localItemId: 'local:book-1',
+      },
+      metadata: { ...seededItem().metadata, pathDisplay: '/3 resources/books/book-1.pdf' },
+    };
+    const store = new LocalConnectorStore({
+      dbPath: join(mkdtempSync(join(tmpdir(), 'factory-sink-scoped-')), 'store.sqlite'),
+      corpusId: CORPUS_ID,
+      family: 'file',
+      trustDomain: 'secure_local',
+      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy(), {
+        [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: '/tmp/olympus-sink-test-missing-exclusions.json',
+      }),
+    });
+    try {
+      await store.syncFromConnector(
+        createConnector([integral, book], buildSourceSensitivity({
+          trustTier: 'S2', trustDomain: 'secure_local',
+        })),
+        {
+          fetchContent: false,
+          deferMetadataOnlyContent: true,
+          sourceScopeObservation: () => ({
+            accountGeneration: generation,
+            scopeRevision: revision,
+            folderKeys: [],
+          }),
+        },
+      );
+
+      const accepted = await sinkFor(store).accept(requestFor('Approved Integral Theory PDF text.'));
+      expect(accepted.accepted).toBe(true);
+      expect(store.localContent(integral.identity.localItemId)?.storedChunks).toBe(1);
+      expect(store.itemMatchesSearchFilters(integral.identity.localItemId, ACCOUNT, {
+        provider: PROVIDER,
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision,
+        locatorPathScopes: ['/3 resources/integral theory'],
+      })).toBe(true);
+
+      const refused = await sinkFor(store).accept(requestFor('Book text must stay absent.', {
+        ref: refFor({
+          providerItemId: book.identity.providerItemId,
+          localItemId: book.identity.localItemId,
+        }),
+        metadata: {
+          pathLower: '/3 resources/integral theory/spoofed-first.pdf',
+          pathDisplay: '/3 resources/integral theory/spoofed.pdf',
+        },
+      }));
+      expect(refused).toMatchObject({
+        accepted: false,
+        skippedReason: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+      });
+      expect(store.localContent(book.identity.localItemId)?.storedChunks).toBe(0);
+      expect(store.itemMatchesSearchFilters(book.identity.localItemId, ACCOUNT, {
+        provider: PROVIDER,
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision,
+        locatorPathScopes: ['/3 resources/books'],
+      })).toBe(true);
     } finally {
       store.close();
     }

@@ -190,7 +190,7 @@ describe('canonical Dropbox scheduler', () => {
       providerSync: {} as DropboxProviderStoreSyncHandler,
       store: {} as LocalConnectorStore,
       embeddingProvider: { backend: 'cloud' } as SourceEmbeddingProvider,
-    })).toThrow('require a local/private embedding provider');
+    })).toThrow('require a local/private or approved Venice embedding provider');
   });
 
   test('records a typed scheduler failure when an extractor preflight pauses the lane', async () => {

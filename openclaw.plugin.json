@@ -1,7 +1,7 @@
 {
   "id": "olympus",
   "name": "Olympus",
-  "version": "0.4.0-beta.2",
+  "version": "0.4.0-beta.3",
   "description": "Olympus: sovereignty-aware source answers across seven personal data providers for OpenClaw. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",
@@ -47,7 +47,9 @@
               "credentials": {
                 "type": "object",
                 "description": "Resolved provider credentials injected only into the native worker child. Keys are restricted at runtime to approved Olympus credential environment names; raw values should be supplied through Gateway SecretRefs.",
-                "additionalProperties": { "$ref": "#/$defs/secretInput" }
+                "additionalProperties": {
+                  "$ref": "#/$defs/secretInput"
+                }
               },
               "runtimePath": {
                 "type": "string",
@@ -60,17 +62,40 @@
             }
           },
           "creditMonitor": {
-            "type": "object", "additionalProperties": false,
+            "type": "object",
+            "additionalProperties": false,
             "description": "Optional native provider-credit monitoring; presently supports Venice billing.",
             "properties": {
-              "enabled": { "type": "boolean" },
-              "provider": { "type": "string", "enum": ["venice"] },
-              "intervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
-              "reportPath": { "type": "string", "description": "Absolute path for the private billing status report." },
-              "pauseFile": { "type": "string", "description": "Optional absolute path for the existing Venice pause marker." },
+              "enabled": {
+                "type": "boolean"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "venice"
+                ]
+              },
+              "intervalSeconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 86400
+              },
+              "reportPath": {
+                "type": "string",
+                "description": "Absolute path for the private billing status report."
+              },
+              "pauseFile": {
+                "type": "string",
+                "description": "Optional absolute path for the existing Venice pause marker."
+              },
               "credentials": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "VENICE_API_KEY": { "$ref": "#/$defs/secretInput" } }
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "VENICE_API_KEY": {
+                    "$ref": "#/$defs/secretInput"
+                  }
+                }
               }
             }
           },
@@ -88,8 +113,12 @@
                 "description": "Resolved Telethon application credentials. Only OLYMPUS_TELEGRAM_API_ID and OLYMPUS_TELEGRAM_API_HASH are accepted; supply raw values through Gateway SecretRefs.",
                 "additionalProperties": false,
                 "properties": {
-                  "OLYMPUS_TELEGRAM_API_ID": { "$ref": "#/$defs/secretInput" },
-                  "OLYMPUS_TELEGRAM_API_HASH": { "$ref": "#/$defs/secretInput" }
+                  "OLYMPUS_TELEGRAM_API_ID": {
+                    "$ref": "#/$defs/secretInput"
+                  },
+                  "OLYMPUS_TELEGRAM_API_HASH": {
+                    "$ref": "#/$defs/secretInput"
+                  }
                 }
               },
               "pythonPath": {
@@ -147,8 +176,12 @@
                 "description": "Resolved Gemini embedding credentials. Only GEMINI_API_KEY and OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY are accepted; supply raw values through Gateway SecretRefs.",
                 "additionalProperties": false,
                 "properties": {
-                  "GEMINI_API_KEY": { "$ref": "#/$defs/secretInput" },
-                  "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY": { "$ref": "#/$defs/secretInput" }
+                  "GEMINI_API_KEY": {
+                    "$ref": "#/$defs/secretInput"
+                  },
+                  "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY": {
+                    "$ref": "#/$defs/secretInput"
+                  }
                 }
               },
               "runtimePath": {
@@ -166,15 +199,35 @@
             }
           },
           "transcriptionCleanup": {
-            "type": "object", "additionalProperties": false,
+            "type": "object",
+            "additionalProperties": false,
             "description": "Optional native scheduling of the existing stale transcription-temp sweep. Live-process reference checks are preserved.",
             "properties": {
-              "enabled": { "type": "boolean" },
-              "bashPath": { "type": "string", "description": "Absolute Bash path; defaults to /bin/bash." },
-              "tempRoot": { "type": "string", "description": "Absolute transcription-temp root; defaults to the OS temp directory." },
-              "intervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
-              "minAgeMinutes": { "type": "integer", "minimum": 1 },
-              "maxRuntimeSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+              "enabled": {
+                "type": "boolean"
+              },
+              "bashPath": {
+                "type": "string",
+                "description": "Absolute Bash path; defaults to /bin/bash."
+              },
+              "tempRoot": {
+                "type": "string",
+                "description": "Absolute transcription-temp root; defaults to the OS temp directory."
+              },
+              "intervalSeconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 86400
+              },
+              "minAgeMinutes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxRuntimeSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              }
             }
           },
           "scheduler": {
@@ -189,7 +242,15 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "enum": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"]
+                  "enum": [
+                    "gmail.email",
+                    "google_drive.docs",
+                    "dropbox.files",
+                    "x.bookmarks",
+                    "telegram.messages",
+                    "whatsapp.personal.messages",
+                    "readwise.library"
+                  ]
                 },
                 "uniqueItems": true,
                 "description": "Explicit source allowlist. A non-empty list is required when the scheduler is enabled."
@@ -243,17 +304,31 @@
         "properties": {
           "defaultLane": {
             "type": "string",
-            "enum": ["fast", "deep"],
+            "enum": [
+              "fast",
+              "deep"
+            ],
             "description": "Default Argus lane."
           },
           "defaultProfile": {
             "type": "string",
-            "enum": ["default_chat", "source_answer", "classification_fast", "embedding_secure_local", "vlm_document", "vlm_fast", "vlm_qwen36_27b", "vlm_qwen36_35b"],
+            "enum": [
+              "default_chat",
+              "source_answer",
+              "classification_fast",
+              "embedding_secure_local",
+              "vlm_document",
+              "vlm_fast",
+              "vlm_qwen36_27b",
+              "vlm_qwen36_35b"
+            ],
             "description": "Default Argus model profile."
           },
           "transport": {
             "type": "string",
-            "enum": ["direct"],
+            "enum": [
+              "direct"
+            ],
             "description": "Argus transport. v0.1 supports direct HTTP to a runtime-managed endpoint."
           },
           "requestTimeoutSeconds": {
@@ -307,14 +382,30 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "default_chat": { "$ref": "#/$defs/argusModelProfile" },
-              "source_answer": { "$ref": "#/$defs/argusModelProfile" },
-              "classification_fast": { "$ref": "#/$defs/argusModelProfile" },
-              "embedding_secure_local": { "$ref": "#/$defs/argusModelProfile" },
-              "vlm_document": { "$ref": "#/$defs/argusModelProfile" },
-              "vlm_fast": { "$ref": "#/$defs/argusModelProfile" },
-              "vlm_qwen36_27b": { "$ref": "#/$defs/argusModelProfile" },
-              "vlm_qwen36_35b": { "$ref": "#/$defs/argusModelProfile" }
+              "default_chat": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "source_answer": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "classification_fast": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "embedding_secure_local": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "vlm_document": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "vlm_fast": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "vlm_qwen36_27b": {
+                "$ref": "#/$defs/argusModelProfile"
+              },
+              "vlm_qwen36_35b": {
+                "$ref": "#/$defs/argusModelProfile"
+              }
             }
           }
         }
@@ -382,7 +473,9 @@
                   },
                   "schemaVersion": {
                     "type": "number",
-                    "enum": [1]
+                    "enum": [
+                      1
+                    ]
                   },
                   "source": {
                     "type": "string"
@@ -418,16 +511,33 @@
     "$defs": {
       "secretInput": {
         "oneOf": [
-          { "type": "string" },
+          {
+            "type": "string"
+          },
           {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "source": { "type": "string", "enum": ["env", "file", "exec"] },
-              "provider": { "type": "string" },
-              "id": { "type": "string" }
+              "source": {
+                "type": "string",
+                "enum": [
+                  "env",
+                  "file",
+                  "exec"
+                ]
+              },
+              "provider": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
             },
-            "required": ["source", "provider", "id"]
+            "required": [
+              "source",
+              "provider",
+              "id"
+            ]
           }
         ]
       },
@@ -449,7 +559,13 @@
           },
           "purpose": {
             "type": "string",
-            "enum": ["chat", "text_reasoning", "classification", "embedding", "vision"],
+            "enum": [
+              "chat",
+              "text_reasoning",
+              "classification",
+              "embedding",
+              "vision"
+            ],
             "description": "Intended profile capability."
           }
         }
@@ -460,7 +576,9 @@
         "properties": {
           "schemaVersion": {
             "type": "number",
-            "enum": [1]
+            "enum": [
+              1
+            ]
           },
           "corpora": {
             "type": "array",
@@ -476,27 +594,68 @@
         "properties": {
           "corpusId": {
             "type": "string",
-            "enum": ["secure_local.email.private", "internal.email", "internal.drive.docs", "secure_local.drive.docs", "internal.telegram.messages", "internal.readwise.library", "internal.x.bookmarks", "secure_local.dropbox.files", "secure_local.telegram.protected.messages", "secure_local.whatsapp.messages"]
+            "enum": [
+              "secure_local.email.private",
+              "internal.email",
+              "internal.drive.docs",
+              "secure_local.drive.docs",
+              "internal.telegram.messages",
+              "internal.readwise.library",
+              "internal.x.bookmarks",
+              "secure_local.dropbox.files",
+              "secure_local.telegram.protected.messages",
+              "secure_local.whatsapp.messages"
+            ]
           },
           "sourceId": {
             "type": "string",
-            "enum": ["gmail.email", "google_drive.docs", "dropbox.files", "x.bookmarks", "telegram.messages", "whatsapp.personal.messages", "readwise.library"]
+            "enum": [
+              "gmail.email",
+              "google_drive.docs",
+              "dropbox.files",
+              "x.bookmarks",
+              "telegram.messages",
+              "whatsapp.personal.messages",
+              "readwise.library"
+            ]
           },
           "provider": {
             "type": "string",
-            "enum": ["gmail", "google_drive", "dropbox", "x", "telegram", "whatsapp", "readwise"]
+            "enum": [
+              "gmail",
+              "google_drive",
+              "dropbox",
+              "x",
+              "telegram",
+              "whatsapp",
+              "readwise"
+            ]
           },
           "family": {
             "type": "string",
-            "enum": ["email", "file", "chat", "readwise", "x"]
+            "enum": [
+              "email",
+              "file",
+              "chat",
+              "readwise",
+              "x"
+            ]
           },
           "trustDomain": {
             "type": "string",
-            "enum": ["public_safe", "internal", "secure_local"]
+            "enum": [
+              "public_safe",
+              "internal",
+              "secure_local"
+            ]
           },
           "activationMode": {
             "type": "string",
-            "enum": ["lexical_only", "hybrid_shadow", "hybrid_primary"]
+            "enum": [
+              "lexical_only",
+              "hybrid_shadow",
+              "hybrid_primary"
+            ]
           },
           "enabled": {
             "type": "boolean"
@@ -505,113 +664,316 @@
             "type": "array",
             "items": {
               "type": "string",
-              "enum": ["answer", "status", "sync", "search", "promotion_candidates"]
+              "enum": [
+                "answer",
+                "status",
+                "sync",
+                "search",
+                "promotion_candidates"
+              ]
             }
           },
           "description": {
             "type": "string"
           }
         },
-        "required": ["corpusId", "sourceId", "provider", "family", "trustDomain", "capabilities"],
+        "required": [
+          "corpusId",
+          "sourceId",
+          "provider",
+          "family",
+          "trustDomain",
+          "capabilities"
+        ],
         "oneOf": [
           {
             "properties": {
-              "corpusId": { "const": "secure_local.email.private" },
-              "sourceId": { "const": "gmail.email" },
-              "provider": { "const": "gmail" },
-              "family": { "const": "email" },
-              "trustDomain": { "const": "secure_local" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "secure_local.email.private"
+              },
+              "sourceId": {
+                "const": "gmail.email"
+              },
+              "provider": {
+                "const": "gmail"
+              },
+              "family": {
+                "const": "email"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "internal.email" },
-              "sourceId": { "const": "gmail.email" },
-              "provider": { "const": "gmail" },
-              "family": { "const": "email" },
-              "trustDomain": { "const": "internal" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "internal.email"
+              },
+              "sourceId": {
+                "const": "gmail.email"
+              },
+              "provider": {
+                "const": "gmail"
+              },
+              "family": {
+                "const": "email"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "internal.drive.docs" },
-              "sourceId": { "const": "google_drive.docs" },
-              "provider": { "const": "google_drive" },
-              "family": { "const": "file" },
-              "trustDomain": { "const": "internal" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "internal.drive.docs"
+              },
+              "sourceId": {
+                "const": "google_drive.docs"
+              },
+              "provider": {
+                "const": "google_drive"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "secure_local.drive.docs" },
-              "sourceId": { "const": "google_drive.docs" },
-              "provider": { "const": "google_drive" },
-              "family": { "const": "file" },
-              "trustDomain": { "const": "secure_local" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "secure_local.drive.docs"
+              },
+              "sourceId": {
+                "const": "google_drive.docs"
+              },
+              "provider": {
+                "const": "google_drive"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "internal.telegram.messages" },
-              "sourceId": { "const": "telegram.messages" },
-              "provider": { "const": "telegram" },
-              "family": { "const": "chat" },
-              "trustDomain": { "const": "internal" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "internal.telegram.messages"
+              },
+              "sourceId": {
+                "const": "telegram.messages"
+              },
+              "provider": {
+                "const": "telegram"
+              },
+              "family": {
+                "const": "chat"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "internal.readwise.library" },
-              "sourceId": { "const": "readwise.library" },
-              "provider": { "const": "readwise" },
-              "family": { "const": "readwise" },
-              "trustDomain": { "const": "internal" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync"] } }
+              "corpusId": {
+                "const": "internal.readwise.library"
+              },
+              "sourceId": {
+                "const": "readwise.library"
+              },
+              "provider": {
+                "const": "readwise"
+              },
+              "family": {
+                "const": "readwise"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "internal.x.bookmarks" },
-              "sourceId": { "const": "x.bookmarks" },
-              "provider": { "const": "x" },
-              "family": { "const": "x" },
-              "trustDomain": { "const": "internal" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "internal.x.bookmarks"
+              },
+              "sourceId": {
+                "const": "x.bookmarks"
+              },
+              "provider": {
+                "const": "x"
+              },
+              "family": {
+                "const": "x"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "secure_local.dropbox.files" },
-              "sourceId": { "const": "dropbox.files" },
-              "provider": { "const": "dropbox" },
-              "family": { "const": "file" },
-              "trustDomain": { "const": "secure_local" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search", "promotion_candidates"] } }
+              "corpusId": {
+                "const": "secure_local.dropbox.files"
+              },
+              "sourceId": {
+                "const": "dropbox.files"
+              },
+              "provider": {
+                "const": "dropbox"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search",
+                    "promotion_candidates"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "secure_local.telegram.protected.messages" },
-              "sourceId": { "const": "telegram.messages" },
-              "provider": { "const": "telegram" },
-              "family": { "const": "chat" },
-              "trustDomain": { "const": "secure_local" },
-              "capabilities": { "items": { "enum": ["answer", "status", "sync", "search"] } }
+              "corpusId": {
+                "const": "secure_local.telegram.protected.messages"
+              },
+              "sourceId": {
+                "const": "telegram.messages"
+              },
+              "provider": {
+                "const": "telegram"
+              },
+              "family": {
+                "const": "chat"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "sync",
+                    "search"
+                  ]
+                }
+              }
             }
           },
           {
             "properties": {
-              "corpusId": { "const": "secure_local.whatsapp.messages" },
-              "sourceId": { "const": "whatsapp.personal.messages" },
-              "provider": { "const": "whatsapp" },
-              "family": { "const": "chat" },
-              "trustDomain": { "const": "secure_local" },
-              "capabilities": { "items": { "enum": ["status", "sync", "search", "answer"] } }
+              "corpusId": {
+                "const": "secure_local.whatsapp.messages"
+              },
+              "sourceId": {
+                "const": "whatsapp.personal.messages"
+              },
+              "provider": {
+                "const": "whatsapp"
+              },
+              "family": {
+                "const": "chat"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "status",
+                    "sync",
+                    "search",
+                    "answer"
+                  ]
+                }
+              }
             }
           }
         ]
@@ -620,11 +982,16 @@
         "type": "object",
         "additionalProperties": false,
         "description": "Ingestion dispositions. Source-neutral: one shape for every file-storage connector, whether it names folders by path or by identity. An exclusion always wins over an approved scope, and over a metadata-only rule covering the same item, whatever order they are written in. An item that cannot be evaluated against this list is excluded rather than ingested.",
-        "required": ["schemaVersion", "rules"],
+        "required": [
+          "schemaVersion",
+          "rules"
+        ],
         "properties": {
           "schemaVersion": {
             "type": "number",
-            "enum": [1]
+            "enum": [
+              1
+            ]
           },
           "rules": {
             "type": "array",
@@ -638,7 +1005,9 @@
         "type": "object",
         "additionalProperties": false,
         "description": "One ingestion disposition. Names items by folder path prefix, by folder identity, or by a media criterion, for the sources listed. At least one of path_prefixes, folder_ids, or media is required. mode decides what happens to a matching item: exclude (never ingested) or metadata_only (indexed by title, path and date, content never read). Example: {\"id\": \"spirituality\", \"mode\": \"metadata_only\", \"sources\": [\"dropbox.personal\"], \"path_prefixes\": [\"/3 Resources/Spirituality\"], \"reason\": \"index_titles_only\"}",
-        "required": ["id"],
+        "required": [
+          "id"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -646,7 +1015,10 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["exclude", "metadata_only"],
+            "enum": [
+              "exclude",
+              "metadata_only"
+            ],
             "description": "What happens to a matching item. exclude is the default and is what every rule written without this field means: never ingested, and removed by the purge if already stored. metadata_only admits the item with its title, path and timestamps and never reads its content: no extraction, no chunks, no embeddings, and an honest coverage gap naming this rule. Content already stored for such an item is removed by the metadata-only strip, which keeps the item row. An unrecognized value is refused when configuration is read, never defaulted."
           },
           "sources": {
@@ -677,12 +1049,16 @@
             "properties": {
               "extensions": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "File extensions, with or without the leading dot, compared case-insensitively against the last dot of the file name. archive.tar.gz is a .gz; holiday.mp4.txt is a .txt, not a video."
               },
               "mime_prefixes": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Media-type prefixes such as video/ , for providers that publish a mime type and no useful extension."
               },
               "min_bytes": {
@@ -704,7 +1080,10 @@
       "sourceIngestionExclusionFolder": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "description": "One folder named by provider identity. The name is never matched on. It is there so the file stays reviewable a year later, because a list of bare opaque ids is not.",
         "properties": {
           "id": {
@@ -723,7 +1102,9 @@
         "properties": {
           "schemaVersion": {
             "type": "number",
-            "enum": [1]
+            "enum": [
+              1
+            ]
           },
           "source": {
             "type": "string"
@@ -763,7 +1144,11 @@
           },
           "default_action": {
             "type": "string",
-            "enum": ["full_extract", "metadata_only", "on_demand"]
+            "enum": [
+              "full_extract",
+              "metadata_only",
+              "on_demand"
+            ]
           }
         }
       },
@@ -776,7 +1161,11 @@
           },
           "action": {
             "type": "string",
-            "enum": ["full_extract", "metadata_only", "on_demand"]
+            "enum": [
+              "full_extract",
+              "metadata_only",
+              "on_demand"
+            ]
           },
           "reason": {
             "type": "string"
@@ -819,7 +1208,10 @@
         "properties": {
           "cadence": {
             "type": "string",
-            "enum": ["manual", "continuous"]
+            "enum": [
+              "manual",
+              "continuous"
+            ]
           },
           "max_entries_per_pass": {
             "type": "number",
@@ -856,11 +1248,26 @@
   "configContracts": {
     "secretInputs": {
       "paths": [
-        { "path": "worker.authToken", "expected": "string" },
-        { "path": "worker.service.credentials.*", "expected": "string" },
-        { "path": "worker.telegramCapture.credentials.*", "expected": "string" },
-        { "path": "worker.creditMonitor.credentials.*", "expected": "string" },
-        { "path": "worker.embeddingDrain.credentials.*", "expected": "string" }
+        {
+          "path": "worker.authToken",
+          "expected": "string"
+        },
+        {
+          "path": "worker.service.credentials.*",
+          "expected": "string"
+        },
+        {
+          "path": "worker.telegramCapture.credentials.*",
+          "expected": "string"
+        },
+        {
+          "path": "worker.creditMonitor.credentials.*",
+          "expected": "string"
+        },
+        {
+          "path": "worker.embeddingDrain.credentials.*",
+          "expected": "string"
+        }
       ]
     }
   },
@@ -874,7 +1281,7 @@
       "help": "Versioned model-routing and retrieval policy. Config files use secret references, never inline keys."
     },
     "email": {
-      "label": "Private Email Lane",
+      "label": "Email source worker",
       "help": "Gateway-local private email source worker. OAuth and raw email access must stay outside ordinary cloud-model context."
     },
     "sourceIndex": {
@@ -889,10 +1296,29 @@
   },
   "activation": {
     "onStartup": true,
-    "onCapabilities": ["tool"]
+    "onCapabilities": [
+      "tool"
+    ]
   },
   "contracts": {
-    "tools": ["argus_ping", "argus_list_models", "argus_complete", "source_answer", "source_index_status", "source_index_search", "source_watch_create", "source_watches", "source_watch_cancel", "olympus_doctor"]
+    "tools": [
+      "argus_ping",
+      "argus_list_models",
+      "argus_complete",
+      "source_answer",
+      "source_index_status",
+      "source_index_search",
+      "source_watch_create",
+      "source_watches",
+      "source_watch_cancel",
+      "olympus_doctor"
+    ]
   },
-  "skills": ["skills/ask-argus", "skills/ask-sources"]
+  "skills": [
+    "skills/ask-argus",
+    "skills/ask-sources"
+  ],
+  "controlUi": {
+    "entry": "./dist/control-ui/index.js"
+  }
 }

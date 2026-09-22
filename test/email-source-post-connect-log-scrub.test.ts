@@ -47,9 +47,11 @@ describe('post-connect first sync logging', () => {
       }));
 
       expect(response.status).toBe(200);
+      // The acknowledgment is returned before the background import finishes.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(warnings).toHaveLength(1);
       const warning = warnings[0]!;
-      expect(warning).toContain('post-connect first sync did not start for readwise');
+      expect(warning).toContain('initial sync needs attention for readwise');
       expect(warning).toContain('<redacted>');
       expect(warning).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
       expect(warning.length).toBeLessThan(300);

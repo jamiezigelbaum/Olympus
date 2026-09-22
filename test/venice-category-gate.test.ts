@@ -13,11 +13,13 @@ import { createVeniceAnalystModel } from '../src/core/analyst-venice.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import type { OpenAIAnalystFetch } from '../src/core/analyst-openai.ts';
 import {
+  createVenicePrivacyCategoryResolver,
   defaultVeniceModelCatalogCachePath,
   type VeniceModelCatalogFetch,
 } from '../src/core/venice-model-catalog.ts';
 import {
   VeniceModelPolicyDeniedError,
+  assertVeniceEmbeddingModelAllowed,
   isVenicePrivacyCategoryApprovedForSecureLocal,
   veniceAnalystModelAliasTargets,
   venicePrivacyCategoryForModel,
@@ -28,6 +30,48 @@ const HOUR_MS = 60 * 60 * 1_000;
 const NOW_MS = Date.parse('2026-07-21T12:00:00.000Z');
 
 describe('Venice secure-local privacy category gate', () => {
+  test('uses the separate embedding catalog and refuses text-cache fallback for unknown models', async () => {
+    await withCatalogCache(async (cachePath) => {
+      const urls: string[] = [];
+      const resolveCategory = createVenicePrivacyCategoryResolver({
+        apiKey: 'venice-test',
+        baseUrl: 'https://api.venice.ai/api/v1',
+        catalog: {
+          type: 'embedding',
+          cachePath,
+          fetchImpl: async (url) => {
+            urls.push(url);
+            return catalogResponse({ 'text-embedding-qwen3-8b': 'private' });
+          },
+          now: () => NOW_MS,
+        },
+      });
+
+      await expect(assertVeniceEmbeddingModelAllowed(
+        'text-embedding-qwen3-8b',
+        resolveCategory,
+      )).resolves.toBeUndefined();
+      expect(urls).toEqual(['https://api.venice.ai/api/v1/models?type=embedding']);
+    });
+  });
+
+  test('does not use the text pinned snapshot to approve an unknown embedding model', async () => {
+    await withCatalogCache(async (cachePath) => {
+      const resolveCategory = createVenicePrivacyCategoryResolver({
+        apiKey: 'venice-test',
+        baseUrl: 'https://api.venice.ai/api/v1',
+        catalog: {
+          type: 'embedding',
+          cachePath,
+          fetchImpl: async () => { throw new Error('catalog unavailable'); },
+          now: () => NOW_MS,
+        },
+      });
+
+      await expect(resolveCategory('kimi-k3')).resolves.toBeUndefined();
+    });
+  });
+
   test('allows a new Private model from Venice catalog even when it is absent from the pinned snapshot', async () => {
     await withCatalogCache(async (cachePath) => {
       const catalogCalls: Array<{ url: string; init: RequestInit }> = [];

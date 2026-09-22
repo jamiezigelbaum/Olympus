@@ -3,6 +3,13 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
+import { dropboxCanonicalIngestionMatcher } from '../src/workers/dropbox-files/connector-store.ts';
+import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
+import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
+import {
+  fileSourceScopeContentFilters,
+  fileSourceScopeMetadataFilters,
+} from '../src/workers/source-scope-runtime.ts';
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
   createSourceIndexStatusHandler,
@@ -87,6 +94,114 @@ describe('connector-store status readiness', () => {
       // Known model, nothing embedded on it: zero files, zero chunks.
       expect(modelCounts.items_embedded).toBe(0);
       expect(modelCounts.embedded_chunks).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('reports current scoped file choices separately from standing policy and folders', async () => {
+    const generation = 'a'.repeat(64);
+    const revision = '11111111-1111-4111-8111-111111111111';
+    const approval = {
+      sourceId: 'dropbox.files' as const,
+      status: 'approved' as const,
+      accountGeneration: generation,
+      revision,
+      selections: [
+        { key: '/3 resources/books', state: 'metadata_only' as const },
+        { key: '/3 resources/integral theory', state: 'ingest' as const },
+      ],
+      wholeAccount: false,
+    };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    const contentScope = fileSourceScopeContentFilters(approval);
+    expect(metadataScope.allowed).toBe(true);
+    expect(contentScope.allowed).toBe(true);
+    if (!metadataScope.allowed || !contentScope.allowed || !contentScope.filters) return;
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local',
+      exclusions: dropboxCanonicalIngestionMatcher(defaultDropboxIngestionPolicy(), {
+        [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: '/tmp/olympus-status-test-missing-exclusions.json',
+      }),
+    });
+    const currentItems = [
+      ...Array.from({ length: 556 }, (_, index) => file(`book-${index}.pdf`, undefined, {
+        path: `/3 resources/books/book-${index}.pdf`,
+      })),
+      ...Array.from({ length: 39 }, (_, index) => file(`book-folder-${index}`, undefined, {
+        path: `/3 resources/books/folder-${index}`,
+        mimeType: 'inode/directory',
+      })),
+      file('one.pdf', undefined, { path: '/3 resources/integral theory/one.pdf' }),
+      file('two.pdf', undefined, { path: '/3 resources/integral theory/two.pdf' }),
+      file('cover.jpg', undefined, {
+        path: '/3 resources/integral theory/cover.jpg',
+        mimeType: 'image/jpeg',
+      }),
+      file('integral-folder', undefined, {
+        path: '/3 resources/integral theory/subfolder',
+        mimeType: 'inode/directory',
+      }),
+      file('stale.pdf', undefined, { path: '/3 resources/integral theory/stale.pdf' }),
+    ];
+    try {
+      await store.syncFromConnector(connector(currentItems), {
+        fetchContent: true,
+        deferMetadataOnlyContent: true,
+        sourceScopeObservation: (item) => ({
+          accountGeneration: generation,
+          scopeRevision: item.identity.providerItemId === 'stale.pdf'
+            ? '22222222-2222-4222-8222-222222222222'
+            : revision,
+        }),
+      });
+
+      const result = await createSourceIndexStatusHandler({
+        corpusDefinitions: [defineDropboxFilesCorpus()],
+        connectorStores: [store],
+        readinessLedger: {
+          snapshotForCorpus: () => ({ counts: { qa_metadata_only_expected: 2 } }),
+        },
+        connectorStoreStatusScope: () => ({
+          scopeRevision: revision,
+          accountScope: ACCOUNT,
+          itemFilters: metadataScope.filters,
+          ...(contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+          contentAllowed: true,
+        }),
+      }).status({ corpus_id: CORPUS_ID, include_readiness_ledger: true });
+      const corpus = result.corpora[0] as { scope_revision?: string; counts: Record<string, number> };
+
+      expect(corpus.scope_revision).toBe(revision);
+      expect(corpus.counts).toMatchObject({
+        indexed_items: 559,
+        folders: 40,
+        scope_full_ingestion_files: 3,
+        scope_metadata_only_files: 556,
+        scope_policy_deferred_files: 1,
+        qa_eligible_items: 2,
+        qa_metadata_only_expected: 557,
+        items_with_text: 0,
+        chunks: 0,
+        embedded_chunks: 0,
+      });
+      const candidates = store.extractionCandidates({
+        limit: 10,
+        withoutChunksOnly: true,
+        filters: contentScope.filters,
+      });
+      expect(candidates.candidates.map((candidate) => candidate.identity.providerItemId).sort())
+        .toEqual(['one.pdf', 'two.pdf']);
+      expect(candidates.skippedByDisposition).toBe(1);
+      const current = candidates.candidates[0]!;
+      expect(store.itemMatchesExtractionRef({
+        ...current.identity,
+        ...(current.contentHash ? { contentHash: current.contentHash } : {}),
+      }, contentScope.filters)).toBe(true);
+      expect(store.itemMatchesExtractionRef({
+        ...current.identity,
+        sourceVersion: 'superseded-version',
+      }, contentScope.filters)).toBe(false);
     } finally {
       store.close();
     }
@@ -332,7 +447,11 @@ describe('connector-store status readiness', () => {
   });
 });
 
-function file(name: string, text?: string): RawItem {
+function file(
+  name: string,
+  text?: string,
+  options: { path?: string; mimeType?: string } = {},
+): RawItem {
   return {
     identity: {
       family: 'file',
@@ -342,9 +461,9 @@ function file(name: string, text?: string): RawItem {
       localItemId: `${ACCOUNT}:${name}`,
       sourceVersion: 'rev-1',
     },
-    mimeType: text === undefined ? 'application/pdf' : 'text/plain',
+    mimeType: options.mimeType ?? (text === undefined ? 'application/pdf' : 'text/plain'),
     content: text === undefined ? { kind: 'metadata_only' } : { kind: 'text', text },
-    metadata: { title: name },
+    metadata: { title: name, ...(options.path ? { pathDisplay: options.path } : {}) },
     fetchedAt: '2026-08-31T12:00:00.000Z',
   };
 }

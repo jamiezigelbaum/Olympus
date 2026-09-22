@@ -542,6 +542,8 @@ function renderLaunchdWorkerUnit(input: WorkerServiceInstallOptions & {
     <string>-c</string>
     <string>${escapeXml(launchdEnvSourcingExec(input.envPath, command))}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>OLYMPUS_MANAGED_WORKER</key><string>1</string></dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -574,6 +576,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=${workingDirectory}
 EnvironmentFile=-${input.envPath}
+Environment=OLYMPUS_MANAGED_WORKER=1
 ExecStart=${command.map(systemdExecArg).join(' ')}
 Restart=on-failure
 RestartSec=5

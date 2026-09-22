@@ -40,6 +40,9 @@ function isSecureTrustTier(trustTier) {
 }
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
+    if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
+      throw new Error("secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.");
+    }
     const profile = {
       trustDomain: input.trustDomain,
       placement: input.placement ?? "local_private",
@@ -114,9 +117,6 @@ function assertSecureLocalStorageProfile(profile) {
   }
   if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
     throw new Error("secure_local vector search must use a local SQLite-family vector lane.");
-  }
-  if (profile.embeddingBackend === "cloud") {
-    throw new Error("secure_local corpora cannot use cloud embeddings.");
   }
   if (profile.cloudQueryEligible) {
     throw new Error("secure_local corpora cannot be directly cloud-query eligible.");
@@ -222,9 +222,6 @@ function assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile) {
   }
   if (storageProfile.embeddingBackend === "local" && embeddingPolicy === "cloud_allowed") {
     throw new Error("Local embedding storage cannot use an always-cloud corpus embedding policy.");
-  }
-  if (storageProfile.trustDomain === "secure_local" && embeddingPolicy.startsWith("cloud_")) {
-    throw new Error("secure_local corpora cannot use cloud embedding policies.");
   }
 }
 var SOURCE_INDEX_ACTIVATION_MODES;
@@ -3522,10 +3519,25 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       secretRef: firstExistingSecretRef(env, ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "GEMINI_API_KEY"]) ?? "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
       purpose: "embedding"
     };
+  } else if (embeddingProvider === "venice") {
+    profiles["venice-source-embedding"] = {
+      provider: "venice",
+      trust: "encrypted_cloud",
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || "https://api.venice.ai/api/v1",
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || "text-embedding-qwen3-8b",
+      secretRef: firstExistingSecretRef(env, [
+        "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+        "VENICE_API_KEY",
+        "API_KEY_VENICE",
+        "Venice-API-Key"
+      ]) ?? "env:OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+      purpose: "embedding"
+    };
   }
   const defaultRoute = cloudEnabled ? ["cloud-openclaw-infer", "local-source-answer"] : ["local-source-answer"];
   const internalEmbeddingProfile = embeddingProvider === "google-gemini" ? "gemini-source-embedding" : embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
-  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
+  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "venice" ? "venice-source-embedding" : null;
+  const secureEmbeddingTrust = embeddingProvider === "venice" ? ["encrypted_cloud"] : ["local"];
   const secureAnalystMembers = profiles["venice-private"] ? ["local-source-answer", "venice-private"] : ["local-source-answer"];
   return {
     schemaVersion: SOVEREIGNTY_SCHEMA_VERSION,
@@ -3539,7 +3551,7 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       trustDomains: {
         secure_local: {
           minimumExecutionTrust: "local",
-          allowedEmbeddingTrust: ["local"],
+          allowedEmbeddingTrust: secureEmbeddingTrust,
           embeddingProfile: secureEmbeddingProfile,
           allowCloudQuery: false,
           activationMode: secureEmbeddingProfile ? "hybrid_shadow" : "lexical_only",
@@ -3740,8 +3752,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (policy.allowCloudQuery) {
       throw new OperationError("config_error", "secure_local retrieval cannot allow cloud query.");
     }
-    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local")) {
-      throw new OperationError("config_error", "secure_local embeddings may only use local trust in v1.", "encrypted_cloud embedding remains disallowed until a provider-specific approval exists.");
+    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local" && trust !== "encrypted_cloud")) {
+      throw new OperationError("config_error", "secure_local embeddings may use local or approved encrypted_cloud trust.", "Use a local profile or a Venice Private embedding profile; standard cloud remains disallowed.");
     }
   }
   if (policy.embeddingProfile) {
@@ -3749,8 +3761,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError("config_error", `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
-    if (domain === "secure_local" && resolved.profile.trust !== "local") {
-      throw new OperationError("config_error", "secure_local is never cloud-embedded.", "Use a local embedding profile or leave secure_local lexical/metadata-only.");
+    if (domain === "secure_local" && (resolved.profile.trust !== "local" && !(resolved.profile.trust === "encrypted_cloud" && resolved.profile.provider === "venice"))) {
+      throw new OperationError("config_error", "secure_local cloud embeddings require a Venice profile.", "Use a local embedding profile or an approved Venice Private embedding profile.");
     }
   }
 }
@@ -4031,7 +4043,7 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
 import { dirname as dirname8 } from "node:path";
 function isCredentialProvider(value) {
@@ -4073,7 +4085,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash2("sha256").update(handle).digest("hex");
+    const digest = createHash3("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -6008,6 +6020,17 @@ var init_connected_handles = __esm(() => {
   init_credential_broker();
 });
 
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+});
+
 // src/core/ingestion-throughput.ts
 function dropboxContentExtractionStallHours(env = process.env) {
   const raw = env[DROPBOX_CONTENT_EXTRACTION_STALL_HOURS_ENV];
@@ -6333,7 +6356,7 @@ function parseCategory(value, label) {
   }
   const targetTierName = enumString2(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`);
   if (targetTierName === "public" || targetTierName === "private") {
-    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: public/private downgrade guidance is not supported yet.`);
+    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`);
   }
   const targetTrustTier = enumString2(record.targetTrustTier, SOURCE_TRUST_TIERS, `${label}.targetTrustTier`);
   const targetTrustDomain = enumString2(record.targetTrustDomain, SOURCE_TRUST_DOMAINS, `${label}.targetTrustDomain`);
@@ -6425,7 +6448,7 @@ var init_sensitivity_map = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -6486,7 +6509,7 @@ function dedupeFindings(findings) {
   return unique2;
 }
 function hashFinding(type, matchedText) {
-  return createHash3("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash4("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -6979,7 +7002,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -7458,7 +7481,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
 var init_gmail = __esm(() => {
@@ -7469,7 +7492,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -7495,6 +7518,7 @@ class GoogleDriveSourceConnector {
   contentReadFailures = 0;
   itemsByLocalId = new Map;
   exclusions;
+  scope;
   ancestry;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -7518,6 +7542,7 @@ class GoogleDriveSourceConnector {
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
     this.exclusions = options.exclusions;
+    this.scope = options.scope;
   }
   async authenticate() {
     await this.clientForRequest();
@@ -7545,24 +7570,28 @@ class GoogleDriveSourceConnector {
       });
       const files = page.files.filter((file) => file.id);
       const items = [];
+      let processedFiles = 0;
       for (const file of files) {
         if (items.length >= remaining)
           break;
+        processedFiles += 1;
         const read = await this.rawItemFromDriveFile(file);
-        this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
-        items.push(read.item);
+        if (read) {
+          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
+          items.push(read.item);
+        }
         if (file.modifiedTime) {
           if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
             highWater = file.modifiedTime;
           }
-          if (read.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
+          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
             deferredFloor = file.modifiedTime;
           }
         }
       }
       remaining -= items.length;
       pageToken = page.nextPageToken;
-      const pageTruncated = items.length < files.length;
+      const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
       const nextCursor = done ? encodeDriveCursor(promoted ? { watermark: promoted } : {}) : encodeDriveCursor({
@@ -7630,8 +7659,13 @@ class GoogleDriveSourceConnector {
       ...folderAncestorIds ? { folderAncestorIds } : {},
       ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
     });
+    if (!folderAncestorIds && this.scope)
+      return;
+    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? []))
+      return;
     const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
-    const read = excluded || this.contentReads >= this.maxContentFiles ? { deferred: !excluded } : await this.tryReadText(file);
+    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
+    const read = excluded || !contentAllowed ? {} : this.contentReads >= this.maxContentFiles ? { deferred: true } : await this.tryReadText(file);
     const text = read.text;
     if (text !== undefined)
       this.contentReads += 1;
@@ -7658,7 +7692,7 @@ class GoogleDriveSourceConnector {
     };
   }
   async resolveFolderAncestry(file) {
-    if (this.exclusions?.identityActive !== true)
+    if (this.exclusions?.identityActive !== true && !this.scope)
       return;
     const client = await this.clientForRequest();
     this.ancestry ??= new GoogleDriveFolderAncestry(client);
@@ -8031,7 +8065,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString2(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash6("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -8058,6 +8092,7 @@ var init_drive = __esm(() => {
 
 // src/workers/google-connectors/corpora.ts
 var init_corpora = __esm(() => {
+  init_privacy_language();
   init_corpus();
   init_gmail();
   init_drive();
@@ -8153,6 +8188,11 @@ var init_embedding_identity = __esm(() => {
       providerKind: "google-gemini",
       epochProviderToken: "google-gemini",
       dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
     }
   ];
   CANONICAL_EMBEDDING_IDENTITIES = [
@@ -8167,6 +8207,12 @@ var init_embedding_identity = __esm(() => {
       modelId: "gemini-embedding-2",
       backend: "cloud",
       dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
     })
   ];
 });
@@ -8180,7 +8226,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-var READ_RESULT_PROJECTION_LOCATOR_URI, CONNECTOR_STORE_FTS_MIGRATION, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, CONNECTOR_STORE_FTS_MIGRATION, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -8259,6 +8305,12 @@ var init_local_index = __esm(() => {
   CONNECTOR_STORE_V9_ITEM_COLUMNS = [
     ...CONNECTOR_STORE_V7_ITEM_COLUMNS,
     "reactions_json"
+  ];
+  CONNECTOR_STORE_V12_ITEM_COLUMNS = [
+    ...CONNECTOR_STORE_V9_ITEM_COLUMNS,
+    "source_scope_generation",
+    "source_scope_revision",
+    "source_scope_folder_keys_json"
   ];
 });
 
@@ -8890,6 +8942,7 @@ var init_connector3 = __esm(() => {
 
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
+  init_embeddings();
   init_connector3();
   init_provider_client();
 });
@@ -9300,7 +9353,7 @@ var init_public_source_capabilities = __esm(() => {
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
       contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Whatsmeow bridge", required_for: "QR pairing and live capture" }],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
       doctor_lane: {
@@ -9333,8 +9386,9 @@ function defaultSourceDashboardHistoryDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir9(), ".local", "share");
   return join14(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
-var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
+var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -9348,6 +9402,43 @@ var init_source_dashboard = __esm(() => {
   init_public_source_capabilities();
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
+  DASHBOARD_SENSITIVITY_TIERS = {
+    policy_basis: "enforced",
+    tiers: [
+      {
+        name: SENSITIVITY_TIER_LABELS.secrets,
+        tier_label: "S5",
+        meaning: "Refused before storage — content never stored and never reaches any model",
+        local: false,
+        venice: false,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.secure,
+        tier_label: "S4",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
+        local: true,
+        venice: true,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.private,
+        tier_label: "S1–S3",
+        meaning: "Everyday mail, files, and notes",
+        local: true,
+        venice: true,
+        frontier: true
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.public,
+        tier_label: "S0",
+        meaning: "Freely shareable material",
+        local: true,
+        venice: true,
+        frontier: true
+      }
+    ]
+  };
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -9362,6 +9453,7 @@ var init_gmail_live_control = __esm(() => {
 // src/workers/google-connectors/gmail-live-sync.ts
 var init_gmail_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_gmail();
   init_gmail_live_control();
@@ -9379,6 +9471,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_drive();
   init_drive_live_control();
@@ -11047,7 +11140,7 @@ function asRecord6(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -13167,8 +13260,140 @@ function humanUtcMinute(value) {
 }
 
 // src/workers/http.ts
-import { createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
+
+// src/core/dashboard-launch.ts
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
+var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120;
+var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin) {
+    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
+    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+    const ticket = randomBytes2(32).toString("base64url");
+    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var status = document.getElementById('status');
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          return new URLSearchParams(hash).get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            window.location.replace('/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+
+// src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+var DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin";
+var DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer";
+var DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1";
+function createGatewayCallbackPeerHeader(peer, authToken) {
+  const normalized = normalizeGatewayCallbackPeer(peer);
+  const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");
+  return `${normalized}.${signature}`;
+}
+function normalizeGatewayCallbackPeer(value) {
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : "unknown";
+}
 function hasValidWorkerBearerToken(header, expectedToken) {
   if (!header)
     return false;
@@ -13261,7 +13486,7 @@ async function secretRefPrerequisite(profileId, profile, env, secretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return `printf '%s' "$KEY" | olympus connect gemini --api-key-stdin`;
+    return "Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -13289,13 +13514,13 @@ function localServerPrerequisite(profileId, profile) {
 }
 function storeSecretRemedy(key) {
   if (key === "venice.api_key") {
-    return `printf '%s' "$KEY" | olympus connect venice --api-key-stdin`;
+    return "Open Models in Olympus Setup to connect Venice. Headless fallback: olympus connect venice --api-key-prompt";
   }
   return `Store ${key} with the matching olympus connect command before source answering.`;
 }
 
 // src/workers/credential-degradation.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -13307,7 +13532,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash("sha256").update(material, "utf8").digest("hex");
+  return createHash2("sha256").update(material, "utf8").digest("hex");
 }
 var DEFAULT_MAX_ATTEMPTS = 3;
 var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
@@ -15484,6 +15709,833 @@ function optionalAttachmentType(value) {
   throw new OperationError("invalid_params", "attachment_type must be image, video, audio, file, link, or other.");
 }
 
+// src/control-ui-contract.ts
+var OLYMPUS_DASHBOARD_READ_METHOD = "olympus.dashboard.read";
+var OLYMPUS_DASHBOARD_CONTROL_METHOD = "olympus.dashboard.control";
+var OLYMPUS_DASHBOARD_VIEWS = [
+  "home",
+  "setup",
+  "background",
+  "sensitivity",
+  "source",
+  "dispositions"
+];
+
+// src/core/control-ui-gateway.ts
+var DASHBOARD_READ_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+var DASHBOARD_CONTROL_RESPONSE_MAX_BYTES = 256 * 1024;
+var DASHBOARD_CONTROL_REQUEST_MAX_BYTES = 256 * 1024;
+var OAUTH_CALLBACK_URL_MAX_BYTES = 16 * 1024;
+var DASHBOARD_TIMEOUT_MAX_MS = 180000;
+var DASHBOARD_TIMEOUT_MIN_MS = 1000;
+var OAUTH_CALLBACK_SOURCES = ["gmail", "google-drive", "dropbox", "x"];
+var OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000;
+var OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30;
+var OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS = 1024;
+
+class DashboardGatewayInvalidRequestError extends Error {
+}
+
+class DashboardGatewayUnavailableError extends Error {
+}
+function registerOlympusDashboardGateway(api, config, options = {}) {
+  if (!api.registerGatewayMethod)
+    return;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  api.registerGatewayMethod(OLYMPUS_DASHBOARD_READ_METHOD, async ({ params, client, respond, context, signal }) => {
+    if (!gatewayClientHasScope(client, "operator.read")) {
+      respond(false, undefined, { code: "INVALID_REQUEST", message: "Operator read scope is required." });
+      return;
+    }
+    try {
+      const result = await requestDashboardRead({
+        params: parseDashboardReadParams(params),
+        canWrite: gatewayClientHasScope(client, "operator.write"),
+        config,
+        openClawConfig: context?.getRuntimeConfig?.() ?? api.config,
+        fetchImpl,
+        ...signal ? { signal } : {}
+      });
+      respond(true, result);
+    } catch (error) {
+      respondDashboardGatewayError(respond, error);
+    }
+  }, { scope: "operator.read", profileAccess: "required" });
+  api.registerGatewayMethod(OLYMPUS_DASHBOARD_CONTROL_METHOD, async ({ params, client, respond, context, signal }) => {
+    if (!gatewayClientHasScope(client, "operator.write")) {
+      respond(false, undefined, { code: "INVALID_REQUEST", message: "Operator write scope is required." });
+      return;
+    }
+    try {
+      const parsed = parseDashboardControlParams(params);
+      const openClawConfig = context?.getRuntimeConfig?.() ?? api.config;
+      const gatewayPublicOrigin = resolveGatewayPublicOrigin(openClawConfig);
+      if (parsed.action === "start_oauth" && !gatewayPublicOrigin) {
+        respond(true, gatewayPublicOriginRequiredResult());
+        return;
+      }
+      const result = await requestDashboardControl({
+        params: parsed,
+        config,
+        ...gatewayPublicOrigin ? { gatewayPublicOrigin } : {},
+        fetchImpl,
+        ...signal ? { signal } : {}
+      });
+      respond(true, result);
+    } catch (error) {
+      respondDashboardGatewayError(respond, error);
+    }
+  }, { scope: "operator.write", profileAccess: "required" });
+  registerOAuthCallbackRoutes(api, config, fetchImpl);
+}
+async function requestDashboardRead(input) {
+  const authToken = requireWorkerAuthToken(input.config);
+  if (input.params.view === "dispositions" && "action" in input.params && input.params.action === "browse_folder_scope") {
+    if (!input.canWrite) {
+      throw new DashboardGatewayInvalidRequestError("Operator write scope is required to browse private folders.");
+    }
+    const encoded = JSON.stringify({
+      action: input.params.action,
+      source_id: input.params.source_id,
+      ...input.params.parent_key ? { parent_key: input.params.parent_key } : {},
+      ...input.params.cursor ? { cursor: input.params.cursor } : {}
+    });
+    const { response: response2, text: body2 } = await boundedWorkerRequest({
+      fetchImpl: input.fetchImpl ?? fetch,
+      url: workerRootUrl(input.config, "/dashboard/dispositions"),
+      init: {
+        method: "POST",
+        headers: workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig), true),
+        body: encoded,
+        redirect: "error"
+      },
+      timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
+      maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES,
+      ...input.signal ? { signal: input.signal } : {}
+    });
+    if (!response2.ok) {
+      throw new DashboardGatewayUnavailableError(`Olympus dashboard worker returned HTTP ${response2.status}.`);
+    }
+    let parsed2;
+    try {
+      parsed2 = JSON.parse(body2);
+    } catch {
+      throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+    }
+    return parseDashboardReadResult(parsed2, input.canWrite);
+  }
+  const url = workerRootUrl(input.config, "/dashboard/ui");
+  url.searchParams.set("native", "1");
+  url.searchParams.set("view", input.params.view);
+  url.searchParams.set("can_write", input.canWrite ? "1" : "0");
+  if (input.params.source_id !== undefined)
+    url.searchParams.set("source_id", input.params.source_id);
+  const headers = workerHeaders(authToken, resolveGatewayPublicOrigin(input.openClawConfig));
+  const { response, text: body } = await boundedWorkerRequest({
+    fetchImpl: input.fetchImpl ?? fetch,
+    url,
+    init: { method: "GET", headers, redirect: "error" },
+    timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
+    maxResponseBytes: DASHBOARD_READ_RESPONSE_MAX_BYTES,
+    ...input.signal ? { signal: input.signal } : {}
+  });
+  if (!response.ok) {
+    throw new DashboardGatewayUnavailableError(`Olympus dashboard worker returned HTTP ${response.status}.`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  return parseDashboardReadResult(parsed, input.canWrite);
+}
+async function requestDashboardControl(input) {
+  const authToken = requireWorkerAuthToken(input.config);
+  const mapped = dashboardControlWorkerRequest(input.params);
+  const encoded = JSON.stringify(mapped.body);
+  if (Buffer.byteLength(encoded, "utf8") > DASHBOARD_CONTROL_REQUEST_MAX_BYTES) {
+    throw new DashboardGatewayInvalidRequestError("Dashboard control request is too large.");
+  }
+  const { response, text } = await boundedWorkerRequest({
+    fetchImpl: input.fetchImpl ?? fetch,
+    url: workerRootUrl(input.config, mapped.path),
+    init: {
+      method: "POST",
+      headers: workerHeaders(authToken, input.gatewayPublicOrigin, true),
+      body: encoded,
+      redirect: "error"
+    },
+    timeoutMs: input.timeoutMs ?? dashboardTimeoutMs(input.config),
+    maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES,
+    ...input.signal ? { signal: input.signal } : {}
+  });
+  let body;
+  try {
+    body = text === "" ? {} : JSON.parse(text);
+  } catch {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  if (!isRecord2(body)) {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  return { status: response.status, body };
+}
+function parseDashboardReadParams(value) {
+  const record = exactRecord(value, ["view", "source_id", "action", "parent_key", "cursor"]);
+  if (!OLYMPUS_DASHBOARD_VIEWS.includes(record.view)) {
+    throw new DashboardGatewayInvalidRequestError("Unknown Olympus dashboard view.");
+  }
+  const view = record.view;
+  if (record.action === "browse_folder_scope") {
+    if (view !== "dispositions") {
+      throw new DashboardGatewayInvalidRequestError("Folder browsing is available only in the dispositions view.");
+    }
+    const parentKey = optionalBoundedString(record.parent_key, 4096, "parent_key", false);
+    const cursor = optionalBoundedString(record.cursor, 8192, "cursor", false);
+    return {
+      view,
+      action: "browse_folder_scope",
+      source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
+      ...parentKey ? { parent_key: parentKey } : {},
+      ...cursor ? { cursor } : {}
+    };
+  }
+  if (record.action !== undefined || record.parent_key !== undefined || record.cursor !== undefined) {
+    throw new DashboardGatewayInvalidRequestError("Unexpected folder browse parameters.");
+  }
+  const sourceId = record.source_id === undefined ? undefined : boundedString2(record.source_id, 256, "source_id");
+  if (view === "source" && sourceId === undefined) {
+    throw new DashboardGatewayInvalidRequestError("source_id is required for the source view.");
+  }
+  if (view !== "source" && view !== "dispositions" && sourceId !== undefined) {
+    throw new DashboardGatewayInvalidRequestError("source_id is allowed only for the source view or dispositions view.");
+  }
+  return { view, ...sourceId ? { source_id: sourceId } : {} };
+}
+function parseDashboardControlParams(value) {
+  const outer = recordValue(value);
+  const action = outer.action;
+  if (action === "browse_folder_scope") {
+    const record = exactRecord(outer, ["action", "source_id", "parent_key", "cursor"]);
+    const parentKey = optionalBoundedString(record.parent_key, 4096, "parent_key", false);
+    const cursor = optionalBoundedString(record.cursor, 8192, "cursor", false);
+    return {
+      action,
+      source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
+      ...parentKey ? { parent_key: parentKey } : {},
+      ...cursor ? { cursor } : {}
+    };
+  }
+  if (action === "approve_source_scope_and_start") {
+    const record = exactRecord(outer, [
+      "action",
+      "source_id",
+      "account_generation",
+      "expected_scope_revision",
+      "selections",
+      "whole_account",
+      "explicit_whole_account_confirmation"
+    ]);
+    if (!Array.isArray(record.selections) || record.selections.length > 100) {
+      throw new DashboardGatewayInvalidRequestError("selections must be an array of at most 100 folders.");
+    }
+    const selections = record.selections.map((value2) => {
+      const selection = exactRecord(value2, ["key", "state", "ancestor_keys"]);
+      if (selection.state !== "ingest" && selection.state !== "metadata_only" && selection.state !== "exclude") {
+        throw new DashboardGatewayInvalidRequestError("Unknown source scope disposition.");
+      }
+      let ancestorKeys;
+      if (selection.ancestor_keys !== undefined) {
+        if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
+          throw new DashboardGatewayInvalidRequestError("ancestor_keys must be an array of at most 100 folder keys.");
+        }
+        ancestorKeys = selection.ancestor_keys.map((key) => boundedString2(key, 4096, "ancestor_keys[]", false));
+      }
+      return {
+        key: boundedString2(selection.key, 4096, "key", false),
+        state: selection.state,
+        ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
+      };
+    });
+    if (typeof record.whole_account !== "boolean" || typeof record.explicit_whole_account_confirmation !== "boolean") {
+      throw new DashboardGatewayInvalidRequestError("Whole-account fields must be true or false.");
+    }
+    return {
+      action,
+      source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
+      account_generation: boundedString2(record.account_generation, 128, "account_generation", false),
+      expected_scope_revision: boundedString2(record.expected_scope_revision, 256, "expected_scope_revision", false),
+      selections,
+      whole_account: record.whole_account,
+      explicit_whole_account_confirmation: record.explicit_whole_account_confirmation
+    };
+  }
+  if (action === "save_dispositions") {
+    const record = exactRecord(outer, ["action", "source", "edits"]);
+    const source = boundedString2(record.source, 256, "source");
+    if (!Array.isArray(record.edits) || record.edits.length === 0 || record.edits.length > 1000) {
+      throw new DashboardGatewayInvalidRequestError("edits must contain between 1 and 1000 changes.");
+    }
+    const edits = record.edits.map((entry) => {
+      const edit = exactRecord(entry, ["path", "state"]);
+      const path = boundedString2(edit.path, 4096, "path", false);
+      if (edit.state !== "ingest" && edit.state !== "metadata_only" && edit.state !== "exclude") {
+        throw new DashboardGatewayInvalidRequestError("Unknown source disposition state.");
+      }
+      return { path, state: edit.state };
+    });
+    return { action, source, edits };
+  }
+  if (action === "start_oauth") {
+    const record = exactRecord(outer, ["action", "source", "client_id", "client_secret"]);
+    const source = enumValue(record.source, OAUTH_CALLBACK_SOURCES, "source");
+    const clientId = optionalBoundedString(record.client_id, 2048, "client_id", false);
+    const clientSecret = optionalBoundedString(record.client_secret, 8192, "client_secret", false);
+    return { action, source, ...clientId ? { client_id: clientId } : {}, ...clientSecret ? { client_secret: clientSecret } : {} };
+  }
+  if (action === "cancel_oauth") {
+    const record = exactRecord(outer, ["action", "source"]);
+    return { action, source: enumValue(record.source, OAUTH_CALLBACK_SOURCES, "source") };
+  }
+  if (action === "check_model_setup") {
+    exactRecord(outer, ["action"]);
+    return { action };
+  }
+  if (action === "connect_api_key") {
+    const record = exactRecord(outer, ["action", "source", "api_key"]);
+    return {
+      action,
+      source: enumValue(record.source, ["gemini", "venice", "readwise"], "source"),
+      api_key: boundedString2(record.api_key, 8192, "api_key", false)
+    };
+  }
+  if (action === "sync_now") {
+    const record = exactRecord(outer, ["action", "source"]);
+    return {
+      action,
+      source: enumValue(record.source, ["gmail", "google-drive", "dropbox", "x", "readwise"], "source")
+    };
+  }
+  if (action === "set_embedding_priority") {
+    const record = exactRecord(outer, ["action", "on"]);
+    if (typeof record.on !== "boolean")
+      throw new DashboardGatewayInvalidRequestError("on must be true or false.");
+    return { action, on: record.on };
+  }
+  if (action === "disconnect") {
+    const record = exactRecord(outer, ["action", "source_id", "acknowledge"]);
+    if (record.acknowledge !== true)
+      throw new DashboardGatewayInvalidRequestError("Disconnect acknowledgement is required.");
+    return {
+      action,
+      source_id: enumValue(record.source_id, [
+        "gmail.email",
+        "google_drive.docs",
+        "dropbox.files",
+        "x.bookmarks",
+        "telegram.messages",
+        "whatsapp.personal.messages",
+        "readwise.library"
+      ], "source_id"),
+      acknowledge: true
+    };
+  }
+  if (action === "unpair") {
+    const record = exactRecord(outer, ["action", "source_id", "acknowledge"]);
+    if (record.acknowledge !== true)
+      throw new DashboardGatewayInvalidRequestError("Unpair acknowledgement is required.");
+    return {
+      action,
+      source_id: enumValue(record.source_id, ["telegram.messages", "whatsapp.personal.messages"], "source_id"),
+      acknowledge: true
+    };
+  }
+  throw new DashboardGatewayInvalidRequestError("Unknown Olympus dashboard control action.");
+}
+function resolveGatewayPublicOrigin(value) {
+  const root = isRecord2(value) ? value : undefined;
+  const gateway = isRecord2(root?.gateway) ? root.gateway : undefined;
+  const raw = typeof gateway?.publicOrigin === "string" ? gateway.publicOrigin.trim() : "";
+  if (!raw)
+    return;
+  try {
+    const url = new URL(raw);
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash)
+      return;
+    if (url.protocol === "https:")
+      return url.origin;
+    if (url.protocol !== "http:")
+      return;
+    const hostname = url.hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" ? url.origin : undefined;
+  } catch {
+    return;
+  }
+}
+function registerOAuthCallbackRoutes(api, config, fetchImpl) {
+  if (!api.registerHttpRoute)
+    return;
+  const callbackRateLimiter = createOAuthCallbackRateLimiter();
+  for (const source of OAUTH_CALLBACK_SOURCES) {
+    api.registerHttpRoute({
+      path: `/oauth/callback/${source}`,
+      auth: "plugin",
+      match: "exact",
+      handler: async (request, response) => {
+        if (request.method === "GET" && !callbackRateLimiter(`${source}:${trustedCallbackPeer(request)}`, Date.now())) {
+          writeCallbackPage(response, false, 410);
+          return true;
+        }
+        await handleOAuthCallback({ request, response, source, config, openClawConfig: api.config, fetchImpl });
+        return true;
+      }
+    });
+    api.registerHttpRoute({
+      path: `/oauth/callback/${source}/done`,
+      auth: "plugin",
+      match: "exact",
+      handler: (request, response) => {
+        if (request.method !== "GET") {
+          writeCallbackPage(response, false, 405);
+          return true;
+        }
+        writeCallbackPage(response, true, 200);
+        return true;
+      }
+    });
+  }
+}
+function createOAuthCallbackRateLimiter() {
+  const buckets = new Map;
+  return (key, now) => {
+    for (const [bucketKey, bucket2] of buckets) {
+      if (now - bucket2.windowStart >= OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS)
+        buckets.delete(bucketKey);
+    }
+    let bucket = buckets.get(key);
+    if (!bucket || now - bucket.windowStart >= OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS) {
+      if (!bucket && buckets.size >= OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS) {
+        const oldest = buckets.keys().next().value;
+        if (oldest !== undefined)
+          buckets.delete(oldest);
+      }
+      bucket = { windowStart: now, count: 0 };
+      buckets.set(key, bucket);
+    }
+    if (bucket.count >= OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW)
+      return false;
+    bucket.count += 1;
+    return true;
+  };
+}
+function trustedCallbackPeer(request) {
+  const address = request.socket?.remoteAddress?.trim();
+  return address || "unknown";
+}
+async function handleOAuthCallback(input) {
+  if (input.request.method !== "GET") {
+    writeCallbackPage(input.response, false, 405);
+    return;
+  }
+  const publicOrigin = resolveGatewayPublicOrigin(input.openClawConfig);
+  const authToken = workerAuthTokenFromConfig(input.config);
+  if (!publicOrigin || !authToken) {
+    writeCallbackPage(input.response, false, 503);
+    return;
+  }
+  let inbound;
+  try {
+    const raw = input.request.url ?? "";
+    if (Buffer.byteLength(raw, "utf8") > OAUTH_CALLBACK_URL_MAX_BYTES)
+      throw new Error("too large");
+    inbound = new URL(raw, publicOrigin);
+  } catch {
+    writeCallbackPage(input.response, false, 400);
+    return;
+  }
+  if (inbound.pathname !== `/oauth/callback/${input.source}` || !validOAuthCallbackQuery(inbound.searchParams)) {
+    writeCallbackPage(input.response, false, 400);
+    return;
+  }
+  const workerUrl = workerRootUrl(input.config, `/oauth/callback/${input.source}`);
+  for (const key of ["code", "state", "error", "error_description"]) {
+    const value = inbound.searchParams.get(key);
+    if (value !== null)
+      workerUrl.searchParams.set(key, value);
+  }
+  try {
+    const { response: worker } = await boundedWorkerRequest({
+      fetchImpl: input.fetchImpl,
+      url: workerUrl,
+      init: {
+        method: "GET",
+        headers: workerHeaders(authToken, publicOrigin, false, createGatewayCallbackPeerHeader(trustedCallbackPeer(input.request), authToken)),
+        redirect: "manual"
+      },
+      timeoutMs: dashboardTimeoutMs(input.config),
+      maxResponseBytes: DASHBOARD_CONTROL_RESPONSE_MAX_BYTES
+    });
+    const expectedLocation = `/oauth/callback/${input.source}/done`;
+    if (worker.status === 303 && worker.headers.get("Location") === expectedLocation) {
+      writeCallbackRedirect(input.response, expectedLocation);
+      return;
+    }
+    writeCallbackPage(input.response, false, worker.status);
+  } catch {
+    writeCallbackPage(input.response, false, 502);
+  }
+}
+function validOAuthCallbackQuery(search) {
+  const known = new Set(["code", "state", "error", "error_description"]);
+  const limits = { code: 8192, state: 4096, error: 256, error_description: 2048 };
+  const seen = new Set;
+  for (const [key, value] of search) {
+    if (!known.has(key))
+      continue;
+    if (seen.has(key) || value.length === 0 || value.length > (limits[key] ?? 0))
+      return false;
+    seen.add(key);
+  }
+  return seen.has("state") && seen.has("code") !== seen.has("error");
+}
+function writeCallbackPage(response, ok, status) {
+  const safeStatus = status >= 400 && status <= 599 ? status : ok ? 200 : 400;
+  const title = ok ? "Olympus connection complete" : "Olympus connection was not completed";
+  const detail = ok ? "Return to Olympus in OpenClaw. You can close this tab." : "Return to Olympus in OpenClaw for the current status, then close this tab.";
+  response.statusCode = safeStatus;
+  response.setHeader("Content-Type", "text/html; charset=utf-8");
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px system-ui,sans-serif;max-width:36rem;margin:12vh auto;padding:0 1.5rem;color:#202124}h1{font-size:1.35rem}</style></head><body><h1>${title}</h1><p>${detail}</p></body></html>`);
+}
+function writeCallbackRedirect(response, location) {
+  response.statusCode = 303;
+  response.setHeader("Location", location);
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.end();
+}
+function dashboardControlWorkerRequest(params) {
+  switch (params.action) {
+    case "browse_folder_scope":
+      return {
+        path: "/dashboard/dispositions",
+        body: {
+          action: params.action,
+          source_id: params.source_id,
+          ...params.parent_key ? { parent_key: params.parent_key } : {},
+          ...params.cursor ? { cursor: params.cursor } : {}
+        }
+      };
+    case "save_dispositions":
+      return { path: "/dashboard/dispositions", body: { source: params.source, edits: params.edits } };
+    case "start_oauth":
+      return {
+        path: "/dashboard/connect/oauth/start",
+        body: {
+          source: params.source,
+          ...params.client_id ? { client_id: params.client_id } : {},
+          ...params.client_secret ? { client_secret: params.client_secret } : {}
+        }
+      };
+    case "cancel_oauth":
+      return { path: "/dashboard/connect/oauth/cancel", body: { source: params.source } };
+    case "check_model_setup":
+      return { path: "/dashboard/models/check", body: {} };
+    case "connect_api_key":
+      return { path: "/dashboard/connect/api-key", body: { source: params.source, api_key: params.api_key } };
+    case "sync_now":
+      return { path: "/dashboard/sync-now", body: { source: params.source } };
+    case "approve_source_scope_and_start":
+      return {
+        path: "/dashboard/dispositions",
+        body: {
+          action: params.action,
+          source_id: params.source_id,
+          account_generation: params.account_generation,
+          expected_scope_revision: params.expected_scope_revision,
+          selections: params.selections,
+          whole_account: params.whole_account,
+          explicit_whole_account_confirmation: params.explicit_whole_account_confirmation
+        }
+      };
+    case "set_embedding_priority":
+      return { path: "/dashboard/embedding-priority", body: { on: params.on } };
+    case "disconnect":
+      return { path: "/dashboard/disconnect", body: { source_id: params.source_id, acknowledge: true } };
+    case "unpair":
+      return { path: "/dashboard/unpair", body: { source_id: params.source_id, acknowledge: true } };
+  }
+}
+function parseDashboardReadResult(value, expectedCanWrite) {
+  const record = exactRecord(value, [
+    "status",
+    "title",
+    "body",
+    "controller",
+    "can_write",
+    "signature",
+    "poll_interval_ms",
+    "scope_browser"
+  ]);
+  if (!Number.isInteger(record.status) || record.status < 100 || record.status > 599) {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  const title = boundedString2(record.title, 256, "title", false);
+  const body = boundedString2(record.body, DASHBOARD_READ_RESPONSE_MAX_BYTES, "body", false);
+  if (containsExecutableMarkup(body)) {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned executable markup.");
+  }
+  if (record.controller !== "dashboard" && record.controller !== "dispositions") {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  if (record.can_write !== expectedCanWrite) {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned mismatched control authority.");
+  }
+  const signature = boundedString2(record.signature, 128, "signature");
+  if (!Number.isInteger(record.poll_interval_ms) || record.poll_interval_ms < 1000 || record.poll_interval_ms > 300000) {
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
+  }
+  return {
+    status: record.status,
+    title,
+    body,
+    controller: record.controller,
+    can_write: expectedCanWrite,
+    signature,
+    poll_interval_ms: record.poll_interval_ms,
+    ...record.scope_browser === undefined ? {} : { scope_browser: parseFolderScopeBrowseResult(record.scope_browser) }
+  };
+}
+function parseFolderScopeBrowseResult(value) {
+  const record = exactRecord(value, [
+    "source_id",
+    "account_generation",
+    "scope_revision",
+    "status",
+    "nodes",
+    "next_cursor",
+    "selections",
+    "whole_account_selected"
+  ]);
+  if (record.status !== "scope_pending" && record.status !== "approved") {
+    throw new DashboardGatewayUnavailableError("Olympus folder scope status is invalid.");
+  }
+  if (!Array.isArray(record.nodes) || record.nodes.length > 1000) {
+    throw new DashboardGatewayUnavailableError("Olympus folder scope nodes are invalid.");
+  }
+  const nodes = record.nodes.map((value2) => {
+    const node = exactRecord(value2, ["key", "parent_key", "name", "kind", "has_children", "selectable"]);
+    if (node.kind !== "folder" || typeof node.has_children !== "boolean" || typeof node.selectable !== "boolean") {
+      throw new DashboardGatewayUnavailableError("Olympus folder scope node is invalid.");
+    }
+    const parentKey = optionalBoundedString(node.parent_key, 4096, "parent_key", false);
+    return {
+      key: boundedString2(node.key, 4096, "key", false),
+      ...parentKey ? { parent_key: parentKey } : {},
+      name: boundedString2(node.name, 1024, "name", false),
+      kind: "folder",
+      has_children: node.has_children,
+      selectable: node.selectable
+    };
+  });
+  if (!Array.isArray(record.selections) || record.selections.length > 100) {
+    throw new DashboardGatewayUnavailableError("Olympus folder scope selections are invalid.");
+  }
+  const selections = record.selections.map((value2) => {
+    const selection = exactRecord(value2, ["key", "state", "ancestor_keys"]);
+    if (selection.state !== "ingest" && selection.state !== "metadata_only" && selection.state !== "exclude") {
+      throw new DashboardGatewayUnavailableError("Olympus folder scope selection is invalid.");
+    }
+    let ancestorKeys;
+    if (selection.ancestor_keys !== undefined) {
+      if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
+        throw new DashboardGatewayUnavailableError("Olympus folder scope ancestry is invalid.");
+      }
+      ancestorKeys = selection.ancestor_keys.map((key) => boundedString2(key, 4096, "ancestor_keys[]", false));
+    }
+    return {
+      key: boundedString2(selection.key, 4096, "key", false),
+      state: selection.state,
+      ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
+    };
+  });
+  if (typeof record.whole_account_selected !== "boolean") {
+    throw new DashboardGatewayUnavailableError("Olympus whole-account scope state is invalid.");
+  }
+  const nextCursor = optionalBoundedString(record.next_cursor, 8192, "next_cursor", false);
+  return {
+    source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
+    account_generation: boundedString2(record.account_generation, 128, "account_generation", false),
+    scope_revision: boundedString2(record.scope_revision, 256, "scope_revision", false),
+    status: record.status,
+    nodes,
+    ...nextCursor ? { next_cursor: nextCursor } : {},
+    selections,
+    whole_account_selected: record.whole_account_selected
+  };
+}
+function containsExecutableMarkup(html) {
+  return /<(?:script|style|iframe|object|embed|link|meta|base)\b/i.test(html) || /\son[a-z]+\s*=/i.test(html) || /\b(?:href|src)\s*=\s*["']?\s*javascript:/i.test(html);
+}
+function gatewayClientHasScope(client, scope) {
+  if (!client || client.invalidated === true)
+    return false;
+  const scopes = Array.isArray(client.connect?.scopes) ? client.connect.scopes : [];
+  return scopes.includes("operator.admin") || scopes.includes(scope) || scope === "operator.read" && scopes.includes("operator.write");
+}
+function respondDashboardGatewayError(respond, error) {
+  if (error instanceof DashboardGatewayInvalidRequestError) {
+    respond(false, undefined, { code: "INVALID_REQUEST", message: error.message });
+    return;
+  }
+  const message = error instanceof DashboardGatewayUnavailableError ? error.message : "Olympus dashboard worker is unavailable.";
+  respond(false, undefined, { code: "UNAVAILABLE", message });
+}
+function gatewayPublicOriginRequiredResult() {
+  return {
+    status: 409,
+    body: {
+      error: {
+        code: "gateway_public_origin_required",
+        status: 409,
+        message: "Set gateway.publicOrigin to the externally reachable Gateway origin before connecting an OAuth source from OpenClaw."
+      },
+      policy: { guessed_browser_origin: false, arbitrary_return_to_accepted: false }
+    }
+  };
+}
+function requireWorkerAuthToken(config) {
+  const token = workerAuthTokenFromConfig(config);
+  if (!token)
+    throw new DashboardGatewayUnavailableError("Olympus worker authentication is not configured.");
+  return token;
+}
+function workerRootUrl(config, path) {
+  try {
+    const base = new URL(config.email.baseUrl);
+    return new URL(path, base.origin);
+  } catch {
+    throw new DashboardGatewayUnavailableError("Olympus worker URL is not configured correctly.");
+  }
+}
+function workerHeaders(authToken, gatewayPublicOrigin, json = false, callbackPeerHeader) {
+  const headers = new Headers({
+    Accept: "application/json",
+    Authorization: `Bearer ${authToken}`
+  });
+  if (json)
+    headers.set("Content-Type", "application/json");
+  if (gatewayPublicOrigin)
+    headers.set(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER, gatewayPublicOrigin);
+  if (callbackPeerHeader)
+    headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, callbackPeerHeader);
+  return headers;
+}
+function dashboardTimeoutMs(config) {
+  const configured = Math.round(config.email.requestTimeoutSeconds * 1000);
+  return Math.min(DASHBOARD_TIMEOUT_MAX_MS, Math.max(DASHBOARD_TIMEOUT_MIN_MS, configured));
+}
+async function boundedWorkerRequest(input) {
+  const controller = new AbortController;
+  const abort = () => controller.abort(input.signal?.reason);
+  if (input.signal?.aborted)
+    abort();
+  else
+    input.signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error("dashboard timeout")), input.timeoutMs);
+  try {
+    const response = await input.fetchImpl(input.url, { ...input.init, signal: controller.signal });
+    const text = await readBoundedResponseText(response, input.maxResponseBytes, controller.signal);
+    return { response, text };
+  } catch (error) {
+    if (error instanceof DashboardGatewayUnavailableError)
+      throw error;
+    throw new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable.");
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abort);
+  }
+}
+async function readBoundedResponseText(response, maxBytes, signal) {
+  if (!response.body)
+    return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder;
+  let total = 0;
+  let text = "";
+  let rejectAbort;
+  const aborted = new Promise((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => rejectAbort(new DashboardGatewayUnavailableError("Olympus dashboard worker is unavailable."));
+  if (signal.aborted)
+    onAbort();
+  else
+    signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (done)
+        break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        reader.cancel().catch(() => {
+          return;
+        });
+        throw new DashboardGatewayUnavailableError("Olympus dashboard worker response is too large.");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    if (signal.aborted)
+      reader.cancel().catch(() => {
+        return;
+      });
+    reader.releaseLock();
+  }
+}
+function exactRecord(value, keys) {
+  const record = recordValue(value);
+  const allowed = new Set(keys);
+  if (Object.keys(record).some((key) => !allowed.has(key))) {
+    throw new DashboardGatewayInvalidRequestError("Dashboard request contains an unknown field.");
+  }
+  return record;
+}
+function recordValue(value) {
+  if (!isRecord2(value))
+    throw new DashboardGatewayInvalidRequestError("Dashboard request must be an object.");
+  return value;
+}
+function isRecord2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function boundedString2(value, maxLength, label, trim = true) {
+  if (typeof value !== "string")
+    throw new DashboardGatewayInvalidRequestError(`${label} must be a string.`);
+  const normalized = trim ? value.trim() : value;
+  if (!normalized.trim() || normalized.length > maxLength || normalized.includes("\x00")) {
+    throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
+  }
+  return normalized;
+}
+function optionalBoundedString(value, maxLength, label, trim = true) {
+  if (value === undefined)
+    return;
+  return boundedString2(value, maxLength, label, trim);
+}
+function enumValue(value, values, label) {
+  if (typeof value === "string" && values.includes(value))
+    return value;
+  throw new DashboardGatewayInvalidRequestError(`${label} is invalid.`);
+}
+
 // src/native-plugin.ts
 function operationResult(operation, payload) {
   return {
@@ -15629,6 +16681,7 @@ var plugin = {
       email: new EmailClient(config, createEmailTransport(config))
     };
     registerSourceWatchDeliveryRoute(api, config);
+    registerOlympusDashboardGateway(api, config);
     for (const operation of operations) {
       if (!shouldExposeOperation(operation, { config, surface: "native" }))
         continue;
@@ -15759,30 +16812,30 @@ async function loadOpenClawDurableSend() {
   return sdk.sendDurableMessageBatch;
 }
 function parseSourceWatchDeliveryRequest(value) {
-  const record = exactRecord(value, ["route", "downstream_idempotency_key", "payload"]);
-  const route = exactRecord(record.route, ["ownerId", "kind", "targetId", "accountId"]);
+  const record = exactRecord2(value, ["route", "downstream_idempotency_key", "payload"]);
+  const route = exactRecord2(record.route, ["ownerId", "kind", "targetId", "accountId"]);
   const kind = route.kind;
   if (kind !== "openclaw_channel" && kind !== "openclaw_task")
     throw new TypeError("Invalid route kind.");
-  const targetId = boundedString2(route.targetId, 256);
+  const targetId = boundedString3(route.targetId, 256);
   if (kind === "openclaw_channel")
     splitChannelTarget(targetId);
   const payload = parseEvidencePointerPayload(record.payload);
-  const downstreamIdempotencyKey = boundedString2(record.downstream_idempotency_key, 64);
+  const downstreamIdempotencyKey = boundedString3(record.downstream_idempotency_key, 64);
   if (!/^[a-f0-9]{64}$/.test(downstreamIdempotencyKey))
     throw new TypeError("Invalid idempotency key.");
   return {
     route: {
       kind,
       targetId,
-      ...route.accountId === undefined ? {} : { accountId: boundedString2(route.accountId, 256) }
+      ...route.accountId === undefined ? {} : { accountId: boundedString3(route.accountId, 256) }
     },
     downstreamIdempotencyKey,
     payload
   };
 }
 function parseEvidencePointerPayload(value) {
-  const record = exactRecord(value, [
+  const record = exactRecord2(value, [
     "headline",
     "watch_id",
     "corpus_id",
@@ -15800,21 +16853,21 @@ function parseEvidencePointerPayload(value) {
   }
   if (!Array.isArray(record.items) || record.items.length !== 1)
     throw new TypeError("Invalid watch delivery items.");
-  const item = exactRecord(record.items[0], ["local_item_id", "source_version", "matched_at"]);
-  const sourceVersion = boundedString2(item.source_version, 64);
-  const matchedAt = boundedString2(item.matched_at, 64);
+  const item = exactRecord2(record.items[0], ["local_item_id", "source_version", "matched_at"]);
+  const sourceVersion = boundedString3(item.source_version, 64);
+  const matchedAt = boundedString3(item.matched_at, 64);
   if (!Number.isFinite(Date.parse(sourceVersion)) || !Number.isFinite(Date.parse(matchedAt))) {
     throw new TypeError("Invalid watch delivery timestamp.");
   }
   return {
     headline: SOURCE_WATCH_DELIVERY_HEADLINE,
-    watch_id: boundedString2(record.watch_id, 256),
-    corpus_id: boundedString2(record.corpus_id, 256),
-    query_text: boundedString2(record.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
+    watch_id: boundedString3(record.watch_id, 256),
+    corpus_id: boundedString3(record.corpus_id, 256),
+    query_text: boundedString3(record.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
     watch_mode: watchMode,
     match_count: 1,
     items: [{
-      local_item_id: boundedString2(item.local_item_id, 4096),
+      local_item_id: boundedString3(item.local_item_id, 4096),
       source_version: sourceVersion,
       matched_at: matchedAt
     }]
@@ -15826,14 +16879,14 @@ function splitChannelTarget(value) {
     throw new TypeError("Invalid OpenClaw channel target.");
   return [match[1], match[2]];
 }
-function exactRecord(value, allowed) {
+function exactRecord2(value, allowed) {
   const record = asRecord17(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
   return record;
 }
-function boundedString2(value, maximum) {
+function boundedString3(value, maximum) {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new TypeError("Invalid watch delivery string.");
   }
@@ -15863,7 +16916,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash6("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash7("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { defaultTelegramCaptureSpoolDir } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 
 const SCRIPT = join(import.meta.dir, '..', 'scripts', 'telegram-telethon-reader.py');
 const ORDINARY_SCOPE = 'telegram.personal:chat:101';

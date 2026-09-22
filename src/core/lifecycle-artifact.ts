@@ -93,7 +93,8 @@ export function prepareWorkerUpgradeArtifact(options: {
       if (existsSync(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
-        if (versionTreeDigest(workingDirectory) === expectedDigest) {
+        const existingMode = lstatSync(workingDirectory).mode & 0o777;
+        if (existingMode === 0o555 && versionTreeDigest(workingDirectory) === expectedDigest) {
           removeStagingTree(staging);
           syncDirectorySync(versionsDir);
           return { artifactSha256, packageVersion, workingDirectory };
@@ -303,8 +304,15 @@ function makeVersionTreeReadOnly(root: string): void {
       chmodSync(path, 0o444);
     }
   }
-  chmodSync(root, 0o555);
-  if (!statSync(root).isDirectory()) throw new OperationError('config_error', 'Managed upgrade version root changed during staging.');
+  // Keep only the staging root owner-writable until its same-parent rename.
+  // Air's native filesystem refuses rename(2) when that source root is 0555.
+  // Every child is already immutable; publishVersionTree closes the root to
+  // 0555 and fsyncs it before this path can be returned for activation.
+  chmodSync(root, 0o700);
+  const rootStats = statSync(root);
+  if (!rootStats.isDirectory() || (rootStats.mode & 0o777) !== 0o700) {
+    throw new OperationError('config_error', 'Managed upgrade version root changed during staging.');
+  }
 }
 
 function syncVersionTree(root: string): void {
@@ -354,26 +362,47 @@ function hashVersionTree(
   }
 }
 
-function publishVersionTree(staging: string, workingDirectory: string, versionsDir: string): void {
+/** @internal Exported for deterministic publication-failure tests. */
+export function publishVersionTree(
+  staging: string,
+  workingDirectory: string,
+  versionsDir: string,
+  syncDirectory: (path: string) => void = syncDirectorySync,
+): void {
   let replacedPath: string | undefined;
-  if (existsSync(workingDirectory)) {
-    replacedPath = join(versionsDir, `.olympus-replaced-${basename(workingDirectory)}-${randomUUID()}`);
-    renameSync(workingDirectory, replacedPath);
-    syncDirectorySync(versionsDir);
-  }
+  let published = false;
   try {
+    if (existsSync(workingDirectory)) {
+      replacedPath = join(versionsDir, `.olympus-replaced-${basename(workingDirectory)}-${randomUUID()}`);
+      renameSync(workingDirectory, replacedPath);
+      syncDirectory(versionsDir);
+    }
     renameSync(staging, workingDirectory);
-    syncDirectorySync(versionsDir);
+    published = true;
+    chmodSync(workingDirectory, 0o555);
+    syncDirectory(workingDirectory);
+    syncDirectory(versionsDir);
   } catch (error) {
-    if (replacedPath && existsSync(replacedPath) && !existsSync(workingDirectory)) {
-      renameSync(replacedPath, workingDirectory);
-      syncDirectorySync(versionsDir);
+    try {
+      if (published && existsSync(workingDirectory)) removeStagingTree(workingDirectory);
+      if (replacedPath && existsSync(replacedPath) && !existsSync(workingDirectory)) {
+        renameSync(replacedPath, workingDirectory);
+      }
+      syncDirectory(versionsDir);
+    } catch (rollbackError) {
+      const publication = error instanceof Error ? error.message : 'unknown publication failure';
+      const rollback = rollbackError instanceof Error ? rollbackError.message : 'unknown rollback failure';
+      throw new OperationError(
+        'config_error',
+        'Could not restore the previous Olympus worker version after failed publication.',
+        `Publication failed: ${publication}; rollback failed: ${rollback}`,
+      );
     }
     throw error;
   }
   if (replacedPath && existsSync(replacedPath)) {
     removeStagingTree(replacedPath);
-    syncDirectorySync(versionsDir);
+    syncDirectory(versionsDir);
   }
 }
 
