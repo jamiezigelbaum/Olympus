@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0-beta.3 - candidate
+
+- Restore beta 1 setup, native dashboard, messaging pairing and folder-scope
+  controls alongside the newer native services and X reconnect fixes.
+- Preserve beta 1 schema-12 stores and existing content during upgrade.
+- Bind file sync cursors to the current approval and enforce content scope
+  before embedding dispatch, including revocation between batches.
+- Require exclusive native messaging capture ownership and retain sessions
+  when Unpair cannot confirm that native capture stopped.
+- This candidate is prepared for the final test; it is not yet published.
+
 ## 0.4.0-beta.2 - 2026-09-21
 
 - Add optional native OpenClaw services for the source worker, Telegram and

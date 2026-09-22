@@ -131,6 +131,9 @@ function isSecureTrustTier(trustTier) {
 }
 function buildSourceIndexStorageProfile(input) {
   if (input.trustDomain === "secure_local") {
+    if (input.embeddingBackend === "cloud" && input.embeddingProvider !== "venice") {
+      throw new Error("secure_local corpora cannot use cloud embeddings unless the provider is approved Venice.");
+    }
     const profile = {
       trustDomain: input.trustDomain,
       placement: input.placement ?? "local_private",
@@ -205,9 +208,6 @@ function assertSecureLocalStorageProfile(profile) {
   }
   if (!["none", "exact_scan", "sqlite_vec", "sqlite_vec1"].includes(profile.vectorBackend)) {
     throw new Error("secure_local vector search must use a local SQLite-family vector lane.");
-  }
-  if (profile.embeddingBackend === "cloud") {
-    throw new Error("secure_local corpora cannot use cloud embeddings.");
   }
   if (profile.cloudQueryEligible) {
     throw new Error("secure_local corpora cannot be directly cloud-query eligible.");
@@ -2692,6 +2692,19 @@ function normalizeVeniceAnalystModelId(value) {
   const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
 }
+function venicePrivacyCategoryForModel(value) {
+  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
+}
+async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  if (category !== "private" && category !== "tee") {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
+  }
+}
 var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
 var init_venice_models = __esm(() => {
   init_operation_error();
@@ -2966,10 +2979,25 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       secretRef: firstExistingSecretRef(env, ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "GEMINI_API_KEY"]) ?? "env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY",
       purpose: "embedding"
     };
+  } else if (embeddingProvider === "venice") {
+    profiles["venice-source-embedding"] = {
+      provider: "venice",
+      trust: "encrypted_cloud",
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || "https://api.venice.ai/api/v1",
+      model: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || "text-embedding-qwen3-8b",
+      secretRef: firstExistingSecretRef(env, [
+        "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+        "VENICE_API_KEY",
+        "API_KEY_VENICE",
+        "Venice-API-Key"
+      ]) ?? "env:OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+      purpose: "embedding"
+    };
   }
   const defaultRoute = cloudEnabled ? ["cloud-openclaw-infer", "local-source-answer"] : ["local-source-answer"];
   const internalEmbeddingProfile = embeddingProvider === "google-gemini" ? "gemini-source-embedding" : embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
-  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : null;
+  const secureEmbeddingProfile = embeddingProvider === "local-openai-compatible" ? "local-source-embedding" : embeddingProvider === "venice" ? "venice-source-embedding" : null;
+  const secureEmbeddingTrust = embeddingProvider === "venice" ? ["encrypted_cloud"] : ["local"];
   const secureAnalystMembers = profiles["venice-private"] ? ["local-source-answer", "venice-private"] : ["local-source-answer"];
   return {
     schemaVersion: SOVEREIGNTY_SCHEMA_VERSION,
@@ -2983,7 +3011,7 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
       trustDomains: {
         secure_local: {
           minimumExecutionTrust: "local",
-          allowedEmbeddingTrust: ["local"],
+          allowedEmbeddingTrust: secureEmbeddingTrust,
           embeddingProfile: secureEmbeddingProfile,
           allowCloudQuery: false,
           activationMode: secureEmbeddingProfile ? "hybrid_shadow" : "lexical_only",
@@ -3184,8 +3212,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (policy.allowCloudQuery) {
       throw new OperationError("config_error", "secure_local retrieval cannot allow cloud query.");
     }
-    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local")) {
-      throw new OperationError("config_error", "secure_local embeddings may only use local trust in v1.", "encrypted_cloud embedding remains disallowed until a provider-specific approval exists.");
+    if (policy.allowedEmbeddingTrust.some((trust) => trust !== "local" && trust !== "encrypted_cloud")) {
+      throw new OperationError("config_error", "secure_local embeddings may use local or approved encrypted_cloud trust.", "Use a local profile or a Venice Private embedding profile; standard cloud remains disallowed.");
     }
   }
   if (policy.embeddingProfile) {
@@ -3193,8 +3221,8 @@ function validateRetrievalPolicy(config, domain, policy) {
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError("config_error", `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
-    if (domain === "secure_local" && resolved.profile.trust !== "local") {
-      throw new OperationError("config_error", "secure_local is never cloud-embedded.", "Use a local embedding profile or leave secure_local lexical/metadata-only.");
+    if (domain === "secure_local" && (resolved.profile.trust !== "local" && !(resolved.profile.trust === "encrypted_cloud" && resolved.profile.provider === "venice"))) {
+      throw new OperationError("config_error", "secure_local cloud embeddings require a Venice profile.", "Use a local embedding profile or an approved Venice Private embedding profile.");
     }
   }
 }
@@ -5717,8 +5745,798 @@ var init_connector = __esm(() => {
   init_provider_client();
 });
 
+// src/workers/source-index/embedding-identity.ts
+function embeddingProviderFamily(providerKind) {
+  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
+}
+function declaredEmbeddingProviderFamily(providerKind) {
+  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
+}
+function buildEmbeddingEpoch(input) {
+  const family = embeddingProviderFamily(input.provider);
+  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
+  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
+}
+function declaredDimensionToken(dimension) {
+  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
+}
+function canonicalIdentity(input) {
+  return { ...input, epochId: buildEmbeddingEpoch(input) };
+}
+function canonicalEmbeddingIdentityForModel(modelId) {
+  return CANONICAL_EMBEDDING_IDENTITIES.find((identity) => identity.modelId === modelId);
+}
+function canonicalEmbeddingDimension(modelId) {
+  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
+}
+function resolveEmbeddingEpoch(input) {
+  const derived = buildEmbeddingEpoch(input);
+  const override = input.epochOverride?.trim();
+  if (!override || override === derived)
+    return derived;
+  if (!declaredEmbeddingProviderFamily(input.provider))
+    return override;
+  const [overrideBackend, , overrideModelId] = override.split(":");
+  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
+    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
+  }
+  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
+    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
+  }
+  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
+  if (contaminated) {
+    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
+  }
+  return override;
+}
+function refusedEmbeddingEpoch(override, input, because) {
+  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
+}
+function contaminatedEmbeddingEpoch(modelId, epochId) {
+  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
+}
+var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
+var init_embedding_identity = __esm(() => {
+  init_operation_error();
+  EMBEDDING_PROVIDER_FAMILIES = [
+    {
+      providerKind: "local-openai-compatible",
+      epochProviderToken: "openai-compatible",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "google-gemini",
+      epochProviderToken: "google-gemini",
+      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
+    }
+  ];
+  CANONICAL_EMBEDDING_IDENTITIES = [
+    canonicalIdentity({
+      provider: "local-openai-compatible",
+      modelId: "secure-local-qwen3-embed",
+      backend: "local",
+      dimension: 2560
+    }),
+    canonicalIdentity({
+      provider: "google-gemini",
+      modelId: "gemini-embedding-2",
+      backend: "cloud",
+      dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
+    })
+  ];
+  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "code default before the provider token was pinned (dimension configured)"
+    },
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "code default before the provider token was pinned (dimension unconfigured)"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
+      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
+    }
+  ];
+});
+
+// src/workers/source-index/embeddings.ts
+import { Buffer as Buffer2 } from "node:buffer";
+import { createHash as createHash3 } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
+function isApprovedSecureSourceEmbeddingProvider(provider) {
+  return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
+}
+
+class GeminiSourceEmbeddingProvider {
+  provider = "google-gemini";
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend = "cloud";
+  lastMediaPartsSkipped = 0;
+  mediaPartsSkipped = 0;
+  apiKey;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  outputDimensionality;
+  maxMediaPerInput;
+  maxMediaBytes;
+  mediaFetchTimeoutMs;
+  lookupIpAddresses;
+  mediaFetchImpl;
+  maxMediaRedirects;
+  constructor(options) {
+    const apiKey = options.apiKey.trim();
+    if (!apiKey) {
+      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
+    }
+    this.apiKey = apiKey;
+    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
+    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
+    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
+    this.dimension = this.outputDimensionality ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
+    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
+    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
+    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
+    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
+    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.outputDimensionality,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      baseUrl: this.baseUrl,
+      outputDimensionality: this.outputDimensionality ?? "provider-reported",
+      maxMediaPerInput: this.maxMediaPerInput,
+      maxMediaBytes: this.maxMediaBytes,
+      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
+      maxMediaRedirects: this.maxMediaRedirects,
+      backend: this.backend
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const modelPath = `models/${this.modelId}`;
+      let mediaPartsSkipped = 0;
+      const requests = await Promise.all(inputs.map(async (input) => {
+        const contentParts = await this.contentPartsForInput(input);
+        mediaPartsSkipped += contentParts.mediaPartsSkipped;
+        return {
+          model: modelPath,
+          content: {
+            parts: contentParts.parts
+          },
+          taskType: options.taskType,
+          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
+          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
+        };
+      }));
+      this.lastMediaPartsSkipped = mediaPartsSkipped;
+      this.mediaPartsSkipped += mediaPartsSkipped;
+      const response = await this.fetchImpl(`${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey
+        },
+        body: JSON.stringify({
+          requests
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
+      }
+      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async contentPartsForInput(input) {
+    const parts = [{ text: input.text }];
+    const mediaInputs = input.media ?? [];
+    const media = mediaInputs.slice(0, this.maxMediaPerInput);
+    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
+    for (const item of media) {
+      const part = await this.inlineMediaPart(item);
+      if (part) {
+        parts.push(part);
+      } else {
+        mediaPartsSkipped += 1;
+      }
+    }
+    return { parts, mediaPartsSkipped };
+  }
+  async inlineMediaPart(input) {
+    const url = parseSafeMediaUrl(input.url);
+    if (!url)
+      return;
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
+    try {
+      const response = await this.fetchPublicMedia(url, controller.signal);
+      if (!response)
+        return;
+      if (!response.ok)
+        return;
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      if (contentLength > this.maxMediaBytes)
+        return;
+      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
+      if (!mimeType)
+        return;
+      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
+      if (!bytes)
+        return;
+      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
+        return;
+      return {
+        inlineData: {
+          mimeType,
+          data: Buffer2.from(bytes).toString("base64")
+        }
+      };
+    } catch {
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async fetchPublicMedia(initialUrl, signal) {
+    let url = initialUrl;
+    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
+      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
+      if (!validatedAddresses)
+        return;
+      const response = await this.mediaFetchImpl(url, {
+        validatedAddresses,
+        signal
+      });
+      if (!isRedirectStatus(response.status))
+        return response;
+      const location = response.headers.get("location");
+      if (!location)
+        return;
+      const nextUrl = parseSafeMediaUrl(location, url);
+      if (!nextUrl)
+        return;
+      url = nextUrl;
+    }
+    return;
+  }
+}
+
+class OpenAICompatibleSourceEmbeddingProvider {
+  provider;
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  apiKeyProvider;
+  queryInstructionPrefix;
+  sendDimensions;
+  preflight;
+  requireIndexedResponses;
+  requireDimension;
+  constructor(options) {
+    this.provider = options.provider ?? "local-openai-compatible";
+    this.backend = options.backend ?? "local";
+    this.baseUrl = this.backend === "cloud" ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl) : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
+    this.modelId = options.model.trim();
+    if (!this.modelId) {
+      throw new OperationError("config_error", "Local source embedding model must be configured.");
+    }
+    this.dimension = options.dimension ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.apiKeyProvider = options.apiKeyProvider;
+    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
+    this.sendDimensions = options.sendDimensions === true;
+    this.preflight = options.preflight;
+    this.requireIndexedResponses = options.requireIndexedResponses === true;
+    this.requireDimension = options.requireDimension === true;
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString(JSON.stringify({
+      provider: this.provider,
+      baseUrl: this.baseUrl,
+      model: this.modelId,
+      dimension: this.dimension || "provider-reported",
+      backend: this.backend,
+      ...this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {},
+      ...this.sendDimensions ? { sendDimensions: true } : {},
+      ...this.requireIndexedResponses ? { requireIndexedResponses: true } : {},
+      ...this.requireDimension ? { requireDimension: true } : {}
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      await this.preflight?.(controller.signal);
+      const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+        method: "POST",
+        headers: this.requestHeaders(),
+        body: JSON.stringify({
+          model: this.modelId,
+          input: inputs.map((input) => this.formatInput(input, options.taskType)),
+          ...this.sendDimensions ? { dimensions: this.dimension } : {}
+        }),
+        redirect: "error",
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
+      }
+      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json(), this.requireIndexedResponses);
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
+      }
+      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`, `Expected ${this.dimension} finite values for model ${this.modelId}.`);
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  formatInput(input, taskType) {
+    const text = [
+      input.title ? `Title: ${input.title}` : undefined,
+      input.text
+    ].filter((part) => Boolean(part)).join(`
+`);
+    return taskType === "RETRIEVAL_QUERY" && this.queryInstructionPrefix ? `${this.queryInstructionPrefix}
+Query:${text}` : text;
+  }
+  requestHeaders() {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const apiKey = this.apiKeyProvider?.()?.trim();
+    if (apiKey)
+      headers.set("Authorization", `Bearer ${apiKey}`);
+    return headers;
+  }
+}
+function cosineSimilarity(left, right) {
+  const length = Math.min(left.length, right.length);
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0;index < length; index += 1) {
+    const l = left[index] ?? 0;
+    const r = right[index] ?? 0;
+    dot += l * r;
+    leftNorm += l * l;
+    rightNorm += r * r;
+  }
+  if (leftNorm === 0 || rightNorm === 0)
+    return 0;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+function encodeEmbedding(vector, expectedDimension) {
+  if (vector.length !== expectedDimension) {
+    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
+  }
+  const floats = new Float32Array(vector.length);
+  vector.forEach((value, index) => {
+    floats[index] = Number.isFinite(value) ? value : 0;
+  });
+  return new Uint8Array(floats.buffer);
+}
+function decodeEmbedding(value) {
+  let bytes;
+  if (value instanceof Uint8Array) {
+    bytes = value;
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else {
+    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
+  }
+  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
+  if (bytes.byteOffset % 4 !== 0) {
+    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
+  }
+  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
+}
+function parseGeminiBatchEmbeddingResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
+  }
+  const embeddings = value.embeddings;
+  if (!Array.isArray(embeddings)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
+  }
+  return embeddings.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
+    }
+    const values = item.values;
+    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
+    }
+    return values;
+  });
+}
+function parseOpenAICompatibleEmbeddingResponse(value, requireIndices = false) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
+  }
+  const data = value.data;
+  if (!Array.isArray(data)) {
+    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
+  }
+  return data.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
+    }
+    if (requireIndices && item.index !== index) {
+      throw new OperationError("source_index_error", `Venice source embedding data.${index}.index was missing or out of order.`);
+    }
+    const embedding = item.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
+    }
+    return embedding;
+  });
+}
+function normalizeMaxMediaPerInput(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_PER_INPUT;
+  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
+}
+function normalizeMaxMediaBytes(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_BYTES;
+  return Math.max(1, Math.floor(value));
+}
+function normalizeMediaFetchTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
+  return Math.max(100, Math.floor(value));
+}
+function normalizeMaxMediaRedirects(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_REDIRECTS;
+  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
+}
+function normalizeImageMimeType(value) {
+  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
+  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
+    return;
+  return mimeType;
+}
+function parseSafeMediaUrl(value, base) {
+  let url;
+  try {
+    url = base ? new URL(value, base) : new URL(value);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:")
+    return;
+  return url;
+}
+function defaultMediaFetch(url, options) {
+  const address = options.validatedAddresses[0];
+  const family = address ? isIP(address) : 0;
+  if (!address || !family || isPrivateOrReservedIp(address)) {
+    return Promise.resolve(new Response(null, { status: 403 }));
+  }
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsRequest(url, {
+      method: "GET",
+      headers: MEDIA_FETCH_HEADERS,
+      lookup: (_hostname, _options, callback) => {
+        callback(null, address, family);
+      },
+      signal: options.signal
+    }, (message) => {
+      resolvePromise(responseFromIncomingMessage(message));
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
+function responseFromIncomingMessage(message) {
+  const headers = new Headers;
+  for (const [name, value] of Object.entries(message.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value)
+        headers.append(name, item);
+    } else if (value !== undefined) {
+      headers.set(name, String(value));
+    }
+  }
+  const status = message.statusCode && message.statusCode >= 100 && message.statusCode <= 599 ? message.statusCode : 502;
+  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message);
+  return new Response(body, {
+    status,
+    headers,
+    ...message.statusMessage ? { statusText: message.statusMessage } : {}
+  });
+}
+async function readCappedMediaBody(response, maxBytes) {
+  if (!response.body) {
+    const bytes2 = new Uint8Array(await response.arrayBuffer());
+    return bytes2.byteLength > maxBytes ? undefined : bytes2;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+function readableStreamFromIncomingMessage(message) {
+  return new ReadableStream({
+    start(controller) {
+      message.on("data", (chunk) => {
+        if (typeof chunk === "string") {
+          controller.enqueue(new TextEncoder().encode(chunk));
+          return;
+        }
+        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      });
+      message.on("end", () => controller.close());
+      message.on("error", (error) => controller.error(error));
+    },
+    cancel() {
+      message.destroy();
+    }
+  });
+}
+async function publicMediaFetchAddresses(url, lookupIpAddresses) {
+  const host = normalizedHostname(url);
+  if (host === "localhost" || host.endsWith(".local")) {
+    return;
+  }
+  if (isIP(host))
+    return isPrivateOrReservedIp(host) ? undefined : [host];
+  let addresses;
+  try {
+    addresses = await lookupIpAddresses(host);
+  } catch {
+    return;
+  }
+  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
+}
+async function defaultLookupIpAddresses(hostname) {
+  const records = await lookup(hostname, { all: true });
+  return records.map((record) => record.address);
+}
+function normalizedHostname(url) {
+  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+function isRedirectStatus(status) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+function isPrivateOrReservedIp(address) {
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const version = isIP(normalized);
+  if (version === 4)
+    return isPrivateOrReservedIpv4(normalized);
+  if (version !== 6)
+    return true;
+  const mapped = ipv4FromMappedIpv6(normalized);
+  if (mapped)
+    return isPrivateOrReservedIpv4(mapped);
+  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
+  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
+}
+function isPrivateOrReservedIpv4(address) {
+  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return true;
+  const [a = 0, b = 0] = parts;
+  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
+}
+function ipv4FromMappedIpv6(address) {
+  const words = expandIpv6Words(address);
+  if (!words || words.length !== 8)
+    return;
+  if (words.slice(0, 5).some((word) => word !== 0) || words[5] !== 65535) {
+    return;
+  }
+  const [high = 0, low = 0] = words.slice(6);
+  return [
+    high >> 8 & 255,
+    high & 255,
+    low >> 8 & 255,
+    low & 255
+  ].join(".");
+}
+function expandIpv6Words(address) {
+  const normalized = replaceDottedIpv4Tail(address);
+  if (!normalized)
+    return;
+  const parts = normalized.split("::");
+  if (parts.length > 2)
+    return;
+  const left = ipv6WordsFromPart(parts[0] ?? "");
+  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
+  if (!left || !right)
+    return;
+  if (parts.length === 1)
+    return left.length === 8 ? left : undefined;
+  const missing = 8 - left.length - right.length;
+  if (missing < 1)
+    return;
+  return [
+    ...left,
+    ...Array.from({ length: missing }, () => 0),
+    ...right
+  ];
+}
+function replaceDottedIpv4Tail(address) {
+  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
+  if (!dotted)
+    return address;
+  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return;
+  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
+  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
+  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
+}
+function ipv6WordsFromPart(part) {
+  if (!part)
+    return [];
+  const words = part.split(":").map((segment) => {
+    if (!/^[0-9a-f]{1,4}$/i.test(segment))
+      return Number.NaN;
+    return Number.parseInt(segment, 16);
+  });
+  return words.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words : undefined;
+}
+function normalizeGeminiModelId(value) {
+  const trimmed = value.trim();
+  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
+}
+function normalizeLocalSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  if (!localHost) {
+    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
+  }
+  return value.replace(/\/+$/, "");
+}
+function normalizeVeniceSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Venice source embedding base URL must be a valid HTTPS URL.");
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.venice.ai" || url.port || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/api/v1") {
+    throw new OperationError("config_error", "Venice source embeddings must use the approved Venice HTTPS endpoint.", "Use https://api.venice.ai/api/v1.");
+  }
+  return `${url.origin}/api/v1`;
+}
+function normalizeOutputDimensionality(value) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
+  }
+  return value;
+}
+function hashString(value) {
+  return createHash3("sha256").update(value).digest("hex");
+}
+var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS;
+var init_embeddings = __esm(() => {
+  init_operation_error();
+  init_embedding_identity();
+  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+  MEDIA_FETCH_HEADERS = {
+    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
+    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
+  };
+});
+
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
+  init_embeddings();
   init_connector();
   init_provider_client();
 });
@@ -5917,14 +6735,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash3("sha256").update(block).digest());
+    blockDigests.push(createHash4("sha256").update(block).digest());
   }
-  return createHash3("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash4("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -6169,7 +6987,7 @@ function parseCategory(value, label) {
   }
   const targetTierName = enumString2(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`);
   if (targetTierName === "public" || targetTierName === "private") {
-    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: public/private downgrade guidance is not supported yet.`);
+    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`);
   }
   const targetTrustTier = enumString2(record.targetTrustTier, SOURCE_TRUST_TIERS, `${label}.targetTrustTier`);
   const targetTrustDomain = enumString2(record.targetTrustDomain, SOURCE_TRUST_DOMAINS, `${label}.targetTrustDomain`);
@@ -6949,739 +7767,6 @@ var init_reactions = __esm(() => {
   };
 });
 
-// src/workers/source-index/embedding-identity.ts
-function embeddingProviderFamily(providerKind) {
-  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
-}
-function declaredEmbeddingProviderFamily(providerKind) {
-  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
-}
-function buildEmbeddingEpoch(input) {
-  const family = embeddingProviderFamily(input.provider);
-  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
-  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
-}
-function declaredDimensionToken(dimension) {
-  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
-}
-function canonicalIdentity(input) {
-  return { ...input, epochId: buildEmbeddingEpoch(input) };
-}
-function canonicalEmbeddingIdentityForModel(modelId) {
-  return CANONICAL_EMBEDDING_IDENTITIES.find((identity) => identity.modelId === modelId);
-}
-function canonicalEmbeddingDimension(modelId) {
-  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
-}
-function resolveEmbeddingEpoch(input) {
-  const derived = buildEmbeddingEpoch(input);
-  const override = input.epochOverride?.trim();
-  if (!override || override === derived)
-    return derived;
-  if (!declaredEmbeddingProviderFamily(input.provider))
-    return override;
-  const [overrideBackend, , overrideModelId] = override.split(":");
-  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
-    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
-  }
-  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
-    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
-  }
-  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
-  if (contaminated) {
-    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
-  }
-  return override;
-}
-function refusedEmbeddingEpoch(override, input, because) {
-  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
-}
-function contaminatedEmbeddingEpoch(modelId, epochId) {
-  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
-}
-var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
-var init_embedding_identity = __esm(() => {
-  init_operation_error();
-  EMBEDDING_PROVIDER_FAMILIES = [
-    {
-      providerKind: "local-openai-compatible",
-      epochProviderToken: "openai-compatible",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "google-gemini",
-      epochProviderToken: "google-gemini",
-      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
-    }
-  ];
-  CANONICAL_EMBEDDING_IDENTITIES = [
-    canonicalIdentity({
-      provider: "local-openai-compatible",
-      modelId: "secure-local-qwen3-embed",
-      backend: "local",
-      dimension: 2560
-    }),
-    canonicalIdentity({
-      provider: "google-gemini",
-      modelId: "gemini-embedding-2",
-      backend: "cloud",
-      dimension: 3072
-    })
-  ];
-  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "code default before the provider token was pinned (dimension configured)"
-    },
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "code default before the provider token was pinned (dimension unconfigured)"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
-      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
-    }
-  ];
-});
-
-// src/workers/source-index/embeddings.ts
-import { Buffer as Buffer2 } from "node:buffer";
-import { createHash as createHash4 } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
-import { isIP } from "node:net";
-
-class GeminiSourceEmbeddingProvider {
-  provider = "google-gemini";
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend = "cloud";
-  lastMediaPartsSkipped = 0;
-  mediaPartsSkipped = 0;
-  apiKey;
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  outputDimensionality;
-  maxMediaPerInput;
-  maxMediaBytes;
-  mediaFetchTimeoutMs;
-  lookupIpAddresses;
-  mediaFetchImpl;
-  maxMediaRedirects;
-  constructor(options) {
-    const apiKey = options.apiKey.trim();
-    if (!apiKey) {
-      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
-    }
-    this.apiKey = apiKey;
-    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
-    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
-    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
-    this.dimension = this.outputDimensionality ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
-    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
-    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
-    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
-    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
-    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.outputDimensionality,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      model: this.modelId,
-      baseUrl: this.baseUrl,
-      outputDimensionality: this.outputDimensionality ?? "provider-reported",
-      maxMediaPerInput: this.maxMediaPerInput,
-      maxMediaBytes: this.maxMediaBytes,
-      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
-      maxMediaRedirects: this.maxMediaRedirects,
-      backend: this.backend
-    }));
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      const modelPath = `models/${this.modelId}`;
-      let mediaPartsSkipped = 0;
-      const requests = await Promise.all(inputs.map(async (input) => {
-        const contentParts = await this.contentPartsForInput(input);
-        mediaPartsSkipped += contentParts.mediaPartsSkipped;
-        return {
-          model: modelPath,
-          content: {
-            parts: contentParts.parts
-          },
-          taskType: options.taskType,
-          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
-          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
-        };
-      }));
-      this.lastMediaPartsSkipped = mediaPartsSkipped;
-      this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await this.fetchImpl(`${this.baseUrl}/${modelPath}:batchEmbedContents`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": this.apiKey
-        },
-        body: JSON.stringify({
-          requests
-        }),
-        signal: controller.signal
-      });
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
-      }
-      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async contentPartsForInput(input) {
-    const parts = [{ text: input.text }];
-    const mediaInputs = input.media ?? [];
-    const media = mediaInputs.slice(0, this.maxMediaPerInput);
-    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
-    for (const item of media) {
-      const part = await this.inlineMediaPart(item);
-      if (part) {
-        parts.push(part);
-      } else {
-        mediaPartsSkipped += 1;
-      }
-    }
-    return { parts, mediaPartsSkipped };
-  }
-  async inlineMediaPart(input) {
-    const url = parseSafeMediaUrl(input.url);
-    if (!url)
-      return;
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
-    try {
-      const response = await this.fetchPublicMedia(url, controller.signal);
-      if (!response)
-        return;
-      if (!response.ok)
-        return;
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
-      if (contentLength > this.maxMediaBytes)
-        return;
-      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
-      if (!mimeType)
-        return;
-      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
-      if (!bytes)
-        return;
-      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
-        return;
-      return {
-        inlineData: {
-          mimeType,
-          data: Buffer2.from(bytes).toString("base64")
-        }
-      };
-    } catch {
-      return;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async fetchPublicMedia(initialUrl, signal) {
-    let url = initialUrl;
-    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
-      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
-      if (!validatedAddresses)
-        return;
-      const response = await this.mediaFetchImpl(url, {
-        validatedAddresses,
-        signal
-      });
-      if (!isRedirectStatus(response.status))
-        return response;
-      const location = response.headers.get("location");
-      if (!location)
-        return;
-      const nextUrl = parseSafeMediaUrl(location, url);
-      if (!nextUrl)
-        return;
-      url = nextUrl;
-    }
-    return;
-  }
-}
-
-class OpenAICompatibleSourceEmbeddingProvider {
-  provider = "local-openai-compatible";
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend = "local";
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  apiKeyProvider;
-  constructor(options) {
-    this.baseUrl = normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
-    this.modelId = options.model.trim();
-    if (!this.modelId) {
-      throw new OperationError("config_error", "Local source embedding model must be configured.");
-    }
-    this.dimension = options.dimension ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.apiKeyProvider = options.apiKeyProvider;
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      baseUrl: this.baseUrl,
-      model: this.modelId,
-      dimension: this.dimension || "provider-reported",
-      backend: this.backend
-    }));
-  }
-  async embed(inputs, _options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
-        method: "POST",
-        headers: this.requestHeaders(),
-        body: JSON.stringify({
-          model: this.modelId,
-          input: inputs.map((input) => [
-            input.title ? `Title: ${input.title}` : undefined,
-            input.text
-          ].filter((part) => Boolean(part)).join(`
-`))
-        }),
-        signal: controller.signal
-      });
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `Local source embedding endpoint returned HTTP ${response.status}.`, "Check the local/private embedding endpoint configured for secure-local source-index embeddings.");
-      }
-      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json());
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", "Local source embedding endpoint returned the wrong number of embeddings.");
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      throw new OperationError("source_index_error", "Local source embedding endpoint failed.", error instanceof Error ? error.message : "Check the local/private embedding endpoint.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  requestHeaders() {
-    const headers = new Headers({ "Content-Type": "application/json" });
-    const apiKey = this.apiKeyProvider?.()?.trim();
-    if (apiKey)
-      headers.set("Authorization", `Bearer ${apiKey}`);
-    return headers;
-  }
-}
-function cosineSimilarity(left, right) {
-  const length = Math.min(left.length, right.length);
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0;index < length; index += 1) {
-    const l = left[index] ?? 0;
-    const r = right[index] ?? 0;
-    dot += l * r;
-    leftNorm += l * l;
-    rightNorm += r * r;
-  }
-  if (leftNorm === 0 || rightNorm === 0)
-    return 0;
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
-}
-function encodeEmbedding(vector, expectedDimension) {
-  if (vector.length !== expectedDimension) {
-    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
-  }
-  const floats = new Float32Array(vector.length);
-  vector.forEach((value, index) => {
-    floats[index] = Number.isFinite(value) ? value : 0;
-  });
-  return new Uint8Array(floats.buffer);
-}
-function decodeEmbedding(value) {
-  let bytes;
-  if (value instanceof Uint8Array) {
-    bytes = value;
-  } else if (value instanceof ArrayBuffer) {
-    bytes = new Uint8Array(value);
-  } else if (ArrayBuffer.isView(value)) {
-    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  } else {
-    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
-  }
-  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
-  if (bytes.byteOffset % 4 !== 0) {
-    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
-  }
-  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
-}
-function parseGeminiBatchEmbeddingResponse(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
-  }
-  const embeddings = value.embeddings;
-  if (!Array.isArray(embeddings)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
-  }
-  return embeddings.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
-    }
-    const values = item.values;
-    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
-    }
-    return values;
-  });
-}
-function parseOpenAICompatibleEmbeddingResponse(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
-  }
-  const data = value.data;
-  if (!Array.isArray(data)) {
-    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
-  }
-  return data.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
-    }
-    const embedding = item.embedding;
-    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
-    }
-    return embedding;
-  });
-}
-function normalizeMaxMediaPerInput(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_PER_INPUT;
-  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
-}
-function normalizeMaxMediaBytes(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_BYTES;
-  return Math.max(1, Math.floor(value));
-}
-function normalizeMediaFetchTimeoutMs(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
-  return Math.max(100, Math.floor(value));
-}
-function normalizeMaxMediaRedirects(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_REDIRECTS;
-  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
-}
-function normalizeImageMimeType(value) {
-  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
-  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
-    return;
-  return mimeType;
-}
-function parseSafeMediaUrl(value, base) {
-  let url;
-  try {
-    url = base ? new URL(value, base) : new URL(value);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "https:")
-    return;
-  return url;
-}
-function defaultMediaFetch(url, options) {
-  const address = options.validatedAddresses[0];
-  const family = address ? isIP(address) : 0;
-  if (!address || !family || isPrivateOrReservedIp(address)) {
-    return Promise.resolve(new Response(null, { status: 403 }));
-  }
-  return new Promise((resolvePromise, rejectPromise) => {
-    const request = httpsRequest(url, {
-      method: "GET",
-      headers: MEDIA_FETCH_HEADERS,
-      lookup: (_hostname, _options, callback) => {
-        callback(null, address, family);
-      },
-      signal: options.signal
-    }, (message) => {
-      resolvePromise(responseFromIncomingMessage(message));
-    });
-    request.on("error", rejectPromise);
-    request.end();
-  });
-}
-function responseFromIncomingMessage(message) {
-  const headers = new Headers;
-  for (const [name, value] of Object.entries(message.headers)) {
-    if (Array.isArray(value)) {
-      for (const item of value)
-        headers.append(name, item);
-    } else if (value !== undefined) {
-      headers.set(name, String(value));
-    }
-  }
-  const status = message.statusCode && message.statusCode >= 100 && message.statusCode <= 599 ? message.statusCode : 502;
-  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message);
-  return new Response(body, {
-    status,
-    headers,
-    ...message.statusMessage ? { statusText: message.statusMessage } : {}
-  });
-}
-async function readCappedMediaBody(response, maxBytes) {
-  if (!response.body) {
-    const bytes2 = new Uint8Array(await response.arrayBuffer());
-    return bytes2.byteLength > maxBytes ? undefined : bytes2;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return;
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-function readableStreamFromIncomingMessage(message) {
-  return new ReadableStream({
-    start(controller) {
-      message.on("data", (chunk) => {
-        if (typeof chunk === "string") {
-          controller.enqueue(new TextEncoder().encode(chunk));
-          return;
-        }
-        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
-      });
-      message.on("end", () => controller.close());
-      message.on("error", (error) => controller.error(error));
-    },
-    cancel() {
-      message.destroy();
-    }
-  });
-}
-async function publicMediaFetchAddresses(url, lookupIpAddresses) {
-  const host = normalizedHostname(url);
-  if (host === "localhost" || host.endsWith(".local")) {
-    return;
-  }
-  if (isIP(host))
-    return isPrivateOrReservedIp(host) ? undefined : [host];
-  let addresses;
-  try {
-    addresses = await lookupIpAddresses(host);
-  } catch {
-    return;
-  }
-  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
-}
-async function defaultLookupIpAddresses(hostname) {
-  const records = await lookup(hostname, { all: true });
-  return records.map((record) => record.address);
-}
-function normalizedHostname(url) {
-  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-}
-function isRedirectStatus(status) {
-  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
-}
-function isPrivateOrReservedIp(address) {
-  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const version = isIP(normalized);
-  if (version === 4)
-    return isPrivateOrReservedIpv4(normalized);
-  if (version !== 6)
-    return true;
-  const mapped = ipv4FromMappedIpv6(normalized);
-  if (mapped)
-    return isPrivateOrReservedIpv4(mapped);
-  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
-  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
-}
-function isPrivateOrReservedIpv4(address) {
-  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return true;
-  const [a = 0, b = 0] = parts;
-  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
-}
-function ipv4FromMappedIpv6(address) {
-  const words = expandIpv6Words(address);
-  if (!words || words.length !== 8)
-    return;
-  if (words.slice(0, 5).some((word) => word !== 0) || words[5] !== 65535) {
-    return;
-  }
-  const [high = 0, low = 0] = words.slice(6);
-  return [
-    high >> 8 & 255,
-    high & 255,
-    low >> 8 & 255,
-    low & 255
-  ].join(".");
-}
-function expandIpv6Words(address) {
-  const normalized = replaceDottedIpv4Tail(address);
-  if (!normalized)
-    return;
-  const parts = normalized.split("::");
-  if (parts.length > 2)
-    return;
-  const left = ipv6WordsFromPart(parts[0] ?? "");
-  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
-  if (!left || !right)
-    return;
-  if (parts.length === 1)
-    return left.length === 8 ? left : undefined;
-  const missing = 8 - left.length - right.length;
-  if (missing < 1)
-    return;
-  return [
-    ...left,
-    ...Array.from({ length: missing }, () => 0),
-    ...right
-  ];
-}
-function replaceDottedIpv4Tail(address) {
-  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
-  if (!dotted)
-    return address;
-  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return;
-  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
-  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
-  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
-}
-function ipv6WordsFromPart(part) {
-  if (!part)
-    return [];
-  const words = part.split(":").map((segment) => {
-    if (!/^[0-9a-f]{1,4}$/i.test(segment))
-      return Number.NaN;
-    return Number.parseInt(segment, 16);
-  });
-  return words.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words : undefined;
-}
-function normalizeGeminiModelId(value) {
-  const trimmed = value.trim();
-  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
-}
-function normalizeLocalSourceEmbeddingBaseUrl(value) {
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
-  }
-  const hostname = url.hostname.toLowerCase();
-  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-  if (!localHost) {
-    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
-  }
-  return value.replace(/\/+$/, "");
-}
-function normalizeOutputDimensionality(value) {
-  if (value === undefined)
-    return;
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
-  }
-  return value;
-}
-function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
-}
-var DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS;
-var init_embeddings = __esm(() => {
-  init_operation_error();
-  init_embedding_identity();
-  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
-  MEDIA_FETCH_HEADERS = {
-    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
-    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
-  };
-});
-
 // src/core/sqlite-store.ts
 function closeSqliteStore(db, options = {}) {
   if (options.checkpoint !== false) {
@@ -7796,10 +7881,19 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 11,
       name: "connector_store_locator_identity_index",
       up(db) {
         createConnectorStoreLocatorIdentityIndex(db);
+      }
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: "connector_store_trusted_source_scope_observation",
+      up(db) {
+        addColumnIfMissing(db, "items", "source_scope_generation", "TEXT");
+        addColumnIfMissing(db, "items", "source_scope_revision", "TEXT");
+        addColumnIfMissing(db, "items", "source_scope_folder_keys_json", "TEXT");
       }
     }
   ];
@@ -8357,14 +8451,14 @@ function budgetChunks(chunks, maxChars) {
   return { chunks: bounded, truncated: false };
 }
 function assertConnectorStoreEmbeddingProvider(trustDomain, provider) {
-  assertConnectorStoreEmbeddingBackend(trustDomain, provider.backend);
+  assertConnectorStoreEmbeddingBackend(trustDomain, provider);
   if (!Number.isSafeInteger(provider.dimension) || provider.dimension < 1) {
     throw new Error("Connector store embedding provider must declare its dimension before use " + "(a provider that discovers its width from its first response cannot be fenced).");
   }
 }
-function assertConnectorStoreEmbeddingBackend(trustDomain, backend) {
-  if (trustDomain === "secure_local" && backend !== "local") {
-    throw new Error("Connector store secure_local embeddings must use a local/private embedding provider " + "(secure_local chunks are never cloud-embedding eligible).");
+function assertConnectorStoreEmbeddingBackend(trustDomain, provider) {
+  if (trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(provider)) {
+    throw new Error("Connector store secure_local embeddings must use a local/private provider or the approved Venice embedding lane.");
   }
 }
 async function assertEmbeddingProviderCanEmbed(provider) {
@@ -8479,6 +8573,8 @@ function normalizeConnectorStoreSearchFilters(value) {
     return;
   const provider = normalizeBoundedFilterString(value.provider, "provider");
   const locatorPathScope = normalizeConnectorStoreLocatorPathScope(value.locatorPathScope);
+  const locatorPathScopes = normalizeScopePaths(value.locatorPathScopes);
+  const locatorPathExcludedScopes = normalizeScopePaths(value.locatorPathExcludedScopes);
   const conversationId = normalizeBoundedFilterString(value.conversationId, "conversation id");
   const senderId = normalizeBoundedFilterString(value.senderId, "sender id");
   const senderLabel = normalizeBoundedFilterString(value.senderLabel, "sender label");
@@ -8491,15 +8587,29 @@ function normalizeConnectorStoreSearchFilters(value) {
     throw new Error("Connector store authoredAfter must not be later than authoredBefore.");
   }
   const searchTextExactLines = normalizeBoundedFilterStrings(value.searchTextExactLines, "exact search-context line");
+  const sourceScopeGeneration = normalizeScopeGeneration(value.sourceScopeGeneration);
+  const sourceScopeRevision = normalizeScopeRevision(value.sourceScopeRevision);
+  const sourceScopeFolderAnyKeys = normalizeScopeFolderKeys(value.sourceScopeFolderAnyKeys);
+  const sourceScopeFolderNoneKeys = normalizeScopeFolderKeys(value.sourceScopeFolderNoneKeys);
+  const metadataOnlyLocatorPathScopes = normalizeScopePaths(value.metadataOnlyLocatorPathScopes);
+  const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
+    ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
+    ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
     ...conversationId ? { conversationId } : {},
     ...senderId ? { senderId } : {},
     ...senderLabel ? { senderLabel } : {},
     ...authoredAfter ? { authoredAfter } : {},
     ...authoredBefore ? { authoredBefore } : {},
-    ...searchTextExactLines.length > 0 ? { searchTextExactLines } : {}
+    ...searchTextExactLines.length > 0 ? { searchTextExactLines } : {},
+    ...sourceScopeGeneration ? { sourceScopeGeneration } : {},
+    ...sourceScopeRevision ? { sourceScopeRevision } : {},
+    ...sourceScopeFolderAnyKeys.length > 0 ? { sourceScopeFolderAnyKeys } : {},
+    ...sourceScopeFolderNoneKeys.length > 0 ? { sourceScopeFolderNoneKeys } : {},
+    ...metadataOnlyLocatorPathScopes.length > 0 ? { metadataOnlyLocatorPathScopes } : {},
+    ...metadataOnlySourceScopeFolderKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys } : {}
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -8513,6 +8623,28 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
   }
+  if (normalized.sourceScopeGeneration) {
+    clauses.push("AND i.source_scope_generation = ?");
+    params.push(normalized.sourceScopeGeneration);
+  }
+  if (normalized.sourceScopeRevision) {
+    clauses.push("AND i.source_scope_revision = ?");
+    params.push(normalized.sourceScopeRevision);
+  }
+  if (normalized.sourceScopeFolderAnyKeys?.length) {
+    clauses.push(`AND EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderAnyKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.sourceScopeFolderAnyKeys);
+  }
+  if (normalized.sourceScopeFolderNoneKeys?.length) {
+    clauses.push(`AND NOT EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) scope_folder
+      WHERE scope_folder.value IN (${normalized.sourceScopeFolderNoneKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.sourceScopeFolderNoneKeys);
+  }
   if (normalized.locatorPathScope) {
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
@@ -8521,6 +8653,29 @@ function connectorStoreFilterSql(filters) {
     } else {
       clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.locatorPathScopes?.length) {
+    const alternatives = [];
+    clauses.push("AND i.locator_uri IS NOT NULL");
+    for (const locatorPath of normalized.locatorPathScopes) {
+      if (locatorPath === "/") {
+        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      } else {
+        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
+    }
+    clauses.push(`AND (${alternatives.join(" OR ")})`);
+  }
+  if (normalized.locatorPathExcludedScopes?.length) {
+    for (const locatorPath of normalized.locatorPathExcludedScopes) {
+      if (locatorPath === "/") {
+        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+      } else {
+        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+      }
     }
   }
   if (normalized.conversationId) {
@@ -8549,6 +8704,103 @@ function connectorStoreFilterSql(filters) {
   }
   return { sql: clauses.join(`
 `), params };
+}
+function connectorStoreFtsScopeSql(filters) {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  const contentRow = `(
+    connector_store_fts.chunk_pk IS NOT NULL
+    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
+  )`;
+  if (!normalized)
+    return { sql: `AND ${contentRow}`, params: [] };
+  const metadataOnly = [];
+  const params = [];
+  for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
+    if (locatorPath === "/") {
+      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+    } else {
+      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
+    }
+  }
+  if (normalized.metadataOnlySourceScopeFolderKeys?.length) {
+    metadataOnly.push(`EXISTS (
+      SELECT 1 FROM json_each(COALESCE(i.source_scope_folder_keys_json, '[]')) metadata_folder
+      WHERE metadata_folder.value IN (${normalized.metadataOnlySourceScopeFolderKeys.map(() => "?").join(", ")})
+    )`);
+    params.push(...normalized.metadataOnlySourceScopeFolderKeys);
+  }
+  if (metadataOnly.length === 0)
+    return { sql: `AND ${contentRow}`, params: [] };
+  const metadataExpression = `(${metadataOnly.join(" OR ")})`;
+  return {
+    sql: `AND (
+      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      OR (NOT ${metadataExpression} AND ${contentRow})
+    )`,
+    params: [...params, ...params]
+  };
+}
+function connectorStoreVectorScopeFilters(filters) {
+  const normalized = normalizeConnectorStoreSearchFilters(filters);
+  if (!normalized)
+    return;
+  return normalizeConnectorStoreSearchFilters({
+    ...normalized,
+    locatorPathExcludedScopes: [
+      ...normalized.locatorPathExcludedScopes ?? [],
+      ...normalized.metadataOnlyLocatorPathScopes ?? []
+    ],
+    sourceScopeFolderNoneKeys: [
+      ...normalized.sourceScopeFolderNoneKeys ?? [],
+      ...normalized.metadataOnlySourceScopeFolderKeys ?? []
+    ]
+  });
+}
+function normalizeScopePaths(values) {
+  if (values === undefined)
+    return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error("Connector store locator path scopes must be an array of at most 100 strings.");
+  }
+  return [...new Set(values.map((value) => normalizeConnectorStoreLocatorPathScope(value)))];
+}
+function normalizeScopeGeneration(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error("Connector store source scope generation must be a 64-character lowercase digest.");
+  }
+  return value;
+}
+function normalizeScopeRevision(value) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new Error("Connector store source scope revision must be a lowercase UUID v4.");
+  }
+  return value;
+}
+function normalizeSourceScopeObservation(value) {
+  const accountGeneration = normalizeScopeGeneration(value.accountGeneration);
+  if (!accountGeneration)
+    throw new Error("Connector store source scope observation requires an account generation.");
+  const scopeRevision = normalizeScopeRevision(value.scopeRevision);
+  if (!scopeRevision)
+    throw new Error("Connector store source scope observation requires a scope revision.");
+  return {
+    accountGeneration,
+    scopeRevision,
+    folderKeys: normalizeScopeFolderKeys(value.folderKeys)
+  };
+}
+function normalizeScopeFolderKeys(values) {
+  if (values === undefined)
+    return [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new Error("Connector store source scope folder keys must be an array of at most 100 strings.");
+  }
+  return [...new Set(values.map((value) => normalizeBoundedFilterString(value, "source scope folder key")))];
 }
 function normalizeBoundedFilterStrings(values, label) {
   if (values === undefined)
@@ -8919,6 +9171,8 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV9Schema(db);
   if (version === 10)
     validateConnectorStoreV10Schema(db);
+  if (version === 11)
+    validateConnectorStoreV11Schema(db);
   if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION)
     validateConnectorStoreSchema(db);
 }
@@ -8927,17 +9181,26 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreFtsOwnership(db, "v6");
 }
 function validateConnectorStoreSchema(db) {
+  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, "v12");
+  assertExactTableColumns(db, "embedding_models", CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, false, "v12");
+  assertExactTableColumns(db, "item_write_claims", CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, false, "v12");
+  validateConnectorStoreLocatorIdentitySchema(db, "v12");
+}
+function validateConnectorStoreV11Schema(db) {
   validateConnectorStoreV10Schema(db);
-  assertExactTableColumns(db, "item_locator_identities", ["item_pk", "provider", "account_scope", "normalized_conversation", "normalized_locator"], false, "v11");
-  assertExactTableColumns(db, "locator_identity_index_state", ["singleton", "cursor_item_pk", "completed"], false, "v11");
-  assertIndexColumns(db, "idx_connector_store_locator_identity", ["provider", "account_scope", "normalized_conversation", "normalized_locator", "item_pk"], "v11");
-  assertTriggerExists(db, "connector_store_locator_identity_insert", "v11");
-  assertTriggerExists(db, "connector_store_locator_identity_update", "v11");
+  validateConnectorStoreLocatorIdentitySchema(db, "v11");
+}
+function validateConnectorStoreLocatorIdentitySchema(db, versionLabel) {
+  assertExactTableColumns(db, "item_locator_identities", ["item_pk", "provider", "account_scope", "normalized_conversation", "normalized_locator"], false, versionLabel);
+  assertExactTableColumns(db, "locator_identity_index_state", ["singleton", "cursor_item_pk", "completed"], false, versionLabel);
+  assertIndexColumns(db, "idx_connector_store_locator_identity", ["provider", "account_scope", "normalized_conversation", "normalized_locator", "item_pk"], versionLabel);
+  assertTriggerExists(db, "connector_store_locator_identity_insert", versionLabel);
+  assertTriggerExists(db, "connector_store_locator_identity_update", versionLabel);
   const stateRows = Number(db.query(`
     SELECT COUNT(*) AS count FROM locator_identity_index_state WHERE singleton = 1
   `).get().count);
   if (stateRows !== 1)
-    throw new Error("Connector store locator identity index state is missing for v11.");
+    throw new Error(`Connector store locator identity index state is missing for ${versionLabel}.`);
 }
 function validateConnectorStoreV10Schema(db) {
   validateConnectorStoreV9Schema(db, "v10");
@@ -9370,13 +9633,13 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 11, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -9491,6 +9754,40 @@ var init_local_index = __esm(() => {
     }
     close() {
       closeSqliteStore(this.db);
+    }
+    itemMatchesSearchFilters(localItemId, accountScope, filters) {
+      const predicate = connectorStoreFilterSql(filters);
+      const row = this.db.query(`
+      SELECT 1 AS matched
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""}
+        ${predicate.sql}
+      LIMIT 1
+    `).get(localItemId, ...accountScope ? [accountScope] : [], ...predicate.params);
+      return row?.matched === 1;
+    }
+    itemMatchesExtractionRef(ref, filters) {
+      const predicate = connectorStoreFilterSql(filters);
+      const row = this.db.query(`
+      SELECT i.source_version, i.content_hash
+      FROM items i
+      WHERE i.local_item_id = ?
+        AND i.provider_item_id = ?
+        AND i.provider = ?
+        AND i.account_scope = ?
+        AND i.tombstoned = 0
+        ${predicate.sql}
+      LIMIT 1
+    `).get(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope, ...predicate.params);
+      if (!row)
+        return false;
+      if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+        return false;
+      if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+        return false;
+      return true;
     }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
@@ -9692,8 +9989,8 @@ var init_local_index = __esm(() => {
       const maxWindows = normalizeLocatorIdentityConvergenceWindows(options.maxWindows);
       let state = this.locatorIdentityIndexState();
       let scannedItems = 0;
-      for (let window = 0;!state.completed && window < maxWindows; window += 1) {
-        if (window > 0)
+      for (let window2 = 0;!state.completed && window2 < maxWindows; window2 += 1) {
+        if (window2 > 0)
           await yieldConnectorSyncTurn();
         scannedItems += this.advanceLocatorIdentityIndexWindow(state.cursorItemPk, maxItems);
         state = this.locatorIdentityIndexState();
@@ -9864,6 +10161,7 @@ var init_local_index = __esm(() => {
       const limit = normalizeExtractionCandidateLimit(options.limit);
       const matchesMimeType = buildMimeTypeMatcher(options.mimeTypes);
       const accountScope = normalizeOptionalAccountScope(options.accountScope);
+      const selectedFilters = connectorStoreFilterSql(options.filters);
       let lastExaminedPk = normalizeExtractionCandidateCursor(options.cursor);
       const scanBatch = matchesMimeType ? Math.max(limit, 256) : limit;
       const query = this.db.query(`
@@ -9875,9 +10173,11 @@ var init_local_index = __esm(() => {
         (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS stored_chunks
       FROM items i
       WHERE i.tombstoned = 0
+        AND LOWER(i.mime_type) <> 'inode/directory'
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk))
+        ${selectedFilters.sql}
       ORDER BY i.item_pk
       LIMIT ?
     `);
@@ -9885,7 +10185,7 @@ var init_local_index = __esm(() => {
       let skippedByDisposition = 0;
       let exhausted = false;
       while (candidates.length < limit) {
-        const rows = query.all(lastExaminedPk, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, scanBatch);
+        const rows = query.all(lastExaminedPk, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, ...selectedFilters.params, scanBatch);
         if (rows.length === 0) {
           exhausted = true;
           break;
@@ -9894,7 +10194,11 @@ var init_local_index = __esm(() => {
           lastExaminedPk = row.item_pk;
           if (matchesMimeType && !matchesMimeType(row.mime_type))
             continue;
-          const decision = this.exclusions.evaluatePath(row.locator_uri);
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          });
           if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
             skippedByDisposition += 1;
             continue;
@@ -9961,7 +10265,7 @@ var init_local_index = __esm(() => {
       const exactChunks = chunks.filter((chunk) => chunk.chunk_index >= 0 && chunk.chunk_index < expectation.chunkContentHashes.length && chunk.content_hash === expectation.chunkContentHashes[chunk.chunk_index]);
       const chunksIndexed = exactChunks.length;
       const chunksEmbeddingCurrent = exactChunks.filter((chunk) => chunk.embedding_current === 1).length;
-      const expectedFtsRows = Math.max(1, chunks.length);
+      const expectedFtsRows = chunks.length + 1;
       const ftsRows = this.db.query(`
       SELECT COUNT(*) AS count
       FROM connector_store_fts_rows
@@ -10087,7 +10391,7 @@ var init_local_index = __esm(() => {
       const finishItem = () => {
         if (currentItemPk === undefined)
           return;
-        if (currentChunkUnmapped || currentFtsRows !== Math.max(1, currentChunkCount)) {
+        if (currentChunkUnmapped || currentFtsRows !== currentChunkCount + 1) {
           counts.itemsWithFtsDeficiency += 1;
           if (samples.ftsDeficientLocalItemIds.length < sampleLimit) {
             samples.ftsDeficientLocalItemIds.push(currentLocalItemId);
@@ -10387,7 +10691,7 @@ var init_local_index = __esm(() => {
       const relinquishedLocalItemIds = [];
       let identitiesScanned = 0;
       let itemsRelinquished = 0;
-      for (let window = 0;!position.complete && window < maxWindows; window += 1) {
+      for (let window2 = 0;!position.complete && window2 < maxWindows; window2 += 1) {
         const page = options.stricter.activeItemIdentities({
           afterItemPk: position.cursorItemPk,
           maxItems
@@ -11161,7 +11465,8 @@ var init_local_index = __esm(() => {
               gaps.push(secretsTierExcludedGap(itemForStorage));
               continue;
             }
-            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only");
+            const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
+            const upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", false, deferMetadataOnlyContent && itemForStorage.content.kind === "metadata_only", sourceScopeObservation);
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
@@ -11291,7 +11596,7 @@ var init_local_index = __esm(() => {
         }
       };
     }
-    upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false) {
+    upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
       const exclusion = this.exclusions.evaluateMetadata(item.metadata);
       if (exclusion.excluded)
         throw new ConnectorStoreExclusionViolationError(exclusion.ruleId);
@@ -11316,15 +11621,19 @@ var init_local_index = __esm(() => {
       const reactionsJson = serializeSourceReactions(reactions);
       const emittedSearchText = itemSearchText(item, title, renderSourceReactionLine(reactions));
       const searchText = preserveStoredSearchText ? mergeSearchTextLines(existing?.search_text, emittedSearchText, storedSearchTextLiteralEscapes(item.metadata), preserveStoredSearchTextOwnedFacets) : emittedSearchText;
+      const sourceScopeGeneration = sourceScopeObservation?.accountGeneration;
+      const sourceScopeRevision = sourceScopeObservation?.scopeRevision;
+      const sourceScopeFolderKeysJson = sourceScopeObservation ? JSON.stringify(sourceScopeObservation.folderKeys) : undefined;
       const applied = this.db.query(`
       INSERT INTO items (
         provider, family, account_scope, provider_item_id, provider_thread_id, provider_conversation_id,
         provider_file_id, provider_event_id, local_item_id, source_version, title, search_text,
-        reactions_json, sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
+        reactions_json, source_scope_generation, source_scope_revision, source_scope_folder_keys_json,
+        sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
         authored_at, updated_at,
         fetched_at, indexed_at, content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
         provider_thread_id = excluded.provider_thread_id,
         provider_conversation_id = excluded.provider_conversation_id,
@@ -11335,6 +11644,9 @@ var init_local_index = __esm(() => {
         title = excluded.title,
         search_text = excluded.search_text,
         reactions_json = excluded.reactions_json,
+        source_scope_generation = COALESCE(excluded.source_scope_generation, items.source_scope_generation),
+        source_scope_revision = COALESCE(excluded.source_scope_revision, items.source_scope_revision),
+        source_scope_folder_keys_json = COALESCE(excluded.source_scope_folder_keys_json, items.source_scope_folder_keys_json),
         sender_id = excluded.sender_id,
         sender_label = excluded.sender_label,
         sender_is_owner = excluded.sender_is_owner,
@@ -11349,7 +11661,7 @@ var init_local_index = __esm(() => {
         tombstoned = 0,
         deleted_at = NULL,
         sync_run_id = excluded.sync_run_id
-    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
+    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
       const itemPk = existing?.item_pk ?? Number(applied.lastInsertRowid);
       const ftsMetadataChanged = existing === null || existing.tombstoned === 1 || existing.title !== (title ?? null) || existing.search_text !== (searchText ?? null);
       return {
@@ -11358,11 +11670,15 @@ var init_local_index = __esm(() => {
         contentChanged: ftsMetadataChanged || existing.content_hash !== (contentHash ?? null)
       };
     }
-    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false) {
+    upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
       return this.db.transaction(() => {
-        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash);
+        const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
         this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
-        if (upsert.ftsMetadataChanged)
+        const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
+          SELECT 1 AS present FROM connector_store_fts_rows
+          WHERE item_pk = ? AND chunk_pk IS NULL LIMIT 1
+        `).get(upsert.itemPk)?.present;
+        if (upsert.ftsMetadataChanged || missingScopeMetadataRow)
           this.refreshFtsForItem(upsert.itemPk);
         return upsert;
       })();
@@ -11682,14 +11998,11 @@ var init_local_index = __esm(() => {
         const title = item.title ?? "";
         const searchText = item.search_text ?? "";
         const chunks = this.db.query("SELECT chunk_pk, bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(itemPk);
-        if (chunks.length === 0) {
-          this.insertFtsRow(title, connectorStoreFtsText(searchText, ""), itemPk, null);
-          return 1;
-        }
+        this.insertFtsRow(title, connectorStoreFtsText(searchText, ""), itemPk, null);
         for (const chunk of chunks) {
           this.insertFtsRow(title, connectorStoreFtsText(searchText, chunk.bounded_text), itemPk, chunk.chunk_pk);
         }
-        return chunks.length;
+        return chunks.length + 1;
       })();
     }
     async embedChunks(options) {
@@ -11698,6 +12011,7 @@ var init_local_index = __esm(() => {
         throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
       }
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      await options.assertAuthorized?.();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -11726,13 +12040,14 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const rows = this.embeddingSourceRows(options.localItemIds);
+      const rows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
         throw new Error("Connector store embedding journal input changed.");
       }
       if (!(priorJournal && priorCounts) && this.embeddingRebindWouldInvalidateCurrency(provider)) {
+        await options.assertAuthorized?.();
         await assertEmbeddingProviderCanEmbed(provider);
       }
       let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
@@ -11801,6 +12116,7 @@ var init_local_index = __esm(() => {
       let staleSkipped = 0;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        await options.assertAuthorized?.();
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row)
@@ -12084,7 +12400,7 @@ var init_local_index = __esm(() => {
         embedding_backend = excluded.embedding_backend,
         embedding_epoch = excluded.embedding_epoch,
         cloud_embedding_eligible = excluded.cloud_embedding_eligible
-    `).run(model.modelId, model.provider, model.dimension, model.backend, model.epochId, Number(this.trustDomain !== "secure_local" && model.backend === "cloud"), recordedAt);
+    `).run(model.modelId, model.provider, model.dimension, model.backend, model.epochId, Number(model.backend === "cloud" && (this.trustDomain !== "secure_local" || model.provider === "venice")), recordedAt);
     }
     hasEmbeddings(modelId) {
       if (this.embeddingCurrencyRebuildPending(modelId))
@@ -12111,6 +12427,7 @@ var init_local_index = __esm(() => {
     }
     async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      const vectorFilters = connectorStoreVectorScopeFilters(filters);
       const trimmed = query.trim();
       if (!trimmed)
         return { rows: [] };
@@ -12129,7 +12446,7 @@ var init_local_index = __esm(() => {
         beforeToken: before.token,
         maxResults,
         ...accountScope !== undefined ? { accountScope } : {},
-        ...filters ? { filters } : {},
+        ...vectorFilters ? { filters: vectorFilters } : {},
         ...deadlineAtMs !== undefined ? { deadlineAtMs } : {}
       });
     }
@@ -12239,10 +12556,12 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds) {
+    embeddingSourceRows(localItemIds, accountScope, filters) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
+      const selectedAccount = normalizeOptionalAccountScope(accountScope);
+      const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       return this.db.query(`
       SELECT
@@ -12259,8 +12578,10 @@ var init_local_index = __esm(() => {
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
         ${itemFilter}
+        ${selectedAccount ? "AND i.account_scope = ?" : ""}
+        ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? []);
+    `).all(...selectedLocalItemIds ?? [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -12290,6 +12611,7 @@ var init_local_index = __esm(() => {
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
+      const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
         return [];
@@ -12318,10 +12640,11 @@ var init_local_index = __esm(() => {
         AND i.tombstoned = 0
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
+        ${selectedFtsScope.sql}
       GROUP BY i.item_pk
       ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC
       LIMIT ?
-    `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, fetchLimit);
+    `).all(terms, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, ...selectedFtsScope.params, fetchLimit);
       let selected = rows;
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
@@ -12329,9 +12652,13 @@ var init_local_index = __esm(() => {
         const matchedGroups = new Map;
         for (const group of groups) {
           const hits = this.db.query(`
-          SELECT DISTINCT item_pk FROM connector_store_fts
-          WHERE connector_store_fts MATCH ? AND item_pk IN (${placeholders})
-        `).all(sourceIndexFtsGroupQuery(group), ...pks);
+          SELECT DISTINCT connector_store_fts.item_pk
+          FROM connector_store_fts
+          JOIN items i ON i.item_pk = connector_store_fts.item_pk
+          WHERE connector_store_fts MATCH ?
+            AND connector_store_fts.item_pk IN (${placeholders})
+            ${selectedFtsScope.sql}
+        `).all(sourceIndexFtsGroupQuery(group), ...pks, ...selectedFtsScope.params);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
           }
@@ -12413,17 +12740,34 @@ var init_local_index = __esm(() => {
       const row = this.db.query("SELECT reactions_json FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId);
       return parseStoredSourceReactions(row?.reactions_json);
     }
-    status() {
+    status(scope) {
+      const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
+      const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
+      const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+      const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${itemFilters.sql}`;
+      const contentWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}`;
+      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params];
+      const contentParams = [...accountScope ? [accountScope] : [], ...contentFilters.params];
       const counts = this.db.query(`
       SELECT
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items,
-        (SELECT COUNT(*) FROM items WHERE tombstoned = 1) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks) AS chunks,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
+        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
+        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+          WHERE i.tombstoned = 0 ${contentWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
           WHERE connector_id <> 'connector_store_embedding_write_authority'
@@ -12433,8 +12777,34 @@ var init_local_index = __esm(() => {
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        ) AS items_with_text
-    `).get();
+            ${contentWhere}
+        ) AS items_with_text,
+        (SELECT COUNT(*) FROM items i
+          WHERE i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${contentWhere}
+        ) AS full_ingestion_files
+    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...contentParams, ...contentParams, ...contentParams, ...contentParams);
+      let policyDeferredItems = 0;
+      if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
+        const rows = this.db.query(`
+        SELECT i.locator_uri, i.title, i.mime_type
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND LOWER(i.mime_type) <> 'inode/directory'
+          ${contentWhere}
+      `).all(...contentParams);
+        for (const row of rows) {
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          });
+          if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
+            policyDeferredItems += 1;
+          }
+        }
+      }
       const byModel = this.db.query(`
       SELECT
         m.model_id AS model_id,
@@ -12443,10 +12813,12 @@ var init_local_index = __esm(() => {
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
+            ${contentWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+            ${contentWhere}
             AND NOT EXISTS (
               SELECT 1 FROM chunks c
               WHERE c.item_pk = i.item_pk
@@ -12458,9 +12830,14 @@ var init_local_index = __esm(() => {
                 )
             )
         ) AS items_embedded
-      FROM (SELECT DISTINCT model_id FROM chunk_embeddings) m
+      FROM (
+        SELECT DISTINCT emb.model_id
+        FROM chunk_embeddings emb
+        JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0 ${contentWhere}
+      ) m
       ORDER BY m.model_id
-    `).all();
+    `).all(...contentParams, ...contentParams, ...contentParams);
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id <> 'connector_store_embedding_write_authority'
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
@@ -12468,13 +12845,22 @@ var init_local_index = __esm(() => {
         corpusId: this.corpusId,
         family: this.family,
         trustDomain: this.trustDomain,
+        ...scope?.scopeRevision ? { scopeRevision: scope.scopeRevision } : {},
         counts: {
           items: counts.items,
           tombstonedItems: counts.tombstoned_items,
           chunks: counts.chunks,
           embeddedChunks: counts.embedded_chunks,
           syncRuns: counts.sync_runs,
-          itemsWithText: counts.items_with_text
+          itemsWithText: counts.items_with_text,
+          ...scope ? {
+            files: counts.files,
+            folders: counts.folders,
+            fullIngestionFiles: counts.full_ingestion_files,
+            scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+            contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems),
+            policyDeferredItems
+          } : {}
         },
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
@@ -12622,6 +13008,12 @@ var init_local_index = __esm(() => {
   CONNECTOR_STORE_V9_ITEM_COLUMNS = [
     ...CONNECTOR_STORE_V7_ITEM_COLUMNS,
     "reactions_json"
+  ];
+  CONNECTOR_STORE_V12_ITEM_COLUMNS = [
+    ...CONNECTOR_STORE_V9_ITEM_COLUMNS,
+    "source_scope_generation",
+    "source_scope_revision",
+    "source_scope_folder_keys_json"
   ];
   CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
     "item_pk",
@@ -13332,6 +13724,7 @@ class GoogleDriveSourceConnector {
   contentReadFailures = 0;
   itemsByLocalId = new Map;
   exclusions;
+  scope;
   ancestry;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -13355,6 +13748,7 @@ class GoogleDriveSourceConnector {
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
     this.exclusions = options.exclusions;
+    this.scope = options.scope;
   }
   async authenticate() {
     await this.clientForRequest();
@@ -13382,24 +13776,28 @@ class GoogleDriveSourceConnector {
       });
       const files = page.files.filter((file) => file.id);
       const items = [];
+      let processedFiles = 0;
       for (const file of files) {
         if (items.length >= remaining)
           break;
+        processedFiles += 1;
         const read = await this.rawItemFromDriveFile(file);
-        this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
-        items.push(read.item);
+        if (read) {
+          this.itemsByLocalId.set(read.item.identity.localItemId, read.item);
+          items.push(read.item);
+        }
         if (file.modifiedTime) {
           if (!highWater || file.modifiedTime.localeCompare(highWater) > 0) {
             highWater = file.modifiedTime;
           }
-          if (read.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
+          if (read?.contentDeferred && (!deferredFloor || file.modifiedTime.localeCompare(deferredFloor) < 0)) {
             deferredFloor = file.modifiedTime;
           }
         }
       }
       remaining -= items.length;
       pageToken = page.nextPageToken;
-      const pageTruncated = items.length < files.length;
+      const pageTruncated = processedFiles < files.length;
       const done = !pageToken && !pageTruncated;
       const promoted = promotedDriveWatermark(highWater ?? watermark, deferredFloor, watermark);
       const nextCursor = done ? encodeDriveCursor(promoted ? { watermark: promoted } : {}) : encodeDriveCursor({
@@ -13467,8 +13865,13 @@ class GoogleDriveSourceConnector {
       ...folderAncestorIds ? { folderAncestorIds } : {},
       ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
     });
+    if (!folderAncestorIds && this.scope)
+      return;
+    if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? []))
+      return;
     const excluded = this.exclusions?.evaluateMetadata(metadata).excluded === true;
-    const read = excluded || this.contentReads >= this.maxContentFiles ? { deferred: !excluded } : await this.tryReadText(file);
+    const contentAllowed = !this.scope || this.scope.allowsContent(folderAncestorIds ?? []);
+    const read = excluded || !contentAllowed ? {} : this.contentReads >= this.maxContentFiles ? { deferred: true } : await this.tryReadText(file);
     const text = read.text;
     if (text !== undefined)
       this.contentReads += 1;
@@ -13495,7 +13898,7 @@ class GoogleDriveSourceConnector {
     };
   }
   async resolveFolderAncestry(file) {
-    if (this.exclusions?.identityActive !== true)
+    if (this.exclusions?.identityActive !== true && !this.scope)
       return;
     const client = await this.clientForRequest();
     this.ancestry ??= new GoogleDriveFolderAncestry(client);
@@ -13908,6 +14311,17 @@ var init_ingestion_throughput = __esm(() => {
   init_operation_error();
 });
 
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -13962,8 +14376,8 @@ var init_ingest_filter = __esm(() => {
 
 // src/workers/google-connectors/gmail.ts
 import { createHash as createHash8 } from "node:crypto";
-import { homedir as homedir10 } from "node:os";
-import { join as join11 } from "node:path";
+import { homedir as homedir11 } from "node:os";
+import { join as join12 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -14223,8 +14637,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
-  return join11(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir11(), ".local", "share");
+  return join12(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -14461,6 +14875,7 @@ var init_gmail = __esm(() => {
 
 // src/workers/google-connectors/corpora.ts
 var init_corpora = __esm(() => {
+  init_privacy_language();
   init_corpus();
   init_gmail();
   init_drive();
@@ -14476,14 +14891,14 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname9, join as join12 } from "node:path";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname10, join as join13 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir11(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir12(), ".local", "share");
+  return join13(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 var init_connector2 = __esm(() => {
   init_atomic_file();
@@ -14581,14 +14996,14 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { homedir as homedir12 } from "node:os";
-import { join as join13 } from "node:path";
+import { homedir as homedir13 } from "node:os";
+import { join as join14 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir12(), ".local", "share");
-  return join13(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir13(), ".local", "share");
+  return join14(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 var init_connector3 = __esm(() => {
   init_types();
@@ -14678,13 +15093,13 @@ var init_x_bookmarks = __esm(() => {
 });
 
 // src/workers/telegram-messages/corpus-adapter.ts
-import { homedir as homedir13 } from "node:os";
-import { join as join14 } from "node:path";
+import { homedir as homedir14 } from "node:os";
+import { join as join15 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join14(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join15(env.HOME?.trim() || homedir14(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join14(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join15(env.HOME?.trim() || homedir14(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
@@ -14857,7 +15272,7 @@ var init_public_source_capabilities = __esm(() => {
       label: "WhatsApp",
       authentication: { type: "paired_session", ownership: "one linked user device" },
       contextual_scopes: ["live linked-device traffic", "optional exports", "exclude Status broadcasts"],
-      dependencies: [{ id: "whatsmeow_bridge", label: "Whatsmeow bridge", required_for: "QR pairing and live capture" }],
+      dependencies: [{ id: "whatsmeow_bridge", label: "Packaged Whatsmeow bridge (Go and a C compiler for its first build)", required_for: "QR pairing and live capture" }],
       provider_ceiling: "Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.",
       supported_formats: ["message text", "link previews", "reactions", "media metadata", "voice-note transcript sidecars"],
       doctor_lane: {
@@ -14884,8 +15299,9 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS;
+var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
+  init_privacy_language();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -14899,6 +15315,43 @@ var init_source_dashboard = __esm(() => {
   init_public_source_capabilities();
   MIN_PROGRESS_WINDOW_MS = 5 * 60000;
   SAMPLE_RETENTION_MS = 24 * 60 * 60000;
+  DASHBOARD_SENSITIVITY_TIERS = {
+    policy_basis: "enforced",
+    tiers: [
+      {
+        name: SENSITIVITY_TIER_LABELS.secrets,
+        tier_label: "S5",
+        meaning: "Refused before storage — content never stored and never reaches any model",
+        local: false,
+        venice: false,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.secure,
+        tier_label: "S4",
+        meaning: "Sensitive personal material — local models and Venice only, never frontier cloud",
+        local: true,
+        venice: true,
+        frontier: false
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.private,
+        tier_label: "S1–S3",
+        meaning: "Everyday mail, files, and notes",
+        local: true,
+        venice: true,
+        frontier: true
+      },
+      {
+        name: SENSITIVITY_TIER_LABELS.public,
+        tier_label: "S0",
+        meaning: "Freely shareable material",
+        local: true,
+        venice: true,
+        frontier: true
+      }
+    ]
+  };
 });
 
 // src/workers/dashboard/phases.ts
@@ -14919,6 +15372,7 @@ var init_gmail_live_control = __esm(() => {
 // src/workers/google-connectors/gmail-live-sync.ts
 var init_gmail_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_gmail();
   init_gmail_live_control();
@@ -14936,6 +15390,7 @@ var init_drive_live_control = __esm(() => {
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
   init_connector_store();
+  init_embeddings();
   init_classification();
   init_drive();
   init_drive_live_control();
@@ -14976,9 +15431,9 @@ init_atomic_file();
 init_config();
 init_sovereignty();
 init_secret_store();
-import { createHash as createHash12 } from "node:crypto";
-import { existsSync as existsSync7, lstatSync as lstatSync4, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname11, isAbsolute as isAbsolute2 } from "node:path";
+import { createHash as createHash13 } from "node:crypto";
+import { existsSync as existsSync8, lstatSync as lstatSync4, mkdirSync as mkdirSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname12, isAbsolute as isAbsolute3 } from "node:path";
 
 // src/core/worker-auth.ts
 import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
@@ -15055,15 +15510,65 @@ function unquoteEnvValue(value) {
 // scripts/source-embedding-drain.ts
 init_dropbox_files();
 
+// src/core/messaging-capture.ts
+init_atomic_file();
+init_secret_store();
+
+// src/workers/credential-broker/unpaired-sources.ts
+init_atomic_file();
+var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+
+// src/core/messaging-capture.ts
+init_connected_handles();
+
+// src/core/messaging-pairing.ts
+init_atomic_file();
+init_secret_store();
+
+// src/core/connect.ts
+init_secret_store();
+
+// src/core/worker-service.ts
+init_atomic_file();
+init_operation_error();
+var WORKER_LOG_TAIL_BYTES = 64 * 1024;
+
+// src/core/connect.ts
+init_http_timeout();
+init_oauth_relay();
+init_publisher_oauth_client();
+init_connected_handles();
+init_credential_broker();
+var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
+var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+var KNOWN_OAUTH_ERROR_CODES = new Set([
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+  "access_denied",
+  "server_error",
+  "temporarily_unavailable",
+  "slow_down",
+  "expired_token",
+  "redirect_uri_mismatch"
+]);
+
+// src/core/native-worker-service.ts
+init_config();
+
+// src/core/model-setup.ts
+init_http_timeout();
+init_embedding_identity();
+var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-init_connector_store2();
-
-// src/workers/dropbox-files/extraction-source.ts
-init_dropbox_content_hash();
-import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash6 } from "node:crypto";
@@ -15109,7 +15614,13 @@ function splitScopedLocalItemId(localItemId) {
   };
 }
 
+// src/workers/email-source/file-extraction-runtime.ts
+init_connector_store2();
+
 // src/workers/dropbox-files/extraction-source.ts
+init_dropbox_content_hash();
+import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
+import { relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
 var DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.";
 var DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:";
@@ -15584,6 +16095,7 @@ init_types();
 init_command_runner();
 
 // src/workers/file-extraction/store-sink.ts
+init_source_ingestion_exclusions();
 init_connector_store();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
 var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
@@ -15610,13 +16122,319 @@ init_operation_error();
 
 // src/core/venice-model-catalog.ts
 init_venice_models();
+import {
+  existsSync as existsSync7,
+  mkdirSync as mkdirSync7,
+  readFileSync as readFileSync8,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  writeFileSync as writeFileSync4
+} from "node:fs";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { homedir as homedir10 } from "node:os";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join11 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
+var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
+var CACHE_SCHEMA_VERSION = 1;
+var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir10(), type = "text") {
+  const configuredRoot = env.XDG_CACHE_HOME?.trim();
+  const cacheRoot = configuredRoot && isAbsolute2(configuredRoot) ? configuredRoot : join11(homeDir, ".cache");
+  return join11(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+}
+function createVenicePrivacyCategoryResolver(input) {
+  const options = input.catalog ?? {};
+  const type = options.type ?? "text";
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir10(), type);
+  const cacheKey = `${cachePath}
+${type}`;
+  const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
+  const refreshMinIntervalMs = boundedNonNegativeMs(options.refreshMinIntervalMs, DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS);
+  const timeoutMs = boundedPositiveMs(options.timeoutMs, DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS, MAX_CATALOG_TIMEOUT_MS);
+  const now = options.now ?? Date.now;
+  const fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
+  const catalogUrl = `${input.baseUrl.replace(/\/+$/, "")}/models?type=${type}`;
+  let cachedCatalog = readCatalogCache(cachePath, type);
+  return async (rawModelId, signal) => {
+    throwIfAborted(signal);
+    const modelId = type === "embedding" ? rawModelId.trim() : normalizeVeniceAnalystModelId(rawModelId);
+    const resolvedAtMs = now();
+    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
+    if (catalogIsFresh(cachedCatalog, resolvedAtMs, ttlMs)) {
+      const cachedCategory = catalogCategory(cachedCatalog, modelId);
+      if (cachedCategory)
+        return cachedCategory;
+      const refreshed2 = await refreshCatalog({
+        apiKey: input.apiKey,
+        cachePath,
+        cacheKey,
+        type,
+        catalogUrl,
+        fetchImpl,
+        now,
+        refreshMinIntervalMs,
+        timeoutMs,
+        ...signal ? { signal } : {}
+      });
+      if (refreshed2.status === "success") {
+        cachedCatalog = refreshed2.catalog;
+        return catalogCategory(refreshed2.catalog, modelId);
+      }
+      cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
+      return catalogIsFresh(cachedCatalog, now(), ttlMs) ? catalogCategory(cachedCatalog, modelId) : undefined;
+    }
+    const refreshed = await refreshCatalog({
+      apiKey: input.apiKey,
+      cachePath,
+      cacheKey,
+      type,
+      catalogUrl,
+      fetchImpl,
+      now,
+      refreshMinIntervalMs,
+      timeoutMs,
+      ...signal ? { signal } : {}
+    });
+    if (refreshed.status === "success") {
+      cachedCatalog = refreshed.catalog;
+      return catalogCategory(refreshed.catalog, modelId);
+    }
+    cachedCatalog = newerCatalog(cachedCatalog, readCatalogCache(cachePath, type));
+    if (catalogIsFresh(cachedCatalog, now(), ttlMs)) {
+      return catalogCategory(cachedCatalog, modelId);
+    }
+    return type === "embedding" ? undefined : venicePrivacyCategoryForModel(modelId);
+  };
+}
+function catalogCategory(catalog, modelId) {
+  if (!catalog)
+    return;
+  const exact = catalog.models[modelId];
+  if (exact)
+    return exact;
+  const lower = modelId.toLowerCase();
+  for (const [key, category] of Object.entries(catalog.models)) {
+    if (key.toLowerCase() === lower)
+      return category;
+  }
+  return;
+}
+function newerCatalog(current, candidate) {
+  if (!candidate)
+    return current;
+  if (!current || candidate.fetchedAtMs > current.fetchedAtMs)
+    return candidate;
+  return current;
+}
+function catalogIsFresh(catalog, nowMs, ttlMs) {
+  if (!catalog)
+    return false;
+  const ageMs = nowMs - catalog.fetchedAtMs;
+  return ageMs >= -MAX_FUTURE_CLOCK_SKEW_MS && ageMs <= ttlMs;
+}
+async function refreshCatalog(input) {
+  throwIfAborted(input.signal);
+  const gate = REFRESH_GATES.get(input.cacheKey) ?? {};
+  REFRESH_GATES.set(input.cacheKey, gate);
+  if (gate.inFlight)
+    return awaitWithAbort(gate.inFlight, input.signal);
+  const attemptedAtMs = input.now();
+  if (gate.lastAttemptAtMs !== undefined && attemptedAtMs - gate.lastAttemptAtMs < input.refreshMinIntervalMs) {
+    return { status: "rate_limited" };
+  }
+  gate.lastAttemptAtMs = attemptedAtMs;
+  const refresh = fetchCatalog(input, attemptedAtMs);
+  gate.inFlight = refresh;
+  try {
+    return await refresh;
+  } finally {
+    delete gate.inFlight;
+  }
+}
+async function fetchCatalog(input, fetchedAtMs) {
+  const controller = new AbortController;
+  const abortFromCaller = () => controller.abort(input.signal?.reason);
+  if (input.signal?.aborted)
+    abortFromCaller();
+  else
+    input.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+  let response;
+  try {
+    response = await input.fetchImpl(input.catalogUrl, {
+      method: "GET",
+      redirect: "error",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${input.apiKey}`
+      },
+      signal: controller.signal
+    });
+  } catch {
+    throwIfAborted(input.signal);
+    return { status: "failed" };
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abortFromCaller);
+  }
+  if (!response.ok)
+    return { status: "failed" };
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    return { status: "failed" };
+  }
+  const models = parseCatalogModels(payload);
+  if (!models)
+    return { status: "failed" };
+  const catalog = { fetchedAtMs, type: input.type, models };
+  writeCatalogCache(input.cachePath, catalog);
+  return { status: "success", catalog };
+}
+function parseCatalogModels(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload.data) || payload.data.length === 0) {
+    return;
+  }
+  const models = {};
+  for (const rawItem of payload.data) {
+    if (!isRecord(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
+      continue;
+    if (!isRecord(rawItem.model_spec))
+      continue;
+    const category = parsePrivacyCategory(rawItem.model_spec.privacy);
+    if (!category)
+      continue;
+    models[rawItem.id.trim()] = category;
+  }
+  return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
+}
+function readCatalogCache(path, type) {
+  if (!existsSync7(path))
+    return;
+  let payload;
+  try {
+    payload = JSON.parse(readFileSync8(path, "utf8"));
+  } catch {
+    return;
+  }
+  if (!isRecord(payload) || payload.schema_version !== CACHE_SCHEMA_VERSION)
+    return;
+  if (payload.catalog_type !== undefined && payload.catalog_type !== type)
+    return;
+  if (type === "embedding" && payload.catalog_type !== "embedding")
+    return;
+  if (typeof payload.fetched_at !== "string" || !isRecord(payload.models))
+    return;
+  const fetchedAtMs = Date.parse(payload.fetched_at);
+  if (!Number.isFinite(fetchedAtMs))
+    return;
+  const models = {};
+  for (const [modelId, rawCategory] of Object.entries(payload.models)) {
+    const category = parsePrivacyCategory(rawCategory);
+    if (!modelId.trim() || !category)
+      continue;
+    if (venicePrivacyCategoryForModel(modelId.toLowerCase()) === "anonymized" && category !== "anonymized") {
+      continue;
+    }
+    models[modelId] = category;
+  }
+  if (Object.keys(models).length === 0)
+    return;
+  return { fetchedAtMs, type, models: Object.freeze(models) };
+}
+function writeCatalogCache(path, catalog) {
+  const tempPath = `${path}.${process.pid}.${randomUUID4()}.tmp`;
+  try {
+    mkdirSync7(dirname9(path), { recursive: true, mode: 448 });
+    const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
+    writeFileSync4(tempPath, `${JSON.stringify({
+      schema_version: CACHE_SCHEMA_VERSION,
+      catalog_type: catalog.type,
+      fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
+      models
+    }, null, 2)}
+`, { mode: 384 });
+    renameSync2(tempPath, path);
+  } catch {} finally {
+    rmSync2(tempPath, { force: true });
+  }
+}
+function parsePrivacyCategory(value) {
+  if (typeof value !== "string")
+    return;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "anonymized" || normalized === "private" || normalized === "tee" || normalized === "e2ee") {
+    return normalized;
+  }
+  return;
+}
+function boundedNonNegativeMs(value, fallback) {
+  if (value === undefined || !Number.isFinite(value))
+    return fallback;
+  return Math.max(0, Math.floor(value));
+}
+function boundedPositiveMs(value, fallback, maximum) {
+  if (value === undefined || !Number.isFinite(value) || value <= 0)
+    return fallback;
+  return Math.min(maximum, Math.max(1, Math.floor(value)));
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function throwIfAborted(signal) {
+  if (!signal?.aborted)
+    return;
+  if (signal.reason instanceof Error && signal.reason.name === "AbortError") {
+    throw signal.reason;
+  }
+  const error = new Error("Venice model catalog request was cancelled.");
+  error.name = "AbortError";
+  throw error;
+}
+async function awaitWithAbort(promise, signal) {
+  if (!signal)
+    return promise;
+  throwIfAborted(signal);
+  let abortListener;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        abortListener = () => {
+          try {
+            throwIfAborted(signal);
+          } catch (error) {
+            reject(error);
+          }
+        };
+        signal.addEventListener("abort", abortListener, { once: true });
+      })
+    ]);
+  } finally {
+    if (abortListener)
+      signal.removeEventListener("abort", abortListener);
+  }
+}
 
 // src/core/analyst-venice.ts
 init_venice_models();
+function approvedVeniceAnalystBaseUrl(rawBaseUrl) {
+  let url;
+  try {
+    url = new URL(rawBaseUrl);
+  } catch {
+    throw new Error("Venice analyst requires the approved Venice HTTPS endpoint.");
+  }
+  if (url.protocol !== "https:" || url.hostname !== "api.venice.ai") {
+    throw new Error("Venice analyst requires the approved Venice HTTPS endpoint.");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  return url.toString().replace(/\/+$/, "");
+}
 
 // src/workers/file-extraction/extractors/venice-client.ts
 init_venice_models();
@@ -15645,47 +16463,6 @@ var FORBIDDEN_RAW_RESPONSE_KEYS = new Set([
 // src/workers/email-source/index.ts
 init_publisher_oauth_client();
 init_oauth_relay();
-
-// src/core/connect.ts
-init_secret_store();
-
-// src/core/worker-service.ts
-init_atomic_file();
-init_operation_error();
-var WORKER_LOG_TAIL_BYTES = 64 * 1024;
-
-// src/core/connect.ts
-init_http_timeout();
-init_oauth_relay();
-init_publisher_oauth_client();
-init_connected_handles();
-
-// src/workers/credential-broker/unpaired-sources.ts
-init_atomic_file();
-var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-
-// src/core/connect.ts
-init_credential_broker();
-var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
-var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
-var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-var KNOWN_OAUTH_ERROR_CODES = new Set([
-  "invalid_request",
-  "invalid_client",
-  "invalid_grant",
-  "unauthorized_client",
-  "unsupported_grant_type",
-  "invalid_scope",
-  "access_denied",
-  "server_error",
-  "temporarily_unavailable",
-  "slow_down",
-  "expired_token",
-  "redirect_uri_mismatch"
-]);
-
-// src/workers/email-source/index.ts
 init_operation_error();
 init_ingestion_throughput();
 init_secret_store();
@@ -15731,6 +16508,7 @@ init_readwise();
 init_x_bookmarks();
 init_dropbox_files();
 init_telegram_messages();
+init_embeddings();
 
 // src/core/source-watch.ts
 init_sqlite_migrations();
@@ -16003,7 +16781,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 `;
 
 // src/workers/dashboard/components.ts
-var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "I need the Olympus worker token to unlock the dashboard controls. Get the plugin rootDir from " + "`openclaw plugins inspect olympus --json`, run `<rootDir>/bin/olympus dashboard token` (or read " + "OLYMPUS_WORKER_AUTH_TOKEN from the Olympus worker.env file), and give me the token so I can paste " + "it into the dashboard. Do not change any configuration.";
+var DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
 
 // src/workers/dashboard/index.ts
 init_vocabulary();
@@ -16056,30 +16834,153 @@ var CONNECTOR_PROMPT = [
 `);
 
 // src/workers/dashboard/pages/sensitivity.ts
+init_privacy_language();
 init_vocabulary();
+var TIER_NAMES = {
+  secure: SENSITIVITY_TIER_LABELS.secure,
+  secrets: SENSITIVITY_TIER_LABELS.secrets
+};
 
 // src/workers/dashboard/index.ts
 init_vocabulary();
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash9, randomBytes as randomBytes2 } from "node:crypto";
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
+var DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 120;
+var DASHBOARD_LAUNCH_MAX_TICKETS = 32;
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin) {
+    const expiresAtMs = this.now() + DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000;
+    this.prune(expiresAtMs - DASHBOARD_LAUNCH_TICKET_TTL_SECONDS * 1000);
+    const ticket = randomBytes2(32).toString("base64url");
+    this.tickets.set(ticket, { expiresAtMs, originTag: dashboardLaunchOriginTag(origin) });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash9("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var status = document.getElementById('status');
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          return new URLSearchParams(hash).get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          status.textContent = 'This link is missing its opening ticket.';
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (response.ok) {
+            window.location.replace('/dashboard');
+            return;
+          }
+          status.textContent = response.status === 403
+            ? 'This opening link is no longer valid.'
+            : 'Opening failed.';
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
 
 // src/workers/http.ts
 var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // src/workers/embedding-ledger.ts
-import { homedir as homedir14 } from "node:os";
+import { homedir as homedir15 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname10, join as join15 } from "node:path";
+import { dirname as dirname11, join as join16 } from "node:path";
 var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir14(), ".local", "share");
-  return join15(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir15(), ".local", "share");
+  return join16(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname10(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname11(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -16353,7 +17254,7 @@ init_connector_store();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
 var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
 var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
@@ -16437,7 +17338,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash9("sha256").update(value).digest("hex");
+  return createHash10("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -16564,7 +17465,7 @@ init_types();
 init_secret_store();
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -16576,7 +17477,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash10("sha256").update(material, "utf8").digest("hex");
+  return createHash11("sha256").update(material, "utf8").digest("hex");
 }
 var DEFAULT_MAX_ATTEMPTS = 3;
 var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
@@ -16784,9 +17685,10 @@ init_source_ingestion_policy();
 init_dropbox_files();
 init_google_connectors();
 init_readwise();
+init_embeddings();
 init_x_bookmarks();
 init_live_control2();
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 
 // src/workers/whatsapp/connector.ts
 init_types();
@@ -17459,7 +18361,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash11("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash12("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -17606,6 +18508,21 @@ ${task.id}`;
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
+
+// src/core/source-scope-approval.ts
+init_atomic_file();
+init_file_lease();
+init_operation_error();
+
+// src/workers/source-scope-runtime.ts
+init_connected_handles();
+
+// src/workers/source-scope-browser.ts
+init_credential_broker();
+init_drive();
+init_provider_client();
+
+// src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
   if (options.envKeys.every((key) => options.env[key] === undefined)) {
@@ -17620,12 +18537,35 @@ function requireSourceEmbeddingDimension(options) {
     return dimension;
   throw new OperationError("config_error", `Source embedding ${options.lane} model ${options.model} requires a positive safe-integer dimension from ${envKey}.`, `Set ${envKey} to the model's authoritative output dimension before starting this lane.`);
 }
+function createVeniceSourceEmbeddingProvider(options) {
+  const baseUrl = approvedVeniceAnalystBaseUrl(options.baseUrl);
+  const resolvePrivacyCategory = createVenicePrivacyCategoryResolver({
+    apiKey: options.apiKey,
+    baseUrl,
+    catalog: { type: "embedding" }
+  });
+  return new OpenAICompatibleSourceEmbeddingProvider({
+    provider: "venice",
+    backend: "cloud",
+    baseUrl,
+    model: options.model,
+    apiKeyProvider: () => options.apiKey,
+    dimension: options.dimension ?? DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
+    queryInstructionPrefix: VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
+    sendDimensions: true,
+    requireIndexedResponses: true,
+    requireDimension: true,
+    preflight: (signal) => assertVeniceEmbeddingModelAllowed(options.model, resolvePrivacyCategory, signal),
+    ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+    ...options.epochId ? { epochId: options.epochId } : {}
+  });
+}
 function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
   const provider = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER;
   if (provider === undefined || provider.trim().length === 0)
     return;
-  if (provider !== "google-gemini" && provider !== "local-openai-compatible") {
-    throw new Error("OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini or local-openai-compatible.");
+  if (provider !== "google-gemini" && provider !== "local-openai-compatible" && provider !== "venice") {
+    throw new Error("OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini, local-openai-compatible, or venice.");
   }
   const timeoutMs = parseOptionalTimeoutSeconds(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS, "OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS");
   const mediaFetchTimeoutMs = parseOptionalTimeoutSeconds(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS, "OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS");
@@ -17647,6 +18587,32 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
       dimension: outputDimensionality2,
       ...timeoutMs !== undefined ? { timeoutMs } : {},
       ...env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH } : {}
+    });
+  }
+  if (provider === "venice") {
+    const apiKey2 = firstNonEmptyEnv2(env, [
+      "OLYMPUS_SOURCE_INDEX_VENICE_API_KEY",
+      "VENICE_API_KEY",
+      "API_KEY_VENICE",
+      "Venice-API-Key"
+    ]);
+    if (!apiKey2) {
+      throw new Error("OLYMPUS_SOURCE_INDEX_VENICE_API_KEY or VENICE_API_KEY is required for Venice source-index embeddings.");
+    }
+    const model2 = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL;
+    const outputDimensionality2 = requireSourceEmbeddingDimension({
+      env,
+      envKeys: ["OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY"],
+      lane: "Venice source-index env lane",
+      model: model2
+    });
+    return createVeniceSourceEmbeddingProvider({
+      apiKey: apiKey2,
+      model: model2,
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
+      dimension: outputDimensionality2,
+      ...timeoutMs !== undefined ? { timeoutMs } : {},
+      ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
     });
   }
   const apiKey = firstNonEmptyEnv2(env, ["OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY", "GEMINI_API_KEY"]);
@@ -17696,6 +18662,25 @@ function createSourceIndexEmbeddingProviderFromSovereignty(engine, trustDomain, 
       dimension: outputDimensionality,
       ...timeoutMs !== undefined ? { timeoutMs } : {},
       ...env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH } : {}
+    });
+  }
+  if (profile.provider === "venice") {
+    const apiKey = resolveSecretRefSync(profile.secretRef, env, `Sovereignty embedding profile "${resolved.id}"`, bootSecretOptions(bootSecretResolver, [resolved.id], ["embedding"]));
+    if (!apiKey)
+      return;
+    const outputDimensionality = requireSourceEmbeddingDimension({
+      env,
+      envKeys: ["OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY"],
+      lane: `sovereignty ${trustDomain} Venice lane`,
+      model: profile.model
+    });
+    return createVeniceSourceEmbeddingProvider({
+      apiKey,
+      model: profile.model,
+      baseUrl: profile.baseUrl ?? DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
+      dimension: outputDimensionality,
+      ...timeoutMs !== undefined ? { timeoutMs } : {},
+      ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
     });
   }
   if (profile.provider === "google-gemini") {
@@ -18035,6 +19020,9 @@ class DirectSourceEmbeddingDrainClient {
     const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === request.corpus_id);
     if (!config?.dbPath)
       throw new Error(`Direct connector-store embedding is not configured for ${request.corpus_id}.`);
+    if (config.family === "file") {
+      throw new Error(`Direct connector-store embedding refuses file-family corpus ${request.corpus_id} because it cannot own ` + "the current approved content scope. Use the default HTTP drain mode.");
+    }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
       store = new LocalConnectorStore({
@@ -18260,7 +19248,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash12("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash13("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -18389,7 +19377,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync7(config.dbPath))
+    if (!config.dbPath || !existsSync8(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -18714,7 +19702,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash12("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash13("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -18815,11 +19803,11 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute2(readinessPath)) {
+  if (!readinessPath || !isAbsolute3(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname11(readinessPath);
-  mkdirSync7(directory, { recursive: true, mode: 448 });
+  const directory = dirname12(readinessPath);
+  mkdirSync8(directory, { recursive: true, mode: 448 });
   const parent = lstatSync4(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
@@ -18841,8 +19829,8 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync7(dirname11(args.reportPath), { recursive: true });
-      writeFileSync4(args.reportPath, `${json}
+      mkdirSync8(dirname12(args.reportPath), { recursive: true });
+      writeFileSync5(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -18851,9 +19839,9 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync7(dirname11(args.reportPath), { recursive: true });
+      mkdirSync8(dirname12(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
-        writeFileSync4(args.reportPath, `${JSON.stringify(report2, null, 2)}
+        writeFileSync5(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
       };
     }
@@ -18861,7 +19849,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync4(args.reportPath, `${json}
+      writeFileSync5(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {
@@ -18878,5 +19866,6 @@ export {
   publishNativeEmbeddingDrainReadiness,
   optionsFromEnv,
   embeddingLedgerRecorderFromEnv,
-  assertEmbeddingProviderForLane
+  assertEmbeddingProviderForLane,
+  DirectSourceEmbeddingDrainClient
 };

@@ -40,7 +40,12 @@ import {
   type DashboardSourceAction,
 } from '../src/workers/source-dashboard.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import {
+  createGatewayCallbackPeerHeader,
+  DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
+  DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
+  withWorkerBearerAuth,
+} from '../src/workers/http.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,
@@ -48,9 +53,14 @@ import {
 
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
-const LOOPBACK_HTTPS_ORIGIN = 'https://127.0.0.1:18789';
-const LOOPBACK_HTTP_ORIGIN = 'http://127.0.0.1:18789';
+const GATEWAY_PUBLIC_ORIGIN = 'https://127.0.0.1:18789';
 const PILOT_CLIENT_ID = '123456789012-olympusdesktopfixture.apps.googleusercontent.com';
+const GOOGLE_LOOPBACK_ORIGINS = [
+  'http://localhost:18789',
+  'http://127.0.0.1:18789',
+  'http://[::1]:18789',
+  GATEWAY_PUBLIC_ORIGIN,
+] as const;
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
@@ -76,11 +86,14 @@ interface Fixture {
 
 function fixture(
   initialSecrets: Record<string, string> = {},
-  options: { attemptExpiresInMs?: number } = {},
+  options: { attemptExpiresInMs?: number; secretReads?: string[]; secretWrites?: string[] } = {},
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-relay-worker-'));
   dirs.push(dir);
-  const secretStore = memorySecretStore(initialSecrets);
+  const secretStore = memorySecretStore(initialSecrets, {
+    ...(options.secretReads ? { reads: options.secretReads } : {}),
+    ...(options.secretWrites ? { writes: options.secretWrites } : {}),
+  });
   const exchanges: URLSearchParams[] = [];
   const exchangeUrls: string[] = [];
   const oauthFetch: OAuthFetch = async (url, init) => {
@@ -565,49 +578,68 @@ describe('publisher-client relay flow', () => {
   });
 });
 
-describe('scheme-aware Google publisher flow', () => {
-  test('HTTPS loopback uses the publisher Web client, signed relay, and HTTPS target for Gmail and Drive', async () => {
+describe('native Gateway public-origin context', () => {
+  test('authenticated Gateway HTTPS origin selects the Google Web relay for Gmail and Drive', async () => {
     await withPilotClient(async () => {
       for (const source of ['gmail', 'google-drive'] as const) {
         const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance, { source }, LOOPBACK_HTTPS_ORIGIN));
-        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
-        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
-        const state = started.searchParams.get('state')!;
-        expect(statePayload(state)).toMatchObject({
-          origin: LOOPBACK_HTTPS_ORIGIN,
+        const started = await instance.fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer dashboard-secret',
+            'Content-Type': 'application/json',
+            [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: GATEWAY_PUBLIC_ORIGIN,
+          },
+          body: JSON.stringify({ source }),
+        }));
+        const url = await authorizationUrl(started);
+        expect(url.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(url.searchParams.get('state')!)).toMatchObject({
+          origin: GATEWAY_PUBLIC_ORIGIN,
           source,
         });
-
-        const callback = await instance.fetch(new Request(
-          `${LOOPBACK_HTTPS_ORIGIN}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
-        ));
-        expect(callback.status).toBe(303);
-        const location = callback.headers.get('Location')!;
-        expect(location).toBe(`/oauth/callback/${source}/done`);
-        const done = await instance.fetch(new Request(`${LOOPBACK_HTTPS_ORIGIN}${location}`));
-        expect(done.status).toBe(200);
-        expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
-        expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
       }
     });
   });
 
-  test('HTTP loopback preserves the Desktop pilot client and direct callback exchange', async () => {
+  test('HTTP and HTTPS loopback complete Gmail and Drive through the publisher Web relay without local Google secrets', async () => {
     await withPilotClient(async () => {
-      const instance = fixture();
-      const started = await authorizationUrl(await startConnect(instance, { source: 'gmail' }, LOOPBACK_HTTP_ORIGIN));
-      expect(started.searchParams.get('client_id')).toBe(PILOT_CLIENT_ID);
-      expect(started.searchParams.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
-      const state = started.searchParams.get('state')!;
-      expect(state).not.toContain('.');
+      for (const origin of GOOGLE_LOOPBACK_ORIGINS) {
+        for (const source of ['gmail', 'google-drive'] as const) {
+          const callbackOrigin = origin.startsWith('http:')
+            ? 'http://127.0.0.1:18789'
+            : origin;
+          const secretReads: string[] = [];
+          const secretWrites: string[] = [];
+          const instance = fixture({
+            'google.personal.oauth.client_id': DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            'google.personal.oauth.client_secret': 'must-not-be-read-google-secret',
+            [`${source}.personal.oauth.client_id`]: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            [`${source}.personal.oauth.client_secret`]: 'must-not-be-read-source-secret',
+          }, { secretReads, secretWrites });
+          const started = await authorizationUrl(await startConnect(instance, { source }, origin));
+          expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+          expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const state = started.searchParams.get('state')!;
+          expect(state.split('.')).toHaveLength(2);
+          expect(statePayload(state)).toMatchObject({ origin: callbackOrigin, source });
 
-      const callback = await instance.fetch(new Request(
-        `${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail?code=gmail-http-code&state=${encodeURIComponent(state)}`,
-      ));
-      expect(callback.status).toBe(303);
-      expect(instance.exchangeUrls).toEqual(['https://oauth2.googleapis.com/token']);
-      expect(instance.exchanges[0]!.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
+          const callback = await instance.fetch(new Request(
+            `${callbackOrigin}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+          ));
+          expect(callback.status).toBe(303);
+          const location = callback.headers.get('Location')!;
+          expect(location).toBe(`/oauth/callback/${source}/done`);
+          const done = await instance.fetch(new Request(`${callbackOrigin}${location}`));
+          expect(done.status).toBe(200);
+          expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+          expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+          expect(secretReads.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+          expect(secretWrites.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+        }
+      }
     });
   });
 });
@@ -762,10 +794,13 @@ describe('publisher provenance survives reauthentication', () => {
 describe('callback rate limiting', () => {
   const RATE_LIMIT_MAX_PER_WINDOW = 30;
 
-  function floodRequest(source: string, forwardedFor: string): Request {
+  function floodRequest(source: string, peer: string): Request {
     return new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/${source}?code=flood&state=aaaa.bbbb`,
-      { headers: { 'X-Forwarded-For': forwardedFor } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader(peer, 'dashboard-secret'),
+      } },
     );
   }
 
@@ -785,7 +820,10 @@ describe('callback rate limiting', () => {
     // other refusal on this route uses, and the exchange never runs.
     const shouldHaveWorked = await instance.fetch(new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=too-late&state=${encodeURIComponent(state)}`,
-      { headers: { 'X-Forwarded-For': '203.0.113.9' } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.9', 'dashboard-secret'),
+      } },
     ));
     expect(shouldHaveWorked.status).toBe(410);
     const baseline = await fixture().fetch(new Request(
@@ -805,7 +843,29 @@ describe('callback rate limiting', () => {
     const state = authorizeUrl.searchParams.get('state')!;
     const completed = await instance.fetch(new Request(
       `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
-      { headers: { 'X-Forwarded-For': '203.0.113.2' } },
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.2', 'dashboard-secret'),
+      } },
+    ));
+    expect(completed.status).toBe(303);
+  });
+
+  test('a direct caller cannot select a relay peer bucket by spoofing the private header', async () => {
+    const instance = fixture();
+    for (let i = 0; i < RATE_LIMIT_MAX_PER_WINDOW; i += 1) {
+      const request = floodRequest('dropbox', '203.0.113.10');
+      request.headers.set(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER, '203.0.113.10.forged');
+      expect((await instance.fetch(request)).status).toBe(410);
+    }
+    const authorizeUrl = await authorizationUrl(await startConnect(instance));
+    const state = authorizeUrl.searchParams.get('state')!;
+    const completed = await instance.fetch(new Request(
+      `${DASHBOARD_ORIGIN}/oauth/callback/dropbox?code=c&state=${encodeURIComponent(state)}`,
+      { headers: {
+        Authorization: 'Bearer dashboard-secret',
+        [DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER]: createGatewayCallbackPeerHeader('203.0.113.10', 'dashboard-secret'),
+      } },
     ));
     expect(completed.status).toBe(303);
   });
@@ -1071,17 +1131,23 @@ function fixtureStatus(): SourceIndexStatusResult {
   } as unknown as SourceIndexStatusResult;
 }
 
-function memorySecretStore(initial: Record<string, string> = {}): SecretStore {
+function memorySecretStore(
+  initial: Record<string, string> = {},
+  activity: { reads?: string[]; writes?: string[] } = {},
+): SecretStore {
   const secrets = new Map(Object.entries(initial));
   return {
     label: 'memory',
     async get(key) {
+      activity.reads?.push(key);
       return secrets.get(key);
     },
     getSync(key) {
+      activity.reads?.push(key);
       return secrets.get(key);
     },
     async set(key, value) {
+      activity.writes?.push(key);
       secrets.set(key, value);
     },
     async delete(key) {

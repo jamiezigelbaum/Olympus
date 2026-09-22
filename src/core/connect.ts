@@ -50,15 +50,13 @@ export type ConnectSource =
   | 'google'
   | 'gmail'
   | 'google-drive'
-  | 'gcp'
   | 'dropbox'
   | 'x'
   | 'telegram'
   | 'whatsapp'
   | 'venice'
   | 'readwise'
-  | 'gemini'
-  | 'notion';
+  | 'gemini';
 
 export interface ConnectOAuthOptions {
   source: 'google' | 'gmail' | 'google-drive' | 'dropbox' | 'x';
@@ -817,7 +815,7 @@ export async function connectPublicApiKeySource(options: {
       handles: [],
       registryPath,
       secretRefs: ['store:venice.api_key'],
-      next: 'Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Secure answers use that configured pool; E2EE model ids remain gated pending local key handling.',
+      next: 'Use secretRef store:venice.api_key on an approved Venice member in routes.secure_local.pool. Private answers use that configured pool; E2EE model ids remain gated pending local key handling.',
     };
   }
 
@@ -1202,6 +1200,7 @@ async function fetchXUserId(options: {
 export async function connectGuidedSession(options: {
   source: 'telegram' | 'whatsapp';
   sessionPath: string;
+  additionalTokenSecretRefs?: readonly string[];
   accountRole?: string;
   registryPath?: string;
   secretStore?: SecretStore;
@@ -1220,6 +1219,12 @@ export async function connectGuidedSession(options: {
   clearUnpairedSource?: (sourceId: string, registryPath: string) => void;
 }): Promise<ConnectResult> {
   const accountRole = safeAccountRole(options.accountRole ?? (options.source === 'telegram' ? 'personal' : 'personal_local'));
+  const additionalRefs = [...new Set(options.additionalTokenSecretRefs ?? [])];
+  const allowedAppRefs = ['store:telegram.personal.app.api_id', 'store:telegram.personal.app.api_hash'];
+  if (additionalRefs.some((ref) => options.source !== 'telegram' || !allowedAppRefs.includes(ref))) {
+    throw new Error('Only the Telegram application credential references may accompany a paired session.');
+  }
+
   const sessionPath = options.sessionPath.trim();
   if (!sessionPath) throw new Error('Session path is required.');
   const secretStore = options.secretStore ?? createDefaultSecretStore();
@@ -1280,7 +1285,7 @@ export async function connectGuidedSession(options: {
         trustDomain: 'secure_local',
         allowedCapabilities: ['telegram.messages.sync'],
         scopes: [],
-        tokenSecretRefs: [`store:${key}`],
+        tokenSecretRefs: [`store:${key}`, ...additionalRefs],
         backendState: {
           kind: 'mtproto_session',
           status: options.sessionReady ? 'available' : 'reauth_required',
@@ -1299,7 +1304,7 @@ export async function connectGuidedSession(options: {
         trustDomain: 'secure_local',
         allowedCapabilities: ['whatsapp.personal.messages.sync'],
         scopes: [],
-        tokenSecretRefs: [`store:${key}`],
+        tokenSecretRefs: [`store:${key}`, ...additionalRefs],
         backendState: {
           kind: 'local_app_database',
           status: options.sessionReady ? 'available' : 'reauth_required',
@@ -1334,7 +1339,7 @@ export async function connectGuidedSession(options: {
       source: options.source,
       handles: [handle],
       registryPath,
-      secretRefs: [`store:${key}`],
+      secretRefs: [`store:${key}`, ...additionalRefs],
       next: options.source === 'telegram'
         ? 'Run the Telethon login helper for this session path if status is reauth_required.'
         : 'Run the whatsmeow QR pairing helper for this session path if status is reauth_required.',

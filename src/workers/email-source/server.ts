@@ -1,3 +1,16 @@
+import { olympusPackageRoot } from '../../core/package-root.ts';
+import {
+  MessagingCaptureSupervisor,
+  NativeMessagingCaptureOwnerError,
+  defaultMessagingCaptureGrantPath,
+  revokeMessagingCaptureGrant,
+} from '../../core/messaging-capture.ts';
+import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
+import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
+import { createModelKeyReload } from '../../core/model-key-reload.ts';
+import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
+import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import {
@@ -58,7 +71,10 @@ import {
   createVenicePrivacyCategoryResolver,
   type VeniceModelCatalogOptions,
 } from '../../core/venice-model-catalog.ts';
-import { assertVeniceAnalystModelAllowed } from '../../core/venice-models.ts';
+import {
+  assertVeniceAnalystModelAllowed,
+  assertVeniceEmbeddingModelAllowed,
+} from '../../core/venice-models.ts';
 import { createOpenAICompatibleAnalystModel, type OpenAIReasoningEffort } from '../../core/analyst-openai.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
 import { defaultConfig, loadConfig, parseLane, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
@@ -167,6 +183,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
+import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
 import {
@@ -186,7 +203,12 @@ import {
   type CredentialReadinessBinding,
 } from '../credential-degradation.ts';
 import {
+  DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
+  DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
+  DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL,
+  VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
   GeminiSourceEmbeddingProvider,
+  isApprovedSecureSourceEmbeddingProvider,
   OpenAICompatibleSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
@@ -234,10 +256,81 @@ import {
   readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
+import {
+  FileSourceScopeAuthority,
+  createScopeBoundGoogleDriveContentScope,
+  createScopeBoundDropboxContentScope,
+  fileSourceScopeContentFilters,
+  fileSourceScopeDropboxPolicy,
+  fileSourceScopeMetadataEnabled,
+  fileSourceScopeMetadataFilters,
+  scopeBoundEmbeddingProvider,
+  scopeBoundSchedulerSource,
+  type FileSourceScopePolicyRef,
+} from '../source-scope-runtime.ts';
+import {
+  createDropboxFolderScopeBrowser,
+  createGoogleDriveFolderScopeBrowser,
+} from '../source-scope-browser.ts';
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
+
+type MessagingCaptureSource = 'telegram' | 'whatsapp';
+type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>;
+
+export function createWorkerMessagingCaptureOwnership(options: {
+  env?: Record<string, string | undefined>;
+  registryPath: string;
+  packageRoot: string;
+  createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
+  revokeGrant?: (path: string) => void;
+}): {
+  captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
+  nativeOwners: Record<MessagingCaptureSource, boolean>;
+  stopForUnpair(source: MessagingCaptureSource): Promise<void>;
+} {
+  const env = options.env ?? process.env;
+  const nativeOwners = {
+    telegram: parseOptionalBooleanEnv(
+      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram],
+      NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram,
+    ),
+    whatsapp: parseOptionalBooleanEnv(
+      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp],
+      NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp,
+    ),
+  };
+  const createSupervisor = options.createSupervisor ?? ((source: MessagingCaptureSource) => (
+    source === 'telegram'
+      ? new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot })
+      : new MessagingCaptureSupervisor({
+          source,
+          registryPath: options.registryPath,
+          packageRoot: options.packageRoot,
+          whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env }),
+        })
+  ));
+  const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  for (const source of ['telegram', 'whatsapp'] as const) {
+    if (!nativeOwners[source]) captures[source] = createSupervisor(source);
+  }
+  const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
+  return {
+    captures,
+    nativeOwners,
+    async stopForUnpair(source) {
+      if (nativeOwners[source]) {
+        throw new NativeMessagingCaptureOwnerError(source);
+      }
+      const capture = captures[source];
+      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      await capture.stop();
+      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    },
+  };
+}
 
 export function registerConnectorStoreEmbeddingLane(options: {
   store: LocalConnectorStore;
@@ -245,8 +338,8 @@ export function registerConnectorStoreEmbeddingLane(options: {
   providers: Map<string, SourceEmbeddingProvider>;
   retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability>;
 }): void {
-  if (options.store.trustDomain === 'secure_local' && options.provider.backend !== 'local') {
-    throw new Error('Connector store secure_local embeddings require a local/private embedding provider.');
+  if (options.store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
+    throw new Error('Connector store secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
   options.providers.set(options.store.corpusId, options.provider);
   options.retrievalAvailability[options.store.corpusId] = () => {
@@ -303,13 +396,48 @@ function requireSourceEmbeddingDimension(options: {
   );
 }
 
+function createVeniceSourceEmbeddingProvider(options: {
+  apiKey: string;
+  model: string;
+  baseUrl: string;
+  dimension?: number;
+  timeoutMs?: number;
+  epochId?: string;
+}): SourceEmbeddingProvider {
+  const baseUrl = approvedVeniceAnalystBaseUrl(options.baseUrl);
+  const resolvePrivacyCategory = createVenicePrivacyCategoryResolver({
+    apiKey: options.apiKey,
+    baseUrl,
+    catalog: { type: 'embedding' },
+  });
+  return new OpenAICompatibleSourceEmbeddingProvider({
+    provider: 'venice',
+    backend: 'cloud',
+    baseUrl,
+    model: options.model,
+    apiKeyProvider: () => options.apiKey,
+    dimension: options.dimension ?? DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
+    queryInstructionPrefix: VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
+    sendDimensions: true,
+    requireIndexedResponses: true,
+    requireDimension: true,
+    preflight: (signal) => assertVeniceEmbeddingModelAllowed(
+      options.model,
+      resolvePrivacyCategory,
+      signal,
+    ),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.epochId ? { epochId: options.epochId } : {}),
+  });
+}
+
 export function createSourceIndexEmbeddingProviderFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): SourceEmbeddingProvider | undefined {
   const provider = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER;
   if (provider === undefined || provider.trim().length === 0) return undefined;
-  if (provider !== 'google-gemini' && provider !== 'local-openai-compatible') {
-    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini or local-openai-compatible.');
+  if (provider !== 'google-gemini' && provider !== 'local-openai-compatible' && provider !== 'venice') {
+    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini, local-openai-compatible, or venice.');
   }
   const timeoutMs = parseOptionalTimeoutSeconds(
     env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS,
@@ -338,6 +466,34 @@ export function createSourceIndexEmbeddingProviderFromEnv(
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH
         ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH }
+        : {}),
+    });
+  }
+  if (provider === 'venice') {
+    const apiKey = firstNonEmptyEnv(env, [
+      'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
+      'VENICE_API_KEY',
+      'API_KEY_VENICE',
+      'Venice-API-Key',
+    ]);
+    if (!apiKey) {
+      throw new Error('OLYMPUS_SOURCE_INDEX_VENICE_API_KEY or VENICE_API_KEY is required for Venice source-index embeddings.');
+    }
+    const model = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL;
+    const outputDimensionality = requireSourceEmbeddingDimension({
+      env,
+      envKeys: ['OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY'],
+      lane: 'Venice source-index env lane',
+      model,
+    });
+    return createVeniceSourceEmbeddingProvider({
+      apiKey,
+      model,
+      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
+      dimension: outputDimensionality,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
+        ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
         : {}),
     });
   }
@@ -409,6 +565,31 @@ export function createSourceIndexEmbeddingProviderFromSovereignty(
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH
         ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH }
+        : {}),
+    });
+  }
+  if (profile.provider === 'venice') {
+    const apiKey = resolveSecretRefSync(
+      profile.secretRef,
+      env,
+      `Sovereignty embedding profile "${resolved.id}"`,
+      bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding']),
+    );
+    if (!apiKey) return undefined;
+    const outputDimensionality = requireSourceEmbeddingDimension({
+      env,
+      envKeys: ['OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY'],
+      lane: `sovereignty ${trustDomain} Venice lane`,
+      model: profile.model,
+    });
+    return createVeniceSourceEmbeddingProvider({
+      apiKey,
+      model: profile.model,
+      baseUrl: profile.baseUrl ?? DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
+      dimension: outputDimensionality,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
+        ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
         : {}),
     });
   }
@@ -1245,6 +1426,33 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT?.trim()
     || accountFromDropboxCredentialHandle(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE);
   const connectedHandles = readActiveConnectedHandles(process.env);
+  const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
+  const packageRoot = olympusPackageRoot();
+  const captureOwnership = createWorkerMessagingCaptureOwnership({
+    registryPath: connectedHandleRegistryPath!,
+    packageRoot,
+  });
+  const captures = captureOwnership.captures;
+  let captureReconcileRunning = false;
+  let capturesClosed = false;
+  const reconcileCaptures = async () => {
+    if (capturesClosed || captureReconcileRunning) return;
+    captureReconcileRunning = true;
+    if (sovereigntyEngine.config.routes.secure_local?.mode === 'disabled' || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+      try { await Promise.all(Object.values(captures).map((capture) => capture.stop())); } finally { captureReconcileRunning = false; }
+      return;
+    }
+    try { await Promise.all(Object.values(captures).map((capture) => capture.reconcile())); }
+    catch { console.warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.'); }
+    finally { captureReconcileRunning = false; }
+  };
+  const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
+    await captureOwnership.stopForUnpair(source);
+  };
+
+  const fileSourceScopeAuthority = connectedHandleRegistryPath
+    ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath })
+    : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
@@ -1308,7 +1516,7 @@ export async function main(): Promise<void> {
     ) ?? sourceIndexEmbeddingProvider
     : sourceIndexEmbeddingProvider;
   const dropboxFilesEmbeddingProvider = secureLocalPolicyEmbeddingProvider
-    ?? (sourceIndexEmbeddingProvider?.backend === 'local'
+    ?? (sourceIndexEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(sourceIndexEmbeddingProvider)
       ? sourceIndexEmbeddingProvider
       : undefined);
   // Telegram chunks are local-only (internal + secure_local lanes): never hand
@@ -1327,6 +1535,53 @@ export async function main(): Promise<void> {
   // Drive/Docs is INTERNAL only (there is no secure drive corpus), so the
   // cloud (Gemini) source-index provider rides directly — NO local-only gate.
   const googleDriveDocsEmbeddingProvider = sourceIndexEmbeddingProvider;
+  const requiredProfiles = requiredModelProfiles(sovereigntyEngine.config);
+  const safeModelCredential = (profile: typeof requiredProfiles[number]['profile'], env: Record<string, string | undefined>): string | undefined => {
+    if (!profile.secretRef) return undefined;
+    try { return resolveSecretRefValueSync(profile.secretRef, { env })?.trim() || undefined; }
+    catch { return undefined; }
+  };
+  // Only used inside this process to distinguish stored from applied keys.
+  const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
+  const modelCredentialState = (id: string, profile: typeof requiredProfiles[number]['profile']): ModelCredentialState => {
+    if (!profile.secretRef) return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
+    const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+    const current = safeModelCredential(profile, storedEnv);
+    if (!current) return 'missing';
+    if (current !== bootModelCredentials.get(id)
+      || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id))) return 'applying';
+    return 'ready';
+  };
+  let requestModelReload: () => boolean = () => false;
+  let modelReloadUnavailable = false;
+  const modelSetup = new ModelSetupService({
+    config: sovereigntyEngine.config,
+    credentialState: modelCredentialState,
+    localApiKey: (id) => bootModelCredentials.get(id),
+    expectedEmbeddingDimension: (id) => {
+      const secure = sovereigntyEngine.resolveEmbeddingProfile('secure_local');
+      if (secure?.id === id) return secureLocalPolicyEmbeddingProvider?.dimension;
+      const internal = sovereigntyEngine.resolveEmbeddingProfile('internal');
+      if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
+      return undefined;
+    },
+  });
+  const getModelSetup = () => {
+    const view = modelSetup.getStatus();
+    if (!modelReloadUnavailable) return view;
+    return { ...view, ready: false, cards: view.cards.map((card) => card.state === 'applying'
+      ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
+      : card) };
+  };
+  const connectModelKey = async (provider: 'gemini' | 'venice', apiKey: string): Promise<void> => {
+    if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
+    else await connectPublicApiKeySource({ source: 'venice', apiKey });
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    if (!credentials.includes('missing') && credentials.includes('applying')) {
+      modelReloadUnavailable = !requestModelReload();
+    }
+  };
+
   const fileExtractionPdfTextCommandEnv = process.env.OLYMPUS_FILE_EXTRACTION_PDF_TEXT_COMMAND?.trim();
   const fileExtractionPdfTextCommand = fileExtractionPdfTextCommandEnv === 'off'
     ? undefined
@@ -1518,13 +1773,17 @@ export async function main(): Promise<void> {
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim()
     || dropboxFilesAccount
     || 'personal';
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle
+  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority
+    ? fileSourceScopeAuthority.policyRef('dropbox.files')
+    : undefined;
+  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
     ? createDropboxProviderStoreSyncHandler({
         store: dropboxConnectorStore,
         account: dropboxProviderAccount,
         credentialHandle: dropboxHandle.handle,
-        ...(dropboxFilesEmbeddingProvider?.backend === 'local'
-          ? { embeddingProvider: dropboxFilesEmbeddingProvider }
+        scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
+        ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
+          ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) }
           : {}),
       })
     : undefined;
@@ -1621,6 +1880,25 @@ export async function main(): Promise<void> {
       ? {
           dropbox: {
             extractionScopes: dropboxExtractionScopes,
+            resolveExtractionScopes: () => {
+              const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+              if (!ref || !fileSourceScopeAuthority) return [];
+              return dropboxPolicyFullExtractionScopeKeys(fileSourceScopeDropboxPolicy(
+                dropboxIngestionPolicy,
+                fileSourceScopeAuthority.assertCurrent(ref),
+              ));
+            },
+            resolveCandidateFilters: () => {
+              const approval = fileSourceScopeAuthority?.snapshot('dropbox.files');
+              const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false as const };
+              if (!scope.allowed || !scope.filters) {
+                throw new OperationError(
+                  'source_index_policy_violation',
+                  'Current Dropbox full-ingestion scope is required before candidate enumeration.',
+                );
+              }
+              return scope.filters;
+            },
             resolveCredentialHandle: () => selectedSourceCredentialHandle({
               env: process.env,
               pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
@@ -1645,6 +1923,33 @@ export async function main(): Promise<void> {
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
+    scopeGuard: {
+      assertAuthorized({ config }) {
+        const sourceId = config.provider === 'dropbox'
+          ? 'dropbox.files' as const
+          : config.provider === 'google_drive'
+            ? 'google_drive.docs' as const
+            : undefined;
+        if (!sourceId) return;
+        const ref = fileSourceScopeAuthority?.policyRef(sourceId);
+        if (!ref || !fileSourceScopeAuthority) {
+          throw new OperationError('source_index_policy_violation', 'File-source scope approval is required.');
+        }
+        fileSourceScopeAuthority.assertCurrent(ref);
+      },
+      allowsRef({ config, store, ref }) {
+        const sourceId = config.provider === 'dropbox'
+          ? 'dropbox.files' as const
+          : config.provider === 'google_drive'
+            ? 'google_drive.docs' as const
+            : undefined;
+        if (!sourceId) return true;
+        const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+        if (!approval) return false;
+        const scope = fileSourceScopeContentFilters(approval);
+        return scope.allowed && store.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
+      },
+    },
     extractors: {
       ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
         ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
@@ -1767,6 +2072,64 @@ export async function main(): Promise<void> {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   }
+  const connectorStoreReadScope = (store: LocalConnectorStore):
+    { allowed: false } | {
+      allowed: true;
+      accountScope?: string;
+      filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+      contentAllowed: boolean;
+      contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+    } => {
+    const sourceId = store === dropboxConnectorStore
+      ? 'dropbox.files' as const
+      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
+        ? 'google_drive.docs' as const
+        : undefined;
+    if (!sourceId) return { allowed: true, contentAllowed: true };
+    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+    if (!approval || approval.status !== 'approved') return { allowed: false };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    if (!metadataScope.allowed) return { allowed: false };
+    const contentScope = fileSourceScopeContentFilters(approval);
+    const handle = selectedSourceCredentialHandle({
+      env: process.env,
+      pinEnvName: sourceId === 'dropbox.files'
+        ? 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE'
+        : 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE',
+      provider: sourceId === 'dropbox.files' ? 'dropbox' : 'google_drive',
+      capability: sourceId === 'dropbox.files' ? 'dropbox.files.sync' : 'google_drive.docs.sync',
+      handles: readActiveConnectedHandles(process.env),
+    });
+    if (!handle) return { allowed: false };
+    return {
+      allowed: true,
+      accountScope: handle.accountRole?.trim() || 'personal',
+      filters: metadataScope.filters,
+      contentAllowed: contentScope.allowed,
+      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+    };
+  };
+  const connectorStoreStatusScope = (store: LocalConnectorStore):
+    ConnectorStoreStatusScope | undefined => {
+    const readScope = connectorStoreReadScope(store);
+    if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
+    if (!readScope.filters && !readScope.contentFilters) return undefined;
+    return {
+      ...(readScope.filters?.sourceScopeRevision
+        ? { scopeRevision: readScope.filters.sourceScopeRevision }
+        : {}),
+      ...(readScope.accountScope ? { accountScope: readScope.accountScope } : {}),
+      ...(readScope.filters ? { itemFilters: readScope.filters } : {}),
+      contentAllowed: readScope.contentAllowed,
+      ...(readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}),
+    };
+  };
+  // Policy truth is independent of credential readiness: a selected Venice
+  // profile stays visible as the intended secure embedding lane even when its
+  // secret is currently missing and the runtime provider is unavailable.
+  const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile('secure_local');
+  const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === 'venice'
+    && secureEmbeddingProfile.profile.trust === 'encrypted_cloud';
   const fullCorpusDefinitions = [
     defineGmailSecureLocalCorpus(),
     defineInternalEmailCorpus(),
@@ -1776,7 +2139,9 @@ export async function main(): Promise<void> {
     defineDropboxFilesCorpus(),
     defineInternalTelegramMessagesCorpus(),
     defineProtectedTelegramMessagesCorpus(),
-  ];
+  ].map((definition) => secureEmbeddingCloudApproved && definition.trustDomain === 'secure_local'
+    ? { ...definition, embeddingPolicy: 'cloud_allowed_by_policy' as const }
+    : definition);
   const registeredCorpusDefinitions = new Map(
     sourceCorpusRegistry.definitions().map((definition) => [definition.corpusId, definition]),
   );
@@ -1789,6 +2154,9 @@ export async function main(): Promise<void> {
       family: store.family,
       trustDomain: store.trustDomain,
       ...(registeredDefinition ? { activationMode: registeredDefinition.activationMode } : {}),
+      ...(secureEmbeddingCloudApproved && store.trustDomain === 'secure_local'
+        ? { embeddingPolicy: 'cloud_allowed_by_policy' as const }
+        : {}),
     }));
     fullyDefinedCorpusIds.add(store.corpusId);
   }
@@ -1815,7 +2183,7 @@ export async function main(): Promise<void> {
     const provider = store.trustDomain === 'secure_local'
       ? secureLocalPolicyEmbeddingProvider
       : sourceIndexEmbeddingProvider;
-    if (!provider || (store.trustDomain === 'secure_local' && provider.backend !== 'local')) continue;
+    if (!provider || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(provider))) continue;
     registerConnectorStoreEmbeddingLane({
       store,
       provider,
@@ -1855,7 +2223,7 @@ export async function main(): Promise<void> {
       ...(sourceIndexEmbeddingProvider
         ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider }
         : {}),
-      ...(secureLocalPolicyEmbeddingProvider?.backend === 'local'
+      ...(secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider)
         ? { secureEmbeddingProvider: secureLocalPolicyEmbeddingProvider }
         : {}),
       ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
@@ -1864,12 +2232,21 @@ export async function main(): Promise<void> {
     : undefined;
   const createGoogleDriveConnectorStoreSyncForHandle = (
     handle: ConnectedCredentialHandle | undefined,
-  ): GoogleDriveConnectorStoreSyncHandler | undefined =>
-    handle && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore && googleDriveRequestBudget
+  ): GoogleDriveConnectorStoreSyncHandler | undefined => {
+    const scopeRef = handle && fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.policyRef('google_drive.docs')
+      : undefined;
+    const scopeSnapshot = scopeRef && fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.assertCurrent(scopeRef)
+      : undefined;
+    return handle && scopeRef && fileSourceScopeAuthority
+      && scopeSnapshot && fileSourceScopeMetadataEnabled(scopeSnapshot)
+      && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore && googleDriveRequestBudget
       ? createGoogleDriveConnectorStoreSyncHandler({
         internalStore: googleDriveInternalConnectorStore,
         secureStore: googleDriveSecureConnectorStore,
         requestBudget: googleDriveRequestBudget,
+        scope: createScopeBoundGoogleDriveContentScope({ authority: fileSourceScopeAuthority, ref: scopeRef }),
         // The same gate the stores hold, handed to the traversal so an excluded
         // file is refused before its content is downloaded rather than after.
         ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
@@ -1880,15 +2257,16 @@ export async function main(): Promise<void> {
         // lane makes. Without it the pull fills both stores with chunks and no
         // embeddings, and the corpus can never become servable.
         ...(googleDriveDocsEmbeddingProvider
-          ? { internalEmbeddingProvider: googleDriveDocsEmbeddingProvider }
+          ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(googleDriveDocsEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
           : {}),
-        ...(secureLocalPolicyEmbeddingProvider?.backend === 'local'
-          ? { secureEmbeddingProvider: secureLocalPolicyEmbeddingProvider }
+        ...(secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider)
+          ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
           : {}),
         ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
         ...(handle?.accountRole ? { account: handle.accountRole } : {}),
       })
       : undefined;
+  };
   // The analyst-backed contracts path is THE source answer path (the template
   // handler was deleted at the Lane F deletion milestone, 2026-06-10).
   const sourceIndexAnswerMaxResults = parseOptionalPositiveInteger(
@@ -2065,6 +2443,8 @@ export async function main(): Promise<void> {
           const connectorStoreAdapter = (
             store: LocalConnectorStore,
           ): SourceIndexCorpusSearchAdapter | undefined => {
+            const mandatoryScope = connectorStoreReadScope(store);
+            if (!mandatoryScope.allowed) return undefined;
             const principal = connectorStorePrincipals.get(store.corpusId);
             const scope = connectorStoreAnswerScope({
               store,
@@ -2075,6 +2455,7 @@ export async function main(): Promise<void> {
             const connectorStoreEmbedding = connectorStoreEmbeddingProviders.get(store.corpusId)
               ?? sourceIndexEmbeddingProvider;
             const connectorStoreAccount = scope.accountScope
+              ?? mandatoryScope.accountScope
               ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
             return createConnectorStoreCorpusAdapter({
               store,
@@ -2083,9 +2464,11 @@ export async function main(): Promise<void> {
                 ? { semanticRelevanceBar: xBookmarksSemanticRelevanceBar }
                 : {}),
               ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
-              ...(scope.filters ? { filters: scope.filters } : {}),
+              ...(scope.filters || mandatoryScope.filters
+                ? { filters: { ...scope.filters, ...mandatoryScope.filters } }
+                : {}),
               ...(connectorStoreEmbedding
-                && (store.trustDomain !== 'secure_local' || connectorStoreEmbedding.backend === 'local')
+                && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbedding))
                 ? { embeddingProvider: connectorStoreEmbedding }
                 : {}),
             });
@@ -2106,10 +2489,16 @@ export async function main(): Promise<void> {
             contentProviders: {
               ...Object.fromEntries(
                 readConnectorStores
-                  .map((store) => [
-                    store.corpusId,
-                    createConnectorStoreContentProvider({ store }),
-                  ]),
+                  .flatMap((store) => {
+                    const mandatoryScope = connectorStoreReadScope(store);
+                    return mandatoryScope.allowed && mandatoryScope.contentAllowed !== false
+                      ? [[store.corpusId, createConnectorStoreContentProvider({
+                          store,
+                          ...(mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {}),
+                          ...(mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}),
+                        })] as const]
+                      : [];
+                  }),
               ),
             },
           };
@@ -2140,13 +2529,49 @@ export async function main(): Promise<void> {
     ? createSourceIndexStatusHandler({
       corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions),
       connectorStores,
+      connectorStoreStatusScope,
       retrievalAvailability,
       // The policy and queue half of the readiness counts, from the shared
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
       // store's own per-item count alone.
       ...(fileExtractionRuntime
-        ? { readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs) }
+        ? {
+            readinessLedger: createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
+              currentItem(ref) {
+                if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
+                  return false;
+                }
+                const readScope = connectorStoreReadScope(dropboxConnectorStore);
+                return readScope.allowed
+                  && readScope.contentAllowed
+                  && dropboxConnectorStore.itemMatchesExtractionRef(ref, readScope.contentFilters);
+              },
+              lanesForCorpus(corpusId) {
+                if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
+                const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+                if (!ref || !fileSourceScopeAuthority) return [];
+                const approval = fileSourceScopeAuthority.assertCurrent(ref);
+                const scopes = dropboxPolicyFullExtractionScopeKeys(
+                  fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval),
+                );
+                const handle = selectedSourceCredentialHandle({
+                  env: process.env,
+                  pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
+                  provider: 'dropbox',
+                  capability: 'dropbox.files.sync',
+                  handles: readActiveConnectedHandles(process.env),
+                });
+                const accountScope = handle?.accountRole?.trim() || dropboxFilesAccount || 'personal';
+                return scopes.map((approvedScopeKey) => ({
+                  corpusId,
+                  provider: 'dropbox',
+                  accountScope,
+                  approvedScopeKey,
+                }));
+              },
+            }),
+          }
         : {}),
     })
     : undefined;
@@ -2258,16 +2683,28 @@ export async function main(): Promise<void> {
       handles,
     });
     const currentGmailConnectorStoreSync = createGmailConnectorStoreSyncForHandle(currentGmailHandle);
+    const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.policyRef('google_drive.docs')
+      : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
-    const currentDropboxProviderStoreSync = currentDropboxHandle && dropboxConnectorStore
-      ? currentDropboxHandle.handle === dropboxHandle?.handle && dropboxProviderStoreSync
+    const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.policyRef('dropbox.files')
+      : undefined;
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef
+      && fileSourceScopeAuthority && dropboxConnectorStore
+      ? currentDropboxHandle.handle === dropboxHandle?.handle
+        && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId
+        && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration
+        && currentDropboxScopeRef.revision === dropboxScopeRef?.revision
+        && dropboxProviderStoreSync
         ? dropboxProviderStoreSync
         : createDropboxProviderStoreSyncHandler({
             store: dropboxConnectorStore,
             account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
             credentialHandle: currentDropboxHandle.handle,
-            ...(dropboxFilesEmbeddingProvider?.backend === 'local'
-              ? { embeddingProvider: dropboxFilesEmbeddingProvider }
+            scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef }),
+            ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
+              ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) }
               : {}),
           })
       : undefined;
@@ -2279,6 +2716,18 @@ export async function main(): Promise<void> {
         sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || 'personal',
       );
     }
+    const currentDropboxPolicy = currentDropboxScopeRef && fileSourceScopeAuthority
+      ? fileSourceScopeDropboxPolicy(
+          dropboxIngestionPolicy,
+          fileSourceScopeAuthority.assertCurrent(currentDropboxScopeRef),
+        )
+      : fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, {
+          sourceId: 'dropbox.files',
+          status: 'scope_pending',
+          revision: 'pending',
+          selections: [],
+          wholeAccount: false,
+        });
     // The canonical store lane rides the same source id and is bound to the
     // handle its runtime selected at boot.
     const readwiseStoreLaneEnabled = currentReadwiseHandle !== undefined
@@ -2302,31 +2751,44 @@ export async function main(): Promise<void> {
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.googleDrive,
-        currentGoogleDriveHandle ? undefined : 'no_handle',
-        () => createGoogleDriveConnectorStoreSchedulerSource({
+        !currentGoogleDriveHandle ? 'no_handle' : !currentGoogleDriveScopeRef ? 'scope_pending' : undefined,
+        () => {
+          const source = createGoogleDriveConnectorStoreSchedulerSource({
           config: olympusConfig,
           ...(currentGoogleDriveConnectorStoreSync ? { liveSync: currentGoogleDriveConnectorStoreSync } : {}),
           ...(googleDriveInternalConnectorStore ? { internalStore: googleDriveInternalConnectorStore } : {}),
           ...(googleDriveSecureConnectorStore ? { secureStore: googleDriveSecureConnectorStore } : {}),
-        }),
+          });
+          return source && currentGoogleDriveScopeRef && fileSourceScopeAuthority
+            ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGoogleDriveScopeRef })
+            : undefined;
+        },
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.dropbox,
         !currentDropboxHandle
           ? 'no_handle'
+          : !currentDropboxScopeRef
+            ? 'scope_pending'
           : !currentDropboxProviderStoreSync || !dropboxConnectorStore
             ? 'no_store_sync'
             : undefined,
-        () => createCanonicalDropboxSchedulerSource({
-          policy: dropboxIngestionPolicy,
+        () => {
+          const source = createCanonicalDropboxSchedulerSource({
+          policy: currentDropboxPolicy,
           config: olympusConfig,
           ...(currentDropboxProviderStoreSync ? { providerSync: currentDropboxProviderStoreSync } : {}),
           ...(dropboxConnectorStore ? { store: dropboxConnectorStore } : {}),
           ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
-          ...(dropboxFilesEmbeddingProvider?.backend === 'local'
-            ? { embeddingProvider: dropboxFilesEmbeddingProvider }
+          ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
+            && currentDropboxScopeRef && fileSourceScopeAuthority
+            ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) }
             : {}),
-        }),
+          });
+          return source && currentDropboxScopeRef && fileSourceScopeAuthority
+            ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentDropboxScopeRef })
+            : undefined;
+        },
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.readwise,
@@ -2415,6 +2877,159 @@ export async function main(): Promise<void> {
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath
     ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath)
     : undefined;
+  const fileSourceScopes = fileSourceScopeAuthority ? {
+    summaries: () => ([
+      ['google_drive.docs', GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE, 'Google Drive'],
+      ['dropbox.files', DROPBOX_INGESTION_EXCLUSION_SOURCE, 'Dropbox'],
+    ] as const).map(([sourceId, dispositionSourceId, label]) => {
+      const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
+      return {
+        source_id: sourceId,
+        disposition_source_id: dispositionSourceId,
+        label,
+        connected: snapshot.accountGeneration !== undefined,
+        status: snapshot.status,
+        ...(snapshot.accountGeneration ? { account_generation: snapshot.accountGeneration } : {}),
+        scope_revision: snapshot.revision,
+        selections: snapshot.selections.map((selection) => ({
+          key: selection.key,
+          state: selection.state,
+          ...(selection.ancestorKeys ? { ancestor_keys: selection.ancestorKeys } : {}),
+        })),
+        whole_account_selected: snapshot.wholeAccount,
+        ...(snapshot.reason === 'malformed'
+          ? { error: 'Saved scope state is unreadable. Review and save the scope again.' }
+          : {}),
+      };
+    }),
+    browse: async (input: {
+      sourceId: 'google_drive.docs' | 'dropbox.files';
+      parentKey?: string;
+      cursor?: string;
+    }) => {
+      const before = fileSourceScopeAuthority.snapshot(input.sourceId);
+      const accountGeneration = before.accountGeneration;
+      if (!accountGeneration) {
+        throw new OperationError('source_index_policy_violation', 'Connect this source before browsing folders.');
+      }
+      const handles = readActiveConnectedHandles(process.env);
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: input.sourceId === 'dropbox.files'
+          ? 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE'
+          : 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE',
+        provider: input.sourceId === 'dropbox.files' ? 'dropbox' : 'google_drive',
+        capability: input.sourceId === 'dropbox.files' ? 'dropbox.files.sync' : 'google_drive.docs.sync',
+        handles,
+      });
+      if (!handle) {
+        throw new OperationError('source_index_policy_violation', 'The connected source credential is unavailable.');
+      }
+      const browser = input.sourceId === 'dropbox.files'
+        ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle })
+        : createGoogleDriveFolderScopeBrowser({
+            credentialHandle: handle.handle,
+            ...(handle.accountRole ? { account: handle.accountRole } : {}),
+            ...(googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}),
+          });
+      const page = await browser.browse({
+        ...(input.parentKey ? { parentKey: input.parentKey } : {}),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+      });
+      const after = fileSourceScopeAuthority.snapshot(input.sourceId);
+      if (after.accountGeneration !== accountGeneration || after.revision !== before.revision) {
+        throw new OperationError(
+          'source_index_policy_violation',
+          'The account or saved scope changed while folders were being listed. Reload the picker.',
+        );
+      }
+      return {
+        source_id: input.sourceId,
+        account_generation: accountGeneration,
+        scope_revision: before.revision,
+        status: before.status,
+        nodes: page.nodes,
+        ...(page.nextCursor ? { next_cursor: page.nextCursor } : {}),
+        selections: before.selections.map((selection) => ({
+          key: selection.key,
+          state: selection.state,
+          ...(selection.ancestorKeys ? { ancestor_keys: selection.ancestorKeys } : {}),
+        })),
+        whole_account_selected: before.wholeAccount,
+      };
+    },
+    approveAndStart: async (input: {
+      sourceId: 'google_drive.docs' | 'dropbox.files';
+      accountGeneration: string;
+      expectedRevision: string;
+      selections: Array<{ key: string; state: 'ingest' | 'metadata_only' | 'exclude'; ancestor_keys?: string[] }>;
+      wholeAccount: boolean;
+      explicitWholeAccountConfirmation: boolean;
+    }) => {
+      const selections = input.selections.map((selection) => ({
+        key: input.sourceId === 'dropbox.files'
+          ? selection.key.trim().toLowerCase()
+          : selection.key.trim(),
+        state: selection.state,
+      }));
+      const handle = selectedSourceCredentialHandle({
+        env: process.env,
+        pinEnvName: input.sourceId === 'dropbox.files'
+          ? 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE'
+          : 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE',
+        provider: input.sourceId === 'dropbox.files' ? 'dropbox' : 'google_drive',
+        capability: input.sourceId === 'dropbox.files' ? 'dropbox.files.sync' : 'google_drive.docs.sync',
+        handles: readActiveConnectedHandles(process.env),
+      });
+      if (!handle) {
+        throw new OperationError('source_index_policy_violation', 'The connected source credential is unavailable.');
+      }
+      const browser = input.sourceId === 'dropbox.files'
+        ? createDropboxFolderScopeBrowser({ credentialHandle: handle.handle })
+        : createGoogleDriveFolderScopeBrowser({
+            credentialHandle: handle.handle,
+            ...(handle.accountRole ? { account: handle.accountRole } : {}),
+            ...(googleDriveRequestBudget ? { requestBudget: googleDriveRequestBudget } : {}),
+          });
+      const verifiedSelections = await browser.validateSelections(selections);
+      const approval = fileSourceScopeAuthority.approve({
+        sourceId: input.sourceId,
+        accountGeneration: input.accountGeneration,
+        expectedRevision: input.expectedRevision,
+        selections: verifiedSelections,
+        wholeAccount: input.wholeAccount,
+        explicitWholeAccountConfirmation: input.explicitWholeAccountConfirmation,
+      });
+      let invalidatedJobs = 0;
+      if (fileExtractionRuntime) {
+        const corpora = input.sourceId === 'dropbox.files'
+          ? [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID]
+          : [GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID];
+        invalidatedJobs = corpora.reduce(
+          (total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId),
+          0,
+        );
+      }
+      let started = false;
+      if (sourceScheduler) {
+        sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
+        if (fileSourceScopeMetadataEnabled(approval)
+          && sourceScheduler.status().sources.some((source) => source.source_id === input.sourceId)) {
+          await sourceScheduler.runSource(input.sourceId, undefined, 'operator');
+          started = true;
+        }
+      }
+      return {
+        ok: true,
+        kind: 'file_source_scope_approved',
+        source_id: input.sourceId,
+        status: approval.status,
+        scope_revision: approval.revision,
+        ingestion_started: started,
+        invalidated_queued_jobs: invalidatedJobs,
+      };
+    },
+  } : undefined;
   const worker = createEmailSourceWorker({
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
@@ -2429,6 +3044,7 @@ export async function main(): Promise<void> {
     ...(connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {}),
     ...(connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {}),
     ...(connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {}),
+    connectorStoreReadScope,
     ...(sourceScheduler ? { sourceScheduler } : {}),
     ...(sourceWatchPass
       ? {
@@ -2441,10 +3057,15 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
+            modelSetup: getModelSetup,
+            checkModelSetup: () => modelSetup.checkLocalModels(),
+            connectModelKey,
+            stopMessagingCapture,
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
             ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
+            ...(fileSourceScopes ? { fileSourceScopes } : {}),
             enforceConnectedSourceReads: true,
             // The filter applies to the override too. An override is a caller
             // saying which handles changed, never a claim that an unpaired
@@ -2466,35 +3087,10 @@ export async function main(): Promise<void> {
               if (request.source !== 'dropbox') {
                 throw dashboardSourceSyncNotSupportedError(request.source);
               }
-              const latestDropboxHandle = selectedSourceCredentialHandle({
-                env: process.env,
-                pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
-                provider: 'dropbox',
-                capability: 'dropbox.files.sync',
-                handles: readActiveConnectedHandles(process.env),
-              });
-              const latestDropboxProviderStoreSync = latestDropboxHandle && dropboxConnectorStore
-                ? createDropboxProviderStoreSyncHandler({
-                    store: dropboxConnectorStore,
-                    account: latestDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
-                    credentialHandle: latestDropboxHandle.handle,
-                    ...(dropboxFilesEmbeddingProvider?.backend === 'local'
-                      ? { embeddingProvider: dropboxFilesEmbeddingProvider }
-                      : {}),
-                  })
-                : undefined;
-              const source = createCanonicalDropboxSchedulerSource({
-                policy: dropboxIngestionPolicy,
-                config: olympusConfig,
-                ...(latestDropboxProviderStoreSync
-                  ? { providerSync: latestDropboxProviderStoreSync }
-                  : {}),
-                ...(dropboxConnectorStore ? { store: dropboxConnectorStore } : {}),
-                ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
-                ...(dropboxFilesEmbeddingProvider?.backend === 'local'
-                  ? { embeddingProvider: dropboxFilesEmbeddingProvider }
-                  : {}),
-              });
+              const source = schedulerSourcesForHandles(activeLaneHandles(
+                readActiveConnectedHandles(process.env),
+                process.env,
+              )).sources.find((candidate) => candidate.sourceId === SCHEDULER_SOURCE_IDS.dropbox);
               if (!source) throw new Error('Dropbox sync is not configured.');
               const tasks = [];
               for (const task of source.tasks) {
@@ -2530,6 +3126,9 @@ export async function main(): Promise<void> {
     fetch: withWorkerBearerAuth(worker.fetch, { authToken }),
   });
   sourceScheduler?.start();
+  await reconcileCaptures();
+  const captureTick = setInterval(() => { void reconcileCaptures(); }, 10_000);
+  captureTick.unref?.();
 
   // The worker owns a background tick that outlives any request, so the process
   // needs a way to put it down. Without this the only shutdown was the process
@@ -2538,11 +3137,19 @@ export async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    capturesClosed = true;
+    clearInterval(captureTick);
+    void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     console.log(`Olympus private email source worker shutting down on ${signal}.`);
     worker.close();
     sourceScheduler?.stop();
     void server.stop();
   };
+  requestModelReload = createModelKeyReload({
+    managed: process.env.OLYMPUS_MANAGED_WORKER === '1',
+    shutdown: async () => { shutdown('SIGTERM'); await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
+    exit: (code) => process.exit(code),
+  });
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 

@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { SENSITIVITY_TIER_LABELS } from '../src/core/privacy-language.ts';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -47,6 +48,28 @@ async function withTempMap(
 }
 
 describe('sensitivity map schema', () => {
+  test('new display names preserve the legacy Private versus Secure policy boundary', () => {
+    const parsed = parseSensitivityMap(validMap());
+    expect(SENSITIVITY_TIER_LABELS).toEqual({ public: 'Public', private: 'Personal', secure: 'Private', secrets: 'Secrets' });
+    expect(parsed.userFacingTiers.private).toEqual({ targetTrustTier: 'S3', targetTrustDomain: 'internal' });
+    expect(parsed.categories[0]!.targetTierName).toBe('secure');
+    expect(parsed.categories[0]!.targetTrustTier).toBe('S4');
+    expect(SENSITIVITY_TIER_LABELS[parsed.categories[0]!.targetTierName]).toBe('Private');
+    expect(() => parseSensitivityMap(validMap({ categories: [{ ...(validMap().categories as object[])[0], targetTierName: 'private' }] })))
+      .toThrow('Public/Personal downgrade guidance is not supported yet');
+  });
+  test('the current installation guide writes Private categories with the compatible stored key', () => {
+    const guide = readFileSync(join(import.meta.dir, '..', 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const sample = guide.match(/```json\n(\{\n  "schemaVersion": 1,\n  "userFacingTiers":[\s\S]*?)\n```/);
+    expect(sample).not.toBeNull();
+    const parsed = parseSensitivityMap(JSON.parse(sample![1]!));
+    expect(parsed.categories[0]!.targetTierName).toBe('secure');
+    expect(parsed.categories[0]!.targetTrustTier).toBe('S4');
+    expect(guide).toContain('**Personal** — ordinary personal and work life');
+    expect(guide).toContain('**Private** — the things');
+    expect(guide).not.toContain('**Secure** —');
+  });
+
   test('parses a valid raise-only map', () => {
     const parsed = parseSensitivityMap(validMap());
     expect(parsed.schemaVersion).toBe(1);

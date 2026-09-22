@@ -9,7 +9,8 @@
  * always-reachable addresses the same way, as ?setup and ?background.
  */
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
-import { escapeHtml, pageShell } from './components.ts';
+import type { OlympusDashboardReadParams, OlympusDashboardReadResult } from '../../control-ui-contract.ts';
+import { dashboardPageSignature, escapeHtml, pageShell } from './components.ts';
 import { dashboardHomeMeta, dashboardIsFirstRun } from './vocabulary.ts';
 import { renderDashboardHomePage, type DashboardPageOptions } from './pages/home.ts';
 import { renderDashboardDetailPage } from './pages/detail.ts';
@@ -69,6 +70,68 @@ export function renderDashboardHtmlRoute(input: DashboardHtmlRouteInput): Dashbo
   return { html: renderDashboardHomePage(view, options), status: 200 };
 }
 
+/** The existing dashboard renderer projected as inert native-Control-UI HTML. */
+export function renderDashboardControlUi(input: {
+  params: OlympusDashboardReadParams;
+  view: SourceDashboardViewModel;
+  canWrite: boolean;
+  options?: DashboardPageOptions;
+}): OlympusDashboardReadResult {
+  if (input.params.view === 'dispositions') {
+    throw new Error(`Dashboard view ${input.params.view} has its own native renderer.`);
+  }
+  const url = dashboardControlUiUrl(input.params);
+  const rendered = renderDashboardHtmlRoute({
+    url,
+    view: input.view,
+    options: {
+      ...input.options,
+      basePath: DASHBOARD_HTML_PATH,
+      format: 'fragment',
+      controlMode: 'native',
+      canWrite: input.canWrite,
+      readOnly: !input.canWrite,
+    },
+  });
+  const body = input.options?.nativeOAuthAvailable === false
+    ? `<div class="attncard" data-native-oauth-unavailable>OAuth connections are unavailable until the Gateway has a trusted public origin.</div>\n${
+      rendered.html.replaceAll('data-connect-kind="oauth"', 'data-connect-kind="oauth" data-native-oauth-unavailable')
+    }`
+    : rendered.html;
+  return {
+    status: rendered.status,
+    title: dashboardControlUiTitle(input.params, input.view),
+    body,
+    controller: 'dashboard',
+    can_write: input.canWrite,
+    signature: dashboardPageSignature(body),
+    poll_interval_ms: 15_000,
+  };
+}
+
+function dashboardControlUiUrl(params: OlympusDashboardReadParams): URL {
+  const url = new URL('http://olympus.invalid/dashboard');
+  if (params.view === 'source' && params.source_id) url.searchParams.set('source', params.source_id);
+  else if (params.view === 'setup') url.searchParams.set('setup', '');
+  else if (params.view === 'background') url.searchParams.set('background', '');
+  else if (params.view === 'sensitivity') url.searchParams.set('sensitivity', '');
+  return url;
+}
+
+function dashboardControlUiTitle(
+  params: OlympusDashboardReadParams,
+  view: SourceDashboardViewModel,
+): string {
+  if (params.view === 'source') {
+    const source = view.sources.find((entry) => entry.source_id === params.source_id);
+    return source ? `Olympus / ${source.label}` : 'Olympus / Not found';
+  }
+  if (params.view === 'setup') return 'Olympus / Setup';
+  if (params.view === 'background') return 'Olympus / Background';
+  if (params.view === 'sensitivity') return 'Olympus / Sensitivity';
+  return 'Olympus';
+}
+
 /**
  * The read-only dash_ query token is the only way a browser reaches this HTML
  * — a bearer header cannot be typed into an address bar — so every internal
@@ -116,6 +179,7 @@ function renderNotFound(view: SourceDashboardViewModel, options?: DashboardPageO
     basePath,
     meta: dashboardHomeMeta(view, options),
     body: `<div class="foot">No source by that id. <a href="${escapeHtml(basePath)}">Back to the dashboard</a></div>`,
+    ...(options?.format === undefined ? {} : { format: options.format }),
   });
 }
 

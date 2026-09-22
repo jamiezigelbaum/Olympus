@@ -76,7 +76,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
 export function whatsappPairingSessionPaths(context: OlympusPathContext = {}): string[] {
   const stateDir = whatsappStateDir(context);
   const sessionDb = join(stateDir, 'session.db');
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt')];
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 
 /**
@@ -150,7 +150,7 @@ export function pairingSessionPathsFromStoredValue(
   }
   const stateDir = whatsappStateDirFromValue(value);
   const sessionDb = join(stateDir, 'session.db');
-  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt')];
+  return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 
 /** Whether an explicit env override names where this pairing session lives. */

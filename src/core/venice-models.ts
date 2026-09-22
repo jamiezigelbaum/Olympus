@@ -171,6 +171,37 @@ export async function assertVeniceAnalystModelAllowed(
   }
 }
 
+/** Embedding models use the dedicated Venice embedding catalog, not chat metadata. */
+export async function assertVeniceEmbeddingModelAllowed(
+  modelId: string,
+  resolveCategory: (
+    modelId: string,
+    signal?: AbortSignal,
+  ) => Promise<VenicePrivacyCategory | undefined>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError(
+      'source_index_policy_violation',
+      `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`,
+      'Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.',
+    );
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  // Source vectors are raw content derivatives; keep this lane on the
+  // explicitly qualified Private/TEE embedding classes. Unknown, anonymized,
+  // and E2EE classes remain gated until local key handling exists, before POST
+  // /embeddings.
+  if (category !== 'private' && category !== 'tee') {
+    throw new OperationError(
+      'source_index_policy_violation',
+      `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? 'unknown'}; source embeddings require Venice Private or TEE.`,
+      'Choose a Venice embedding model published with Private or TEE privacy metadata.',
+    );
+  }
+}
+
 export function veniceAnalystModelAliasTargets(): readonly string[] {
   return [...new Set(Object.values(VENICE_MODEL_ALIASES))].sort();
 }

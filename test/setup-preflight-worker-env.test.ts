@@ -33,7 +33,7 @@ describe('preflight over the managed worker environment', () => {
       });
       expect(before.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
       expect(before.find((item) => item.id === 'env:GEMINI_API_KEY')?.remedy)
-        .toContain('olympus connect gemini --api-key-stdin');
+        .toContain('olympus connect gemini --api-key-prompt');
 
       // Exactly what the connect command does.
       writeManagedWorkerEnvSecret({
@@ -280,7 +280,7 @@ describe('preflight over the managed worker environment', () => {
       });
       const beforeCheck = before.checks.find((check) => check.name === 'sovereignty_prerequisites')!;
       expect(beforeCheck.ok).toBe(false);
-      expect(beforeCheck.hint).toContain('olympus connect gemini --api-key-stdin');
+      expect(beforeCheck.hint).toContain('olympus connect gemini --api-key-prompt');
 
       writeManagedWorkerEnvSecret({
         key: 'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',

@@ -11,9 +11,11 @@ import {
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   formatCliFatalError,
+  runDashboardCommand,
+  type DashboardCommandDependencies,
   isV04PublicCliInvocation,
   lifecycleRecoverySignalsFromWorkerHttpState,
   parseArgs,
@@ -25,9 +27,18 @@ import {
   runWorkerForeground,
 } from '../src/cli.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
+import {
+  DASHBOARD_LAUNCH_REDEEM_PATH,
+  DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY,
+  DashboardLaunchTickets,
+} from '../src/core/dashboard-launch.ts';
+import { OperationError } from '../src/core/operation-error.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { operations } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_CLI_COMMANDS } from '../src/core/public-surface.ts';
+
+type DashboardFetch = NonNullable<DashboardCommandDependencies['fetchImpl']>;
 
 describe('CLI tool surface', () => {
   test('native managed foreground preserves the parent-finalized environment exactly once', async () => {
@@ -852,148 +863,384 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
-  test('the opened dashboard URL is minted from the token the worker actually accepts', async () => {
+  test('the opening link is minted from the token the worker actually accepts', async () => {
     // `olympus dashboard token` deliberately prefers worker.env over a token
     // remembered in ~/.olympus/config.json, because the service loads its
-    // environment from that file. `olympus dashboard` derived its dash_ query
-    // token config-first, so a stale config token produced a URL the worker
-    // refuses while the token command printed the working one.
+    // environment from that file. The opening link mints with that same
+    // resolution, so a stale config token can never produce a refused request.
     const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-url-precedence-'));
-    const binDir = join(home, 'bin');
-    const openerLog = join(home, 'opener.url');
+    const sent: Array<{ url: string; init: RequestInit }> = [];
     try {
-      mkdirSync(binDir, { recursive: true });
-      const openerScript = ['#!/bin/sh', `printf "%s\\n" "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
-      for (const opener of ['open', 'xdg-open']) {
-        writeFileSync(join(binDir, opener), openerScript);
-        chmodSync(join(binDir, opener), 0o755);
-      }
       writeWorkerEnv(home, 'token-the-worker-loaded');
       const configPath = join(home, 'config.json');
       writeFileSync(configPath, JSON.stringify({ worker: { authToken: 'stale-config-token' } }));
-
-      const env = {
+      const env = withTemporaryEnv({
         HOME: home,
-        PATH: `${binDir}:${process.env.PATH ?? ''}`,
         OLYMPUS_CONFIG: configPath,
-        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010',
-      };
-      const dashboard = await runSourceCli(['dashboard'], env);
-      const printedToken = new URL(JSON.parse(dashboard.stdout).url).searchParams.get('token');
-      const workerToken = (await runSourceCli(['dashboard', 'token'], env)).stdout.trim();
+        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
+      });
+      try {
+        const result = await runDashboardCommand({
+          fetchImpl: recordingFetch(sent, () => workerTicketResponse('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE')),
+          openImpl: () => true,
+        });
 
-      expect(workerToken).toBe('token-the-worker-loaded');
-      expect(printedToken).toBe(dashboardQueryTokenFromWorkerAuthToken(workerToken) ?? null);
-      expect(printedToken).not.toBe(dashboardQueryTokenFromWorkerAuthToken('stale-config-token') ?? null);
-      // The bearer itself is still nowhere in the output or the opened URL.
-      expect(dashboard.stdout).not.toContain(workerToken);
-      expect(readFileSync(openerLog, 'utf8')).not.toContain(workerToken);
+        expect(sent).toHaveLength(1);
+        expect(sent[0]?.url).toBe('http://127.0.0.1:8010/dashboard/control/launch');
+        expect(sent[0]?.init.method).toBe('POST');
+        expect(sent[0]?.init.redirect).toBe('error');
+        // The request is authenticated by the token the WORKER accepts, not by
+        // the stale one a legacy config remembers, and it names the origin the
+        // browser will open so the ticket is redeemable exactly there.
+        const headers = new Headers(sent[0]?.init.headers);
+        expect(headers.get('Authorization')).toBe('Bearer token-the-worker-loaded');
+        expect(headers.get('Origin')).toBe('http://127.0.0.1:8010');
+
+        const opened = new URL(result.url);
+        expect(opened.pathname).toBe('/dashboard/launch');
+        expect(opened.search).toBe('');
+        expect(opened.hash).toBe(
+          `#${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}=QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE`,
+        );
+        expect(result.opened).toBe(true);
+        expect(result.url).not.toContain('token-the-worker-loaded');
+        expect(result.url).not.toContain('dash_');
+      } finally {
+        env.restore();
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
 
-  test('dashboard command does not print or open the worker bearer token', async () => {
+  test('dashboard rejects missing credentials and unsafe worker URLs before sending a bearer', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-dashboard-input-boundaries-'));
+    const configPath = join(home, 'missing-config.json');
+    const fetcher: DashboardFetch = async () => {
+      throw new Error('fetcher must not run for rejected input');
+    };
+    try {
+      for (const input of [
+        {
+          baseUrl: 'http://127.0.0.1:8010/v1',
+          token: undefined,
+          message: 'No worker auth token is configured',
+        },
+        {
+          baseUrl: 'file:///tmp/olympus-worker/v1',
+          token: 'protocol-test-token',
+          message: 'email.baseUrl must be an HTTP(S) URL',
+        },
+        {
+          baseUrl: 'http://reader:secret@127.0.0.1:8010/v1',
+          token: 'userinfo-test-token',
+          message: 'must not carry embedded credentials',
+        },
+        {
+          baseUrl: 'http://127.0.0.1:8010/another-service/v1',
+          token: 'path-test-token',
+          message: 'path must be /v1 or the origin root',
+        },
+      ]) {
+        const env = withTemporaryEnv({
+          HOME: home,
+          OLYMPUS_CONFIG: configPath,
+          OLYMPUS_EMAIL_BASE_URL: input.baseUrl,
+          OLYMPUS_WORKER_AUTH_TOKEN: input.token,
+        });
+        try {
+          const error = await runDashboardCommand({
+            fetchImpl: fetcher,
+            openImpl: () => true,
+          }).catch((failure: unknown) => failure);
+          expect(error).toBeInstanceOf(OperationError);
+          expect((error as OperationError).code).toBe('config_error');
+          expect((error as Error).message).toContain(input.message);
+          expect((error as Error).message).not.toContain(input.token ?? 'missing-token-marker');
+        } finally {
+          env.restore();
+        }
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('dashboard bounds the mint request to ten seconds and suppresses the raw fetch error', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-fetch-timeout-'));
+    const timeoutSpy = spyOn(AbortSignal, 'timeout');
+    const rawError = 'transport-secret-that-must-not-surface';
+    const token = 'timeout-worker-token';
+    const env = withTemporaryEnv({
+      HOME: dir,
+      OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
+      OLYMPUS_WORKER_AUTH_TOKEN: token,
+    });
+    try {
+      let requestSignal: AbortSignal | null | undefined;
+      const error = await runDashboardCommand({
+        fetchImpl: (async (_input, init) => {
+          requestSignal = init?.signal;
+          throw new Error(rawError);
+        }),
+        openImpl: () => true,
+      }).catch((failure: unknown) => failure);
+
+      expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+      expect(requestSignal).toBeInstanceOf(AbortSignal);
+      expect(error).toBeInstanceOf(OperationError);
+      expect((error as OperationError).code).toBe('email_unreachable');
+      expect((error as Error).message).not.toContain(rawError);
+      expect((error as Error).message).not.toContain(token);
+    } finally {
+      timeoutSpy.mockRestore();
+      env.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('dashboard no-open leaves the auth-wrapper ticket fresh and redeemable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-no-open-redeemable-'));
+    const origin = 'http://127.0.0.1:18010';
+    const workerToken = 'no-open-worker-token';
+    const tickets = new DashboardLaunchTickets();
+    const guardedFetch = withWorkerBearerAuth(
+      async () => new Response('unexpected route', { status: 404 }),
+      { authToken: workerToken, launchTickets: tickets },
+    );
+    const fetchImpl: DashboardFetch = async (input, init) => guardedFetch(new Request(input, init));
+    const env = withTemporaryEnv({
+      HOME: dir,
+      OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+      OLYMPUS_EMAIL_BASE_URL: `${origin}/v1`,
+      OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
+    });
+    let openerCalls = 0;
+    try {
+      const result = await runDashboardCommand({
+        fetchImpl,
+        noOpen: true,
+        openImpl: () => { openerCalls += 1; return true; },
+      });
+      expect(result.opened).toBe(false);
+      expect(openerCalls).toBe(0);
+      expect(result.hint).toContain('not opened locally');
+      expect(tickets.size).toBe(1);
+
+      const launchUrl = new URL(result.url);
+      const ticket = new URLSearchParams(launchUrl.hash.slice(1)).get(DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY);
+      expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const redeem = await guardedFetch(new Request(`${origin}${DASHBOARD_LAUNCH_REDEEM_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin },
+        body: JSON.stringify({ ticket }),
+      }));
+      expect(redeem.status).toBe(200);
+      expect(tickets.size).toBe(0);
+    } finally {
+      env.restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('dashboard CLI mints, prints, and opens a bounded launch link without surfacing the bearer', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-test-'));
     const binDir = join(dir, 'bin');
     const openerLog = join(dir, 'opener.url');
     const workerToken = 'dashboard-worker-secret';
+    const ticket = 'QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI';
+    const requests: Array<{ method: string | undefined; url: string | undefined; authorization: string | undefined; origin: string | undefined }> = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        authorization: request.headers.authorization,
+        origin: request.headers.origin,
+      });
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ ok: true, ticket, expires_in_seconds: 120 }));
+    });
+    let serverOpen = false;
     try {
       mkdirSync(binDir, { recursive: true });
-      const openerScript = [
-        '#!/bin/sh',
-        `printf "%s\\n" "$1" > ${JSON.stringify(openerLog)}`,
-        '',
-      ].join('\n');
-      writeFileSync(join(binDir, 'open'), openerScript);
-      writeFileSync(join(binDir, 'xdg-open'), openerScript);
-      chmodSync(join(binDir, 'open'), 0o755);
-      chmodSync(join(binDir, 'xdg-open'), 0o755);
+      const openerScript = ['#!/bin/sh', `printf '%s\\n' "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
+      for (const opener of ['open', 'xdg-open']) {
+        writeFileSync(join(binDir, opener), openerScript);
+        chmodSync(join(binDir, opener), 0o755);
+      }
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      serverOpen = true;
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Missing test server address');
+      const workerOrigin = `http://127.0.0.1:${address.port}`;
+      const cliEnv = {
+        HOME: dir,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+        OLYMPUS_EMAIL_BASE_URL: `${workerOrigin}/v1`,
+        OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
+      };
+      const { stdout, stderr } = await runSourceCli(['dashboard'], cliEnv);
 
-      const proc = Bun.spawn([
-        process.execPath,
-        'src/cli.ts',
-        'dashboard',
-      ], {
-        cwd: process.cwd(),
-        env: {
-          PATH: `${binDir}:${process.env.PATH ?? ''}`,
-          OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
-          OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010',
-          OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
-        },
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      if (code !== 0) throw new Error(stderr || stdout);
+      const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
+      const expectedUrl = `${workerOrigin}/dashboard/launch#olympus_launch_ticket=${ticket}`;
+      expect(requests).toEqual([{
+        method: 'POST',
+        url: '/dashboard/control/launch',
+        authorization: `Bearer ${workerToken}`,
+        origin: workerOrigin,
+      }]);
+      expect(output).toMatchObject({ url: expectedUrl, opened: true });
+      expect(output.hint).toContain('single-use 120-second ticket');
+      expect(output.hint).toContain('dashboard --read-only');
+      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(new URL(output.url).search).toBe('');
+      expect(output.url).not.toContain('dash_');
+      for (const surfaced of [stdout, stderr, readFileSync(openerLog, 'utf8')]) {
+        expect(surfaced).not.toContain(workerToken);
+      }
 
-      const output = JSON.parse(stdout);
-      const openedUrl = readFileSync(openerLog, 'utf8');
+      const handoff = await runSourceCli(['dashboard', '--no-open'], cliEnv);
+      const handoffOutput = JSON.parse(handoff.stdout) as { url: string; opened: boolean; hint: string };
+      expect(handoffOutput).toMatchObject({ url: expectedUrl, opened: false });
+      expect(handoffOutput.hint).toContain('not opened locally');
+      expect(readFileSync(openerLog, 'utf8').trim()).toBe(expectedUrl);
+      expect(requests).toHaveLength(2);
 
-      // The printed URL is the one that works: it carries the derived read-only
-      // dash_ view token, which is the only way a browser reaches the HTML.
-      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
-      expect(output.opened).toBe(true);
-      expect(output.hint).toBe(
-        'This URL carries the read-only view token, not the worker token;'
-        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
-      );
-      expect(output.url).toBe(openedUrl.trim());
-      // The shape stays three fields, and the WORKER bearer is still absent:
-      // dash_ carries no control authority and is refused by every control route.
-      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
-      expect(stdout).not.toContain(workerToken);
-      expect(stderr).not.toContain(workerToken);
-      expect(openedUrl).not.toContain(workerToken);
-      expect(openedUrl).toContain('token=dash_');
+      const help = await runSourceCli(['dashboard', '--help']);
+      expect(help.stdout).toContain('Usage: olympus dashboard [--read-only] [--no-open]');
     } finally {
+      server.closeAllConnections();
+      if (serverOpen) await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
 
-  test('package bin dashboard keeps the worker bearer token out of stdout and opener URL', async () => {
+  test('dashboard refuses on a failed mint instead of silently falling back to the old link', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-bin-dashboard-test-'));
-    const binDir = join(dir, 'bin');
-    const openerLog = join(dir, 'opener.url');
     const workerToken = 'dashboard-bin-worker-secret';
+    const openedUrls: string[] = [];
+    const targetRequests: string[] = [];
+    let responseMode: 'failed' | 'redirect' = 'failed';
+    const server = createServer((request, response) => {
+      if (request.url === '/redirect-target') targetRequests.push(request.url);
+      if (request.url !== '/dashboard/control/launch') {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ ok: true, ticket: 'x'.repeat(43) }));
+        return;
+      }
+      if (responseMode === 'redirect') {
+        response.writeHead(302, { Location: '/redirect-target' });
+        response.end('raw-redirect-body-marker');
+        return;
+      }
+      response.writeHead(503, { 'Content-Type': 'text/plain' });
+      response.end(`raw-failure-body-marker:${workerToken}`);
+    });
+    let serverOpen = false;
     try {
-      mkdirSync(binDir, { recursive: true });
-      const openerScript = [
-        '#!/bin/sh',
-        `printf "%s\\n" "$1" > ${JSON.stringify(openerLog)}`,
-        '',
-      ].join('\n');
-      writeFileSync(join(binDir, 'open'), openerScript);
-      writeFileSync(join(binDir, 'xdg-open'), openerScript);
-      chmodSync(join(binDir, 'open'), 0o755);
-      chmodSync(join(binDir, 'xdg-open'), 0o755);
-
-      const { stdout, stderr } = await runBin(['dashboard'], {
-        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      serverOpen = true;
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Missing test server address');
+      const env = withTemporaryEnv({
+        HOME: dir,
         OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
-        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
+        OLYMPUS_EMAIL_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
         OLYMPUS_WORKER_AUTH_TOKEN: workerToken,
       });
-      const output = JSON.parse(stdout);
-      const openedUrl = readFileSync(openerLog, 'utf8');
+      try {
+        // The mint request was never answered at all.
+        const unreachable = await runDashboardCommand({
+          fetchImpl: async () => { throw new TypeError('fetch failed'); },
+          openImpl: (url) => { openedUrls.push(url); return true; },
+        }).catch((error: unknown) => error);
+        expect(unreachable).toBeInstanceOf(OperationError);
+        expect((unreachable as OperationError).code).toBe('email_unreachable');
+        expect((unreachable as Error).message).not.toContain(workerToken);
 
-      expect(output.url).toStartWith('http://127.0.0.1:8010/dashboard?token=dash_');
-      expect(output.opened).toBe(true);
-      expect(output.hint).toBe(
-        'This URL carries the read-only view token, not the worker token;'
-        + ' unlocking the controls still needs <rootDir>/bin/olympus dashboard token.',
-      );
-      expect(output.url).toBe(openedUrl.trim());
-      expect(Object.keys(output).sort()).toEqual(['hint', 'opened', 'url']);
-      expect(stdout).not.toContain(workerToken);
-      expect(stderr).not.toContain(workerToken);
-      expect(openedUrl).not.toContain(workerToken);
-      expect(openedUrl).toContain('token=dash_');
+        // A real worker endpoint that refuses the bearer. The body can carry
+        // arbitrary server prose, so only the status is safe to surface.
+        const refused = await runDashboardCommand({
+          openImpl: (url) => { openedUrls.push(url); return true; },
+        }).catch((error: unknown) => error);
+        expect(refused).toBeInstanceOf(OperationError);
+        expect((refused as OperationError).code).toBe('email_unreachable');
+        expect((refused as Error).message).toContain('HTTP 503');
+        expect((refused as Error).message).not.toContain('raw-failure-body-marker');
+        expect((refused as Error).message).not.toContain(workerToken);
+
+        // A real redirect response is rejected by fetch itself. The target is
+        // never contacted and the browser is never opened.
+        responseMode = 'redirect';
+        const redirected = await runDashboardCommand({
+          openImpl: (url) => { openedUrls.push(url); return true; },
+        }).catch((error: unknown) => error);
+        expect(redirected).toBeInstanceOf(OperationError);
+        expect((redirected as OperationError).code).toBe('email_unreachable');
+        expect((redirected as Error).message).not.toContain('raw-redirect-body-marker');
+        expect(targetRequests).toEqual([]);
+
+        // A worker that predates the handoff answers 200 with no ticket; that is
+        // a refusal with its own remedy, not a URL to open.
+        const legacyWorker = await runDashboardCommand({
+          fetchImpl: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+          openImpl: (url) => { openedUrls.push(url); return true; },
+        }).catch((error: unknown) => error);
+        expect(legacyWorker).toBeInstanceOf(OperationError);
+        expect((legacyWorker as OperationError).code).toBe('email_unreachable');
+        expect((legacyWorker as Error).message).toContain('without a ticket');
+
+        // Not one of the four failures opened a browser.
+        expect(openedUrls).toEqual([]);
+      } finally {
+        env.restore();
+      }
+    } finally {
+      server.closeAllConnections();
+      if (serverOpen) await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('dashboard --read-only keeps minting the derived view link, named as legacy', async () => {
+    // The read-only view link is not deleted, only demoted: it needs no round
+    // trip, so an install whose worker is older than the opening handoff can
+    // still be viewed, and the reader is told which link they got.
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-dashboard-readonly-test-'));
+    const binDir = join(dir, 'bin');
+    const openerLog = join(dir, 'opener.url');
+    try {
+      mkdirSync(binDir, { recursive: true });
+      const openerScript = ['#!/bin/sh', `printf '%s\\n' "$1" > ${JSON.stringify(openerLog)}`, ''].join('\n');
+      for (const opener of ['open', 'xdg-open']) {
+        writeFileSync(join(binDir, opener), openerScript);
+        chmodSync(join(binDir, opener), 0o755);
+      }
+      const env = withTemporaryEnv({
+        OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+        OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
+        OLYMPUS_WORKER_AUTH_TOKEN: 'read-only-view-worker-token',
+      });
+      try {
+        const { stdout } = await runSourceCli(['dashboard', '--read-only', '--no-open'], {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+          OLYMPUS_EMAIL_BASE_URL: 'http://127.0.0.1:8010/v1',
+          OLYMPUS_WORKER_AUTH_TOKEN: 'read-only-view-worker-token',
+        });
+        const output = JSON.parse(stdout) as { url: string; opened: boolean; hint: string };
+        const expectedToken = dashboardQueryTokenFromWorkerAuthToken('read-only-view-worker-token');
+        expect(output.url).toBe(`http://127.0.0.1:8010/dashboard?token=${encodeURIComponent(expectedToken!)}`);
+        expect(output.opened).toBe(false);
+        expect(output.hint).toContain('read-only view link');
+        expect(output.hint).toContain('not opened locally');
+        expect(existsSync(openerLog)).toBe(false);
+        expect(output.url).not.toContain('read-only-view-worker-token');
+      } finally {
+        env.restore();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1055,6 +1302,32 @@ describe('CLI tool surface', () => {
       expect(JSON.parse(readFileSync(path, 'utf8')).routes.secure_local.mode).toBe('disabled');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('masked key input is explicit and incompatible input modes fail before reading', async () => {
+    for (const args of [
+      ['connect', 'gemini', '--api-key-prompt', '--api-key-stdin'],
+      ['connect', 'venice', '--api-key-prompt', '--api-key-stdin'],
+      ['connect', 'google', '--api-key-prompt'],
+    ]) {
+      const proc = Bun.spawn([process.execPath, 'src/cli.ts', ...args], {
+        cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      });
+      proc.stdin.write('synthetic-secret-must-not-be-read'); proc.stdin.end();
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(code).not.toBe(0);
+      expect(out + err).not.toContain('synthetic-secret-must-not-be-read');
+      expect(out + err).toContain('invalid_params');
+    }
+  }, 30_000);
+
+  test('connect key help advertises the packaged masked prompt and stdin compatibility', async () => {
+    for (const source of ['gemini', 'venice', 'readwise']) {
+      const result = await runSourceCliExit(['connect', source, '--help']);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`connect ${source} --api-key-prompt`);
+      expect(result.stdout).toContain('--api-key-stdin');
     }
   }, 30_000);
 
@@ -1368,4 +1641,46 @@ function writeWorkerEnv(home: string, token: string): string {
   writeFileSync(path, `OLYMPUS_WORKER_AUTH_TOKEN=${token}\n`);
   chmodSync(path, 0o600);
   return path;
+}
+
+/**
+ * A worker that answers exactly one thing: `POST /dashboard/control/launch`.
+ *
+ * The round trip is injected rather than served from a listener so the test can
+ * observe the method, the path, and the bearer the CLI actually sent — that is
+ * the whole point of resolving the token before printing a URL.
+ */
+function workerTicketResponse(ticket: string): Response {
+  return new Response(JSON.stringify({ ok: true, ticket, expires_in_seconds: 120 }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function recordingFetch(
+  sent: Array<{ url: string; init: RequestInit }>,
+  respond: () => Response,
+): DashboardFetch {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    sent.push({ url: String(input), init: init ?? {} });
+    return respond();
+  };
+}
+
+/** Set process.env entries and hand back the exact restore for a `finally`. */
+function withTemporaryEnv(values: Record<string, string | undefined>): { restore: () => void } {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return {
+    restore: () => {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    },
+  };
 }

@@ -18,6 +18,12 @@ mutating: false
 Argus is the local/private reasoning lane for Olympus. In v0.1, Argus means
 MLX-served local models exposed through OpenAI-compatible endpoints.
 
+Use the tier names Public, Personal, Private, and Secrets when explaining
+results. Personal maps to `internal` (S1–S3); Private maps to `secure_local`
+(S4). Existing IDs and tool flags such as `include_secure_local` keep their
+spelling. In schema-v1 sensitivity maps, `private` means Personal and `secure`
+means Private; never substitute one for the other.
+
 ## Contract
 
 Use Olympus tools rather than calling local model endpoints directly.
@@ -52,7 +58,7 @@ Do not silently send sensitive content elsewhere if Argus fails.
 If the user requested local-only reasoning and Argus is unavailable, say so and
 ask before using any non-local lane.
 
-Secure source answers normally use the active deployment's approved pool:
+Private source answers normally use the active deployment's approved pool:
 equal local/Venice members are selected by recent health/latency unless the
 policy configures an order. If the owner asks Argus to constrain the request to
 Venice, route the source question through `source_answer` with

@@ -2,7 +2,8 @@
 //
 // Provider I/O stays in connector.ts. Storage and later extraction/embedding
 // stay in the shared spine. One opaque connector id is derived per approved
-// root, so two roots never overwrite each other's durable provider cursor.
+// root and approved-scope generation/revision, so two roots or two explicit
+// approvals never overwrite each other's durable provider cursor.
 
 import { createHash } from 'node:crypto';
 import type {
@@ -10,11 +11,15 @@ import type {
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import {
+  isApprovedSecureSourceEmbeddingProvider,
+  type SourceEmbeddingProvider,
+} from '../source-index/embeddings.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import {
   createDropboxSourceConnector,
+  type DropboxContentScope,
 } from './connector.ts';
 import {
   isDropboxCursorResetError,
@@ -26,6 +31,7 @@ export const DROPBOX_PROVIDER_STORE_RECEIPT_KIND = 'dropbox_provider_connector_s
 
 const DROPBOX_RESUME_CURSOR_RESET_WARNING =
   'provider_cursor_reset: provider invalidated the resume cursor; traversal restarted from the beginning.';
+const DROPBOX_SCOPED_CHECKPOINT_PREFIX = 'dbxs1:';
 
 export interface DropboxProviderStorePullRequest {
   approved_scope_key: string;
@@ -90,18 +96,19 @@ export interface DropboxProviderStoreSyncHandlerOptions {
   contentBaseUrl?: string;
   /** Kept here so construction rejects an unsafe secure-lane provider early. */
   embeddingProvider?: SourceEmbeddingProvider;
+  scope?: DropboxContentScope;
 }
 
 export function createDropboxProviderStoreSyncHandler(
   options: DropboxProviderStoreSyncHandlerOptions,
 ): DropboxProviderStoreSyncHandler {
   const account = required(options.account, 'Dropbox connector-store account');
-  if (options.embeddingProvider && options.embeddingProvider.backend !== 'local') {
-    throw new Error('Dropbox secure_local embeddings require a local/private embedding provider.');
+  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
+    throw new Error('Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
 
   const connectorIdForScope = (approvedScopeKey: string): string =>
-    dropboxConnectorIdForScope(account, approvedScopeKey);
+    dropboxConnectorIdForScope(account, approvedScopeKey, options.scope);
 
   return {
     connectorIdForScope,
@@ -110,7 +117,7 @@ export function createDropboxProviderStoreSyncHandler(
       const approvedScopeKey = required(request.approved_scope_key, 'Dropbox approved scope key');
       const connectorId = connectorIdForScope(approvedScopeKey);
       const candidate = options.store.lastCompletedSyncRun(connectorId)?.cursor
-        ?? request.checkpoint?.trim()
+        ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined)
         ?? undefined;
       const maxItems = request.max_items === undefined
         ? undefined
@@ -129,6 +136,7 @@ export function createDropboxProviderStoreSyncHandler(
           ...(options.fetch ? { fetch: options.fetch } : {}),
           ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
           ...(options.contentBaseUrl ? { contentBaseUrl: options.contentBaseUrl } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
           deletedItemIdentityResolver: options.store,
           onPageDigestRestart: () => {
             pageDigestRestarts += 1;
@@ -136,6 +144,15 @@ export function createDropboxProviderStoreSyncHandler(
         }));
         const sync = await options.store.syncFromConnector(observed.connector, {
           fetchContent: false,
+          ...(options.scope
+            ? {
+                sourceScopeObservation: () => ({
+                  accountGeneration: options.scope!.generation,
+                  scopeRevision: options.scope!.revision,
+                  folderKeys: [],
+                }),
+              }
+            : {}),
           ...(maxItems !== undefined ? { maxItems } : {}),
           ...(cursor ? { cursor } : {}),
         });
@@ -203,7 +220,7 @@ export function createDropboxProviderStoreSyncHandler(
             .update(JSON.stringify(receiptWithoutDigest))
             .digest('hex'),
         },
-        checkpoint: sync.cursor ?? null,
+        checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined),
       };
     },
 
@@ -211,14 +228,50 @@ export function createDropboxProviderStoreSyncHandler(
   };
 }
 
-export function dropboxConnectorIdForScope(account: string, approvedScopeKey: string): string {
+export function dropboxConnectorIdForScope(
+  account: string,
+  approvedScopeKey: string,
+  scope?: Pick<DropboxContentScope, 'generation' | 'revision'>,
+): string {
   const normalizedAccount = required(account, 'Dropbox connector account');
   const normalizedScope = required(approvedScopeKey, 'Dropbox approved scope key');
+  const approvedScopeIdentity = scope
+    ? `\u0000${required(scope.generation, 'Dropbox approved scope generation')}`
+      + `\u0000${required(scope.revision, 'Dropbox approved scope revision')}`
+    : '';
   const scopeHash = createHash('sha256')
-    .update(`${normalizedAccount}\u0000${normalizedScope}`)
+    .update(`${normalizedAccount}\u0000${normalizedScope}${approvedScopeIdentity}`)
     .digest('hex')
     .slice(0, 24);
   return `dropbox.files.${scopeHash}`;
+}
+
+function dropboxScopedCheckpoint(
+  cursor: string | undefined,
+  connectorId: string,
+  scoped: boolean,
+): string | null {
+  if (!cursor) return null;
+  if (!scoped) return cursor;
+  return `${DROPBOX_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice('dropbox.files.'.length)}:`
+    + Buffer.from(cursor).toString('base64url');
+}
+
+function dropboxCheckpointCursor(
+  checkpoint: string | undefined,
+  connectorId: string,
+  scoped: boolean,
+): string | undefined {
+  const normalized = checkpoint?.trim();
+  if (!normalized) return undefined;
+  if (!scoped) return normalized;
+  const prefix = `${DROPBOX_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice('dropbox.files.'.length)}:`;
+  if (!normalized.startsWith(prefix)) return undefined;
+  try {
+    return Buffer.from(normalized.slice(prefix.length), 'base64url').toString('utf8').trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 interface DropboxTraversalRun {

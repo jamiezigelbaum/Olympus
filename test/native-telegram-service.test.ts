@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
@@ -14,6 +14,22 @@ afterEach(async () => {
 });
 
 describe('native Telegram capture service', () => {
+  test('refuses capture without native worker ownership and when worker supervision is disabled', async () => {
+    const fixture = telegramFixture();
+    for (const enabled of [true, false]) {
+      const service = track(createNativeTelegramService({
+        initialPluginConfig: { ...fixture.pluginConfig, worker: { ...fixture.pluginConfig.worker, service: { enabled } } },
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+        workerIsReady: () => false,
+        workerReadinessTimeoutMs: 0,
+      }));
+      await expect(service.start({})).rejects.toThrow(enabled ? 'does not own its endpoint' : 'requires worker.service.enabled');
+      expect(existsSync(fixture.startsPath)).toBe(false);
+      expect(service.reload.configPrefixes).toContain('plugins.entries.olympus.config.worker');
+    }
+  });
+
   test('defaults disabled and validates only the two resolved credential names and absolute paths', () => {
     expect(configFromPluginConfig({}).worker.telegramCapture).toEqual({
       enabled: false,
@@ -59,6 +75,7 @@ describe('native Telegram capture service', () => {
       'APPROVED_CHAT_SCOPES= telegram.personal:chat:42, ,telegram.personal:chat:42 ',
     ));
     const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
       workerEnvPath: fixture.workerEnvPath,
@@ -73,6 +90,7 @@ describe('native Telegram capture service', () => {
   test('uses fresh scoped environment and instance-bound receipt across stop and restart', async () => {
     const fixture = telegramFixture();
     const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
       workerEnvPath: fixture.workerEnvPath,
@@ -134,6 +152,7 @@ describe('native Telegram capture service', () => {
     }));
     const failures: string[] = [];
     const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
       workerEnvPath: fixture.workerEnvPath,
@@ -181,7 +200,8 @@ describe('native Telegram capture service', () => {
       entry.mutate(config, envLines);
       writeFileSync(fixture.workerEnvPath, `${envLines.join('\n')}\n`, { mode: 0o600 });
       const service = track(createNativeTelegramService({
-        initialPluginConfig: config,
+      workerIsReady: () => true,
+      initialPluginConfig: config,
         moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
         workerEnvPath: fixture.workerEnvPath,
         startupTimeoutMs: 200,
@@ -196,6 +216,7 @@ describe('native Telegram capture service', () => {
   test('fresh runtime removal disables a service registered from enabled initial config', async () => {
     const fixture = telegramFixture();
     const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
       workerEnvPath: fixture.workerEnvPath,
@@ -247,6 +268,7 @@ function telegramFixture(options: { publishReadiness?: boolean } = {}) {
   chmodSync(workerEnvPath, 0o600);
   const pluginConfig = {
     worker: {
+      service: { enabled: true },
       telegramCapture: {
         enabled: true,
         pythonPath,

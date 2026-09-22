@@ -1,3 +1,4 @@
+import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
@@ -24,6 +25,8 @@ const SESSION_FILE = 'session.db';
 
 export interface NativeWhatsAppServiceOptions {
   initialPluginConfig: unknown;
+  workerIsReady?: () => boolean;
+  workerReadinessTimeoutMs?: number;
   startupTimeoutMs?: number;
   readinessPollMs?: number;
   stopGraceMs?: number;
@@ -49,7 +52,7 @@ export function createNativeWhatsAppService(
   return createNativeProcessService<WhatsAppLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
-    reload: { configPrefixes: ['plugins.entries.olympus.config.worker.whatsappCapture'] },
+    reload: { configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
@@ -57,12 +60,13 @@ export function createNativeWhatsAppService(
     ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
     ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
     ...(options.workingDirectory ? { workingDirectory: options.workingDirectory } : {}),
-    prepareStart: prepareWhatsAppStart,
+    prepareStart: (input) => prepareWhatsAppStart(input, options),
   });
 }
 
 async function prepareWhatsAppStart(
   input: NativeProcessStartInput<WhatsAppLaunchSettings>,
+  options: NativeWhatsAppServiceOptions,
 ): Promise<WhatsAppLaunchSettings | undefined> {
   let config: OlympusConfig;
   try {
@@ -74,6 +78,16 @@ async function prepareWhatsAppStart(
   }
   const capture = config.worker.whatsappCapture;
   if (!capture.enabled) return undefined;
+  if (!config.worker.service.enabled) {
+    throw new NativeProcessConfigurationError(
+      'Native whatsapp capture requires worker.service.enabled so the worker can enforce exclusive capture ownership.',
+    );
+  }
+  await waitForNativeWorkerOwnership(
+    options.workerIsReady,
+    options.workerReadinessTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1_000 + 5_000,
+  );
+
   if (!capture.binaryPath) {
     throw new NativeProcessConfigurationError(
       'Olympus WhatsApp capture service requires an absolute worker.whatsappCapture.binaryPath.',

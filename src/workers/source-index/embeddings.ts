@@ -31,6 +31,11 @@ export interface SourceEmbeddingProvider {
   embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]>;
 }
 
+/** Secure corpora may use local embeddings or the explicitly approved Venice cloud lane. */
+export function isApprovedSecureSourceEmbeddingProvider(provider: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>): boolean {
+  return provider.backend === 'local' || (provider.backend === 'cloud' && provider.provider === 'venice');
+}
+
 export interface SourceEmbeddingProviderFingerprint {
   provider: string;
   modelId: string;
@@ -85,6 +90,13 @@ export interface OpenAICompatibleSourceEmbeddingProviderOptions {
   model: string;
   apiKeyProvider?: () => string | undefined;
   dimension?: number;
+  provider?: string;
+  backend?: SourceEmbeddingBackend;
+  queryInstructionPrefix?: string;
+  sendDimensions?: boolean;
+  preflight?: (signal: AbortSignal) => Promise<void>;
+  requireIndexedResponses?: boolean;
+  requireDimension?: boolean;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   epochId?: string;
@@ -92,6 +104,11 @@ export interface OpenAICompatibleSourceEmbeddingProviderOptions {
 
 const DEFAULT_GEMINI_EMBEDDING_MODEL = 'gemini-embedding-2';
 const DEFAULT_GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+export const DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = 'text-embedding-qwen3-8b';
+export const DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = 'https://api.venice.ai/api/v1';
+export const DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096;
+export const VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION =
+  'Instruct: Given a web search query, retrieve relevant passages that answer the query';
 const DEFAULT_MAX_MEDIA_PER_INPUT = 0;
 const MAX_MEDIA_PER_INPUT_LIMIT = 6;
 const DEFAULT_MAX_MEDIA_REDIRECTS = 3;
@@ -292,20 +309,29 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
 }
 
 export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingProvider {
-  provider = 'local-openai-compatible';
+  provider: string;
   modelId: string;
   dimension: number;
   configHash: string;
   epochId: string;
-  backend = 'local' as const;
+  backend: SourceEmbeddingBackend;
 
   private baseUrl: string;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
   private apiKeyProvider: (() => string | undefined) | undefined;
+  private queryInstructionPrefix: string | undefined;
+  private sendDimensions: boolean;
+  private preflight: ((signal: AbortSignal) => Promise<void>) | undefined;
+  private requireIndexedResponses: boolean;
+  private requireDimension: boolean;
 
   constructor(options: OpenAICompatibleSourceEmbeddingProviderOptions) {
-    this.baseUrl = normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
+    this.provider = options.provider ?? 'local-openai-compatible';
+    this.backend = options.backend ?? 'local';
+    this.baseUrl = this.backend === 'cloud'
+      ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl)
+      : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
     this.modelId = options.model.trim();
     if (!this.modelId) {
       throw new OperationError('config_error', 'Local source embedding model must be configured.');
@@ -314,6 +340,11 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiKeyProvider = options.apiKeyProvider;
+    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
+    this.sendDimensions = options.sendDimensions === true;
+    this.preflight = options.preflight;
+    this.requireIndexedResponses = options.requireIndexedResponses === true;
+    this.requireDimension = options.requireDimension === true;
     this.epochId = resolveEmbeddingEpoch({
       provider: this.provider,
       modelId: this.modelId,
@@ -327,36 +358,50 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
       model: this.modelId,
       dimension: this.dimension || 'provider-reported',
       backend: this.backend,
+      ...(this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {}),
+      ...(this.sendDimensions ? { sendDimensions: true } : {}),
+      ...(this.requireIndexedResponses ? { requireIndexedResponses: true } : {}),
+      ...(this.requireDimension ? { requireDimension: true } : {}),
     }));
   }
 
-  async embed(inputs: SourceEmbeddingInput[], _options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
+  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     if (inputs.length === 0) return [];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      await this.preflight?.(controller.signal);
       const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: this.requestHeaders(),
         body: JSON.stringify({
           model: this.modelId,
-          input: inputs.map((input) => [
-            input.title ? `Title: ${input.title}` : undefined,
-            input.text,
-          ].filter((part): part is string => Boolean(part)).join('\n')),
+          input: inputs.map((input) => this.formatInput(input, options.taskType)),
+          ...(this.sendDimensions ? { dimensions: this.dimension } : {}),
         }),
+        redirect: 'error',
         signal: controller.signal,
       });
       if (!response.ok) {
         throw new OperationError(
           'source_index_error',
-          `Local source embedding endpoint returned HTTP ${response.status}.`,
-          'Check the local/private embedding endpoint configured for secure-local source-index embeddings.',
+          `${this.provider} source embedding endpoint returned HTTP ${response.status}.`,
+          'Check the configured source-index embedding endpoint, model, and credential.',
         );
       }
-      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json());
+      const vectors = parseOpenAICompatibleEmbeddingResponse(
+        await response.json(),
+        this.requireIndexedResponses,
+      );
       if (vectors.length !== inputs.length) {
-        throw new OperationError('source_index_error', 'Local source embedding endpoint returned the wrong number of embeddings.');
+        throw new OperationError('source_index_error', `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
+      }
+      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
+        throw new OperationError(
+          'source_index_error',
+          `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`,
+          `Expected ${this.dimension} finite values for model ${this.modelId}.`,
+        );
       }
       if (this.dimension === 0 && vectors[0]) {
         this.dimension = vectors[0].length;
@@ -366,12 +411,22 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
       if (error instanceof OperationError) throw error;
       throw new OperationError(
         'source_index_error',
-        'Local source embedding endpoint failed.',
-        error instanceof Error ? error.message : 'Check the local/private embedding endpoint.',
+        `${this.provider} source embedding endpoint failed.`,
+        error instanceof Error ? error.message : 'Check the configured source-index embedding endpoint.',
       );
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private formatInput(input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
+    const text = [
+      input.title ? `Title: ${input.title}` : undefined,
+      input.text,
+    ].filter((part): part is string => Boolean(part)).join('\n');
+    return taskType === 'RETRIEVAL_QUERY' && this.queryInstructionPrefix
+      ? `${this.queryInstructionPrefix}\nQuery:${text}`
+      : text;
   }
 
   private requestHeaders(): Headers {
@@ -527,7 +582,7 @@ function parseGeminiBatchEmbeddingResponse(value: unknown): number[][] {
   });
 }
 
-function parseOpenAICompatibleEmbeddingResponse(value: unknown): number[][] {
+function parseOpenAICompatibleEmbeddingResponse(value: unknown, requireIndices = false): number[][] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new OperationError('source_index_error', 'Local source embedding response must be a JSON object.');
   }
@@ -538,6 +593,9 @@ function parseOpenAICompatibleEmbeddingResponse(value: unknown): number[][] {
   return data.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       throw new OperationError('source_index_error', `Local source embedding data.${index} must be an object.`);
+    }
+    if (requireIndices && (item as { index?: unknown }).index !== index) {
+      throw new OperationError('source_index_error', `Venice source embedding data.${index}.index was missing or out of order.`);
     }
     const embedding = (item as { embedding?: unknown }).embedding;
     if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === 'number' && Number.isFinite(entry))) {
@@ -838,6 +896,32 @@ function normalizeLocalSourceEmbeddingBaseUrl(value: string): string {
     );
   }
   return value.replace(/\/+$/, '');
+}
+
+function normalizeVeniceSourceEmbeddingBaseUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError('config_error', 'Venice source embedding base URL must be a valid HTTPS URL.');
+  }
+  if (
+    url.protocol !== 'https:'
+    || url.hostname.toLowerCase() !== 'api.venice.ai'
+    || url.port
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || url.pathname.replace(/\/+$/, '') !== '/api/v1'
+  ) {
+    throw new OperationError(
+      'config_error',
+      'Venice source embeddings must use the approved Venice HTTPS endpoint.',
+      'Use https://api.venice.ai/api/v1.',
+    );
+  }
+  return `${url.origin}/api/v1`;
 }
 
 function normalizeOutputDimensionality(value: number | undefined): number | undefined {

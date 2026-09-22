@@ -473,6 +473,75 @@ describe('Dropbox canonical provider-to-store runtime', () => {
     }
   });
 
+  test('a new explicit scope approval starts fresh and restamps unchanged metadata', async () => {
+    const calls: string[] = [];
+    let freshLists = 0;
+    const metadataClient: DropboxMetadataClient = {
+      supportsNativeRecursive: true,
+      async listFolder(): Promise<DropboxMetadataPage> {
+        freshLists += 1;
+        calls.push('list');
+        return { entries: [file('id:stable')], cursor: `cursor-${freshLists}`, hasMore: false };
+      },
+      async listFolderContinue(request): Promise<DropboxMetadataPage> {
+        calls.push(`continue:${request.cursor}`);
+        return { entries: [], cursor: request.cursor, hasMore: false };
+      },
+    };
+    const { store, close } = testStore();
+    const approvedScopeKey = 'dropbox.personal:/Approved';
+    const generation = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const revision1 = '11111111-1111-4111-8111-111111111111';
+    const revision2 = '22222222-2222-4222-8222-222222222222';
+    const contentScope = (revision: string) => ({
+      generation,
+      revision,
+      allowsMetadata: () => true,
+      allowsContent: () => true,
+      assertCurrent() {},
+    });
+    try {
+      const r1 = createDropboxProviderStoreSyncHandler({
+        store,
+        account: 'personal',
+        broker: broker(),
+        metadataClient,
+        scope: contentScope(revision1),
+      });
+      const first = await r1.pull({ approved_scope_key: approvedScopeKey });
+      expect(first.checkpoint).toStartWith('dbxs1:');
+
+      const r2 = createDropboxProviderStoreSyncHandler({
+        store,
+        account: 'personal',
+        broker: broker(),
+        metadataClient,
+        scope: contentScope(revision2),
+      });
+      expect(r2.connectorIdForScope(approvedScopeKey)).not.toBe(r1.connectorIdForScope(approvedScopeKey));
+      const second = await r2.pull({
+        approved_scope_key: approvedScopeKey,
+        checkpoint: first.checkpoint!,
+      });
+
+      expect(second.receipt.counts.resumed_from_checkpoint).toBe(0);
+      expect(second.checkpoint).toStartWith('dbxs1:');
+      expect(second.checkpoint).not.toBe(first.checkpoint);
+      expect(calls).toEqual(['list', 'list']);
+      expect(store.searchItems('stable', 10, 'personal', {
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision2,
+      }).map((row) => row.sourceItem.localItemId)).toEqual(['personal:id:stable']);
+      expect(store.searchItems('stable', 10, 'personal', {
+        sourceScopeGeneration: generation,
+        sourceScopeRevision: revision1,
+      })).toEqual([]);
+      expect(store.localContent('personal:id:stable')?.chunks).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
   test('uses the full traversal budget across continuation pages', async () => {
     const calls: string[] = [];
     const metadataClient: DropboxMetadataClient = {

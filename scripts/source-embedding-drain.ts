@@ -326,7 +326,7 @@ type ConnectorStoreCorpusId =
   | typeof X_BOOKMARKS_CORPUS_ID
   | typeof DRIVE_INTERNAL_CORPUS_ID;
 
-interface DirectClientOptions {
+export interface DirectClientOptions {
   connectorStores: Array<{
     corpusId: ConnectorStoreCorpusId;
     dbPath?: string;
@@ -344,7 +344,7 @@ interface DirectClientOptions {
   secureLocalEndpoint?: string;
 }
 
-class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainClient {
+export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainClient {
   private readonly connectorStoreConfigs: DirectClientOptions['connectorStores'];
   private readonly connectorStores = new Map<string, LocalConnectorStore>();
   private readonly secureLocalProvider: SourceEmbeddingProvider;
@@ -402,6 +402,12 @@ class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainClient {
   async embedConnectorStore(request: CorpusEmbeddingRequest): Promise<DropboxEmbeddingResult> {
     const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === request.corpus_id);
     if (!config?.dbPath) throw new Error(`Direct connector-store embedding is not configured for ${request.corpus_id}.`);
+    if (config.family === 'file') {
+      throw new Error(
+        `Direct connector-store embedding refuses file-family corpus ${request.corpus_id} because it cannot own `
+        + 'the current approved content scope. Use the default HTTP drain mode.',
+      );
+    }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
       store = new LocalConnectorStore({

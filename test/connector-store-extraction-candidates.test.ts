@@ -28,6 +28,7 @@ interface SeedSpec {
   text?: string;
   accountScope?: string;
   deleted?: boolean;
+  path?: string;
 }
 
 function seedItem(spec: SeedSpec): RawItem {
@@ -46,7 +47,7 @@ function seedItem(spec: SeedSpec): RawItem {
       : { kind: 'text', text: spec.text },
     metadata: {
       name: `${spec.id}.bin`,
-      pathDisplay: `/Files/${spec.id}.bin`,
+      pathDisplay: spec.path ?? `/Files/${spec.id}.bin`,
       ...(spec.deleted === true ? { deleted: true } : {}),
     },
     fetchedAt: '2026-07-28T00:00:00.000Z',
@@ -278,6 +279,53 @@ describe('connector store: extraction candidates', () => {
       });
       expect(ids(next)).toEqual([]);
       expect(next.done).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('applies current full-ingestion scope before pagination and never returns folders', async () => {
+    const generation = 'a'.repeat(64);
+    const revision = '11111111-1111-4111-8111-111111111111';
+    const metadata = Array.from({ length: 595 }, (_, index) => ({
+      id: `metadata-${index}`,
+      path: `/Metadata/item-${index}.pdf`,
+    }));
+    const full = Array.from({ length: 3 }, (_, index) => ({
+      id: `full-${index}`,
+      path: `/Full/item-${index}.pdf`,
+    }));
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local',
+    });
+    try {
+      await store.syncFromConnector(createConnector([
+        ...metadata,
+        ...full,
+        { id: 'metadata-folder', path: '/Metadata/Subfolder', mimeType: 'inode/directory' },
+        { id: 'full-folder', path: '/Full/Subfolder', mimeType: 'inode/directory' },
+        { id: 'stale', path: '/Full/stale.pdf' },
+      ]), {
+        fetchContent: true,
+        sourceScopeObservation: (item) => ({
+          accountGeneration: generation,
+          scopeRevision: item.identity.providerItemId === 'stale'
+            ? '22222222-2222-4222-8222-222222222222'
+            : revision,
+        }),
+      });
+      const page = store.extractionCandidates({
+        limit: 3,
+        withoutChunksOnly: true,
+        filters: {
+          sourceScopeGeneration: generation,
+          sourceScopeRevision: revision,
+          locatorPathScopes: ['/Full'],
+        },
+      });
+
+      expect(ids(page)).toEqual(['full-0', 'full-1', 'full-2']);
+      expect(page.candidates.every((candidate) => candidate.mimeType !== 'inode/directory')).toBe(true);
     } finally {
       store.close();
     }

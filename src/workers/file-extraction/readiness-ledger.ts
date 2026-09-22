@@ -20,7 +20,12 @@ import {
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
-import type { ExtractionCorpusReadiness, LocalFileExtractionJobStore } from './job-store.ts';
+import type {
+  ExtractionCorpusReadiness,
+  ExtractionLaneKey,
+  LocalFileExtractionJobStore,
+} from './job-store.ts';
+import type { ExtractionItemRef } from './types.ts';
 
 /**
  * The readiness ledger backed by the shared extraction queue.
@@ -34,10 +39,28 @@ import type { ExtractionCorpusReadiness, LocalFileExtractionJobStore } from './j
  * is published through the same shared path.
  */
 export function createExtractionReadinessLedger(
-  jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>,
+  jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
+    & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness'>>,
+  options: {
+    // Current approved lanes; undefined preserves the ordinary corpus-wide ledger.
+    lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
+    // Current store identity/scope fence for scoped queue rows.
+    currentItem?: (ref: ExtractionItemRef) => boolean;
+  } = {},
 ): SourceIndexReadinessLedger {
   return {
     snapshotForCorpus(corpusId: string) {
+      const lanes = options.lanesForCorpus?.(corpusId);
+      if (lanes !== undefined) {
+        if (!jobs.scopedReadiness) return undefined;
+        try {
+          return readinessSnapshot(jobs.scopedReadiness(lanes, {
+            ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+          }));
+        } catch {
+          return undefined;
+        }
+      }
       let readiness: ExtractionCorpusReadiness;
       try {
         readiness = jobs.corpusReadiness(corpusId);
@@ -47,26 +70,32 @@ export function createExtractionReadinessLedger(
         // fallback, which understates rather than claiming a full corpus.
         return undefined;
       }
-      return {
-        counts: {
-          [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
-          [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
-          extraction_jobs_queued: readiness.queuedJobs,
-          extraction_jobs_queued_actionable: readiness.queuedJobs,
-          extraction_jobs_leased: readiness.leasedJobs,
-          extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
-          extraction_jobs_failed_actionable: readiness.failedActionableJobs,
-          extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
-        },
-        contentExtractionThroughput: {
-          actionable_queued: readiness.queuedJobs,
-          actionable_retryable_due: readiness.retryableDueJobs,
-          ...(readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {}),
-          ...(readiness.newestTerminalProgressAt
-            ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt }
-            : {}),
-        } satisfies ContentExtractionThroughputSignal,
-      };
+      return readinessSnapshot(readiness);
     },
+  };
+}
+
+function readinessSnapshot(
+  readiness: ExtractionCorpusReadiness,
+): ReturnType<SourceIndexReadinessLedger['snapshotForCorpus']> {
+  return {
+    counts: {
+      [METADATA_ONLY_EXPECTED_COUNT_KEY]: readiness.metadataOnlyExpectedItems,
+      [BLOCKED_BY_POLICY_COUNT_KEY]: readiness.blockedByPolicyItems,
+      extraction_jobs_queued: readiness.queuedJobs,
+      extraction_jobs_queued_actionable: readiness.queuedJobs,
+      extraction_jobs_leased: readiness.leasedJobs,
+      extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
+      extraction_jobs_failed_actionable: readiness.failedActionableJobs,
+      extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
+    },
+    contentExtractionThroughput: {
+      actionable_queued: readiness.queuedJobs,
+      actionable_retryable_due: readiness.retryableDueJobs,
+      ...(readiness.oldestActionableAt ? { oldest_actionable_at: readiness.oldestActionableAt } : {}),
+      ...(readiness.newestTerminalProgressAt
+        ? { newest_terminal_progress_at: readiness.newestTerminalProgressAt }
+        : {}),
+    } satisfies ContentExtractionThroughputSignal,
   };
 }

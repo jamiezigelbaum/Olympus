@@ -1,7 +1,7 @@
 // Google's publisher flow through the token-exchange endpoint.
 //
 // `docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md` ("Worker-side integration") is the
-// contract this exercises: a non-loopback Google connect goes out with the
+// contract this exercises: a publisher Google connect goes out with the
 // publisher **Web** client and a signed relay state exactly like Dropbox
 // already does (`test/dashboard-oauth-publisher-relay.test.ts`), but its token
 // exchange and refresh are delegated to a publisher-side endpoint instead of
@@ -9,9 +9,9 @@
 // confidential and Olympus ships as public source. Three things this suite
 // has to prove that the Dropbox suite cannot: the exchange goes to the
 // endpoint (not to Google) with a JSON body and no `client_secret`, the
-// loopback Desktop pilot client is completely unaffected, and refresh routes
-// on stored provenance (`exchangeVia`) rather than by re-deriving it from the
-// client id every time.
+// same path is used on loopback even when a Desktop pilot id is packaged, and
+// refresh routes on stored provenance (`exchangeVia`) rather than by
+// re-deriving it from the client id every time.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -330,12 +330,12 @@ describe('the publisher path never touches a client secret it does not own', () 
   });
 });
 
-describe('publisher Google flow on a loopback dashboard keeps the Desktop pilot client', () => {
+describe('publisher Google flow on a loopback dashboard uses the Web relay', () => {
   beforeEach(() => {
     process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_ID = PILOT_CLIENT_ID;
   });
 
-  test('start uses the pilot client id and a loopback redirect, never the relay or the exchange endpoint', async () => {
+  test('start and callback use the Web client, signed relay, and publisher exchange', async () => {
     const instance = fixture();
     const started = await instance.fetch(new Request('http://127.0.0.1:8010/dashboard/connect/oauth/start', {
       method: 'POST',
@@ -343,28 +343,26 @@ describe('publisher Google flow on a loopback dashboard keeps the Desktop pilot 
       body: JSON.stringify({ source: 'gmail' }),
     }));
     const url = await authorizationUrl(started);
-    expect(url.searchParams.get('client_id')).toBe(PILOT_CLIENT_ID);
-    expect(url.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:8010/oauth/callback/gmail');
+    expect(url.searchParams.get('client_id')).toBe(PUBLISHER_WEB_CLIENT_ID);
+    expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
 
     const state = url.searchParams.get('state')!;
+    expect(state.split('.')).toHaveLength(2);
     const callback = await instance.fetch(new Request(
       `http://127.0.0.1:8010/oauth/callback/gmail?code=loopback-code-1&state=${encodeURIComponent(state)}`,
     ));
     expect(callback.status).toBe(303);
 
-    // A form-encoded POST straight to Google's own token endpoint, exactly as
-    // before this feature existed -- never JSON, never the exchange endpoint.
     expect(instance.calls).toHaveLength(1);
     const call = instance.calls[0]!;
-    expect(call.url).toBe('https://oauth2.googleapis.com/token');
-    const params = new URLSearchParams(String(call.init.body ?? ''));
-    expect(params.get('client_id')).toBe(PILOT_CLIENT_ID);
-    expect(params.get('redirect_uri')).toBe('http://127.0.0.1:8010/oauth/callback/gmail');
-    expect(params.has('client_secret')).toBe(false);
+    expect(call.url).toBe(EXCHANGE_URL);
+    const body = JSON.parse(String(call.init.body ?? '')) as Record<string, unknown>;
+    expect(body.redirect_uri).toBe(DEFAULT_OAUTH_RELAY_URL);
+    expect(body).not.toHaveProperty('client_secret');
 
     const registry = readConnectedHandleRegistry(instance.registryPath);
     const handle = registry.handles.find((entry) => entry.handle === 'gmail.personal');
-    expect(handle?.oauth2Refresh?.exchangeVia).toBeUndefined();
+    expect(handle?.oauth2Refresh?.exchangeVia).toBe('publisher_endpoint');
   });
 });
 

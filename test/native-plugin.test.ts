@@ -160,7 +160,7 @@ describe('native OpenClaw plugin adapter', () => {
       {
         id: 'olympus-telegram-capture',
         reload: {
-          configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'],
+          configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),
@@ -174,7 +174,7 @@ describe('native OpenClaw plugin adapter', () => {
       {
         id: 'olympus-whatsapp-capture',
         reload: {
-          configPrefixes: ['plugins.entries.olympus.config.worker.whatsappCapture'],
+          configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),
@@ -385,7 +385,7 @@ describe('native OpenClaw plugin adapter', () => {
   test('keeps source-checkout licensing and release version metadata aligned', () => {
     expect(pkg).toMatchObject({ name: 'olympus-source-checkout', private: true });
     expect(pkg.license).toBe('MIT');
-    expect(pkg.version).toBe('0.4.0-beta.2');
+    expect(pkg.version).toBe('0.4.0-beta.3');
     expect(manifest.version).toBe(pkg.version);
   });
 

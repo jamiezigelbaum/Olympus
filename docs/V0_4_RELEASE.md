@@ -185,10 +185,9 @@ testers have exercised the normal product journey without custom engineering.
   outside the release claim. The normal `private-cloud-only` route uses Venice
   through its ordinary API with a model that the live Venice catalog classifies
   as Private or plain TEE. Slice 4 adds no E2EE-specific mechanism. In this
-  posture, secure corpora remain lexical-only; the local presets configure
-  local secure embeddings. Adding a secure cloud embedding lane is deferred
-  and is not a Slice 4 gate. This accepted product limit must be visible in
-  setup, status, and the capability matrix.
+  posture, secure corpora originally remained lexical-only. The 2026-09-10
+  decision above supersedes that embedding limitation; the E2EE boundary
+  remains unchanged.
 - **2026-08-31 — Slice 4 beta shape.** The beta cohort is fluid; participant
   count is not a release constraint. Testers use whichever supported Mac or
   Linux machine they already have; Olympus does not assign them an operating
@@ -201,6 +200,15 @@ testers have exercised the normal product journey without custom engineering.
 - **2026-08-31 — Built artifacts.** `dist/` remains source-controlled for v0.4.
   CI rebuilds and checks it, and the release package contains only current,
   allowlisted built output.
+- **2026-09-07 — OpenClaw dashboard integration.** OpenClaw's native Control
+  UI is the default Olympus plugin interface when available. Target the
+  shipped `2026.9.2` API, with its explicit Custom plugin UI Labs opt-in and
+  same-Gateway HTTPS/localhost requirements. Reuse the existing dashboard
+  renderers and browser controls through scoped Gateway operations; keep the
+  worker bearer server-side. Preserve standalone dashboard access for older
+  hosts and future integrations. This repository change does not upgrade or
+  deploy Castor, change the qualified host floor, or close the clean-install
+  and real-provider qualification exits.
 - **Standing — Embedding control.** Any model, provider, dimension, epoch, or re-embed change requires the owner's advance approval with cost stated and an embedding-ledger entry. Existing vectors are never discarded merely to simplify a cutover.
 
 ## Qualification levels
@@ -337,12 +345,30 @@ together at one exact commit and against one exact package artifact.
   names the next supported action.
 - Use a short-lived local control session with CSRF and origin protection;
   never place the worker bearer token in browser local storage.
+- Standalone dashboard handoff must open authorized controls through a
+  short-lived, single-use CLI-minted link. The operator never has to resolve
+  the plugin directory or copy the durable worker token. Preserve read-only
+  links and the existing control-session origin and CSRF boundaries.
+- Derive file-source selection, extraction and embedding populations from the
+  current approved scope. Count files separately from folders and show policy
+  deferrals separately from the user's full-ingestion choice. Completed metadata
+  remains complete while waiting for its next refresh. Folder pickers sort
+  siblings alphabetically and list only connected providers in Locations.
+- Native OpenClaw setup must preserve the selected tool profile, enable only
+  the approved Olympus tools where needed, and prove a real status-tool call
+  from the intended assistant before the source handoff. Backend health and
+  dashboard activation cannot substitute for agent tool access.
+- Missing extraction dependencies must remain visible prerequisites. Source
+  connection alone does not prove extraction or embedding readiness and does
+  not authorize installing OCR tools. Vision-model image ingestion remains
+  outside this repair; existing image policy and explicit exclusions stay intact.
 - Ship the bounded Disconnect behavior recorded in Decisions. Keep local data
   deletion CLI-only with dry-run and explicit worker/store custody. Web scope
   edits author and preview rules; destructive purge/strip remains a separate
   CLI flow.
-- For Google, make the shared pilot client, unverified warning, and advanced
-  BYO fallback truthful, and request Gmail and Drive scopes contextually. For
+- For Google, use the publisher Web client and server-side token exchange on
+  every dashboard origin, including localhost. Keep the unverified warning and
+  advanced BYO fallback truthful, and request Gmail and Drive scopes contextually. For
   X, guide users through their own developer app, prove the supported OAuth
   shape, and expose cost and provider ceilings.
 
@@ -602,10 +628,27 @@ dashboard and shared configuration owner, with these product outcomes:
 - The flow proves readiness with a bounded test, explains blocked/degraded
   states in ordinary language, and gives one concrete recovery action.
 
-The dashboard work does not authorize secure cloud embeddings or E2EE, new
-providers, multi-account support, or a broader change to v0.4 privacy policy.
+The September 22 reconciliation restores beta 1's previously approved, explicit
+Venice Private embedding option described in CONTRACTS.md. It does not activate
+that option or backfill an existing installation automatically. E2EE, additional
+providers, and multi-account support remain outside this repair.
 Its exit is the same user journey on macOS and Linux without manual generated
 file edits or an agent-only repair.
+
+## Final test repair (2026-09-22)
+
+The isolated Linux test installation exposed an upgrade incompatibility:
+the beta 1 candidate from PR #21 was never merged, and its connector-store schema
+12 cannot be opened by beta 2's schema-11 runtime. Beta 2's primary-deployment acceptance
+proved that deployment, not beta-1 upgrade compatibility. The owner authorized
+reconciling beta 1 setup, native dashboard, pairing and source-scope functionality
+with the newer main fixes, then preparing a corrected beta 3 candidate for the
+existing isolated test data. Do not downgrade or discard the test databases.
+The older public-runtime simplification experiment is excluded from this repair;
+current release privacy controls and private-ops retirement remain authoritative.
+ClawHub publication stays on hold. Candidate preparation does not publish a new
+GitHub release. OpenClaw 9.5 on the test host passed migration, lint, native restart and a
+real source-status tool call; The primary deployment was not changed.
 
 ## Installation remediation (2026-09-20)
 

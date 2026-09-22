@@ -15,9 +15,60 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { prepareWorkerUpgradeArtifact } from '../src/core/lifecycle-artifact.ts';
+import { prepareWorkerUpgradeArtifact, publishVersionTree } from '../src/core/lifecycle-artifact.ts';
 
 describe('worker upgrade artifact custody', () => {
+  test('publishes an immutable version root and reuses it only in that state', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-artifact-readonly-root-'));
+    try {
+      const artifact = packArtifact(home, '0.4.0');
+      const first = prepareWorkerUpgradeArtifact({
+        artifactPath: artifact.path,
+        homeDir: home,
+        bunBin: process.execPath,
+        dryRun: false,
+      });
+      expect(lstatSync(first.workingDirectory).mode & 0o777).toBe(0o555);
+
+      chmodSync(first.workingDirectory, 0o700);
+      const repaired = prepareWorkerUpgradeArtifact({
+        artifactPath: artifact.path,
+        homeDir: home,
+        bunBin: process.execPath,
+        dryRun: false,
+      });
+      expect(repaired).toEqual(first);
+      expect(lstatSync(repaired.workingDirectory).mode & 0o777).toBe(0o555);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('restores the previous version before retrying a failed publication sync', () => {
+    const versionsDir = mkdtempSync(join(tmpdir(), 'olympus-artifact-publish-rollback-'));
+    const workingDirectory = join(versionsDir, 'version');
+    const staging = join(versionsDir, '.staging');
+    try {
+      mkdirSync(workingDirectory);
+      writeFileSync(join(workingDirectory, 'old.txt'), 'previous\n');
+      mkdirSync(staging);
+      writeFileSync(join(staging, 'new.txt'), 'candidate\n');
+      let syncCalls = 0;
+      expect(() => publishVersionTree(staging, workingDirectory, versionsDir, () => {
+        syncCalls += 1;
+        if (syncCalls === 3) throw new Error('forced publication-directory sync failure');
+      })).toThrow('forced publication-directory sync failure');
+
+      expect(readFileSync(join(workingDirectory, 'old.txt'), 'utf8')).toBe('previous\n');
+      expect(existsSync(join(workingDirectory, 'new.txt'))).toBe(false);
+      expect(readdirSync(versionsDir).filter((name) => name.startsWith('.olympus-replaced-'))).toEqual([]);
+    } finally {
+      makeTreeWritable(versionsDir);
+      rmSync(versionsDir, { recursive: true, force: true });
+    }
+  });
+
   test('refuses a symlinked managed versions parent before reuse or extraction', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-artifact-parent-'));
     const outside = mkdtempSync(join(tmpdir(), 'olympus-artifact-outside-'));

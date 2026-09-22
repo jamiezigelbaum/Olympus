@@ -45,9 +45,10 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('ordinary API with a live-catalog Private or plain TEE model');
       expect(pitch).toContain('does not provide or qualify E2EE out of the box');
       expect(pitch).toContain('custom integrations are user-owned');
-      expect(pitch).toContain('Secure search is lexical-only with private-cloud-only');
-      expect(pitch).toContain('local presets use local secure embeddings');
-      expect(pitch).toContain('Turning the secure tier off is a deliberate choice');
+      expect(pitch).toContain('Private semantic search uses local embeddings or an approved Venice Private embedding model');
+      expect(pitch).toContain('Gemini indexes Public and Personal content');
+      expect(pitch).toContain("Choosing Don't ingest Private data is a deliberate choice");
+      expect(result.presetLabel).toBe("Don't ingest Private data");
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');
       expect(result.secureTierDecision).toBe('secure_off_user_choice');
@@ -55,6 +56,10 @@ describe('olympus setup wizard', () => {
       expect(result.unmet_prerequisites.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
       expect(result.worker.authTokenRef).toBe('worker.env:OLYMPUS_WORKER_AUTH_TOKEN');
       expect(result.dashboard.url).toBe('http://127.0.0.1:8010/dashboard');
+      expect(result.dashboard.url_scope).toBe('worker_local');
+      expect(result.dashboard.handoff_required).toBe(true);
+      expect(result.dashboard.next).toContain('operator-reachable dashboard link');
+      expect(result.dashboard.next).toContain('Background monitors');
       expect(existsSync(sovereigntyPath)).toBe(true);
       expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8')).routes.secure_local.mode).toBe('disabled');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=test-worker-token');
@@ -174,7 +179,7 @@ describe('olympus setup wizard', () => {
         kind: 'env_secret',
         // An export in the operator's shell never reaches the launchd worker,
         // so the remedy names the command that writes the key into worker.env.
-        remedy: 'printf \'%s\' "$KEY" | olympus connect gemini --api-key-stdin',
+        remedy: 'Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt',
       }]);
 
       const present = await runIsolatedSetupWizard({
@@ -213,7 +218,7 @@ describe('olympus setup wizard', () => {
         'env:GEMINI_API_KEY',
       ]);
       expect(missing.unmet_prerequisites.find((item) => item.id === 'store:venice.api_key')?.remedy)
-        .toContain('olympus connect venice --api-key-stdin');
+        .toContain('olympus connect venice --api-key-prompt');
       expect(missing.unmet_prerequisites.map((item) => item.kind)).not.toContain('local_model_server');
 
       const withSecrets = await runIsolatedSetupWizard({
@@ -330,7 +335,7 @@ describe('olympus setup wizard', () => {
       // worker and a guide whose very next step was to verify it running.
       expect(manager.calls).toContain('systemctl --user enable --now olympus-worker.service');
       expect(result.worker.state).toBe('active');
-      expect(result.worker.next).toBe('The managed worker is running; open the dashboard with olympus dashboard.');
+      expect(result.worker.next).toBe('The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access.');
       expect(result.worker).not.toHaveProperty('activation_detail');
 
       // olympus worker install stays the idempotent no-op on top of it: the
@@ -547,9 +552,9 @@ describe('olympus setup wizard', () => {
         cloudLane: 'subscription',
       });
       expect(stderr).toContain('Unmet preset prerequisites:');
-      expect(stderr).toContain('olympus connect gemini --api-key-stdin');
+      expect(stderr).toContain('olympus connect gemini --api-key-prompt');
       expect(stderr).not.toContain('export GEMINI_API_KEY=');
-      expect(stderr).toContain('olympus connect venice --api-key-stdin');
+      expect(stderr).toContain('olympus connect venice --api-key-prompt');
       expect(stdout).not.toContain('OLYMPUS_WORKER_AUTH_TOKEN=');
       expect(readFileSync(join(dir, '.config', 'olympus', 'worker.env'), 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=');
     } finally {

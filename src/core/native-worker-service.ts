@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { basename, delimiter, isAbsolute, join } from 'node:path';
@@ -19,6 +20,11 @@ const SERVICE_LABEL = 'worker';
 const READINESS_PROBE_TIMEOUT_MS = 1_000;
 const ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
 const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 10_000;
+
+export const NATIVE_CAPTURE_OWNER_ENV_NAMES = {
+  telegram: 'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER',
+  whatsapp: 'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER',
+} as const;
 
 /**
  * The lifecycle types now live in the shared process kernel; these aliases keep
@@ -62,9 +68,13 @@ interface WorkerLaunchSettings extends NativeProcessStartSettings {
  * environment sanitization, the Bun `--no-env-file` CLI arguments, loopback
  * endpoint validation, and the authenticated HTTP readiness probe.
  */
-export function createNativeWorkerService(options: NativeWorkerServiceOptions): NativeWorkerServiceDefinition {
+export function createNativeWorkerService(options: NativeWorkerServiceOptions): NativeWorkerServiceDefinition & { isReady(): boolean } {
+  let readyChild: ChildProcess | undefined;
+  let proofGeneration = 0;
+  let lifecycleGeneration = 0;
+  const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
   const fetchWorker = options.fetch ?? globalThis.fetch;
-  return createNativeProcessService<WorkerLaunchSettings>({
+  const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
     reload: {
@@ -82,13 +92,45 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
     ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
     ...(options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {}),
     defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
-    prepareStart: (input) => prepareWorkerStart(input, {
-      moduleUrl: options.moduleUrl,
-      fetchWorker,
-      ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
-      ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
-    }),
+    prepareStart: async (input) => {
+      invalidate();
+      const generation = proofGeneration;
+      const settings = await prepareWorkerStart(input, {
+        moduleUrl: options.moduleUrl,
+        fetchWorker,
+        ...(options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}),
+        ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
+      });
+      if (!settings) return undefined;
+      const probe = settings.readinessProbe;
+      return {
+        ...settings,
+        async readinessProbe(child) {
+          const ready = await probe(child);
+          if (ready && generation === proofGeneration) readyChild = child;
+          return ready;
+        },
+      };
+    },
   });
+  return {
+    ...service,
+    isReady() {
+      return Boolean(readyChild?.pid && readyChild.exitCode === null
+        && readyChild.signalCode === null && !readyChild.killed);
+    },
+    async start(context) {
+      const generation = ++lifecycleGeneration;
+      invalidate();
+      try { await service.start(context); }
+      catch (error) { if (generation === lifecycleGeneration) invalidate(); throw error; }
+    },
+    async stop() {
+      lifecycleGeneration += 1;
+      invalidate();
+      await service.stop();
+    },
+  };
 }
 
 async function prepareWorkerStart(
@@ -223,6 +265,8 @@ function applyNativeWorkerConfigEnv(config: OlympusConfig, env: NodeJS.ProcessEn
   env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS = String(config.worker.scheduler.freshnessThresholdHours);
   env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS = String(config.worker.scheduler.errorBackoffSeconds);
   env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
+  env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram] = String(config.worker.telegramCapture.enabled);
+  env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
 }
 
 function resolveBunRuntimePath(configured: string | undefined, env: NodeJS.ProcessEnv): string {
@@ -334,4 +378,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+/** Capture may start only after this Gateway owns the exact worker endpoint. */
+export async function waitForNativeWorkerOwnership(
+  isReady: (() => boolean) | undefined,
+  timeoutMs = 15_000,
+): Promise<void> {
+  if (!isReady) throw new NativeProcessConfigurationError('Native capture requires native-worker ownership proof.');
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  do {
+    if (isReady()) return;
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
+  } while (Date.now() <= deadline);
+  throw new NativeProcessConfigurationError('Native worker is not ready or does not own its endpoint; native capture was not started.');
 }

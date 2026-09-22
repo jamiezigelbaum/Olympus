@@ -1,3 +1,4 @@
+import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
@@ -44,6 +45,8 @@ const MANAGED_TELEGRAM_ENV_NAMES = new Set([
 
 export interface NativeTelegramServiceOptions {
   initialPluginConfig: unknown;
+  workerIsReady?: () => boolean;
+  workerReadinessTimeoutMs?: number;
   moduleUrl: string;
   startupTimeoutMs?: number;
   readinessPollMs?: number;
@@ -72,7 +75,7 @@ export function createNativeTelegramService(
   return createNativeProcessService<TelegramLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
-    reload: { configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'] },
+    reload: { configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
@@ -98,6 +101,16 @@ async function prepareTelegramStart(
   }
   const capture = config.worker.telegramCapture;
   if (!capture.enabled) return undefined;
+  if (!config.worker.service.enabled) {
+    throw new NativeProcessConfigurationError(
+      'Native telegram capture requires worker.service.enabled so the worker can enforce exclusive capture ownership.',
+    );
+  }
+
+  await waitForNativeWorkerOwnership(
+    options.workerIsReady,
+    options.workerReadinessTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1_000 + 5_000,
+  );
 
   if (!capture.pythonPath) {
     throw new NativeProcessConfigurationError(

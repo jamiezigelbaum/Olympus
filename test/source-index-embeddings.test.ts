@@ -3,6 +3,7 @@ import {
   GeminiSourceEmbeddingProvider,
   DeterministicSourceEmbeddingProvider,
   OpenAICompatibleSourceEmbeddingProvider,
+  VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
   cosineSimilarity,
 } from '../src/workers/source-index/embeddings.ts';
 
@@ -416,6 +417,92 @@ describe('source-index embedding providers', () => {
       baseUrl: 'https://api.example.com/v1',
       model: 'not-local',
     })).toThrow('loopback endpoint');
+  });
+
+  test('formats Venice document/query inputs and validates indexed 4096-style responses', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const provider = new OpenAICompatibleSourceEmbeddingProvider({
+      provider: 'venice',
+      backend: 'cloud',
+      baseUrl: 'https://api.venice.ai/api/v1',
+      model: 'text-embedding-qwen3-8b',
+      apiKeyProvider: () => 'venice-fixture-key',
+      dimension: 3,
+      queryInstructionPrefix: VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
+      sendDimensions: true,
+      requireIndexedResponses: true,
+      requireDimension: true,
+      fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+        return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as unknown as typeof fetch,
+    });
+
+    await provider.embed([{ title: 'A title', text: 'A document' }], { taskType: 'RETRIEVAL_DOCUMENT' });
+    await provider.embed([{ text: 'A query' }], { taskType: 'RETRIEVAL_QUERY' });
+
+    expect(calls).toEqual([
+      {
+        url: 'https://api.venice.ai/api/v1/embeddings',
+        body: {
+          model: 'text-embedding-qwen3-8b',
+          input: ['Title: A title\nA document'],
+          dimensions: 3,
+        },
+      },
+      {
+        url: 'https://api.venice.ai/api/v1/embeddings',
+        body: {
+          model: 'text-embedding-qwen3-8b',
+          input: [`${VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION}\nQuery:A query`],
+          dimensions: 3,
+        },
+      },
+    ]);
+  });
+
+  test('rejects an unindexed Venice response before accepting vectors', async () => {
+    const provider = new OpenAICompatibleSourceEmbeddingProvider({
+      provider: 'venice',
+      backend: 'cloud',
+      baseUrl: 'https://api.venice.ai/api/v1',
+      model: 'text-embedding-qwen3-8b',
+      apiKeyProvider: () => 'venice-fixture-key',
+      dimension: 3,
+      requireIndexedResponses: true,
+      requireDimension: true,
+      fetchImpl: (async () => new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0] }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch,
+    });
+
+    await expect(provider.embed([{ text: 'A query' }], { taskType: 'RETRIEVAL_QUERY' }))
+      .rejects.toThrow('index was missing or out of order');
+  });
+
+  test('runs Venice privacy preflight before dispatching an embedding request', async () => {
+    let requests = 0;
+    const provider = new OpenAICompatibleSourceEmbeddingProvider({
+      provider: 'venice',
+      backend: 'cloud',
+      baseUrl: 'https://api.venice.ai/api/v1',
+      model: 'text-embedding-qwen3-8b',
+      apiKeyProvider: () => 'venice-fixture-key',
+      dimension: 3,
+      preflight: async () => { throw new Error('embedding privacy category denied'); },
+      fetchImpl: (async () => {
+        requests += 1;
+        return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+
+    await expect(provider.embed([{ text: 'secure content' }], { taskType: 'RETRIEVAL_DOCUMENT' }))
+      .rejects.toThrow('venice source embedding endpoint failed');
+    expect(requests).toBe(0);
   });
 
   test('deterministic provider keeps semantically related source concepts close for tests', async () => {

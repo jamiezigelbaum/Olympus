@@ -138,6 +138,34 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   });
 
+  test('fresh macOS install waits for launchd bootstrap to reach running', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-darwin-bootstrap-settle-'));
+    const manager = slowDarwinBootstrapManager(3);
+    try {
+      const receipt = runWorkerLifecycle('install', {
+        platform: 'darwin',
+        homeDir: home,
+        workingDirectory: process.cwd(),
+        bunBin: process.execPath,
+        authToken: 'lifecycle-token',
+        exec: manager.exec,
+        actionSettleTimeoutMs: 5_000,
+        actionSettlePollMs: 0,
+      });
+
+      expect(receipt).toMatchObject({
+        action: 'install',
+        ok: true,
+        changed: true,
+        service: { state: 'active' },
+      });
+      expect(manager.calls.some((call) => call.startsWith('launchctl bootstrap '))).toBe(true);
+      expect(manager.printCallsAfterBootstrap).toBeGreaterThan(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('start waits for a service manager that reports the job as still coming up', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-start-settle-'));
     const manager = slowDarwinManager(3);
@@ -1179,6 +1207,42 @@ function slowDarwinManager(pollsBeforeActive: number) {
     exec,
     get printCalls(): number {
       return calls.filter((call) => call.includes(' print ')).length;
+    },
+  };
+}
+
+/**
+ * launchd accepts bootstrap before its first `print` reports `running`. This
+ * manager starts absent and preserves that real submission/readiness split.
+ */
+function slowDarwinBootstrapManager(pollsBeforeActive: number) {
+  let bootstrapped = false;
+  let printsSinceBootstrap = 0;
+  const calls: string[] = [];
+  const exec: WorkerServiceExec = (command, args) => {
+    calls.push([command, ...args].join(' '));
+    if (args[0] === 'print') {
+      if (!bootstrapped) return { status: 113, stdout: '', stderr: 'Could not find service.\n' };
+      printsSinceBootstrap += 1;
+      const active = printsSinceBootstrap > pollsBeforeActive;
+      return {
+        status: 0,
+        stdout: active ? 'state = running\nlast exit code = 0\n' : 'state = waiting\nlast exit code = 0\n',
+        stderr: '',
+      };
+    }
+    if (args[0] === 'bootstrap') {
+      bootstrapped = true;
+      printsSinceBootstrap = 0;
+      return { status: 0, stdout: 'submitted\n', stderr: '' };
+    }
+    return { status: 1, stdout: '', stderr: `unexpected ${[command, ...args].join(' ')}` };
+  };
+  return {
+    calls,
+    exec,
+    get printCallsAfterBootstrap(): number {
+      return printsSinceBootstrap;
     },
   };
 }

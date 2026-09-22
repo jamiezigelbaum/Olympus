@@ -119,7 +119,7 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
     label: 'WhatsApp',
     authentication: { type: 'paired_session', ownership: 'one linked user device' },
     contextual_scopes: ['live linked-device traffic', 'optional exports', 'exclude Status broadcasts'],
-    dependencies: [{ id: 'whatsmeow_bridge', label: 'Whatsmeow bridge', required_for: 'QR pairing and live capture' }],
+    dependencies: [{ id: 'whatsmeow_bridge', label: 'Packaged Whatsmeow bridge (Go and a C compiler for its first build)', required_for: 'QR pairing and live capture' }],
     provider_ceiling: 'Bridge downtime creates an unrecoverable capture gap; general media-byte extraction is unsupported.',
     supported_formats: ['message text', 'link previews', 'reactions', 'media metadata', 'voice-note transcript sidecars'],
     doctor_lane: {

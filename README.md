@@ -53,7 +53,7 @@ mailbox.
 
 ## How it works
 
-Every item you ingest is classified as public, private, secure, or secrets
+Every item you ingest is classified as Public, Personal, Private, or Secrets
 (internally S0-S5), and every tier
 routes only to the model lanes your sovereignty policy allows:
 
@@ -76,8 +76,8 @@ flowchart LR
     subgraph lanes["Model lanes you approved"]
         direction TB
         CLOUD[Frontier cloud<br/>everyday content]
-        PRIVATE[Venice Private cloud<br/>secure content when routed]
-        LOCAL[Your local models<br/>secure content]
+        PRIVATE[Venice<br/>Private content when routed]
+        LOCAL[Your local models<br/>Private content]
     end
 
     AGENT[Your agent<br/>cited, bounded answers]
@@ -87,10 +87,15 @@ flowchart LR
     CLOUD & PRIVATE & LOCAL --> AGENT
 ```
 
+Olympus uses four tiers: **Public**, **Personal** (ordinary personal and work
+content), **Private** (sensitive material), and **Secrets** (never model input).
+See the [tier mapping](docs/TRUST_MODEL.md#product-tier-names) for the unchanged
+storage identifiers.
+
 Four postures, chosen (and changeable) in setup — a config file, not a code
 fork:
 
-| Preset | Public/private content | Secure content: health, finance, legal, therapy, family |
+| Preset | Public/Personal content | Private content: health, finance, legal, therapy, family |
 |---|---|---|
 | **Local models and private cloud** (`local-first`) | frontier cloud | approved secure pool with explicit local → [Venice](https://venice.ai) Private order |
 | **Local models only** (`local-only`) | frontier cloud | your own local models only |
@@ -158,9 +163,20 @@ connect model credentials, and verify base activation before optional source
 setup and the first cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, use **Olympus** in the Control UI sidebar to connect
+sources, choose scope, and follow ingestion. Enable **Settings → Labs → Custom
+plugin UI**, then restart the Gateway through your normal managed procedure
+and reload the browser. OpenClaw currently makes this integration experimental
+and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
+your signed-in OpenClaw permissions; its worker token stays on the server.
+The standalone `olympus dashboard` command remains available for older hosts,
+when custom plugin UI is off, and for direct access when needed. See the
+[dashboard guide](docs/QUICKSTART.md#5-optionally-connect-a-source).
+
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
-It explains the separate secure/non-secure routes, registered embedding
+It explains the separate Private and Public/Personal routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
 Choose how to supply each key: paste it yourself from your password manager's
 website into a supported local field or silent terminal input, or authorize an
@@ -173,6 +189,12 @@ Olympus artifact includes native Control UI support and Custom plugin UI is
 enabled. Host version alone is not proof of support. Otherwise the quickstart
 uses the retained standalone dashboard; it explains the different authentication
 requirements for each route.
+
+Choose how to supply each key: paste it yourself from your password manager's
+website into a supported local field or silent terminal input, or authorize an
+exact named-item read through an already authenticated manager CLI. The manual
+route needs no password-manager desktop app or CLI; a 1Password `op://`
+reference needs authenticated `op` access for an agent fetch.
 
 ## Supported sources
 
@@ -248,8 +270,9 @@ flowchart LR
 | `olympus setup --preset <preset> --yes` | writes sovereignty policy and worker auth for the chosen posture |
 | `olympus connect <source> ...` | records OAuth, session, or API-key credentials with source-specific flags |
 | `olympus worker foreground\|install\|start\|stop\|restart\|status\|upgrade\|uninstall` | one versioned lifecycle for the local engine, foreground or supervised |
-| `olympus dashboard` | opens the local ingestion dashboard |
-| `olympus dashboard token` | prints the worker token the dashboard's Unlock field asks for |
+| `olympus dashboard` | opens the standalone dashboard with a short-lived authorization link; no worker-token copying |
+| `olympus dashboard --no-open` | generates an unused opening link for an agent to hand to you |
+| `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |

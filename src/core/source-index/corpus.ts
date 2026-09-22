@@ -154,7 +154,6 @@ function assertEmbeddingPolicyMatchesStorage(
   if (storageProfile.embeddingBackend === 'local' && embeddingPolicy === 'cloud_allowed') {
     throw new Error('Local embedding storage cannot use an always-cloud corpus embedding policy.');
   }
-  if (storageProfile.trustDomain === 'secure_local' && embeddingPolicy.startsWith('cloud_')) {
-    throw new Error('secure_local corpora cannot use cloud embedding policies.');
-  }
+  // The shared provider seam enforces the secure cloud allowlist (Venice
+  // Private/TEE). A cloud policy here does not authorize an arbitrary backend.
 }

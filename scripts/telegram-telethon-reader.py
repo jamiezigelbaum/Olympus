@@ -744,14 +744,15 @@ def gateway_config() -> GatewayConfig:
         if scope not in approved_scopes:
             raise SafeConfigError("classification_scope_not_approved")
 
-    state_dir = Path(os.environ.get(
-        "OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR",
-        str(Path.home() / ".local/state/olympus/telegram-capture-gateway"),
-    ))
-    spool_dir = Path(os.environ.get(
-        "OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR",
-        str(Path.home() / ".local/share/olympus/telegram-capture/spool"),
-    ))
+    # Match the worker consumer and data-lifecycle custody paths, including
+    # relocated XDG installations and the legacy drain spool override.
+    home = Path(os.environ.get("HOME", "").strip() or str(Path.home()))
+    state_home = Path(os.environ.get("XDG_STATE_HOME", "").strip() or str(home / ".local/state"))
+    data_home = Path(os.environ.get("XDG_DATA_HOME", "").strip() or str(home / ".local/share"))
+    state_dir = Path(first_env("OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR")
+                     or str(state_home / "olympus/telegram-capture-gateway"))
+    spool_dir = Path(first_env("OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR", "OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR")
+                     or str(data_home / "olympus/telegram-capture/spool"))
     report_path = Path(value_after(sys.argv[1:], "--report") or os.environ.get(
         "OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH",
         "/tmp/olympus-source-processing-supervisor/telegram-capture-gateway-current.json",

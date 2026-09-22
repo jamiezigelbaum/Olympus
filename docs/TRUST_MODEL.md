@@ -1,7 +1,7 @@
 # Olympus Trust Model
 
 Status: active
-Updated: 2026-07-21
+Updated: 2026-09-13
 
 ## Purpose
 
@@ -23,6 +23,27 @@ input, and approval boundaries live here and in [CONTRACTS.md](CONTRACTS.md).
 - Bundles inherit the highest tier they contain unless cleanly decomposed.
 - Aggregation can raise sensitivity.
 - No secure lane may silently fall back to a less secure model or transport.
+
+## Product tier names
+
+The product uses **Public → Personal → Private → Secrets**. These display names
+have one compatibility mapping; the stored identifiers and enforcement have not
+changed:
+
+| Display name | Schema-v1 key | Trust tier | Routing domain |
+| --- | --- | --- | --- |
+| Public | `public` | S0 | `public_safe` |
+| Personal | `private` | S1–S3 (map target S3) | `internal` |
+| Private | `secure` | S4 | `secure_local` |
+| Secrets | `secrets` | S5 | `secure_local`; refused before model input |
+
+In a sensitivity-map JSON file, sensitive **Private** categories still require
+`targetTierName: "secure"`, `targetTrustTier: "S4"`, and
+`targetTrustDomain: "secure_local"`. Writing `private` would mean **Personal**,
+not Private. Keep existing schema-v1 keys, corpus IDs, preset IDs, and policy
+values unchanged. The finer S1/S2/S3 levels below all display as Personal.
+Venice's own **Private** model category is a provider classification, distinct
+from Olympus's Private data tier.
 
 ## Sensitivity Tiers
 
@@ -81,7 +102,7 @@ lane exists. That lane may be local, self-hosted, or a trusted service provider
 such as a vault, evidence store, credential broker, or privacy-approved model
 service.
 
-### S5 Secret
+### S5 Secrets
 
 High-authority secrets whose possession grants meaningful capability, control,
 recovery, authentication, spending, decryption, or account access.

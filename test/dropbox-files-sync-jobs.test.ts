@@ -152,7 +152,7 @@ describe('Dropbox canonical provider-to-store pull', () => {
         store,
         account: 'personal',
         embeddingProvider: remoteEmbeddingProvider(),
-      })).toThrow('local/private embedding provider');
+      })).toThrow('approved Venice embedding provider');
 
       const handler = createDropboxProviderStoreSyncHandler({
         store,
