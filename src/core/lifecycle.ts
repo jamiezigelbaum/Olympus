@@ -862,9 +862,26 @@ function qualifyWorkerReadiness(
   port: number,
 ): { status: 'ready'; url: string } {
   const url = `http://127.0.0.1:${port}/v1/health`;
-  const ready = options.readinessProbe
+  const probe = () => options.readinessProbe
     ? options.readinessProbe(url)
     : defaultWorkerReadinessProbe(url, options.bunBin);
+  const timeoutMs = validateSettleWindow(
+    options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS,
+    'Lifecycle readiness timeout',
+    120_000,
+  );
+  const pollMs = validateSettleWindow(
+    options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
+    'Lifecycle readiness poll interval',
+    10_000,
+  );
+  const deadline = Date.now() + timeoutMs;
+  let ready = probe();
+  while (!ready && Date.now() < deadline) {
+    if (inspectWorkerService(serviceActionOptions(options)).state !== 'active') break;
+    waitForActivationSettle(Math.min(Math.max(1, pollMs), Math.max(0, deadline - Date.now())));
+    ready = probe();
+  }
   if (!ready) {
     throw new OperationError(
       'config_error',

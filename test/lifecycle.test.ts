@@ -516,6 +516,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec: manager.exec,
         activationSettleMs: 0,
+        actionSettleTimeoutMs: 0,
         readinessProbe: (url) => {
           probedUrl = url;
           return false;
@@ -524,6 +525,28 @@ describe('versioned Olympus worker lifecycle', () => {
 
       expect(probedUrl).toBe('http://127.0.0.1:8010/v1/health');
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
+      expect(existsSync(transactionPath(home))).toBe(false);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('upgrade waits for HTTP readiness after the service manager becomes active', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-http-settle-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let probes = 0;
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        actionSettleTimeoutMs: 1_000, actionSettlePollMs: 1,
+        readinessProbe: () => ++probes >= 3,
+      });
+      expect(probes).toBe(3);
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
       expect(existsSync(transactionPath(home))).toBe(false);
     } finally {
       makeTreeWritable(home);
