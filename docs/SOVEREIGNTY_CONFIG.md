@@ -56,18 +56,19 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 
 | Preset | Public and Personal embeddings | Private search | Private answers | You supply |
 |---|---|---|---|---|
-| `private-cloud-only` — recommended after you confirm you do not run local models | Gemini Embedding 2 | Local keyword search; no secure vectors | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
-| `local-only` | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
-| `local-first` | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
-| `no-sensitive` | Gemini Embedding 2 | Secure content is unavailable to answering | None | Gemini key |
+| Venice (`private-cloud-only`) — recommended after you confirm you do not run local models | Gemini Embedding 2 | Venice Private embeddings when no local provider is configured | Approved Venice Private/TEE model | Gemini key; Venice account, usable API balance and key |
+| Local models (`local-only`) | Gemini Embedding 2 | Local embedding model | Local answer model | Gemini key; local server and exact registered model IDs, with their matching output dimensions |
+| Local models with Venice fallback (`local-first`) | Gemini Embedding 2 | Local embedding model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
+| Don't ingest Private data (`no-sensitive`) | Gemini Embedding 2 | Private content is unavailable to answering | None | Gemini key |
 
-“Private cloud only” describes **secure-data handling**: secure answers use
-Venice, and secure search is local keyword search. It does not route all
-Olympus traffic through Venice; Gemini serves public and ordinary-private
+The **Venice** preset describes **Private-data handling**: Private answers use
+Venice, and Private semantic search uses a separately configured Venice Private
+embedding model when no local provider is configured. It does not route all
+Olympus traffic through Venice; Gemini serves Public and Personal
 embeddings. Explain that distinction before asking for either provider key.
 
-`local-only` describes the handling of **secure** data; the shipped preset
-still uses Gemini for non-secure embeddings. It is not an all-offline preset.
+`local-only` describes the handling of **Private** data; the shipped preset
+still uses Gemini for Public and Personal embeddings. It is not an all-offline preset.
 The ordinary answer path uses the host's configured inference route by default.
 Neither a Gemini key nor a Venice key creates an OpenClaw subscription/login.
 
@@ -140,12 +141,12 @@ permission to read it; keep the value out of output, files, notes, and logs.
    alone is not a spending cap.
 3. Create a key for this installation, keep it in your password manager, and
    use the method you chose above. For an authorized CLI fetch, give the agent
-   its exact item/field reference. For manual input, enter it silently in your
-   own terminal. The selected route supplies `KEY` to
-   `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect gemini --api-key-stdin`,
-   using the executable resolved from `openclaw plugins inspect olympus --json`.
-   `KEY` represents an in-memory manager read or your silent terminal input,
-   never a value pasted into a command, file, chat, or log. Unset it afterward.
+   its exact item/field reference. For manual input, run the resolved Olympus
+   executable with `connect gemini --api-key-prompt` in a terminal on the host
+   running Olympus. It opens masked input; no shell snippet or temporary script
+   is needed. For an authenticated manager read, continue to pipe directly to
+   `connect gemini --api-key-stdin`. The key must never enter a command argument,
+   chat, or log.
 
 The connect command validates the key before storing it in the owner-only
 managed worker environment. That confirms authentication, not successful
@@ -175,7 +176,9 @@ This step applies to `private-cloud-only` and `local-first`.
    Create an **Inference Only** key named for this Olympus installation and
    set a consumption limit you accept. Save the one-time key display in your
    password manager. An Admin key is unnecessary.
-4. Use your chosen manual-input or authorized named-item CLI route with
+4. For manual entry, run the resolved Olympus executable with
+   `connect venice --api-key-prompt` on the Olympus host. For an authorized
+   named-item manager read, use
    `printf '%s' "$KEY" | "$OLYMPUS_BIN" connect venice --api-key-stdin`, then
    unset `KEY`. This writes Olympus's `store:venice.api_key` entry. It does not
    purchase credits or silently change your privacy preset.
@@ -227,12 +230,10 @@ keyword-only operation honestly. No indexed data means no answer proof yet;
 leaving source setup for later is a valid completed base install. Do not choose
 Gmail or connect every source merely to make a readiness check green.
 
-The v0.4 dashboard handles source connections and shows progress/credential
-problems, but it has no complete model-account or embedding-configuration
-wizard. Full model setup in the dashboard is planned for v0.5. The registered
-defaults remove the missing-dimension startup failure for shipped models;
-custom model configuration and clean-install qualification still need their
-own proof. Do not repair testers' machines through undocumented edits.
+The dashboard handles model keys, existing-local-model readiness, source
+connections, and progress. Custom endpoint/model configuration remains
+agent-assisted; there is no model installer or arbitrary model picker. Keep
+existing model identities and vectors intact while connecting existing servers.
 
 ## Purpose
 

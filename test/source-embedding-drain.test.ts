@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   assertEmbeddingProviderForLane,
+  DirectSourceEmbeddingDrainClient,
   optionsFromEnv,
   publishNativeEmbeddingDrainReadiness,
   runSourceEmbeddingDrain,
@@ -11,6 +12,8 @@ import {
   type CorpusEmbeddingRequest,
   type SourceEmbeddingDrainClient,
 } from '../scripts/source-embedding-drain.ts';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 class FakeClient implements SourceEmbeddingDrainClient {
@@ -139,6 +142,66 @@ describe('canonical connector-store embedding drain', () => {
       OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED: 'false',
     });
     expect(options.lanes).toEqual([]);
+  });
+
+  test('direct mode refuses a retained file-family chunk before the cloud provider is invoked', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-direct-file-scope-'));
+    const dbPath = join(root, 'drive.sqlite');
+    const store = new LocalConnectorStore({
+      dbPath,
+      corpusId: 'internal.drive.docs',
+      family: 'file',
+      trustDomain: 'internal',
+    });
+    const item: RawItem = {
+      identity: {
+        family: 'file',
+        provider: 'google_drive',
+        accountScope: 'personal',
+        providerItemId: 'retained-out-of-scope',
+        providerFileId: 'retained-out-of-scope',
+        localItemId: 'personal:retained-out-of-scope',
+        sourceVersion: 'r1',
+      },
+      mimeType: 'text/plain',
+      content: { kind: 'text', text: 'retained content from a superseded folder approval' },
+      metadata: Object.freeze({ name: 'retained.txt' }),
+      fetchedAt: '2026-09-10T10:00:00.000Z',
+    };
+    const connector: SourceConnector = {
+      id: 'direct-file-scope-fixture',
+      family: 'file',
+      async authenticate() {},
+      async *listItems() { yield { items: [item], done: true }; },
+      async fetchItem() { return item; },
+      classify() { return { trustTier: 'S3', trustDomain: 'internal', cloudEmbeddingEligible: true, localOnly: false }; },
+    };
+    await store.syncFromConnector(connector, { fetchContent: true });
+    store.close();
+    let providerCalls = 0;
+    const cloud = provider('google-gemini', 'cloud');
+    cloud.embed = async (inputs) => {
+      providerCalls += 1;
+      return inputs.map(() => Array(8).fill(0));
+    };
+    const client = new DirectSourceEmbeddingDrainClient({
+      connectorStores: [{
+        corpusId: 'internal.drive.docs',
+        dbPath,
+        family: 'file',
+        trustDomain: 'internal',
+      }],
+      secureLocalProvider: provider('local-openai-compatible', 'local'),
+      internalProvider: cloud,
+    });
+    try {
+      await expect(client.embedConnectorStore({ corpus_id: 'internal.drive.docs' }))
+        .rejects.toThrow('Use the default HTTP drain mode');
+      expect(providerCalls).toBe(0);
+    } finally {
+      client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test('publishes a private content-free readiness receipt bound to the native nonce and pid', () => {

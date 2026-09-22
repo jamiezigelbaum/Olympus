@@ -12476,9 +12476,20 @@ var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
 var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
 var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
+var NATIVE_CAPTURE_OWNER_ENV_NAMES = {
+  telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
+  whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
+};
 function createNativeWorkerService(options) {
+  let readyChild;
+  let proofGeneration = 0;
+  let lifecycleGeneration = 0;
+  const invalidate = () => {
+    proofGeneration += 1;
+    readyChild = undefined;
+  };
   const fetchWorker = options.fetch ?? globalThis.fetch;
-  return createNativeProcessService({
+  const service = createNativeProcessService({
     id: SERVICE_ID3,
     label: SERVICE_LABEL,
     reload: {
@@ -12496,13 +12507,51 @@ function createNativeWorkerService(options) {
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
     ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
     defaultStartupTimeoutMs: DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
-    prepareStart: (input) => prepareWorkerStart(input, {
-      moduleUrl: options.moduleUrl,
-      fetchWorker,
-      ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {},
-      ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}
-    })
+    prepareStart: async (input) => {
+      invalidate();
+      const generation = proofGeneration;
+      const settings = await prepareWorkerStart(input, {
+        moduleUrl: options.moduleUrl,
+        fetchWorker,
+        ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {},
+        ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}
+      });
+      if (!settings)
+        return;
+      const probe = settings.readinessProbe;
+      return {
+        ...settings,
+        async readinessProbe(child) {
+          const ready = await probe(child);
+          if (ready && generation === proofGeneration)
+            readyChild = child;
+          return ready;
+        }
+      };
+    }
   });
+  return {
+    ...service,
+    isReady() {
+      return Boolean(readyChild?.pid && readyChild.exitCode === null && readyChild.signalCode === null && !readyChild.killed);
+    },
+    async start(context) {
+      const generation = ++lifecycleGeneration;
+      invalidate();
+      try {
+        await service.start(context);
+      } catch (error) {
+        if (generation === lifecycleGeneration)
+          invalidate();
+        throw error;
+      }
+    },
+    async stop() {
+      lifecycleGeneration += 1;
+      invalidate();
+      await service.stop();
+    }
+  };
 }
 async function prepareWorkerStart(input, worker) {
   const fresh = freshConfig(input.context.config, input.initialConfig);
@@ -12594,6 +12643,8 @@ function applyNativeWorkerConfigEnv(config, env) {
   env.OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS = String(config.worker.scheduler.freshnessThresholdHours);
   env.OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS = String(config.worker.scheduler.errorBackoffSeconds);
   env.OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES = String(config.worker.scheduler.maxTransientRetries);
+  env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram] = String(config.worker.telegramCapture.enabled);
+  env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp] = String(config.worker.whatsappCapture.enabled);
 }
 function resolveBunRuntimePath(configured, env) {
   if (configured)
@@ -12698,6 +12749,19 @@ function stripGatewayBootstrapSecrets(env) {
 function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
+async function waitForNativeWorkerOwnership(isReady, timeoutMs = 15000) {
+  if (!isReady)
+    throw new NativeProcessConfigurationError("Native capture requires native-worker ownership proof.");
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  do {
+    if (isReady())
+      return;
+    if (Date.now() >= deadline)
+      break;
+    await new Promise((resolve3) => setTimeout(resolve3, Math.min(50, Math.max(1, deadline - Date.now()))));
+  } while (Date.now() <= deadline);
+  throw new NativeProcessConfigurationError("Native worker is not ready or does not own its endpoint; native capture was not started.");
+}
 
 // src/core/native-telegram-service.ts
 init_config();
@@ -12735,7 +12799,7 @@ function createNativeTelegramService(options) {
   return createNativeProcessService({
     id: SERVICE_ID4,
     label: SERVICE_LABEL2,
-    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.telegramCapture"] },
+    reload: { configPrefixes: ["plugins.entries.olympus.config.worker", "plugins.entries.olympus.config.email.baseUrl", "plugins.entries.olympus.config.sourceIndex", "plugins.entries.olympus.config.sovereignty"] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
     ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
@@ -12756,6 +12820,10 @@ async function prepareTelegramStart(input, options) {
   const capture = config.worker.telegramCapture;
   if (!capture.enabled)
     return;
+  if (!config.worker.service.enabled) {
+    throw new NativeProcessConfigurationError("Native telegram capture requires worker.service.enabled so the worker can enforce exclusive capture ownership.");
+  }
+  await waitForNativeWorkerOwnership(options.workerIsReady, options.workerReadinessTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1000 + 5000);
   if (!capture.pythonPath) {
     throw new NativeProcessConfigurationError("Olympus Telegram capture service requires an absolute worker.telegramCapture.pythonPath.");
   }
@@ -12887,7 +12955,7 @@ function createNativeWhatsAppService(options) {
   return createNativeProcessService({
     id: SERVICE_ID5,
     label: SERVICE_LABEL3,
-    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.whatsappCapture"] },
+    reload: { configPrefixes: ["plugins.entries.olympus.config.worker", "plugins.entries.olympus.config.email.baseUrl", "plugins.entries.olympus.config.sourceIndex", "plugins.entries.olympus.config.sovereignty"] },
     initialConfig: options.initialPluginConfig,
     defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
     ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
@@ -12895,10 +12963,10 @@ function createNativeWhatsAppService(options) {
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
     ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
     ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
-    prepareStart: prepareWhatsAppStart
+    prepareStart: (input) => prepareWhatsAppStart(input, options)
   });
 }
-async function prepareWhatsAppStart(input) {
+async function prepareWhatsAppStart(input, options) {
   let config;
   try {
     config = configFromPluginConfig(freshPluginConfig4(input.context.config, input.initialConfig));
@@ -12908,6 +12976,10 @@ async function prepareWhatsAppStart(input) {
   const capture = config.worker.whatsappCapture;
   if (!capture.enabled)
     return;
+  if (!config.worker.service.enabled) {
+    throw new NativeProcessConfigurationError("Native whatsapp capture requires worker.service.enabled so the worker can enforce exclusive capture ownership.");
+  }
+  await waitForNativeWorkerOwnership(options.workerIsReady, options.workerReadinessTimeoutMs ?? config.worker.service.startupTimeoutSeconds * 1000 + 5000);
   if (!capture.binaryPath) {
     throw new NativeProcessConfigurationError("Olympus WhatsApp capture service requires an absolute worker.whatsappCapture.binaryPath.");
   }
@@ -16652,12 +16724,15 @@ var plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
+    const { isReady: workerIsReady, ...workerRegistration } = workerService;
     const telegramService = createNativeTelegramService({
+      workerIsReady,
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url
     });
     const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
     const whatsappService = createNativeWhatsAppService({
+      workerIsReady,
       initialPluginConfig: api.pluginConfig
     });
     const embeddingDrainService = createNativeEmbeddingDrainService({
@@ -16666,7 +16741,7 @@ var plugin = {
     });
     const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
-      api.registerService(backgroundNativeProcessService(workerService));
+      api.registerService(backgroundNativeProcessService(workerRegistration));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
       api.registerService(backgroundNativeProcessService(whatsappService));

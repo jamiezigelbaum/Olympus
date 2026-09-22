@@ -24,13 +24,9 @@ agent with a terminal:
 
 > Install Olympus by reading https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/INSTALL_FOR_AGENTS.md and following it step by step. Walk me through setup and ask me about my data and privacy preferences.
 
-The agent downloads the package, runs this whole guide, asks you for the
-decisions that are yours, and verifies the result. The steps below are the
-same flow, by hand.
-
 Before first setup, read the full
 [four-tier privacy explanation](../INSTALL_FOR_AGENTS.md#step-2--privacy-posture-mandatory-decision-gate),
-then describe your sensitivity preferences and choose how to handle secure data.
+then describe your sensitivity preferences and choose how to handle Private data.
 For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
@@ -232,10 +228,10 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   | `private-cloud-only` | frontier cloud | Venice Private `kimi-k3` only |
   | `no-sensitive` | frontier cloud | **not ingested** (honest gap until you add a Private lane) |
 
-  In `private-cloud-only`, secure answers are served by the approved Venice
-  Private model, with no local-model prerequisite or fallback. “Only” describes
-  secure-data handling: Gemini still handles public and ordinary-private
-  embeddings, while secure search stays on this machine as keyword search.
+  In `private-cloud-only`, Private answers are served by the approved Venice
+  Private model, with no local-model prerequisite or fallback. The Venice
+  option handles Private data: Gemini still handles Public and Personal
+  embeddings, while Private search uses an approved Venice Private embedding model.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
@@ -382,15 +378,29 @@ If the line is not there because the log rotated since the last restart,
 the other two checks stand on their own — do not restart again just to
 produce it.
 
-## 5. Optionally connect a source
+## 5. Open your dashboard and optionally connect sources
+
+Installation ends with a working, clickable Olympus dashboard link from your
+agent. Connecting a source is optional; providing that link is not. The agent
+must resolve the address for your browser and verify dashboard access, rather
+than giving you a host-only localhost URL or another terminal command.
+
+Open **Setup**, finish the required **Models** cards at the top, then connect
+sources below and choose their scope. **Home** shows source
+readiness and anything needing attention. **Background** shows syncing,
+extraction, and embedding progress. Return to the same agent chat if you need
+help connecting a source or understanding its progress.
+
+For native OpenClaw access, the dashboard page is
+`/plugin?plugin=olympus&id=dashboard` on the Gateway origin you already use.
+The agent should include that full verified link in its final reply.
 
 Base installation is ready when the chosen model prerequisites, worker health,
 and plugin/tool activation above are verified. No source connection is needed
 for that result. You can stop here and connect a source later.
 
-On OpenClaw **2026.9.2**, open **Olympus** in the Control UI sidebar when the
-installed Olympus artifact includes native Control UI support. The host version
-alone does not prove support. This requires **Settings → Labs → Custom plugin
+This candidate artifact includes native Control UI support. On OpenClaw
+**2026.9.2**, open **Olympus** in the Control UI sidebar. This requires **Settings → Labs → Custom plugin
 UI** and the Gateway activation completed in Step 4, followed by a browser
 reload. The native page uses your signed-in permissions and
 keeps the worker bearer on the server, so no worker-token paste is needed.
@@ -406,30 +416,20 @@ backend health alone is not a successful UI handoff:
 olympus dashboard
 ```
 
-The standalone command prints three fields: the dashboard `url`, whether it
-`opened` a browser, and a `hint`. The URL ends in `?token=dash_…` — the read-only view
-token — and that is the URL that works. A browser cannot send a bearer
-header from the address bar, so the bare `/dashboard` path returns 401; copy
-the URL whole. Your browser lands on a local, token-protected dashboard:
-source freshness, how much is indexed, and where public, private, secure,
-and secrets are allowed to go. The hint says the split out loud: *"This URL
-carries the read-only view token, not the worker token; unlocking the
-controls still needs `<rootDir>/bin/olympus dashboard token`."*
+The command opens the standalone dashboard with its controls authorized. If
+Olympus runs on another machine, your agent runs `olympus dashboard --no-open`
+and gives you the returned opening link for the browser connection you configured. You do not need the plugin's
+installation directory or its worker token.
 
-That `dash_` token is derived from the worker token, is read-only, and is
-accepted on exactly two routes — `GET /dashboard` and `GET /dashboard.json`
-— so it cannot connect, reauthenticate, sync, disconnect, or unpair. Anyone
-with the link can read your dashboard, so treat the URL like the screen
-itself rather than like a secret to be scrubbed.
+The link expires after two minutes and works once. Open it promptly; if it has
+expired or was already used, ask your agent to run `olympus dashboard` again.
+The browser clears the link's ticket and keeps an HttpOnly control session;
+the durable worker token never enters the URL or browser storage. Treat an
+unused opening link as access to your dashboard and keep it out of public logs.
 
-In the standalone dashboard, changing anything (connecting, reauthenticating,
-sync now) asks once for the **worker token**, which is a different value and is a real secret:
-`<rootDir>/bin/olympus dashboard token` prints it — `rootDir` comes from
-`openclaw plugins inspect olympus --json`, because `olympus` is not on PATH
-after a clean install. It authorizes changes, so keep it out of chat logs
-and notes —
-or ask your agent for the command using the dashboard's "Where is my token?"
-button. The agent must never retrieve and relay the value through chat.
+Old `dash_` links remain read-only. Use a fresh opening link when you need the
+controls. `olympus dashboard token` is an advanced compatibility command, not a
+required setup step; do not copy its secret into chat.
 
 Choose the source you want now; the source roster is not an all-seven checklist. Follow its credential or pairing → scope → initial sync → source
 health → cited-answer readiness journey. Other sources can be added later.
@@ -439,13 +439,9 @@ cards have a **Sync now** button for an immediate run. Dropbox starts from a
 neutral account-root metadata listing until you install a narrower
 operator-approved ingestion policy.
 
-For standalone access, the URL
-carries the read-only dashboard token and nothing more. The first mutable
-action asks for the worker bearer once, exchanges it for a signed HttpOnly
-local control session, and discards the pasted value; origin and CSRF checks
-protect every control request. The page does not put the worker bearer in
-browser storage, and pasting the `dash_` URL token into the unlock field is
-refused.
+Standalone control requests retain their signed HttpOnly session, same-origin,
+and CSRF checks. The opening link authorizes the browser; it does not connect a
+source or start ingestion by itself.
 
 Connect only the source you chose, using its dashboard card and the
 [per-source guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
@@ -453,6 +449,15 @@ Google's packaged shared pilot client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.
+
+For Drive and Dropbox, **Connect** only connects the account. Open **Choose
+folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
+only**, and **No ingestion** choices, then explicitly **Save scope and start**.
+The folder browser lists names without indexing or reading file contents.
+Folder names load automatically when Choose folders opens. Update refreshes
+the listing; the loading indicator stays visible while requests are in flight.
+Unselected folders stay out. Entire-account ingestion requires an explicit
+selection and confirmation; a default configuration is not permission.
 
 All seven declared sources use the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and
@@ -471,7 +476,7 @@ explicitly chosen advanced BYO fallback.
 ```bash
 olympus connect google --client-id <google-oauth-client-id>
 olympus connect dropbox --client-id <dropbox-oauth-client-id>
-olympus connect telegram --session-path ~/.local/share/olympus/telegram.session --session-ready
+olympus connect telegram --pair
 olympus connect whatsapp --session-path ~/.local/share/olympus/whatsapp --session-ready
 printf '%s' "$READWISE_TOKEN" | olympus connect readwise --api-key-stdin
 ```
@@ -566,141 +571,3 @@ health green when the worker is healthy and no credentials are degraded;
 mailbox configuration is not a prerequisite. Choose sources in the dashboard
 when you are ready. A selected source's connection/sync problems remain visible
 as source-readiness problems.
-
-### Optional native OpenClaw worker supervision
-
-On a host with the native plugin service API, Olympus can supervise its packaged
-worker as a child process. Set `plugins.entries.olympus.config.worker.service.enabled`
-to `true` through the host's supported configuration command. The service is off
-by default; standalone worker/MCP installations keep their existing lifecycle.
-
-Run setup/connect first: the child uses `~/.config/olympus/worker.env` and the
-configured worker bearer token. Source settings previously supplied by an external wrapper must be migrated
-before activation. Put provider SecretRefs in `worker.service.credentials`, keyed
-by the supported Olympus credential environment names. OpenClaw resolves these
-through its native secret providers and Olympus injects the resolved values only
-into the child; do not write raw provider credentials into the environment file.
-Bootstrap names such as `OP_CONNECT_TOKEN` are rejected by this credential map.
-Gateway and password-manager bootstrap credentials are not inherited by the child.
-For native supervision, an explicit sovereignty policy must use
-`sovereignty.configPath`; inline policies are rejected. Explicit plugin-level
-corpus registry, ingestion policy, and exclusion overrides are also rejected
-until they can be transported faithfully. Keep those source settings in the
-worker's supported environment/configuration files. A rejected configuration
-never silently starts the child under another policy.
-Stop the existing standalone worker before activating native supervision; an
-occupied endpoint is rejected rather than accepted as the new child. The host
-operator owns plugin installation and Gateway activation.
-
-`worker.service.runtimePath` may name an absolute Bun runtime path when Bun is
-not on the Gateway's PATH. The packaged CLI is selected automatically; the
-advanced `executablePath` override must be absolute. Startup readiness requires
-an authenticated response bearing the child instance ID. The startup deadline
-is 180 seconds by default and can be configured with `startupTimeoutSeconds`
-(up to 600 seconds). Failures remain visible through native service health;
-unexpected exits back off, and shutdown terminates the owned child process group.
-Slow child initialization runs in the background so it fits the host's bounded
-hot-replacement callback. Native service health reports initialization until the
-child passes its readiness check; installation alone does not prove it ready.
-
-### Optional native Telegram capture
-
-After pairing Telegram, enable `worker.telegramCapture.enabled` through the
-host's supported configuration command. Set `pythonPath` to an absolute Python
-interpreter with Telethon installed and `sessionPath` to the existing `.session`
-file. The packaged reader is selected automatically. Supply `OLYMPUS_TELEGRAM_API_ID`
-and `OLYMPUS_TELEGRAM_API_HASH` under `worker.telegramCapture.credentials` as
-Gateway SecretRefs. The capture child receives only its Telegram settings and
-credentials; it does not receive the source worker's other provider credentials.
-
-Preserve the approved chat scopes and security classifications in `worker.env`
-before activation. Optional `stateDir`, `spoolDir`, and `reportPath` settings
-select existing capture locations; changing paths does not migrate data. Stop
-an existing capture producer before enabling its replacement. The state-directory
-lock prevents two producers from sharing one capture state.
-
-Native capture never initiates interactive login. It reports ready only after
-an existing session authenticates, using a private receipt containing the child
-PID and a new instance ID. Capture freshness remains a separate check: a process
-ready to capture is not proof that new messages have arrived or been indexed.
-
-### Optional provider-credit monitoring
-
-`worker.creditMonitor` runs a native periodic billing probe; the currently
-supported provider is `venice`. It is disabled by default. Set an absolute
-`reportPath`, provide the billing/admin key as `credentials.VENICE_API_KEY`
-through a Gateway SecretRef,
-and enable it through the host's supported configuration command. The default
-interval is 600 seconds (allowed range: 60–86,400). An optional absolute
-`pauseFile` preserves the existing provider pause-marker behavior.
-
-The monitor checks the official billing endpoint, never processes source
-content, and does not inherit other provider credentials. A successful credit
-check does not prove that every model is available. Stop the old monitor before
-enabling its replacement; preserve the report and pause paths so existing
-consumers keep using the same files.
-
-### Optional native WhatsApp capture
-
-The package includes the read-only bridge source under `tools/whatsapp-bridge`.
-Building it requires Go 1.26.4 or newer and a C compiler for SQLite. From that
-directory run `go build -o olympus-whatsapp-bridge .`, then use the absolute
-binary path for `worker.whatsappCapture.binaryPath`. The plugin does not download
-or compile a binary during Gateway startup.
-
-Pair the bridge separately with WhatsApp Linked devices before enabling native
-capture. Use the same `OLYMPUS_WHATSAPP_STATE_DIR` for pairing as
-`worker.whatsappCapture.stateDir`; the default is
-`~/.local/share/olympus/whatsapp-live`. Run the built bridge interactively for
-pairing, stop that process after authentication, then enable
-`worker.whatsappCapture.enabled` through the host's supported configuration
-command. Stop any prior capture service before activating its replacement.
-Archive import alone is a historical snapshot; ongoing updates require this
-paired live capture and the source worker's automatic import.
-
-The native WhatsApp bridge keeps its existing connection backoff during a network
-outage. Service health stays initializing until the session authenticates; stopping
-the service still cancels the pending child. An unpaired session refuses startup
-without initiating login and requires the separate pairing flow.
-
-### Optional native embedding drain
-
-After verifying the existing embedding policy, enable `worker.embeddingDrain.enabled`
-through the host's supported configuration command. The packaged Bun drain keeps
-its existing corpus selection, provider routing, limits, and vector identities.
-Native supervision does not enable an embedding lane or approve a new backfill.
-
-Preserve existing nonsecret settings before activation. By default the child reads
-the managed `worker.env`; `environmentPath` can select a separate absolute settings
-file when a drain has different database paths or limits from the source worker.
-The file is parsed as data. Configure required Gemini credentials with native
-SecretRefs under `worker.embeddingDrain.credentials`, using `GEMINI_API_KEY` or
-`OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`. A drain with only secure-local lanes needs no cloud credential.
-Password-manager and Gateway bootstrap tokens are excluded from the child.
-
-Optional `runtimePath` and `reportPath` select the Bun executable and status report.
-The report directory must be controlled by the current user. Stop an existing
-standalone drain before enabling its native replacement. Readiness proves that
-the exact child validated its options; inspect a real bounded pass to verify
-provider operation before allowing broader work.
-
-The installation-specific legacy decision-ledger observer remains in the private
-runtime. Public release artifacts exclude that observer, as they already do for
-the source worker and dashboard.
-
-### Optional transcription-temp cleanup
-
-The shared source scheduler owns WhatsApp transcription and stores transcript
-chunks directly in the canonical store. The standalone sidecar drain is retired;
-existing audio and sidecars are preserved, not deleted or silently re-imported.
-
-Enable `worker.transcriptionCleanup.enabled` to replace an external sweep timer.
-It runs the packaged transcription wrapper's existing `--sweep` mode, keeping
-its age threshold and live-process-reference checks. Defaults are a 30-minute
-interval, a 24-hour minimum age, the OS temp directory, and a 120-second maximum
-run. `bashPath`, `tempRoot`, `intervalSeconds`, `minAgeMinutes`, and
-`maxRuntimeSeconds` can preserve an existing installation's settings. Only
-matching transcription-temp directory prefixes are considered; stop an existing
-sweep timer before enabling its replacement. Bash and the wrapper's process
-inspection tools must already be available; unavailable liveness checks never
-authorize removing a directory.

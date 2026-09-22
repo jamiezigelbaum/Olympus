@@ -12,6 +12,26 @@ Read the current step in full before carrying it out. Immediately before an
 operator-facing transition, read its required message block directly; do not
 use a remembered summary of this guide as the user-facing copy.
 
+## Normal setup sequence
+
+Choose the privacy posture with the operator, activate the base worker, and
+open the dashboard's Setup page. Its **Models** section comes first: Gemini
+and Venice keys are entered there, and existing local models have an
+agent-assisted configuration starting point plus **Check readiness**. Missing
+model keys are expected at this stage; do not block the dashboard handoff or
+send browser users to terminal key commands. Source connections unlock only
+when the selected posture's model requirements are ready. Olympus does not
+install, download, or maintain local models.
+
+## Installation completion requires a dashboard handoff
+
+Every final installation reply, including a reply after a restart or a request
+such as "continue from Step 6", must include a clickable, operator-reachable
+Olympus dashboard link and instructions to connect and monitor sources there.
+Do not end with only "Step 6 is complete", health checks, CLI commands, or a
+statement that connecting sources is optional. Connecting sources is optional;
+the dashboard handoff is required. Follow Step 6 before declaring completion.
+
 ## Rule zero — the residue gate binds EVERY Olympus-touching action
 
 This rule binds every action that installs, updates, enables, re-enables,
@@ -645,24 +665,23 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    cannot answer. Requires: a local runtime with lots of fast memory —
 >    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
 >    Olympus uses — plus a Venice API key (pay-as-you-go) and a Gemini API
->    key (free tier available) for public and ordinary-private search indexing.
+>    key (free tier available) for Public and Personal search indexing.
 >    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
 >    speed and first-pass quality depend on your machine.
 >
 > 2. **Local models** (`local-only`) — Private questions are answered
 >    only on your own machine. Venice is not used. Requires: the same local
 >    runtime with lots of fast memory, plus a Gemini API key (free tier
->    available) for public and ordinary-private search indexing. Trade-off: no
->    sensitive-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
+>    available) for Public and Personal search indexing. Trade-off: no
+>    Private-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
 >
 > 3. **Venice** (`private-cloud-only`) — recommended if you do
 >    not run local models. Private content goes only to Venice, on its
 >    Private model path — `kimi-k3` for answers and a separately approved
 >    Private embedding model for Private search. Requires: a
 >    Venice API key (pay-as-you-go) and a Gemini API key (free tier
->    available) for public and ordinary-private search indexing. Secure search
->    stays on this machine as keyword search; secure content never goes to
->    Gemini. “Only” describes secure-data handling, not all Olympus traffic.
+>    available). Venice protects your Private tier while Gemini indexes only
+>    your Public and Personal data; Private content never goes to Gemini.
 >    Trade-off: no local-model requirement
 >    or local fallback; you are choosing a privacy-focused cloud provider
 >    for Private answers and embeddings, on that provider's word rather than on
@@ -673,7 +692,7 @@ The setup result also supplies `presetLabel` for its human-facing name.
 >    indexed, and no model — local, private cloud, or ordinary cloud —
 >    sees it. When a question touches health, finances, or legal matters,
 >    you get an honest "that's not indexed" instead of an answer. Requires:
->    a Gemini API key (free tier available) for public and ordinary-private
+>    a Gemini API key (free tier available) for Public and Personal
 >    source indexing.
 >    Trade-off: a real hole in what your assistant can do, in exchange for
 >    maximum caution.
@@ -779,7 +798,8 @@ Ask where the operator keeps the key and offer these two supported routes:
 
 - **Manual web route:** the operator opens their password manager's website
   and pastes the key themselves into a supported local dashboard field or
-  silent terminal input. For Gemini, use the documented CLI stdin flow below.
+  the built-in masked terminal prompt described below. No shell function or
+  helper script is needed.
   No password-manager desktop app or CLI is required for this route. Never
   ask them to paste the key into chat.
 - **Authenticated CLI route:** if they want the agent to fetch the key,
@@ -1085,6 +1105,11 @@ stop the background service first so the two do not race.
 
 ## Step 5 — Validate, then restart the gateway (in this order)
 
+**Hermes MCP-only:** skip the native OpenClaw Gateway activation and restart
+paragraphs in this step. An OpenClaw Gateway is not required for Hermes to use
+the Olympus worker. Follow the Hermes MCP instructions below, verify an actual
+MCP status call, then use the standalone opening-link handoff in Step 6.
+
 Resolve the selected dashboard's prerequisites before this restart. If the
 artifact declares native Control UI support, check its Labs opt-in, browser/
 transport compatibility, and Gateway origin described in Step 6 now. Apply
@@ -1163,133 +1188,6 @@ last restart, for instance — do not manufacture the proof and do not
 restart again to produce one. Say the boot line was not observable, and
 lean on the other two checks: `"status": "loaded"` plus a successful
 `olympus source index status` are conclusive on their own.
-
-For a selected native dashboard, also verify `plugins.controlUi.list` includes
-Olympus without a diagnostic and `plugins.controlUi.status` reports successful
-activation from the actual connected browser. Confirm the sidebar entry and
-page render there. A loaded backend and HTTP health alone do not prove browser
-activation. An unusable selected dashboard keeps the handoff incomplete;
-diagnose its asset/transport error without connecting an unrelated source.
-
-**Do not verify by reading `toolNames` from `plugins inspect`.** It is
-`[]` for olympus by design: the tools (`source_answer`,
-`source_index_status`, `source_index_search`) register at runtime when the
-plugin initializes, not in the static manifest inspect reads. An empty
-`toolNames` on a healthy install proves nothing is wrong, and chasing it
-sends you re-installing a plugin that already works.
-
-For a Hermes Agent install, use the package's narrower MCP-only lane:
-
-```bash
-openclaw plugins inspect olympus --json
-hermes mcp add olympus --command /absolute/managed/olympus/bin/olympus --args serve
-hermes mcp test olympus
-```
-
-Take `plugin.rootDir` from the inspect response and append `/bin/olympus`; do
-not guess OpenClaw's managed storage path and do not assume a global `olympus`
-command exists.
-
-Configure the `olympus` server with
-`tools: { include: [source_answer, source_index_status] }` (the packaged
-`config/hermes/olympus.mcp.yaml` shows the complete YAML), reload MCP, and
-verify the only discovered names are `mcp_olympus_source_answer` and
-`mcp_olympus_source_index_status`. In Step 7, after the chosen source is ready,
-exercise a cited answer through the discovered `mcp_olympus_source_answer`. Do not enable
-`source_index_search`, `source_watch_*`, prompts, or resources for v0.4 Hermes.
-
-The optional `integrations/hermes/ask-sources` adaptation may be copied to
-`~/.hermes/skills/ask-sources` or loaded through `skills.external_dirs`. No
-`hermes://mcp/install` link is published because current Hermes documentation
-does not define that handler, and no external catalog submission is authorized.
-
-## Step 6 — Optional source setup
-
-**Base installation is complete before source choice.** Report the selected
-posture, model prerequisites, worker health, and successful plugin/tool and
-selected-dashboard activation from Steps 1–5. No connected source is required.
-Open the selected dashboard, then deliver this required user-facing handoff:
-
-> Setup is complete. In the Olympus dashboard, connect the sources you use.
-> You can start with one and add others whenever you like. I'll help if any
-> connection needs extra setup.
-
-Source selection happens in the dashboard. Do not turn all supported providers
-into a checklist, choose Gmail to satisfy a health hint, or add a chat question
-asking which source to start before the user has chosen a card. Provide help
-for the source the operator selects and only its approved scope. If the
-operator explicitly needs the documented headless fallback, ask which source
-that fallback should connect.
-
-On OpenClaw **2026.9.2**, prefer **Olympus** in the Control UI sidebar **when
-the installed Olympus artifact includes native Control UI support**. Host
-version alone does not prove that integration exists. Native plugin pages need
-**Settings → Labs → Custom plugin UI**, a Gateway restart through the applicable
-managed procedure, and a browser reload. Explain this opt-in and obtain any
-uncovered authorization before enabling it. Use that Gateway's Control UI in a supported browser. On the tested macOS
-  WebKit/Safari 26.2 runtime, Secure plugin cookies are rejected over plain
-  localhost/loopback HTTP even though the page is a secure context. For the
-  integrated UI, use Chrome on loopback or an already configured trusted HTTPS
-  route. Do not weaken cookie/authentication settings, expose a new listener,
-  or change certificate trust as an implicit plugin-install step. The integrated page uses the signed-in operator's
-permissions and keeps the worker bearer on the server; it needs no worker-token
-paste. See the [upstream contract](https://docs.openclaw.ai/plugins/feature-plugins).
-
-For native OAuth, verify that `gateway.publicOrigin` names that Gateway's
-HTTPS or literal localhost/loopback HTTP origin. Use the applicable live-change
-procedure for an authorized change; never edit runtime configuration directly
-or send a remote browser to the worker's loopback callback. If native support is absent, or the operator explicitly chooses direct access,
-explain that boundary and use the supported standalone dashboard. If a declared
-native UI fails to appear, inspect `plugins.controlUi.list` and
-`plugins.controlUi.status` first; a loaded backend does not prove browser
-activation. An import failure is a browser/asset delivery failure, not a reason
-to reconnect sources or reinstall the package blindly:
-
-```bash
-openclaw config validate
-openclaw doctor --lint
-openclaw gateway restart
-```
-
-**Only `openclaw config validate` is the gate.** It must exit green; if it
-does not, stop and fix the config before restarting (MUST NOT #3).
-
-`openclaw doctor --lint` is a report you read, not a gate you must clear.
-It lints the operator's whole OpenClaw install and routinely exits 1 on
-pre-existing warnings that have nothing to do with Olympus — another
-plugin's config, a deprecated key, an unrelated agent. Findings that are
-not about Olympus are **reported to the operator and left alone**: do not
-fix them (you did not cause them and nobody consented to those changes)
-and do not let them block the restart. A lint finding that IS about
-Olympus is a different matter — treat it as a real defect and resolve it
-before restarting.
-
-After the restart, verify the plugin actually loaded. The honest checks
-are:
-
-- the gateway boot line names olympus among the loaded plugins — read it
-  where it actually is, see below, and
-- `openclaw plugins inspect olympus --json` reports `"status": "loaded"`,
-  and
-- one real tool call succeeds — `olympus source index status`.
-
-**Where the gateway boot line actually lives.** Do not go looking in
-`openclaw logs` or `~/.openclaw/logs/gateway.log`. On `2026.9.1` the
-former printed nothing, and the latter is a stale file that can be months
-old — believing it will tell you the plugin failed to load on a machine
-where it loaded fine. On macOS the live gateway log is a per-day
-JSON-lines file under `/tmp/openclaw/`, so grep the newest one:
-
-```bash
-grep -h 'http server listening' "$(ls -t /tmp/openclaw/openclaw-*.log | head -1)"
-```
-
-Use the required handoff above once the selected dashboard is open.
-
-The standalone `olympus dashboard` command prints `url`, `opened` (whether it
-opened a browser), and `hint`. Hand the printed `url` to the operator exactly
-as printed, including `?token=dash_…`. The bare `/dashboard` path returns 401;
-do not remove the read-only view token.
 
 For a selected native dashboard, also verify `plugins.controlUi.list` includes
 Olympus without a diagnostic and `plugins.controlUi.status` reports successful
@@ -1497,40 +1395,36 @@ to reconnect sources or reinstall the package blindly:
 olympus dashboard
 ```
 
-(If no worker token exists yet, the hint instead says
-`No worker auth token found; run <rootDir>/bin/olympus setup first, then
-<rootDir>/bin/olympus dashboard token for the unlock value (rootDir comes
-from openclaw plugins inspect olympus --json).` — that means setup has not
-run, not that the dashboard is broken.)
+Use the required handoff above once the selected dashboard is open.
 
-**The `dash_` token is not the worker token.** It is derived from the
-worker bearer, it is read-only, and the worker admits it on exactly two
-routes — `GET /dashboard` and `GET /dashboard.json` — and no others: no
-control route, and no method but GET. So it is not the secret MUST NOT #2
-governs; treat it as you would the dashboard screen itself. Fine to hand
-the operator, not something to drop into a public issue or a shared log,
-because it does open their dashboard to whoever holds the link.
+The standalone `olympus dashboard` command returns `url`, `opened`, and
+`hint`. Run the already-resolved `$OLYMPUS_BIN dashboard --no-open` yourself and give the
+operator its opening link. They should click a link, not find an installation
+directory, run a terminal command, or copy an internal credential.
+Use `--no-open` for an agent handoff so a browser on the host cannot consume
+the single-use link before the operator opens it.
 
-**`olympus dashboard token` is the secret — treat it like one.** That
-command prints the worker bearer, which authorizes every change
-(**Connect**, **Sync now**, **Disconnect**, Unpair), and MUST NOT #2
-covers it exactly as it covers an API key: never paste it into chat, a
-summary, a note, or a commit. The operator pastes it into the dashboard's
-"Worker token" field with their own hands. When they need it, the
-dashboard's "Where is my token?" sheet gives them the command as
-`<rootDir>/bin/olympus dashboard token`, with `rootDir comes from
-openclaw plugins inspect olympus --json` under it — the same path your
-`$OLYMPUS_BIN` already resolves to, so what you tell them and what the
-page tells them agree. Follow that method, and if you cannot, give them
-the command to run themselves rather than running it and relaying the
-value.
+The opening link contains a short-lived, single-use authorization ticket. It
+expires after two minutes, so generate it at handoff time; if it expires or has
+already been used, run the command again. Do not fetch the link as a preview or
+probe before giving it to the operator. The browser removes the ticket from its
+address bar, exchanges it for the existing HttpOnly control session, and opens
+the dashboard with controls available. Verify that actual browser result before
+claiming the handoff is complete. Keep opening links out of public issues and
+shared logs; they authorize dashboard controls while valid.
 
-Both commands resolve the worker token the same way — worker.env first,
-then config — so the URL you hand over and the token the operator pastes
-always belong to the same worker. If an older build shows you an `auth`
-field beside the URL, or prints a `url` with no `dash_` query token at
-all, that build predates this guide: do not read the `auth` field as the
-token, and do not hand over a tokenless URL as if it worked.
+The durable worker bearer stays on the host. `olympus dashboard token` remains
+an advanced compatibility command: never paste it into chat, a summary, or a
+note, and never use it as the ordinary installation handoff. A missing worker
+credential means setup has not completed; an unreachable worker needs its
+existing readiness repair. Neither error is a reason to print its secret or
+silently hand over a read-only page as if controls were ready.
+
+The `dash_` token is not the worker token. Existing read-only dashboard links
+continue to authorize only their documented read routes. They cannot mint an
+opening ticket or authorize a control action. To operate the dashboard, obtain
+a fresh opening link from the installed CLI. Native OpenClaw access continues
+to use the signed-in Gateway identity and does not need this standalone step.
 
 Follow the source the operator chose; do not bulk-connect anything yourself.
 Other sources can be added later from the same dashboard. Your job is to narrate, run one-time setup when a
@@ -1746,7 +1640,9 @@ Rules:
 ## Step 7 — Verify the chosen source with a cited answer
 
 Run this only after the chosen source has completed a bounded initial sync and
-reports answer readiness. Ask a normal question whose answer the operator
+reports answer readiness. In OpenClaw, have the intended assistant call the
+native `source_answer` tool; a successful CLI command alone does not prove
+agent integration. Ask a normal question whose answer the operator
 expects in that source, then check the returned citations against that scope.
 If they deferred sources, report "base installation verified; cited-answer
 proof pending a chosen source" and stop here. An empty-source answer is not
@@ -1797,8 +1693,9 @@ the worker only if it reports `resolved_restart_required`);
 `degraded_credentials`; and the first answer's audit block must not
 report semantic search skipped for `embedding_provider_unavailable`.
 The dashboard shows a credential alert for the same condition — it
-should be absent. Then return to the selected Olympus dashboard — a protected view of source
-freshness and where public, private, secure, and secrets are allowed to go.
+should be absent. Then show the operator Olympus in OpenClaw: source freshness
+and where Public, Personal, Private, and Secrets are allowed to go. Use
+`olympus dashboard` when standalone access is needed.
 
 End with the required Step 6 dashboard link and connect/monitor instructions.
 Also report what was installed, the chosen posture, which

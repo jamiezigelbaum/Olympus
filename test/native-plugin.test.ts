@@ -160,7 +160,7 @@ describe('native OpenClaw plugin adapter', () => {
       {
         id: 'olympus-telegram-capture',
         reload: {
-          configPrefixes: ['plugins.entries.olympus.config.worker.telegramCapture'],
+          configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),
@@ -174,7 +174,7 @@ describe('native OpenClaw plugin adapter', () => {
       {
         id: 'olympus-whatsapp-capture',
         reload: {
-          configPrefixes: ['plugins.entries.olympus.config.worker.whatsappCapture'],
+          configPrefixes: ['plugins.entries.olympus.config.worker', 'plugins.entries.olympus.config.email.baseUrl', 'plugins.entries.olympus.config.sourceIndex', 'plugins.entries.olympus.config.sovereignty'],
         },
         start: expect.any(Function),
         stop: expect.any(Function),

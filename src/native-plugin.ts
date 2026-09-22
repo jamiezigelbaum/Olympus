@@ -240,12 +240,15 @@ const plugin = {
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
+    const { isReady: workerIsReady, ...workerRegistration } = workerService;
     const telegramService = createNativeTelegramService({
+      workerIsReady,
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
     });
     const creditMonitorService = createNativeCreditMonitorService({ initialPluginConfig: api.pluginConfig });
     const whatsappService = createNativeWhatsAppService({
+      workerIsReady,
       initialPluginConfig: api.pluginConfig,
     });
     const embeddingDrainService = createNativeEmbeddingDrainService({
@@ -254,7 +257,7 @@ const plugin = {
     });
     const transcriptionCleanupService = createNativeTranscriptionCleanupService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url });
     if (api.registerService) {
-      api.registerService(backgroundNativeProcessService(workerService));
+      api.registerService(backgroundNativeProcessService(workerRegistration));
       api.registerService(backgroundNativeProcessService(telegramService));
       api.registerService(creditMonitorService);
       api.registerService(backgroundNativeProcessService(whatsappService));

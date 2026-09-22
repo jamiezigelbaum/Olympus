@@ -12011,6 +12011,7 @@ var init_local_index = __esm(() => {
         throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
       }
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      await options.assertAuthorized?.();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -12039,13 +12040,14 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const rows = this.embeddingSourceRows(options.localItemIds);
+      const rows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
         throw new Error("Connector store embedding journal input changed.");
       }
       if (!(priorJournal && priorCounts) && this.embeddingRebindWouldInvalidateCurrency(provider)) {
+        await options.assertAuthorized?.();
         await assertEmbeddingProviderCanEmbed(provider);
       }
       let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
@@ -12114,6 +12116,7 @@ var init_local_index = __esm(() => {
       let staleSkipped = 0;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        await options.assertAuthorized?.();
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row)
@@ -12553,10 +12556,12 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds) {
+    embeddingSourceRows(localItemIds, accountScope, filters) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
+      const selectedAccount = normalizeOptionalAccountScope(accountScope);
+      const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       return this.db.query(`
       SELECT
@@ -12573,8 +12578,10 @@ var init_local_index = __esm(() => {
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
         ${itemFilter}
+        ${selectedAccount ? "AND i.account_scope = ?" : ""}
+        ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? []);
+    `).all(...selectedLocalItemIds ?? [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -15550,6 +15557,9 @@ var KNOWN_OAUTH_ERROR_CODES = new Set([
   "expired_token",
   "redirect_uri_mismatch"
 ]);
+
+// src/core/native-worker-service.ts
+init_config();
 
 // src/core/model-setup.ts
 init_http_timeout();
@@ -19010,6 +19020,9 @@ class DirectSourceEmbeddingDrainClient {
     const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === request.corpus_id);
     if (!config?.dbPath)
       throw new Error(`Direct connector-store embedding is not configured for ${request.corpus_id}.`);
+    if (config.family === "file") {
+      throw new Error(`Direct connector-store embedding refuses file-family corpus ${request.corpus_id} because it cannot own ` + "the current approved content scope. Use the default HTTP drain mode.");
+    }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
       store = new LocalConnectorStore({
@@ -19853,5 +19866,6 @@ export {
   publishNativeEmbeddingDrainReadiness,
   optionsFromEnv,
   embeddingLedgerRecorderFromEnv,
-  assertEmbeddingProviderForLane
+  assertEmbeddingProviderForLane,
+  DirectSourceEmbeddingDrainClient
 };

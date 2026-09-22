@@ -51,6 +51,7 @@ export const GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND =
 export const GOOGLE_DRIVE_RESUME_REJECTED_WARNING = 'google_drive_store_resume_cursor_rejected';
 export const GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING =
   'google_drive_store_ingest_exclusion';
+const GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX = 'gds1:';
 
 export interface GoogleDriveConnectorStoreSyncRequest {
   max_files?: number;
@@ -182,6 +183,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGoogleDriveLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
+  const connectorId = googleDriveCursorConnectorId(account, options.scope);
   if (
     options.secureEmbeddingProvider
     && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)
@@ -219,13 +221,13 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     // One provider traversal, shared with the second store. The two stores
     // differ only in the trust domain the spine accepts, so the second listing
     // pass was pure duplicate provider cost.
-    const traversal = sharedTraversal(input.connector);
+    const traversal = sharedTraversal(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
       ...(options.scope
         ? {
-            sourceScopeObservation: (item: import('../../core/contracts.ts').RawItem) => ({
+            sourceScopeObservation: (item: RawItem) => ({
               accountGeneration: options.scope!.generation,
               scopeRevision: options.scope!.revision,
               folderKeys: Array.isArray(item.metadata['folderAncestorIds'])
@@ -307,10 +309,11 @@ export function createGoogleDriveConnectorStoreSyncHandler(
       // internal store, and to completed runs because an unfinished row still
       // holds the cursor its run STARTED from.
       const envelope = request.checkpoint?.trim() || undefined;
-      const envelopeUsable = isGoogleDriveConnectorCursor(envelope);
+      const envelopeCursor = googleDriveCheckpointCursor(envelope, connectorId, options.scope !== undefined);
+      const envelopeUsable = isGoogleDriveConnectorCursor(envelopeCursor);
       const candidate = envelopeUsable
-        ? envelope
-        : options.internalStore.lastCompletedSyncRun(GOOGLE_DRIVE_PROVIDER)?.cursor;
+        ? envelopeCursor
+        : options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
       let resume = isGoogleDriveConnectorCursor(candidate) ? candidate : undefined;
       if ((envelope !== undefined && !envelopeUsable) || (candidate !== undefined && resume === undefined)) {
         warnings.push(GOOGLE_DRIVE_RESUME_REJECTED_WARNING);
@@ -342,6 +345,7 @@ export function createGoogleDriveConnectorStoreSyncHandler(
         usage: connector.requestBudgetStatus(),
         resumed: resume !== undefined,
         warnings,
+        ...(options.scope ? { checkpointConnectorId: connectorId } : {}),
       });
     },
 
@@ -442,12 +446,15 @@ async function runStore(input: {
  * recording is faithful even when the store stops early on its own maxItems
  * bound, because the second store applies the same bound to the same pages.
  */
-function sharedTraversal(connector: GoogleDriveSourceConnector): SourceConnector {
+function sharedTraversal(
+  connector: GoogleDriveSourceConnector,
+  connectorId: string,
+): SourceConnector {
   const pages: SourceConnectorListPage[] = [];
   let recorded = false;
   let failed = false;
   return {
-    id: connector.id,
+    id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
@@ -478,12 +485,47 @@ function sharedTraversal(connector: GoogleDriveSourceConnector): SourceConnector
   };
 }
 
+function googleDriveCursorConnectorId(
+  account: string,
+  scope: GoogleDriveConnectorStoreSyncOptions['scope'],
+): string {
+  if (!scope) return GOOGLE_DRIVE_PROVIDER;
+  const digest = createHash('sha256')
+    .update(`${account}\u0000${scope.generation}\u0000${scope.revision}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest}`;
+}
+
+function googleDriveScopedCheckpoint(cursor: string, connectorId: string): string {
+  return `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:`
+    + Buffer.from(cursor).toString('base64url');
+}
+
+function googleDriveCheckpointCursor(
+  checkpoint: string | undefined,
+  connectorId: string,
+  scoped: boolean,
+): string | undefined {
+  if (!checkpoint) return undefined;
+  if (!scoped) return checkpoint;
+  const prefix = `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}`
+    + `${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:`;
+  if (!checkpoint.startsWith(prefix)) return undefined;
+  try {
+    return Buffer.from(checkpoint.slice(prefix.length), 'base64url').toString('utf8').trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function taskOutcome(input: {
   kind: GoogleDriveConnectorStoreReceipt['kind'];
   run: DriveStoreRun;
   usage: GoogleRequestBudgetStatus | undefined;
   resumed: boolean;
   warnings: string[];
+  checkpointConnectorId?: string;
 }): GoogleDriveConnectorStoreTaskOutcome {
   // A reconcile is never a resume point. It traverses from the start of the
   // listing under the connector's own ceiling, so its position is behind the
@@ -491,9 +533,12 @@ function taskOutcome(input: {
   // backwards. The spine also refuses to persist it; both layers state it
   // because only one of them was ever the reason it looked correct.
   //
-  const checkpoint = input.kind === GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND
+  const rawCheckpoint = input.kind === GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND
     ? null
     : input.run.internal.sync.cursor ?? null;
+  const checkpoint = rawCheckpoint && input.checkpointConnectorId
+    ? googleDriveScopedCheckpoint(rawCheckpoint, input.checkpointConnectorId)
+    : rawCheckpoint;
   const internalIndexed = input.run.internal.sync.itemsIndexed;
   const secureIndexed = input.run.secure.sync.itemsIndexed;
   const internalTombstoned = input.run.internal.sync.itemsTombstoned;

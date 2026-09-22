@@ -6921,12 +6921,24 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
+var NativeMessagingCaptureOwnerError;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
   init_secret_store();
   init_unpaired_sources();
   init_connected_handles();
+  NativeMessagingCaptureOwnerError = class NativeMessagingCaptureOwnerError extends Error {
+    source;
+    configKey;
+    constructor(source) {
+      const configKey = source === "telegram" ? "worker.telegramCapture.enabled" : "worker.whatsappCapture.enabled";
+      super(`Native ${source} capture owns this session. Disable ${configKey}, wait for the native capture service to stop, then retry Unpair.`);
+      this.source = source;
+      this.name = "NativeMessagingCaptureOwnerError";
+      this.configKey = configKey;
+    }
+  };
 });
 
 // src/core/source-index/types.ts
@@ -11108,13 +11120,13 @@ function createDropboxProviderStoreSyncHandler(options) {
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
     throw new Error("Dropbox secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
-  const connectorIdForScope = (approvedScopeKey) => dropboxConnectorIdForScope(account, approvedScopeKey);
+  const connectorIdForScope = (approvedScopeKey) => dropboxConnectorIdForScope(account, approvedScopeKey, options.scope);
   return {
     connectorIdForScope,
     async pull(request) {
       const approvedScopeKey = required2(request.approved_scope_key, "Dropbox approved scope key");
       const connectorId = connectorIdForScope(approvedScopeKey);
-      const candidate = options.store.lastCompletedSyncRun(connectorId)?.cursor ?? request.checkpoint?.trim() ?? undefined;
+      const candidate = options.store.lastCompletedSyncRun(connectorId)?.cursor ?? dropboxCheckpointCursor(request.checkpoint, connectorId, options.scope !== undefined) ?? undefined;
       const maxItems = request.max_items === undefined ? undefined : positiveInteger3(request.max_items);
       const runTraversal = async (cursor) => {
         let pageDigestRestarts = 0;
@@ -11200,17 +11212,40 @@ function createDropboxProviderStoreSyncHandler(options) {
           ...receiptWithoutDigest,
           receipt_sha256: createHash8("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
-        checkpoint: sync.cursor ?? null
+        checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
     },
     lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt
   };
 }
-function dropboxConnectorIdForScope(account, approvedScopeKey) {
+function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
-  const scopeHash = createHash8("sha256").update(`${normalizedAccount}\x00${normalizedScope}`).digest("hex").slice(0, 24);
+  const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
+  const scopeHash = createHash8("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
+}
+function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
+  if (!cursor)
+    return null;
+  if (!scoped)
+    return cursor;
+  return `${DROPBOX_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice("dropbox.files.".length)}:` + Buffer.from(cursor).toString("base64url");
+}
+function dropboxCheckpointCursor(checkpoint, connectorId, scoped) {
+  const normalized = checkpoint?.trim();
+  if (!normalized)
+    return;
+  if (!scoped)
+    return normalized;
+  const prefix = `${DROPBOX_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice("dropbox.files.".length)}:`;
+  if (!normalized.startsWith(prefix))
+    return;
+  try {
+    return Buffer.from(normalized.slice(prefix.length), "base64url").toString("utf8").trim() || undefined;
+  } catch {
+    return;
+  }
 }
 function observedCompletion(connector) {
   let completed = false;
@@ -11247,7 +11282,7 @@ function required2(value, label) {
     throw new Error(`${label} is required.`);
   return normalized;
 }
-var DROPBOX_PROVIDER_STORE_RECEIPT_KIND = "dropbox_provider_connector_store_pull_receipt", DROPBOX_RESUME_CURSOR_RESET_WARNING = "provider_cursor_reset: provider invalidated the resume cursor; traversal restarted from the beginning.";
+var DROPBOX_PROVIDER_STORE_RECEIPT_KIND = "dropbox_provider_connector_store_pull_receipt", DROPBOX_RESUME_CURSOR_RESET_WARNING = "provider_cursor_reset: provider invalidated the resume cursor; traversal restarted from the beginning.", DROPBOX_SCOPED_CHECKPOINT_PREFIX = "dbxs1:";
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
   init_connector();
@@ -17488,6 +17523,7 @@ var init_local_index = __esm(() => {
         throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
       }
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      await options.assertAuthorized?.();
       const limit = normalizeEmbedLimit(options.limit);
       const journalId = normalizeMaintenanceJournalId(options.journalId);
       const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(journalId, options.journalLeaseGeneration);
@@ -17516,13 +17552,14 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const rows = this.embeddingSourceRows(options.localItemIds);
+      const rows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
       const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
       const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
       if (priorCounts && (priorCounts.chunksSeen !== rows.length || priorCounts.selectionSha256 !== selectionSha256 || priorCounts.inputSha256 !== inputSha256 || priorCounts.invalidateCurrentModelEmbeddings !== invalidateCurrentModelEmbeddings)) {
         throw new Error("Connector store embedding journal input changed.");
       }
       if (!(priorJournal && priorCounts) && this.embeddingRebindWouldInvalidateCurrency(provider)) {
+        await options.assertAuthorized?.();
         await assertEmbeddingProviderCanEmbed(provider);
       }
       let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
@@ -17591,6 +17628,7 @@ var init_local_index = __esm(() => {
       let staleSkipped = 0;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+        await options.assertAuthorized?.();
         const vectors = await provider.embed(batch.map((row) => ({
           ...row.title ? { title: row.title } : {},
           text: buildConnectorStoreEmbeddingText(row)
@@ -18030,10 +18068,12 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds) {
+    embeddingSourceRows(localItemIds, accountScope, filters) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
+      const selectedAccount = normalizeOptionalAccountScope(accountScope);
+      const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       return this.db.query(`
       SELECT
@@ -18050,8 +18090,10 @@ var init_local_index = __esm(() => {
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
         ${itemFilter}
+        ${selectedAccount ? "AND i.account_scope = ?" : ""}
+        ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? []);
+    `).all(...selectedLocalItemIds ?? [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -24873,6 +24915,7 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGoogleDriveLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
+  const connectorId = googleDriveCursorConnectorId(account, options.scope);
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error("Google Drive secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
@@ -24885,7 +24928,7 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
     provenance: sourceInvocationProvenance(overrides.provenance)
   });
   const runBothStores = async (input) => {
-    const traversal = sharedTraversal2(input.connector);
+    const traversal = sharedTraversal2(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
@@ -24940,8 +24983,9 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
       const maxItems = boundedMaxItems2(request.max_items, config.storePullMaxItems);
       const warnings = [];
       const envelope = request.checkpoint?.trim() || undefined;
-      const envelopeUsable = isGoogleDriveConnectorCursor(envelope);
-      const candidate = envelopeUsable ? envelope : options.internalStore.lastCompletedSyncRun(GOOGLE_DRIVE_PROVIDER)?.cursor;
+      const envelopeCursor = googleDriveCheckpointCursor(envelope, connectorId, options.scope !== undefined);
+      const envelopeUsable = isGoogleDriveConnectorCursor(envelopeCursor);
+      const candidate = envelopeUsable ? envelopeCursor : options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
       let resume = isGoogleDriveConnectorCursor(candidate) ? candidate : undefined;
       if (envelope !== undefined && !envelopeUsable || candidate !== undefined && resume === undefined) {
         warnings.push(GOOGLE_DRIVE_RESUME_REJECTED_WARNING);
@@ -24968,7 +25012,8 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
         run,
         usage: connector.requestBudgetStatus(),
         resumed: resume !== undefined,
-        warnings
+        warnings,
+        ...options.scope ? { checkpointConnectorId: connectorId } : {}
       });
     },
     async reconcile(request = {}) {
@@ -25005,12 +25050,12 @@ async function runStore2(input) {
   });
   return { sync: run.sync, embed: run.embed };
 }
-function sharedTraversal2(connector) {
+function sharedTraversal2(connector, connectorId) {
   const pages = [];
   let recorded = false;
   let failed = false;
   return {
-    id: connector.id,
+    id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId) => connector.fetchItem(localItemId),
@@ -25039,8 +25084,32 @@ function sharedTraversal2(connector) {
     }
   };
 }
+function googleDriveCursorConnectorId(account, scope) {
+  if (!scope)
+    return GOOGLE_DRIVE_PROVIDER;
+  const digest = createHash14("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest}`;
+}
+function googleDriveScopedCheckpoint(cursor, connectorId) {
+  return `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:` + Buffer.from(cursor).toString("base64url");
+}
+function googleDriveCheckpointCursor(checkpoint, connectorId, scoped) {
+  if (!checkpoint)
+    return;
+  if (!scoped)
+    return checkpoint;
+  const prefix = `${GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX}` + `${connectorId.slice(`${GOOGLE_DRIVE_PROVIDER}.scope.`.length)}:`;
+  if (!checkpoint.startsWith(prefix))
+    return;
+  try {
+    return Buffer.from(checkpoint.slice(prefix.length), "base64url").toString("utf8").trim() || undefined;
+  } catch {
+    return;
+  }
+}
 function taskOutcome2(input) {
-  const checkpoint = input.kind === GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND ? null : input.run.internal.sync.cursor ?? null;
+  const rawCheckpoint = input.kind === GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND ? null : input.run.internal.sync.cursor ?? null;
+  const checkpoint = rawCheckpoint && input.checkpointConnectorId ? googleDriveScopedCheckpoint(rawCheckpoint, input.checkpointConnectorId) : rawCheckpoint;
   const internalIndexed = input.run.internal.sync.itemsIndexed;
   const secureIndexed = input.run.secure.sync.itemsIndexed;
   const internalTombstoned = input.run.internal.sync.itemsTombstoned;
@@ -25127,7 +25196,7 @@ function boundedMaxItems2(value, fallback) {
 function latestCompletedAt2(values) {
   return values.filter((value) => Boolean(value)).sort().at(-1);
 }
-var GOOGLE_DRIVE_STORE_PULL_RECEIPT_KIND = "google_drive_connector_store_pull_receipt", GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND = "google_drive_connector_store_reconcile_receipt", GOOGLE_DRIVE_RESUME_REJECTED_WARNING = "google_drive_store_resume_cursor_rejected", GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING = "google_drive_store_ingest_exclusion", MAX_RECONCILE_FILES = 1000, MAX_RECONCILE_CONTENT_FILES = 500;
+var GOOGLE_DRIVE_STORE_PULL_RECEIPT_KIND = "google_drive_connector_store_pull_receipt", GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND = "google_drive_connector_store_reconcile_receipt", GOOGLE_DRIVE_RESUME_REJECTED_WARNING = "google_drive_store_resume_cursor_rejected", GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING = "google_drive_store_ingest_exclusion", GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX = "gds1:", MAX_RECONCILE_FILES = 1000, MAX_RECONCILE_CONTENT_FILES = 500;
 var init_drive_live_sync = __esm(() => {
   init_connector_store();
   init_embeddings();
@@ -57591,6 +57660,21 @@ var init_server3 = __esm(() => {
   init_tools();
 });
 
+// src/core/native-process-service.ts
+var init_native_process_service = () => {};
+
+// src/core/native-worker-service.ts
+var NATIVE_CAPTURE_OWNER_ENV_NAMES;
+var init_native_worker_service = __esm(() => {
+  init_config();
+  init_native_process_service();
+  init_worker_auth();
+  NATIVE_CAPTURE_OWNER_ENV_NAMES = {
+    telegram: "OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER",
+    whatsapp: "OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER"
+  };
+});
+
 // src/core/model-setup.ts
 function requiredModelProfiles(config2) {
   const required4 = new Map;
@@ -73242,7 +73326,10 @@ function createEmailSourceWorker(options = {}) {
               if (sourceDashboard.stopMessagingCapture) {
                 try {
                   await sourceDashboard.stopMessagingCapture(sourceId === "telegram.messages" ? "telegram" : "whatsapp");
-                } catch {
+                } catch (error2) {
+                  if (error2 instanceof NativeMessagingCaptureOwnerError) {
+                    throw new EmailSourceWorkerError(409, "native_capture_owner_active", error2.message);
+                  }
                   throw new EmailSourceWorkerError(409, "capture_stop_unconfirmed", "Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.");
                 }
               }
@@ -73680,6 +73767,13 @@ function createEmailSourceWorker(options = {}) {
           }
           const connectorStore = connectorStoresByCorpusId.get(corpusId);
           if (connectorStore) {
+            const embeddingScope = connectorStore.family === "file" ? requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope) : undefined;
+            const assertEmbeddingScopeCurrent = embeddingScope ? () => {
+              const current = requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope);
+              if (current.signature !== embeddingScope.signature) {
+                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The approved file-content scope changed before embedding dispatch; retry under the current approval.");
+              }
+            } : undefined;
             const embeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId) ?? sourceIndexEmbeddingProvider;
             if (!embeddingProvider) {
               throw new EmailSourceWorkerError(501, "source_index_embedding_not_configured", `Private source worker does not have an embedding provider configured for ${connectorStore.corpusId}.`);
@@ -73688,6 +73782,9 @@ function createEmailSourceWorker(options = {}) {
             const maxPendingChunks = asOptionalNumber(record3.max_pending_chunks);
             const result = await connectorStore.embedChunks({
               provider: embeddingProvider,
+              ...embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {},
+              ...embeddingScope?.filters ? { filters: embeddingScope.filters } : {},
+              ...assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {},
               ...modelId ? { modelId } : {},
               ...maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}
             });
@@ -73904,6 +74001,22 @@ function createEmailSourceWorker(options = {}) {
     }
     return false;
   }
+}
+function requireCurrentFileEmbeddingScope(store, resolver) {
+  const current = resolver?.(store);
+  if (current?.allowed !== true || current.contentAllowed !== true) {
+    throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source has no currently approved full-content scope for embedding.");
+  }
+  const accountScope = current.accountScope?.trim();
+  const filters = normalizeConnectorStoreSearchFilters(current.contentFilters);
+  if (!accountScope || !filters) {
+    throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source embedding lane is missing its current account-bound content scope.");
+  }
+  return {
+    accountScope,
+    filters,
+    signature: JSON.stringify({ accountScope, filters })
+  };
 }
 function scrubSourceWorkerLogMessage(message) {
   return String(message).slice(0, 200).replace(/[A-Za-z0-9._~+/=-]{24,}/g, "<redacted>");
@@ -75873,6 +75986,7 @@ var init_email_source = __esm(() => {
   init_selected_item_safety();
   init_venice_models();
   init_public_surface();
+  init_messaging_capture();
   init_unpaired_sources();
   init_pairing_session_paths();
   init_transcription();
@@ -78357,6 +78471,7 @@ __export(exports_server2, {
   openIngestionDispositionsRuntime: () => openIngestionDispositionsRuntime,
   main: () => main,
   createXBookmarksConnectorStoreRuntime: () => createXBookmarksConnectorStoreRuntime,
+  createWorkerMessagingCaptureOwnership: () => createWorkerMessagingCaptureOwnership,
   createSourceIndexEmbeddingProviderFromSovereignty: () => createSourceIndexEmbeddingProviderFromSovereignty,
   createSourceIndexEmbeddingProviderFromEnv: () => createSourceIndexEmbeddingProviderFromEnv,
   createRefreshableXBookmarksConnectorStoreRuntime: () => createRefreshableXBookmarksConnectorStoreRuntime,
@@ -78372,6 +78487,39 @@ __export(exports_server2, {
 });
 import { existsSync as existsSync31 } from "node:fs";
 import { isAbsolute as isAbsolute7 } from "node:path";
+function createWorkerMessagingCaptureOwnership(options) {
+  const env = options.env ?? process.env;
+  const nativeOwners = {
+    telegram: parseOptionalBooleanEnv(env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram], NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram),
+    whatsapp: parseOptionalBooleanEnv(env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp], NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp)
+  };
+  const createSupervisor = options.createSupervisor ?? ((source) => source === "telegram" ? new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot }) : new MessagingCaptureSupervisor({
+    source,
+    registryPath: options.registryPath,
+    packageRoot: options.packageRoot,
+    whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env })
+  }));
+  const captures = {};
+  for (const source of ["telegram", "whatsapp"]) {
+    if (!nativeOwners[source])
+      captures[source] = createSupervisor(source);
+  }
+  const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
+  return {
+    captures,
+    nativeOwners,
+    async stopForUnpair(source) {
+      if (nativeOwners[source]) {
+        throw new NativeMessagingCaptureOwnerError(source);
+      }
+      const capture = captures[source];
+      if (!capture)
+        throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      await capture.stop();
+      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    }
+  };
+}
 function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
     throw new Error("Connector store secure_local embeddings require a local/private or approved Venice embedding provider.");
@@ -79081,15 +79229,11 @@ async function main() {
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
-  const captures = {
-    telegram: new MessagingCaptureSupervisor({ source: "telegram", registryPath: connectedHandleRegistryPath, packageRoot }),
-    whatsapp: new MessagingCaptureSupervisor({
-      source: "whatsapp",
-      registryPath: connectedHandleRegistryPath,
-      packageRoot,
-      whatsappBridgePath: whatsappBridgePathForPackage(packageRoot, { env: process.env })
-    })
-  };
+  const captureOwnership = createWorkerMessagingCaptureOwnership({
+    registryPath: connectedHandleRegistryPath,
+    packageRoot
+  });
+  const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   let capturesClosed = false;
   const reconcileCaptures = async () => {
@@ -79113,8 +79257,7 @@ async function main() {
     }
   };
   const stopMessagingCapture = async (source) => {
-    revokeMessagingCaptureGrant(defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath));
-    await captures[source].stop();
+    await captureOwnership.stopForUnpair(source);
   };
   const fileSourceScopeAuthority = connectedHandleRegistryPath ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath }) : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
@@ -79873,7 +80016,7 @@ async function main() {
     const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
     const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore ? currentDropboxHandle.handle === dropboxHandle?.handle && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore ? currentDropboxHandle.handle === dropboxHandle?.handle && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration && currentDropboxScopeRef.revision === dropboxScopeRef?.revision && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
       store: dropboxConnectorStore,
       account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
       credentialHandle: currentDropboxHandle.handle,
@@ -80652,6 +80795,7 @@ var init_server4 = __esm(async () => {
   init_package_root();
   init_messaging_capture();
   init_messaging_pairing();
+  init_native_worker_service();
   init_model_setup();
   init_connect();
   init_worker_auth();

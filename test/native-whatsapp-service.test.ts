@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
@@ -14,6 +14,20 @@ afterEach(async () => {
 });
 
 describe('native WhatsApp capture service', () => {
+  test('refuses capture without native worker ownership and when worker supervision is disabled', async () => {
+    const fixture = whatsappFixture();
+    for (const enabled of [true, false]) {
+      const service = track(createNativeWhatsAppService({
+        initialPluginConfig: { ...fixture.pluginConfig, worker: { ...fixture.pluginConfig.worker, service: { enabled } } },
+        workerIsReady: () => false,
+        workerReadinessTimeoutMs: 0,
+      }));
+      await expect(service.start({})).rejects.toThrow(enabled ? 'does not own its endpoint' : 'requires worker.service.enabled');
+      expect(existsSync(fixture.startsPath)).toBe(false);
+      expect(service.reload.configPrefixes).toContain('plugins.entries.olympus.config.worker');
+    }
+  });
+
   test('defaults disabled and requires absolute binary and state paths when configured', () => {
     expect(configFromPluginConfig({}).worker.whatsappCapture).toEqual({ enabled: false });
     expect(() => configFromPluginConfig({
@@ -36,6 +50,7 @@ describe('native WhatsApp capture service', () => {
   test('keeps a connecting bridge pending beyond the host callback deadline and remains stoppable', async () => {
     const fixture = whatsappFixture({ receipt: {} });
     const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig, readinessPollMs: 20, stopGraceMs: 100,
     }));
     let settled = false;
@@ -53,6 +68,7 @@ describe('native WhatsApp capture service', () => {
   test('starts with only the minimal system environment and instance-bound native settings, then stops', async () => {
     const fixture = whatsappFixture();
     const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       startupTimeoutMs: 2_000,
       readinessPollMs: 10,
@@ -105,7 +121,8 @@ describe('native WhatsApp capture service', () => {
       const fixture = whatsappFixture({ receipt });
       const failures: string[] = [];
       const service = track(createNativeWhatsAppService({
-        initialPluginConfig: fixture.pluginConfig,
+      workerIsReady: () => true,
+      initialPluginConfig: fixture.pluginConfig,
         startupTimeoutMs: 100,
         readinessPollMs: 10,
         stopGraceMs: 50,
@@ -127,6 +144,7 @@ describe('native WhatsApp capture service', () => {
     const fixture = whatsappFixture();
     rmSync(join(fixture.stateDir, 'session.db'));
     const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       startupTimeoutMs: 100,
     }));
@@ -137,6 +155,7 @@ describe('native WhatsApp capture service', () => {
   test('fresh runtime removal disables a service registered from enabled initial config', async () => {
     const fixture = whatsappFixture();
     const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
       initialPluginConfig: fixture.pluginConfig,
       startupTimeoutMs: 100,
     }));
@@ -165,7 +184,7 @@ function whatsappFixture(options: {
   chmodSync(binaryPath, 0o700);
   return {
     pluginConfig: {
-      worker: { whatsappCapture: { enabled: true, binaryPath, stateDir } },
+      worker: { service: { enabled: true }, whatsappCapture: { enabled: true, binaryPath, stateDir } },
     },
     binaryPath,
     startsPath,

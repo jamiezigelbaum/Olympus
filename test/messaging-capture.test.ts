@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MessagingCaptureSupervisor,
+  defaultMessagingCaptureGrantPath,
   saveMessagingCaptureGrant,
   type CaptureChild,
 } from '../src/core/messaging-capture.ts';
@@ -13,6 +14,7 @@ import {
   type MessagingPairingConnectedResult,
 } from '../src/core/messaging-pairing.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
+import { createWorkerMessagingCaptureOwnership } from '../src/workers/email-source/server.ts';
 
 function secretStore(values: Record<string, string>): SecretStore {
   const stored = new Map(Object.entries(values));
@@ -198,6 +200,42 @@ describe('messaging capture supervisor', () => {
     // discard its handle and falsely release session custody.
     await expect(supervisor.stop()).rejects.toThrow(/custody is retained/);
     expect(signals).toEqual(['SIGTERM', 'SIGKILL', 'SIGTERM', 'SIGKILL']);
+  });
+});
+
+describe('worker and native capture ownership', () => {
+  test('retains the grant and session without constructing a second supervisor when native capture owns the source', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-native-capture-owner-'));
+    const registryPath = join(root, 'handles.json');
+    const sessionPath = join(root, 'telegram.personal');
+    const grantPath = defaultMessagingCaptureGrantPath('telegram', registryPath);
+    writeRegistry(registryPath, true);
+    writeFileSync(`${sessionPath}.session`, 'fixture');
+    saveMessagingCaptureGrant({ path: grantPath, pairing: telegramPairing(sessionPath) });
+    let supervisorConstructed = false;
+    let grantRevoked = false;
+    const ownership = createWorkerMessagingCaptureOwnership({
+      env: {
+        OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true',
+        OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'true',
+      },
+      registryPath,
+      packageRoot: '/fixture',
+      createSupervisor: () => {
+        supervisorConstructed = true;
+        throw new Error('must not construct a worker capture supervisor');
+      },
+      revokeGrant: () => { grantRevoked = true; },
+    });
+
+    expect(ownership.captures).toEqual({});
+    expect(supervisorConstructed).toBe(false);
+    await expect(ownership.stopForUnpair('telegram')).rejects.toThrow(
+      'Disable worker.telegramCapture.enabled, wait for the native capture service to stop, then retry Unpair.',
+    );
+    expect(grantRevoked).toBe(false);
+    expect(existsSync(grantPath)).toBe(true);
+    expect(existsSync(`${sessionPath}.session`)).toBe(true);
   });
 });
 

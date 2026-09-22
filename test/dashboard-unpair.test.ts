@@ -48,6 +48,10 @@ import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
 import {
+  NativeMessagingCaptureOwnerError,
+  defaultMessagingCaptureGrantPath,
+} from '../src/core/messaging-capture.ts';
+import {
   PairingSessionPathError,
   planPairingSessionRemoval,
   removePlannedPairingSessionFile,
@@ -119,6 +123,38 @@ describe('bounded dashboard Unpair', () => {
     expect(existsSync(sessionPath)).toBe(failStop);
     expect(await secrets.get('telegram.personal.app.api_hash')).toBe(failStop ? 'synthetic-app-secret' : undefined);
     expect(await response.text()).not.toContain('synthetic-app-secret');
+  });
+
+  test('returns actionable native-owner guidance without deleting the retained grant or session', async () => {
+    const home = fixtureHome();
+    const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));
+    const registryPath = join(home, 'handles.json');
+    const grantPath = touch(defaultMessagingCaptureGrantPath('telegram', registryPath));
+    writeConnectedHandleRegistry(registryOf(telegramHandle()), registryPath);
+    const secrets = memorySecretStore({ 'telegram.personal.session_path': sessionPath });
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      registryPath,
+      secretStore: secrets,
+      pairingSessionPathContext: { homeDir: home },
+      stopMessagingCapture: async (source) => { throw new NativeMessagingCaptureOwnerError(source); },
+    } }));
+
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', {
+      source_id: 'telegram.messages',
+      acknowledge: true,
+    }));
+
+    expect(response.status).toBe(409);
+    const body = await response.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('native_capture_owner_active');
+    expect(body.error.message).toContain('Disable worker.telegramCapture.enabled');
+    expect(body.error.message).toContain('wait for the native capture service to stop');
+    expect(body.error.message).toContain('retry Unpair');
+    expect(existsSync(grantPath)).toBe(true);
+    expect(existsSync(sessionPath)).toBe(true);
+    expect(await secrets.get('telegram.personal.session_path')).toBe(sessionPath);
+    expect(readConnectedHandleRegistry(registryPath).handles).toHaveLength(1);
   });
 
   test('removes the local Telegram pairing session, parks the lane, and leaves the capture spool and indexed data alone', async () => {

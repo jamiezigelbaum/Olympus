@@ -21,6 +21,21 @@ export interface MessagingCaptureGrant {
   grantedAt: string;
 }
 
+export class NativeMessagingCaptureOwnerError extends Error {
+  readonly configKey: 'worker.telegramCapture.enabled' | 'worker.whatsappCapture.enabled';
+
+  constructor(readonly source: MessagingPairingSource) {
+    const configKey = source === 'telegram'
+      ? 'worker.telegramCapture.enabled'
+      : 'worker.whatsappCapture.enabled';
+    super(
+      `Native ${source} capture owns this session. Disable ${configKey}, wait for the native capture service to stop, then retry Unpair.`,
+    );
+    this.name = 'NativeMessagingCaptureOwnerError';
+    this.configKey = configKey;
+  }
+}
+
 export function defaultMessagingCaptureGrantPath(
   source: MessagingPairingSource,
   registryPath = defaultHandleRegistryPath(),

@@ -27,6 +27,7 @@ import { selectedItemContentFieldPath } from '../../core/source-index/selected-i
 import { dropboxPolicyExcludedPathPrefixes, type SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
+import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
   artifactPresence,
   assertUnpairedRecordWritable,
@@ -1996,7 +1997,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               for (const unpairedSource of selectedSourceIds) dashboardUnpairedSources.add(unpairedSource);
               if (sourceDashboard.stopMessagingCapture) {
                 try { await sourceDashboard.stopMessagingCapture(sourceId === 'telegram.messages' ? 'telegram' : 'whatsapp'); }
-                catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.'); }
+                catch (error) {
+                  if (error instanceof NativeMessagingCaptureOwnerError) {
+                    throw new EmailSourceWorkerError(409, 'native_capture_owner_active', error.message);
+                  }
+                  throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Pairing files and credentials were retained; retry Unpair.');
+                }
               }
 
               const removedSessionPaths: string[] = [];
@@ -2625,6 +2631,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const connectorStore = connectorStoresByCorpusId.get(corpusId);
           if (connectorStore) {
+            const embeddingScope = connectorStore.family === 'file'
+              ? requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope)
+              : undefined;
+            const assertEmbeddingScopeCurrent = embeddingScope
+              ? () => {
+                  const current = requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope);
+                  if (current.signature !== embeddingScope.signature) {
+                    throw new EmailSourceWorkerError(
+                      403,
+                      'source_index_policy_violation',
+                      'The approved file-content scope changed before embedding dispatch; retry under the current approval.',
+                    );
+                  }
+                }
+              : undefined;
             const embeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
               ?? sourceIndexEmbeddingProvider;
             if (!embeddingProvider) {
@@ -2638,6 +2659,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const maxPendingChunks = asOptionalNumber(record.max_pending_chunks);
             const result = await connectorStore.embedChunks({
               provider: embeddingProvider,
+              ...(embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {}),
+              ...(embeddingScope?.filters ? { filters: embeddingScope.filters } : {}),
+              ...(assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {}),
               ...(modelId ? { modelId } : {}),
               ...(maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}),
             });
@@ -2953,6 +2977,38 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     }
     return false;
   }
+}
+
+function requireCurrentFileEmbeddingScope(
+  store: LocalConnectorStore,
+  resolver: EmailSourceWorkerOptions['connectorStoreReadScope'],
+): {
+  accountScope: string;
+  filters: ConnectorStoreSearchFilters;
+  signature: string;
+} {
+  const current = resolver?.(store);
+  if (current?.allowed !== true || current.contentAllowed !== true) {
+    throw new EmailSourceWorkerError(
+      403,
+      'source_index_policy_violation',
+      'This file source has no currently approved full-content scope for embedding.',
+    );
+  }
+  const accountScope = current.accountScope?.trim();
+  const filters = normalizeConnectorStoreSearchFilters(current.contentFilters);
+  if (!accountScope || !filters) {
+    throw new EmailSourceWorkerError(
+      403,
+      'source_index_policy_violation',
+      'This file source embedding lane is missing its current account-bound content scope.',
+    );
+  }
+  return {
+    accountScope,
+    filters,
+    signature: JSON.stringify({ accountScope, filters }),
+  };
 }
 
 function scrubSourceWorkerLogMessage(message: unknown): string {

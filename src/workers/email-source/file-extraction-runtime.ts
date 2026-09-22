@@ -74,6 +74,7 @@ import {
 } from '../file-extraction/runner.ts';
 import { createConnectorStoreExtractionSink } from '../file-extraction/store-sink.ts';
 import type {
+  ExtractionItemRef,
   ExtractorRegistryConfig,
   FileExtractionSource,
 } from '../file-extraction/types.ts';
@@ -149,7 +150,7 @@ export interface FileExtractionRuntimeOptions {
     allowsRef(input: {
       config: FileExtractionCorpusConfig;
       store: LocalConnectorStore;
-      ref: import('../file-extraction/types.ts').ExtractionItemRef;
+      ref: ExtractionItemRef;
     }): boolean;
   };
   /** Where a dropped corpus is reported. Defaults to `console.warn`. */

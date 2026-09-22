@@ -53,9 +53,14 @@ import {
 
 const PUBLISHER_APP_KEY = 'olympus-publisher-dropbox-app-key';
 const DASHBOARD_ORIGIN = 'https://olympus.example.org';
-const LOOPBACK_HTTPS_ORIGIN = 'https://127.0.0.1:18789';
-const LOOPBACK_HTTP_ORIGIN = 'http://127.0.0.1:18789';
+const GATEWAY_PUBLIC_ORIGIN = 'https://127.0.0.1:18789';
 const PILOT_CLIENT_ID = '123456789012-olympusdesktopfixture.apps.googleusercontent.com';
+const GOOGLE_LOOPBACK_ORIGINS = [
+  'http://localhost:18789',
+  'http://127.0.0.1:18789',
+  'http://[::1]:18789',
+  GATEWAY_PUBLIC_ORIGIN,
+] as const;
 
 const dirs: string[] = [];
 let previousAppKey: string | undefined;
@@ -573,49 +578,68 @@ describe('publisher-client relay flow', () => {
   });
 });
 
-describe('scheme-aware Google publisher flow', () => {
-  test('HTTPS loopback uses the publisher Web client, signed relay, and HTTPS target for Gmail and Drive', async () => {
+describe('native Gateway public-origin context', () => {
+  test('authenticated Gateway HTTPS origin selects the Google Web relay for Gmail and Drive', async () => {
     await withPilotClient(async () => {
       for (const source of ['gmail', 'google-drive'] as const) {
         const instance = fixture();
-        const started = await authorizationUrl(await startConnect(instance, { source }, LOOPBACK_HTTPS_ORIGIN));
-        expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
-        expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
-        const state = started.searchParams.get('state')!;
-        expect(statePayload(state)).toMatchObject({
-          origin: LOOPBACK_HTTPS_ORIGIN,
+        const started = await instance.fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer dashboard-secret',
+            'Content-Type': 'application/json',
+            [DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER]: GATEWAY_PUBLIC_ORIGIN,
+          },
+          body: JSON.stringify({ source }),
+        }));
+        const url = await authorizationUrl(started);
+        expect(url.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+        expect(url.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+        expect(statePayload(url.searchParams.get('state')!)).toMatchObject({
+          origin: GATEWAY_PUBLIC_ORIGIN,
           source,
         });
-
-        const callback = await instance.fetch(new Request(
-          `${LOOPBACK_HTTPS_ORIGIN}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
-        ));
-        expect(callback.status).toBe(303);
-        const location = callback.headers.get('Location')!;
-        expect(location).toBe(`/oauth/callback/${source}/done`);
-        const done = await instance.fetch(new Request(`${LOOPBACK_HTTPS_ORIGIN}${location}`));
-        expect(done.status).toBe(200);
-        expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
-        expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
       }
     });
   });
 
-  test('HTTP loopback preserves the Desktop pilot client and direct callback exchange', async () => {
+  test('HTTP and HTTPS loopback complete Gmail and Drive through the publisher Web relay without local Google secrets', async () => {
     await withPilotClient(async () => {
-      const instance = fixture();
-      const started = await authorizationUrl(await startConnect(instance, { source: 'gmail' }, LOOPBACK_HTTP_ORIGIN));
-      expect(started.searchParams.get('client_id')).toBe(PILOT_CLIENT_ID);
-      expect(started.searchParams.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
-      const state = started.searchParams.get('state')!;
-      expect(state).not.toContain('.');
+      for (const origin of GOOGLE_LOOPBACK_ORIGINS) {
+        for (const source of ['gmail', 'google-drive'] as const) {
+          const callbackOrigin = origin.startsWith('http:')
+            ? 'http://127.0.0.1:18789'
+            : origin;
+          const secretReads: string[] = [];
+          const secretWrites: string[] = [];
+          const instance = fixture({
+            'google.personal.oauth.client_id': DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            'google.personal.oauth.client_secret': 'must-not-be-read-google-secret',
+            [`${source}.personal.oauth.client_id`]: DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID,
+            [`${source}.personal.oauth.client_secret`]: 'must-not-be-read-source-secret',
+          }, { secretReads, secretWrites });
+          const started = await authorizationUrl(await startConnect(instance, { source }, origin));
+          expect(started.searchParams.get('client_id')).toBe(DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID);
+          expect(started.searchParams.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          const state = started.searchParams.get('state')!;
+          expect(state.split('.')).toHaveLength(2);
+          expect(statePayload(state)).toMatchObject({ origin: callbackOrigin, source });
 
-      const callback = await instance.fetch(new Request(
-        `${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail?code=gmail-http-code&state=${encodeURIComponent(state)}`,
-      ));
-      expect(callback.status).toBe(303);
-      expect(instance.exchangeUrls).toEqual(['https://oauth2.googleapis.com/token']);
-      expect(instance.exchanges[0]!.get('redirect_uri')).toBe(`${LOOPBACK_HTTP_ORIGIN}/oauth/callback/gmail`);
+          const callback = await instance.fetch(new Request(
+            `${callbackOrigin}/oauth/callback/${source}?code=${source}-code&state=${encodeURIComponent(state)}`,
+          ));
+          expect(callback.status).toBe(303);
+          const location = callback.headers.get('Location')!;
+          expect(location).toBe(`/oauth/callback/${source}/done`);
+          const done = await instance.fetch(new Request(`${callbackOrigin}${location}`));
+          expect(done.status).toBe(200);
+          expect(instance.exchangeUrls).toEqual([DEFAULT_GOOGLE_PUBLISHER_EXCHANGE_URL]);
+          expect(instance.exchanges[0]!.get('redirect_uri')).toBe(DEFAULT_OAUTH_RELAY_URL);
+          expect(instance.exchanges[0]!.has('client_secret')).toBe(false);
+          expect(secretReads.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+          expect(secretWrites.filter((key) => key.endsWith('.oauth.client_secret'))).toEqual([]);
+        }
+      }
     });
   });
 });

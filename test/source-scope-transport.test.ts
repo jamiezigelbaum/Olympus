@@ -8,6 +8,9 @@ import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.
 import { defaultConfig } from '../src/core/config.ts';
 import { registerOlympusDashboardGateway, type DashboardFetch } from '../src/core/control-ui-gateway.ts';
 import { OLYMPUS_DASHBOARD_READ_METHOD, OLYMPUS_DASHBOARD_CONTROL_METHOD, type OlympusFolderScopeBrowseResult } from '../src/control-ui-contract.ts';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { cleanups.splice(0).reverse().forEach((close) => close()); });
@@ -143,3 +146,155 @@ test.each([false, true])('metadata-only worker searches stay isolated with mixed
   expect((await query('sharedbody')).hits).toHaveLength(mixed ? 1 : 0);
   if (mixed) expect((await query('allowedcontentbody')).hits).toMatchObject([{ sourceItem: { providerItemId: 'full-file' } }]);
 });
+
+test('file embedding refuses a revoked scope before an approved remote provider is invoked', async () => {
+  const store = await scopedEmbeddingStore(['retained private chunk']);
+  let providerCalls = 0;
+  let scopeChecks = 0;
+  const provider = veniceProvider(async (inputs) => {
+    providerCalls += 1;
+    return inputs.map(() => [1, 0]);
+  });
+  const worker = createEmailSourceWorker({
+    connectorStores: [store],
+    connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
+    connectorStoreReadScope: () => {
+      scopeChecks += 1;
+      return { allowed: false };
+    },
+  });
+  cleanups.push(() => worker.close());
+
+  const response = await worker.fetch(embeddingRequest(store.corpusId));
+  expect(response.status).toBe(403);
+  expect(await response.json()).toMatchObject({ error: { code: 'source_index_policy_violation' } });
+  expect(scopeChecks).toBe(1);
+  expect(providerCalls).toBe(0);
+});
+
+test('file embedding filters retained chunks from an earlier approval before remote dispatch', async () => {
+  const store = await scopedEmbeddingStore(['retained chunk stamped under revision one']);
+  let providerCalls = 0;
+  const provider = veniceProvider(async (inputs) => {
+    providerCalls += 1;
+    return inputs.map(() => [1, 0]);
+  });
+  const currentRevision = '22222222-2222-4222-8222-222222222222';
+  const worker = createEmailSourceWorker({
+    connectorStores: [store],
+    connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
+    connectorStoreReadScope: () => ({
+      allowed: true,
+      accountScope: 'personal',
+      filters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: currentRevision },
+      contentAllowed: true,
+      contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: currentRevision },
+    }),
+  });
+  cleanups.push(() => worker.close());
+
+  const response = await worker.fetch(embeddingRequest(store.corpusId));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ chunksSeen: 0, chunksEmbedded: 0 });
+  expect(providerCalls).toBe(0);
+});
+
+test('file embedding rechecks scope between batches and never dispatches retained rows after revocation', async () => {
+  const bodies = Array.from({ length: 33 }, (_unused, index) =>
+    index === 32 ? 'never-send-after-revocation' : `authorized-batch-body-${index}`);
+  const store = await scopedEmbeddingStore(bodies);
+  let approved = true;
+  let scopeChecks = 0;
+  const dispatched: string[][] = [];
+  const provider = veniceProvider(async (inputs) => {
+    dispatched.push(inputs.map((input) => input.text));
+    approved = false;
+    return inputs.map(() => [1, 0]);
+  });
+  const worker = createEmailSourceWorker({
+    connectorStores: [store],
+    connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
+    connectorStoreReadScope: () => {
+      scopeChecks += 1;
+      return approved
+        ? {
+            allowed: true,
+            accountScope: 'personal',
+            filters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: revision },
+            contentAllowed: true,
+            contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: revision },
+          }
+        : { allowed: false };
+    },
+  });
+  cleanups.push(() => worker.close());
+
+  const response = await worker.fetch(embeddingRequest(store.corpusId));
+  expect(response.status).toBe(403);
+  expect(await response.json()).toMatchObject({ error: { code: 'source_index_policy_violation' } });
+  expect(scopeChecks).toBeGreaterThanOrEqual(3);
+  expect(dispatched).toHaveLength(1);
+  expect(dispatched[0]).toHaveLength(32);
+  expect(dispatched.flat().join('\n')).not.toContain('never-send-after-revocation');
+});
+
+async function scopedEmbeddingStore(bodies: string[]): Promise<LocalConnectorStore> {
+  const { LocalConnectorStore } = await import('../src/workers/connector-store/index.ts');
+  const store = new LocalConnectorStore({
+    dbPath: ':memory:',
+    corpusId: 'secure_local.dropbox.files',
+    family: 'file',
+    trustDomain: 'secure_local',
+  });
+  cleanups.push(() => store.close());
+  const items: RawItem[] = bodies.map((body, index) => ({
+    identity: {
+      family: 'file',
+      provider: 'dropbox',
+      accountScope: 'personal',
+      providerItemId: `scope-embed-${index}`,
+      providerFileId: `scope-embed-${index}`,
+      localItemId: `personal:scope-embed-${index}`,
+      sourceVersion: 'rev1',
+    },
+    mimeType: 'text/plain',
+    content: { kind: 'text', text: body },
+    metadata: Object.freeze({ name: `scope-embed-${index}.txt`, pathDisplay: `/approved/scope-embed-${index}.txt` }),
+    fetchedAt: '2026-09-10T10:00:00.000Z',
+  }));
+  const connector: SourceConnector = {
+    id: 'scope-embedding-fixture',
+    family: 'file',
+    async authenticate() {},
+    async *listItems() { yield { items, done: true }; },
+    async fetchItem(localItemId) { return items.find((item) => item.identity.localItemId === localItemId)!; },
+    classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
+  };
+  await store.syncFromConnector(connector, {
+    fetchContent: true,
+    sourceScopeObservation: () => ({ accountGeneration: generation, scopeRevision: revision }),
+  });
+  return store;
+}
+
+function veniceProvider(
+  embed: (inputs: SourceEmbeddingInput[]) => Promise<number[][]>,
+): SourceEmbeddingProvider {
+  return {
+    provider: 'venice',
+    backend: 'cloud',
+    modelId: 'text-embedding-qwen3-8b',
+    dimension: 2,
+    configHash: 'scope-transport-venice',
+    epochId: 'cloud:venice:text-embedding-qwen3-8b:2',
+    embed,
+  };
+}
+
+function embeddingRequest(corpusId: string): Request {
+  return new Request('http://worker.test/v1/source/index/embed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ corpus_id: corpusId, max_pending_chunks: 64 }),
+  });
+}

@@ -887,6 +887,12 @@ export interface ConnectorStoreEmbedOptions {
   provider: SourceEmbeddingProvider;
   modelId?: string;
   limit?: number;
+  /** Trusted account boundary applied in SQL before any text reaches a provider. */
+  accountScope?: string;
+  /** Trusted content-scope predicates applied in SQL before provider dispatch. */
+  filters?: ConnectorStoreSearchFilters;
+  /** Revalidates dynamic authorization immediately before every provider call. */
+  assertAuthorized?: () => void | Promise<void>;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
   /** Durable idempotency key for a maintenance page's embedding phase. */
@@ -5526,6 +5532,7 @@ export class LocalConnectorStore {
       );
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    await options.assertAuthorized?.();
     const limit = normalizeEmbedLimit(options.limit);
     const journalId = normalizeMaintenanceJournalId(options.journalId);
     const journalLeaseGeneration = normalizeMaintenanceJournalLeaseGeneration(
@@ -5582,7 +5589,11 @@ export class LocalConnectorStore {
     )) {
       throw new Error('Connector store embedding journal provider changed.');
     }
-    const rows = this.embeddingSourceRows(options.localItemIds);
+    const rows = this.embeddingSourceRows(
+      options.localItemIds,
+      options.accountScope,
+      options.filters,
+    );
     const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
     const inputSha256 = connectorStoreEmbeddingInputSha256(rows);
     if (priorCounts && (
@@ -5603,6 +5614,7 @@ export class LocalConnectorStore {
     // transaction, so a raced authority change at worst skips one probe.
     if (!(priorJournal && priorCounts)
       && this.embeddingRebindWouldInvalidateCurrency(provider)) {
+      await options.assertAuthorized?.();
       await assertEmbeddingProviderCanEmbed(provider);
     }
     let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
@@ -5722,6 +5734,7 @@ export class LocalConnectorStore {
     let staleSkipped = 0;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
       const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+      await options.assertAuthorized?.();
       const vectors = await provider.embed(batch.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
         text: buildConnectorStoreEmbeddingText(row),
@@ -6512,7 +6525,11 @@ export class LocalConnectorStore {
 
   // Embeddable chunk rows: every live (non-tombstoned) chunk plus the
   // citation-safe item metadata that seasons the embedding text.
-  private embeddingSourceRows(localItemIds?: readonly string[]): Array<{
+  private embeddingSourceRows(
+    localItemIds?: readonly string[],
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): Array<{
     chunk_pk: number;
     item_pk: number;
     content_hash: string;
@@ -6525,6 +6542,8 @@ export class LocalConnectorStore {
   }> {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
     if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const selectedFilters = connectorStoreFilterSql(filters);
     const itemFilter = selectedLocalItemIds
       ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => '?').join(', ')})`
       : '';
@@ -6543,8 +6562,14 @@ export class LocalConnectorStore {
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
         ${itemFilter}
+        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+        ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...(selectedLocalItemIds ?? [])) as Array<{
+    `).all(
+      ...(selectedLocalItemIds ?? []),
+      ...(selectedAccount ? [selectedAccount] : []),
+      ...selectedFilters.params,
+    ) as Array<{
       chunk_pk: number;
       item_pk: number;
       content_hash: string;

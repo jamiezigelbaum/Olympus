@@ -8,6 +8,7 @@ import {
 } from '../src/workers/google-connectors/index.ts';
 import type {
   GoogleDriveApiClient,
+  GoogleDriveContentScope,
   GoogleDriveFile,
   GoogleDriveListFilesRequest,
 } from '../src/workers/google-connectors/drive.ts';
@@ -55,6 +56,67 @@ describe('Google Drive head resume precedence', () => {
     const second = await lane.handler.pull({ max_items: 2 });
     expect(second.receipt.counts.resumed_from_checkpoint).toBe(1);
     expect(second.receipt.counts.items_seen).toBe(2);
+  });
+
+  test('a new explicit scope approval starts a fresh bounded traversal and restamps unchanged rows', async () => {
+    const internalStore = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: 'file',
+      trustDomain: 'internal',
+    });
+    const secureStore = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+      family: 'file',
+      trustDomain: 'secure_local',
+    });
+    openStores.push(internalStore, secureStore);
+    const requests: GoogleDriveListFilesRequest[] = [];
+    const baseClient = fakeDriveClient(driveFiles(3));
+    const apiClient: GoogleDriveApiClient = {
+      ...baseClient,
+      async listFiles(request) {
+        requests.push(request);
+        return baseClient.listFiles(request);
+      },
+    };
+    const provider = localEmbeddingProvider();
+    const generation = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const revision1 = '11111111-1111-4111-8111-111111111111';
+    const revision2 = '22222222-2222-4222-8222-222222222222';
+    const handler = (revision: string) => createGoogleDriveConnectorStoreSyncHandler({
+      internalStore,
+      secureStore,
+      account: 'personal',
+      apiClient,
+      maxFiles: 2,
+      maxContentFiles: 50,
+      internalEmbeddingProvider: provider,
+      secureEmbeddingProvider: provider,
+      scope: driveScope(generation, revision),
+      env: {},
+    });
+
+    const first = await handler(revision1).pull({ max_items: 2 });
+    expect(first.checkpoint).toStartWith('gds1:');
+    expect(first.receipt.counts.items_seen).toBe(2);
+
+    const second = await handler(revision2).pull({ max_items: 2, checkpoint: first.checkpoint! });
+    expect(second.receipt.counts.resumed_from_checkpoint).toBe(0);
+    expect(second.receipt.counts.resume_cursor_rejected).toBe(1);
+    expect(second.receipt.counts.items_seen).toBe(2);
+    expect(second.receipt.counts.internal_chunks_embedded).toBe(0);
+    expect(requests.map((request) => request.pageToken)).toEqual([undefined, undefined]);
+    expect(requests.map((request) => request.pageSize)).toEqual([2, 2]);
+    expect(internalStore.searchItems('Apollo', 10, 'personal', {
+      sourceScopeGeneration: generation,
+      sourceScopeRevision: revision2,
+    })).toHaveLength(2);
+    expect(internalStore.searchItems('Apollo', 10, 'personal', {
+      sourceScopeGeneration: generation,
+      sourceScopeRevision: revision1,
+    })).toEqual([]);
   });
 });
 
@@ -142,5 +204,14 @@ function localEmbeddingProvider(): SourceEmbeddingProvider {
     async embed(inputs) {
       return inputs.map(() => [1, 0]);
     },
+  };
+}
+
+function driveScope(generation: string, revision: string): GoogleDriveContentScope {
+  return {
+    generation,
+    revision,
+    allowsMetadata: () => true,
+    allowsContent: () => true,
   };
 }

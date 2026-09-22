@@ -97,6 +97,9 @@ describe('native Olympus worker service', () => {
 
     expect(readCount(fixture.countPath)).toBe(1);
     expect(events).toEqual(['failure:Olympus worker is starting.', 'clear']);
+    expect(service.isReady()).toBe(true);
+    await service.stop();
+    expect(service.isReady()).toBe(false);
   });
 
   test('does not inherit Gateway and 1Password bootstrap credentials', async () => {
@@ -137,10 +140,11 @@ describe('native Olympus worker service', () => {
     }
   });
 
-  test('native config overrides legacy worker.env scheduler settings', async () => {
+  test('native config overrides worker.env settings and materializes capture ownership', async () => {
     const fixture = fakeWorkerFixture();
     const pluginConfig = fixture.pluginConfig(true);
-    (pluginConfig.worker as Record<string, unknown>).scheduler = {
+    const workerConfig = pluginConfig.worker as Record<string, unknown>;
+    workerConfig.scheduler = {
       enabled: true,
       sourceIds: ['x.bookmarks'],
       tickSeconds: 7,
@@ -149,6 +153,8 @@ describe('native Olympus worker service', () => {
       errorBackoffSeconds: 11,
       maxTransientRetries: 2,
     };
+    workerConfig.telegramCapture = { enabled: true };
+    workerConfig.whatsappCapture = { enabled: false };
     pluginConfig.sovereignty = { configPath: '/opt/olympus/sovereignty.json' };
     const service = track(createNativeWorkerService({
       initialPluginConfig: pluginConfig,
@@ -172,6 +178,8 @@ describe('native Olympus worker service', () => {
       OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS: '5',
       OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS: '11',
       OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES: '2',
+      OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true',
+      OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'false',
       OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '/opt/olympus/sovereignty.json',
     });
   });
@@ -424,6 +432,8 @@ function fakeWorkerFixture(options: { spawnDescendant?: boolean; exitBeforeServe
     `FAKE_WORKER_CONFIG_ENV_PATH=${configEnvPath}`,
     'OLYMPUS_WORKER_SCHEDULER_ENABLED=false',
     'OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS=telegram.messages',
+    'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER=false',
+    'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER=true',
     ...(options.exitBeforeServe ? ['FAKE_WORKER_EXIT_BEFORE_SERVE=true'] : []),
     ...(descendantPidPath ? [`FAKE_WORKER_DESCENDANT_PID_PATH=${descendantPidPath}`] : []),
     '',
@@ -479,6 +489,8 @@ writeFileSync(process.env.FAKE_WORKER_CONFIG_ENV_PATH, JSON.stringify(Object.fro
     'OLYMPUS_WORKER_SCHEDULER_FRESHNESS_THRESHOLD_HOURS',
     'OLYMPUS_WORKER_SCHEDULER_ERROR_BACKOFF_SECONDS',
     'OLYMPUS_WORKER_SCHEDULER_MAX_TRANSIENT_RETRIES',
+    'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER',
+    'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER',
     'OLYMPUS_SOVEREIGNTY_CONFIG_PATH',
     'OLYMPUS_CREDENTIAL_SYNTHETIC',
   ].map((key) => [key, process.env[key]]),
@@ -562,7 +574,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 25_000): Promise<
   throw new Error('Timed out waiting for fake worker lifecycle state.');
 }
 
-function track(service: NativeWorkerServiceDefinition): NativeWorkerServiceDefinition {
+function track<T extends NativeWorkerServiceDefinition>(service: T): T {
   services.push(service);
   return service;
 }

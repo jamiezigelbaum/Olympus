@@ -1,6 +1,12 @@
 import { olympusPackageRoot } from '../../core/package-root.ts';
-import { MessagingCaptureSupervisor, defaultMessagingCaptureGrantPath, revokeMessagingCaptureGrant } from '../../core/messaging-capture.ts';
+import {
+  MessagingCaptureSupervisor,
+  NativeMessagingCaptureOwnerError,
+  defaultMessagingCaptureGrantPath,
+  revokeMessagingCaptureGrant,
+} from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
@@ -270,6 +276,61 @@ import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-source
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
+
+type MessagingCaptureSource = 'telegram' | 'whatsapp';
+type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>;
+
+export function createWorkerMessagingCaptureOwnership(options: {
+  env?: Record<string, string | undefined>;
+  registryPath: string;
+  packageRoot: string;
+  createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
+  revokeGrant?: (path: string) => void;
+}): {
+  captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
+  nativeOwners: Record<MessagingCaptureSource, boolean>;
+  stopForUnpair(source: MessagingCaptureSource): Promise<void>;
+} {
+  const env = options.env ?? process.env;
+  const nativeOwners = {
+    telegram: parseOptionalBooleanEnv(
+      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram],
+      NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram,
+    ),
+    whatsapp: parseOptionalBooleanEnv(
+      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp],
+      NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp,
+    ),
+  };
+  const createSupervisor = options.createSupervisor ?? ((source: MessagingCaptureSource) => (
+    source === 'telegram'
+      ? new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot })
+      : new MessagingCaptureSupervisor({
+          source,
+          registryPath: options.registryPath,
+          packageRoot: options.packageRoot,
+          whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env }),
+        })
+  ));
+  const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  for (const source of ['telegram', 'whatsapp'] as const) {
+    if (!nativeOwners[source]) captures[source] = createSupervisor(source);
+  }
+  const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
+  return {
+    captures,
+    nativeOwners,
+    async stopForUnpair(source) {
+      if (nativeOwners[source]) {
+        throw new NativeMessagingCaptureOwnerError(source);
+      }
+      const capture = captures[source];
+      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      await capture.stop();
+      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    },
+  };
+}
 
 export function registerConnectorStoreEmbeddingLane(options: {
   store: LocalConnectorStore;
@@ -1367,11 +1428,11 @@ export async function main(): Promise<void> {
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
-  const captures = {
-    telegram: new MessagingCaptureSupervisor({ source: 'telegram', registryPath: connectedHandleRegistryPath!, packageRoot }),
-    whatsapp: new MessagingCaptureSupervisor({ source: 'whatsapp', registryPath: connectedHandleRegistryPath!, packageRoot,
-      whatsappBridgePath: whatsappBridgePathForPackage(packageRoot, { env: process.env }) }),
-  };
+  const captureOwnership = createWorkerMessagingCaptureOwnership({
+    registryPath: connectedHandleRegistryPath!,
+    packageRoot,
+  });
+  const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   let capturesClosed = false;
   const reconcileCaptures = async () => {
@@ -1386,8 +1447,7 @@ export async function main(): Promise<void> {
     finally { captureReconcileRunning = false; }
   };
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
-    revokeMessagingCaptureGrant(defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath!));
-    await captures[source].stop();
+    await captureOwnership.stopForUnpair(source);
   };
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
@@ -2632,7 +2692,11 @@ export async function main(): Promise<void> {
       : undefined;
     const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef
       && fileSourceScopeAuthority && dropboxConnectorStore
-      ? currentDropboxHandle.handle === dropboxHandle?.handle && dropboxProviderStoreSync
+      ? currentDropboxHandle.handle === dropboxHandle?.handle
+        && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId
+        && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration
+        && currentDropboxScopeRef.revision === dropboxScopeRef?.revision
+        && dropboxProviderStoreSync
         ? dropboxProviderStoreSync
         : createDropboxProviderStoreSyncHandler({
             store: dropboxConnectorStore,
