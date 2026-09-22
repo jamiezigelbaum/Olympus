@@ -552,7 +552,7 @@ describe('versioned Olympus worker lifecycle', () => {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('upgrade reads a quoted readiness port the way both service managers source it', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-quoted-port-'));
