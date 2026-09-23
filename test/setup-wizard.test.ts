@@ -108,8 +108,11 @@ describe('olympus setup wizard', () => {
       expect(subscription.modelProfiles['local-source-answer']).toBeUndefined();
       expect(subscription.modelProfiles['venice-private'].secretRef).toBe('store:venice.api_key');
       expect(subscription.modelProfiles['cloud-openclaw-infer'].provider).toBe('openclaw-infer');
+      // Subscription lane: OpenClaw's configured default model owns the run.
+      expect(subscription.modelProfiles['cloud-openclaw-infer'].model).toBeUndefined();
       expect(apiKey.modelProfiles['cloud-openclaw-infer']).toMatchObject({
         provider: 'openai-compatible',
+        model: 'gpt-5.5',
         baseUrl: 'https://api.openai.com/v1',
         secretRef: 'env:OPENAI_API_KEY',
       });

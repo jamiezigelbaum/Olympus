@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
-import { homedir, platform as osPlatform } from 'node:os';
+import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -9,6 +9,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
+import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
 import { isWorkerAuthTokenPlaceholder } from './worker-auth.ts';
 
@@ -29,6 +30,10 @@ export interface WorkerServiceInstallOptions {
   homeDir?: string;
   olympusBin?: string;
   bunBin?: string;
+  // Absolute openclaw executable whose directory the worker PATH must carry
+  // (the cloud analyst spawns `openclaw infer`). Resolved from OPENCLAW_BIN,
+  // PATH, and per-user install locations when omitted.
+  openclawBin?: string;
   workingDirectory?: string;
   envPath?: string;
   authToken?: string;
@@ -610,7 +615,7 @@ function defaultWorkerEnv(options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
   return [
     '# Olympus source worker environment.',
-    `PATH=${defaultWorkerPath(bunBin)}`,
+    `PATH=${defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))}`,
     `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
     `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? 'true' : 'false'}`,
     'OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true',
@@ -648,7 +653,11 @@ function nextWorkerEnvAuthToken(text: string, authToken: string | undefined): st
 
 function nextWorkerEnvPath(text: string, options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
-  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
+  const desiredPath = defaultWorkerPath(
+    bunBin,
+    text.match(/^PATH=(.*)$/m)?.[1],
+    workerToolDirectories(options, bunBin),
+  );
   return /^PATH=.*$/m.test(text)
     ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`)
     : `${text.replace(/\n?$/, '\n')}PATH=${desiredPath}\n`;
@@ -853,10 +862,13 @@ function defaultOlympusCliJs(options: WorkerServiceInstallOptions): string {
   return join(process.cwd(), 'dist', 'cli.js');
 }
 
-function defaultWorkerPath(bunBin: string, existingPath?: string): string {
+function defaultWorkerPath(bunBin: string, existingPath?: string, toolDirectories: string[] = []): string {
   const entries = [
     dirname(bunBin),
+    // An operator's existing PATH keeps its order; tool directories only
+    // append after it.
     ...(existingPath ? existingPath.split(':') : []),
+    ...toolDirectories,
     '/opt/homebrew/bin',
     '/usr/local/bin',
     '/usr/bin',
@@ -865,6 +877,41 @@ function defaultWorkerPath(bunBin: string, existingPath?: string): string {
     '/sbin',
   ].map((entry) => entry.trim()).filter(Boolean);
   return Array.from(new Set(entries)).join(':');
+}
+
+// Directories the worker's own child processes need by bare name:
+// - openclaw: the cloud analyst and source-watch runtime spawn it. A per-user
+//   install (npm prefix ~/.local) is invisible to the fixed service PATH.
+// - bun: an npm-installed Bun runs as .../node_modules/bun/bin/bun.exe, so the
+//   runtime directory has no `bun` entry; the setup shell's `bun` shim
+//   directory is recorded too.
+function workerToolDirectories(options: WorkerServiceInstallOptions, bunBin: string): string[] {
+  const directories: string[] = [];
+  if (basename(bunBin).toLowerCase() !== 'bun') {
+    const bunShim = typeof Bun !== 'undefined' ? Bun.which('bun') : null;
+    if (bunShim && isDurableToolPath(bunShim)) directories.push(dirname(bunShim));
+  }
+  if (options.openclawBin) {
+    const explicit = validatedAbsolutePath(options.openclawBin, 'OpenClaw executable');
+    if (!/[:\r\n]/.test(explicit)) directories.push(dirname(explicit));
+  } else {
+    const resolved = resolveOpenClawExecutable(options.homeDir ? { homeDir: options.homeDir } : {});
+    if (resolved && isDurableToolPath(resolved)) directories.push(dirname(resolved));
+  }
+  return directories;
+}
+
+// A setup shell can see tools through a temporary npx/npm-exec prefix or a
+// project's node_modules/.bin. Those vanish or belong to one checkout, so they
+// are never pinned into the long-lived worker PATH.
+export function isDurableToolPath(path: string): boolean {
+  if (!isAbsolute(path) || /[:\r\n]/.test(path)) return false;
+  const normalized = path.replace(/\\/g, '/');
+  if (/\/node_modules\/|\/_npx\/|\/\.npm\/|\/npm-cache\//.test(normalized)) return false;
+  const temporaryRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
+    .map((root) => root.replace(/\\/g, '/').replace(/\/+$/, ''))
+    .filter(Boolean);
+  return !temporaryRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
 }
 
 function systemdExecArg(value: string): string {

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- The cloud analyst (`openclaw-infer`) now uses OpenClaw's configured default
+  model unless a profile names one; shipped presets no longer pin
+  `openai/gpt-5.5`. Its failures carry a bounded, evidence-free reason, and
+  setup records the `openclaw` directory on the worker PATH.
+- Upgrade note: an existing `~/.olympus/sovereignty.json` keeps the model it
+  was written with, and setup does not overwrite it without `--force`. If its
+  `cloud-openclaw-infer` profile says `"model": "openai/gpt-5.5"` and this
+  OpenClaw has no OpenAI auth, remove that `model` line (or re-run
+  `olympus setup --preset <preset> --force` if the policy was never
+  customized), then restart the worker. Olympus does not remove it
+  automatically because a pinned `openai/gpt-5.5` is also a valid explicit
+  choice. Re-run setup once so the worker PATH gains the `openclaw` directory.
+
 ## 0.4.0-beta.3 - 2026-09-23
 
 - Restore beta 1 setup, native dashboard, messaging pairing and folder-scope

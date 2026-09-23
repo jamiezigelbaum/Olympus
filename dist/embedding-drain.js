@@ -2935,7 +2935,7 @@ function buildEnvBridgeSovereigntyConfig(env = process.env) {
     profiles["cloud-openclaw-infer"] = {
       provider: "openclaw-infer",
       trust: "standard_cloud",
-      model: env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL?.trim() || "openai/gpt-5.5",
+      ...env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL?.trim() ? { model: env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL.trim() } : {},
       purpose: "analyst"
     };
   }
@@ -3082,12 +3082,19 @@ function parseProfiles(value, label) {
     }
     const provider = stringField(profile, "provider", `${label}.modelProfiles.${id}`);
     const trust = stringField(profile, "trust", `${label}.modelProfiles.${id}`);
-    const parsedProfile = {
-      provider,
+    const common = {
       trust,
-      model: stringField(profile, "model", `${label}.modelProfiles.${id}`),
       ...optionalString(profile, "baseUrl"),
       ...optionalString(profile, "secretRef")
+    };
+    const parsedProfile = provider === "openclaw-infer" ? {
+      provider,
+      ...common,
+      ...profile.model === undefined ? {} : { model: stringField(profile, "model", `${label}.modelProfiles.${id}`) }
+    } : {
+      provider,
+      ...common,
+      model: stringField(profile, "model", `${label}.modelProfiles.${id}`)
     };
     if (typeof profile.purpose === "string") {
       parsedProfile.purpose = profile.purpose;
@@ -3168,8 +3175,13 @@ function validateProfile(id, profile) {
   if (profile.trust === "local" && profile.provider !== "local-openai-compatible") {
     throw new OperationError("config_error", `Sovereignty profile "${id}" cannot claim local trust with provider "${profile.provider}".`, 'Use provider "local-openai-compatible" for local analyst profiles.');
   }
-  if (!profile.model.trim())
+  if (profile.provider === "openclaw-infer") {
+    if (profile.model !== undefined && !profile.model.trim()) {
+      throw new OperationError("config_error", `Sovereignty profile "${id}" model must be non-empty when set.`, "Omit model to use OpenClaw's configured default model.");
+    }
+  } else if (!profile.model.trim()) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" requires a model.`);
+  }
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }
@@ -13394,6 +13406,15 @@ var init_analyst = __esm(() => {
   ]);
 });
 
+// src/core/openclaw-executable.ts
+var init_openclaw_executable = () => {};
+
+// src/core/analyst-openclaw-infer.ts
+var init_analyst_openclaw_infer = __esm(() => {
+  init_operation_error();
+  init_openclaw_executable();
+});
+
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var storage, CONTENT_FREE_ERROR_CLASSES;
@@ -13557,6 +13578,7 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var init_analyst_answer = __esm(() => {
   init_analyst();
+  init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
   init_source_corpus_registry();
@@ -15541,6 +15563,7 @@ init_secret_store();
 
 // src/core/worker-service.ts
 init_atomic_file();
+init_openclaw_executable();
 init_operation_error();
 var WORKER_LOG_TAIL_BYTES = 64 * 1024;
 
@@ -16557,6 +16580,7 @@ var SYSTEM_CLOCK = Object.freeze({
 });
 
 // src/workers/source-watch-runtime.ts
+init_openclaw_executable();
 init_http_timeout();
 init_source_corpus_registry();
 init_router();
@@ -17440,10 +17464,8 @@ init_operation_error();
 // src/core/analyst-anthropic.ts
 init_operation_error();
 
-// src/core/analyst-openclaw-infer.ts
-init_operation_error();
-
 // src/workers/email-source/server.ts
+init_analyst_openclaw_infer();
 init_venice_models();
 
 // src/core/query-planner.ts

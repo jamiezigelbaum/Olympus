@@ -29,14 +29,27 @@ export type SovereigntyProfileProvider =
   | 'anthropic'
   | 'openai-compatible';
 
-export interface SovereigntyModelProfile {
-  provider: SovereigntyProfileProvider;
+interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
-  model: string;
   baseUrl?: string;
   secretRef?: string;
   purpose?: 'analyst' | 'embedding' | 'vision' | 'classification';
 }
+
+export interface SovereigntyOpenClawInferModelProfile extends SovereigntyModelProfileBase {
+  provider: 'openclaw-infer';
+  // Absent = OpenClaw's configured default model: `openclaw infer model run`
+  // is invoked without --model, so the agent's own model and credentials own
+  // the run. Present = passed verbatim as --model provider/model.
+  model?: string;
+}
+
+export interface SovereigntyExplicitModelProfile extends SovereigntyModelProfileBase {
+  provider: Exclude<SovereigntyProfileProvider, 'openclaw-infer'>;
+  model: string;
+}
+
+export type SovereigntyModelProfile = SovereigntyOpenClawInferModelProfile | SovereigntyExplicitModelProfile;
 
 export interface SovereigntyAnalystRoute {
   // v1 compatibility input. Parsing converts an existing analyst list into a
@@ -317,7 +330,10 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
     profiles['cloud-openclaw-infer'] = {
       provider: 'openclaw-infer',
       trust: 'standard_cloud',
-      model: env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL?.trim() || 'openai/gpt-5.5',
+      // Unset = OpenClaw's configured default model (no --model flag).
+      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL?.trim()
+        ? { model: env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL.trim() }
+        : {}),
       purpose: 'analyst',
     };
   }
@@ -552,13 +568,27 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
     }
     const provider = stringField(profile, 'provider', `${label}.modelProfiles.${id}`) as SovereigntyProfileProvider;
     const trust = stringField(profile, 'trust', `${label}.modelProfiles.${id}`) as SovereigntyProfileTrust;
-    const parsedProfile: SovereigntyModelProfile = {
-      provider,
+    const common = {
       trust,
-      model: stringField(profile, 'model', `${label}.modelProfiles.${id}`),
       ...optionalString(profile, 'baseUrl'),
       ...optionalString(profile, 'secretRef'),
     };
+    // openclaw-infer alone may omit model: absent means OpenClaw's configured
+    // default model (the infer CLI runs without --model). Every other provider
+    // names its model explicitly.
+    const parsedProfile: SovereigntyModelProfile = provider === 'openclaw-infer'
+      ? {
+        provider,
+        ...common,
+        ...(profile.model === undefined
+          ? {}
+          : { model: stringField(profile, 'model', `${label}.modelProfiles.${id}`) }),
+      }
+      : {
+        provider,
+        ...common,
+        model: stringField(profile, 'model', `${label}.modelProfiles.${id}`),
+      };
     if (typeof profile.purpose === 'string') {
       parsedProfile.purpose = profile.purpose as NonNullable<SovereigntyModelProfile['purpose']>;
     }
@@ -655,7 +685,17 @@ function validateProfile(id: string, profile: SovereigntyModelProfile): void {
       'Use provider "local-openai-compatible" for local analyst profiles.',
     );
   }
-  if (!profile.model.trim()) throw new OperationError('config_error', `Sovereignty profile "${id}" requires a model.`);
+  if (profile.provider === 'openclaw-infer') {
+    if (profile.model !== undefined && !profile.model.trim()) {
+      throw new OperationError(
+        'config_error',
+        `Sovereignty profile "${id}" model must be non-empty when set.`,
+        'Omit model to use OpenClaw\'s configured default model.',
+      );
+    }
+  } else if (!profile.model.trim()) {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" requires a model.`);
+  }
   if (profile.baseUrl !== undefined && !/^https?:\/\//.test(profile.baseUrl)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" baseUrl must be an HTTP(S) URL.`);
   }

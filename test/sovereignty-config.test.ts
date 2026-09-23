@@ -31,6 +31,8 @@ import {
   type SovereigntyAnalystRouteStep,
 } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
+import { createAnalyst } from '../src/core/analyst.ts';
+import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { inspectSovereigntyConfigDrift } from '../scripts/sovereignty-drift-check.ts';
 
@@ -935,6 +937,211 @@ describe('sovereignty config engine', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('openclaw-infer analyst: OpenClaw default model unless one is named', () => {
+  test('every preset defers the cloud analyst model to OpenClaw and still validates', () => {
+    for (const preset of SOVEREIGNTY_PRESETS) {
+      const config = loadSovereigntyPreset(preset);
+      const cloud = config.modelProfiles['cloud-openclaw-infer'];
+      expect(cloud?.provider).toBe('openclaw-infer');
+      expect(cloud && 'model' in cloud).toBe(false);
+    }
+  });
+
+  test('a written preset keeps model absent through a reload', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-openclaw-default-model-'));
+    try {
+      const path = writeSovereigntyConfigFile({ config: loadSovereigntyPreset('local-first'), path: join(dir, 'sovereignty.json') });
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      expect(written.modelProfiles['cloud-openclaw-infer'].model).toBeUndefined();
+      const engine = loadSovereigntyEngine({ configPath: path, env: {} });
+      expect(engine.config.modelProfiles['cloud-openclaw-infer']?.model).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('env bridge omits the model unless OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL names one', () => {
+    const defaulted = buildEnvBridgeSovereigntyConfig({ OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'true' });
+    expect(defaulted.modelProfiles['cloud-openclaw-infer']).toEqual({
+      provider: 'openclaw-infer',
+      trust: 'standard_cloud',
+      purpose: 'analyst',
+    });
+    const explicit = buildEnvBridgeSovereigntyConfig({
+      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'true',
+      OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL: ' openai/gpt-5.5 ',
+    });
+    expect(explicit.modelProfiles['cloud-openclaw-infer']?.model).toBe('openai/gpt-5.5');
+  });
+
+  test('only openclaw-infer may omit model; a blank explicit model is rejected', () => {
+    const withoutModel = (provider: string) => ({
+      schemaVersion: 1,
+      modelProfiles: { x: { provider, trust: 'standard_cloud', purpose: 'analyst' } },
+      routes: {},
+      retrieval: { trustDomains: {} },
+    });
+    expect(() => createSovereigntyEngine(withoutModel('anthropic') as unknown as SovereigntyConfig))
+      .toThrow('modelProfiles.x.model must be a non-empty string');
+    expect(() => createSovereigntyEngine(withoutModel('openai-compatible') as unknown as SovereigntyConfig))
+      .toThrow('modelProfiles.x.model must be a non-empty string');
+    const blank = baseConfig({
+      modelProfiles: { cloud: { provider: 'openclaw-infer', trust: 'standard_cloud', model: '  ', purpose: 'analyst' } },
+    });
+    expect(() => createSovereigntyEngine(blank)).toThrow('model must be a non-empty string');
+  });
+
+  test('the worker adapter omits --model for a default profile and passes an explicit one verbatim', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-openclaw-argv-'));
+    const argvLog = join(dir, 'argv.jsonl');
+    const fakeOpenClaw = join(dir, 'openclaw');
+    writeFileSync(
+      fakeOpenClaw,
+      `#!/bin/sh\nprintf '%s\\n' "$*" | head -c 200 >> ${JSON.stringify(argvLog)}\nprintf '\\n' >> ${JSON.stringify(argvLog)}\n`
+        + `echo '{"ok":true,"provider":"anthropic","model":"claude-sonnet-5","outputs":[{"text":"{\\"answer\\":\\"A [1]\\",\\"citations\\":[],\\"unanswered\\":[],\\"sufficient\\":true}"}]}'\n`,
+      { mode: 0o755 },
+    );
+    try {
+      const run = async (profile: SovereigntyConfig['modelProfiles'][string]) => {
+        const analyst = createAnalystForSovereigntyProfile({
+          profile,
+          profileId: 'cloud-openclaw-infer',
+          olympusConfig: defaultConfig(),
+          env: { OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND: fakeOpenClaw },
+          veniceAnalystTimeoutMs: undefined,
+          veniceReasoningHeadroomTokens: undefined,
+        });
+        await analyst.analyze(evidencePackFixture('internal'), { localOnly: false }).catch(() => undefined);
+      };
+      await run({ provider: 'openclaw-infer', trust: 'standard_cloud', purpose: 'analyst' });
+      await run({ provider: 'openclaw-infer', trust: 'standard_cloud', model: 'openai/gpt-5.5', purpose: 'analyst' });
+      const lines = readFileSync(argvLog, 'utf8').split('\n').filter((line) => line.startsWith('infer'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toStartWith('infer model run --thinking low --json --prompt');
+      expect(lines[1]).toStartWith('infer model run --model openai/gpt-5.5 --thinking low --json --prompt');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an exhausted route surfaces the adapter\'s bounded reason, and logs it', async () => {
+    const config = baseConfig({
+      routes: {
+        secure_local: { analyst: ['local'] },
+        internal: { analyst: ['cloud'] },
+        public_safe: { analyst: ['cloud'] },
+      },
+    });
+    const engine = createSovereigntyEngine(config);
+    const local = scriptedAnalyst('LOCAL must not be used.', 'local claim');
+    const reason = 'OpenClaw inference failed (exit 1, model openai/gpt-5.5): No API key found for provider "openai".';
+    const cloudFailure = Object.assign(new OperationError('source_index_error', reason), { safeReason: reason });
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: local.analyst,
+      lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      sovereigntyAnalystRoute: ({ localOnly, requestedProvider }) => engine.resolveAnalystRoute({
+        trustDomain: localOnly ? 'secure_local' : 'internal',
+        requestedProvider,
+      }).map((profile): SovereigntyAnalystRouteStep => ({
+        profile,
+        backend: 'cloud',
+        analyst: { async analyze() { throw cloudFailure; } },
+      })),
+    });
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => { logged.push(String(message)); };
+    let failure: unknown;
+    try {
+      failure = await handler.answer({ question: 'What do my notes say?' }).catch((error) => error);
+    } finally {
+      console.error = originalError;
+    }
+    expect(failure).toBeInstanceOf(OperationError);
+    expect((failure as OperationError).message).toContain('Sovereignty analyst fallback chain exhausted');
+    expect((failure as OperationError).message).toContain(`cloud: ${reason}`);
+    expect(logged.some((line) => line.includes('[analyst-route] leg failed backend=cloud')
+      && line.includes(JSON.stringify(reason)))).toBe(true);
+  });
+
+  test('a real openclaw adapter failure propagates through createAnalyst and the bounded cloud leg', async () => {
+    const config = baseConfig({
+      routes: {
+        secure_local: { analyst: ['local'] },
+        internal: { analyst: ['cloud'] },
+        public_safe: { analyst: ['cloud'] },
+      },
+    });
+    const engine = createSovereigntyEngine(config);
+    const local = scriptedAnalyst('LOCAL must not be used.', 'local claim');
+    const argvSeen: string[][] = [];
+    const cloudAnalyst = createAnalyst(createOpenClawInferAnalystModel({
+      command: 'openclaw',
+      runner: {
+        async run(_command, args) {
+          argvSeen.push(args);
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'upstream said: internal test source text\n',
+          };
+        },
+      },
+    }));
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: local.analyst,
+      lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      sovereigntyAnalystRoute: ({ localOnly, requestedProvider }) => engine.resolveAnalystRoute({
+        trustDomain: localOnly ? 'secure_local' : 'internal',
+        requestedProvider,
+      }).map((profile): SovereigntyAnalystRouteStep => ({ profile, backend: 'cloud', analyst: cloudAnalyst })),
+    });
+    const originalError = console.error;
+    console.error = () => {};
+    let failure: unknown;
+    try {
+      failure = await handler.answer({ question: 'What do my notes say?' }).catch((error) => error);
+    } finally {
+      console.error = originalError;
+    }
+    expect(argvSeen).toHaveLength(1);
+    expect(failure).toBeInstanceOf(OperationError);
+    const message = (failure as OperationError).message;
+    expect(message).toContain(
+      'cloud: OpenClaw inference failed (exit 1, model OpenClaw default model): detail withheld because it echoed request content.',
+    );
+    // the stderr echoed the evidence chunk; none of it reaches the surfaced error
+    expect(message).not.toContain('internal test source text');
+  });
+
+  test('an unmarked failure still reports only its error class', async () => {
+    const config = baseConfig({
+      routes: {
+        secure_local: { analyst: ['local'] },
+        internal: { analyst: ['cloud'] },
+        public_safe: { analyst: ['cloud'] },
+      },
+    });
+    const engine = createSovereigntyEngine(config);
+    const local = scriptedAnalyst('LOCAL must not be used.', 'local claim');
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: local.analyst,
+      lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      sovereigntyAnalystRoute: ({ localOnly, requestedProvider }) => engine.resolveAnalystRoute({
+        trustDomain: localOnly ? 'secure_local' : 'internal',
+        requestedProvider,
+      }).map((profile): SovereigntyAnalystRouteStep => ({
+        profile,
+        backend: 'cloud',
+        analyst: { async analyze() { throw new OperationError('source_index_error', 'raw provider text with evidence'); } },
+      })),
+    });
+    const failure = await handler.answer({ question: 'What do my notes say?' }).catch((error) => error);
+    expect(failure).not.toBeInstanceOf(OperationError);
+    expect(String(failure.message)).not.toContain('raw provider text');
   });
 });
 

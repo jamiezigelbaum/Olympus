@@ -327,14 +327,22 @@ function workerOptions(
   };
 }
 
+const OPENAI_API_KEY_LANE_DEFAULT_MODEL = 'gpt-5.5';
+
 function applyCloudLane(config: SovereigntyConfig, cloudLane: SetupCloudLane): SovereigntyConfig {
   if (cloudLane === 'subscription') return config;
   const next = structuredClone(config);
-  for (const profile of Object.values(next.modelProfiles)) {
+  for (const [id, profile] of Object.entries(next.modelProfiles)) {
     if (profile.provider !== 'openclaw-infer') continue;
-    profile.provider = 'openai-compatible';
-    profile.baseUrl = 'https://api.openai.com/v1';
-    profile.secretRef = 'env:OPENAI_API_KEY';
+    // The API-key lane talks to OpenAI directly, so it needs an explicit model
+    // even where the subscription lane defers to OpenClaw's default.
+    next.modelProfiles[id] = {
+      ...profile,
+      provider: 'openai-compatible',
+      model: profile.model ?? OPENAI_API_KEY_LANE_DEFAULT_MODEL,
+      baseUrl: 'https://api.openai.com/v1',
+      secretRef: 'env:OPENAI_API_KEY',
+    };
   }
   return next;
 }

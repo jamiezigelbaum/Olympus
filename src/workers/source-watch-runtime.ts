@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
@@ -24,6 +24,7 @@ import {
   type SourceWatchRouteKind,
   type TrustedSourceWatchOwnerContext,
 } from '../core/source-watch.ts';
+import { resolveOpenClawExecutable } from '../core/openclaw-executable.ts';
 import { fetchWithTimeout, type TimeoutFetch } from '../core/http-timeout.ts';
 import { normalizeWorkerAuthToken, withWorkerAuthHeader } from '../core/worker-auth.ts';
 import { canonicalSourceCorpusId } from '../core/source-corpus-registry.ts';
@@ -803,22 +804,8 @@ function resolvePublicCertificatePath(
 }
 
 function resolveOpenClawCommand(env: Record<string, string | undefined>): string {
-  const pathEntries = env.PATH?.split(':').map((entry) => entry.trim()).filter(Boolean) ?? [];
-  for (const entry of pathEntries) {
-    const candidate = resolvePath(entry, 'openclaw');
-    if (existsSync(candidate)) return candidate;
-  }
-  const found = Bun.which('openclaw');
-  if (found) return found;
   const home = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir();
-  for (const candidate of [
-    '/opt/homebrew/bin/openclaw',
-    '/usr/local/bin/openclaw',
-    resolvePath(home, '.openclaw', 'bin', 'openclaw'),
-  ]) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return 'openclaw';
+  return resolveOpenClawExecutable({ env, homeDir: home }) ?? 'openclaw';
 }
 
 function normalizeGatewayBaseUrl(value: string): string {

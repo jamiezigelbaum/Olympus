@@ -411,7 +411,6 @@ Minimal schema:
     },
     "cloud-openclaw-infer": {
       "provider": "openclaw-infer",
-      "model": "openai/gpt-5.5",
       "trust": "standard_cloud",
       "purpose": "analyst"
     }
@@ -453,6 +452,22 @@ Minimal schema:
   }
 }
 ```
+
+An `openclaw-infer` profile is the only kind whose `model` is optional.
+Absent means OpenClaw's configured default model: the worker runs
+`openclaw infer model run` without `--model`, so the agent's own model and
+credentials own the run, whatever provider that is. The shipped presets leave
+it absent. Set `model` (a `provider/model` ref such as `openai/gpt-5.5`), or
+`OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_MODEL` on an env-bridge install, only to
+pin a specific model; OpenClaw must hold auth for it. A failed run reports a
+bounded reason (exit code, model, and a fixed cause such as missing auth; any
+OpenClaw free text only when redacted and proven not to echo the request), and a
+missing CLI reads as "OpenClaw CLI not found on the worker PATH"; setup records
+the `openclaw` directory on the worker PATH, and
+`OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND` may name the executable instead.
+Policies written by earlier releases keep `"model": "openai/gpt-5.5"`; on a
+host without OpenAI auth in OpenClaw, remove that line to use the default (see
+the changelog upgrade note).
 
 Hard invariants remain enforced outside user control:
 

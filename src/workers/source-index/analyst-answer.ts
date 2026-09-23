@@ -29,6 +29,7 @@
 
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidencePack } from '../../core/contracts.ts';
 import { noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
+import { OPENCLAW_DEFAULT_MODEL_LABEL } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
   hasTemporalIntent,
@@ -741,7 +742,7 @@ function analystRouteTraceStep(step: SovereigntyAnalystRouteStep): {
   return {
     profile_id: step.profile.id,
     backend: step.backend,
-    model_id: step.profile.profile.model,
+    model_id: step.profile.profile.model ?? OPENCLAW_DEFAULT_MODEL_LABEL,
   };
 }
 
@@ -1085,6 +1086,7 @@ async function routeAnalysisThroughSovereignty(input: {
   }
   let lastFallback: SourceIndexAnalystFallback | undefined;
   const legOutcomes: string[] = [];
+  const legReasons: string[] = [];
   const secureLegBudgets = input.trustDomain === 'secure_local'
     ? deriveSecureAnalystPoolLegBudgets(
         input.route.map((step) => ({ id: step.profile.id, backend: step.backend })),
@@ -1200,8 +1202,11 @@ async function routeAnalysisThroughSovereignty(input: {
         input.secureAnalystPoolState.recordFailure(input.poolId, step.profile.id);
       }
       legOutcomes.push(`${step.backend}:failed:${sourceAnswerTraceErrorClass(error)}`);
+      const safeReason = analystSafeFailureReason(error);
+      if (safeReason) legReasons.push(`${step.backend}: ${safeReason}`);
       console.error(
-        `[analyst-route] leg failed backend=${step.backend} error_class=${sourceAnswerTraceErrorClass(error)}`,
+        `[analyst-route] leg failed backend=${step.backend} error_class=${sourceAnswerTraceErrorClass(error)}`
+          + (safeReason ? ` reason=${JSON.stringify(safeReason)}` : ''),
       );
       lastFallback = step.backend === 'local'
         ? undefined
@@ -1213,9 +1218,29 @@ async function routeAnalysisThroughSovereignty(input: {
           });
     }
   }
-  throw new Error(
-    `Sovereignty analyst fallback chain exhausted; route outcomes=${legOutcomes.join(',') || 'none'}.`,
+  const exhausted = `Sovereignty analyst fallback chain exhausted; route outcomes=${legOutcomes.join(',') || 'none'}.`;
+  if (legReasons.length === 0) throw new Error(exhausted);
+  // Only adapter-supplied safe reasons reach the caller: bounded, redacted,
+  // and free of prompt, evidence, and credentials by construction.
+  throw new OperationError(
+    'source_index_error',
+    `${exhausted} ${legReasons.join(' ')}`,
+    'Fix the failing analyst lane named above; no source answer was produced.',
   );
+}
+
+// An adapter marks a failure as safe to surface by attaching a bounded,
+// secret-free `safeReason` string (see OpenClawInferError). Anything else is
+// reported by error class only.
+const MAX_SAFE_REASON_CHARS = 300;
+
+function analystSafeFailureReason(error: unknown): string | undefined {
+  if (!(error instanceof OperationError)) return undefined;
+  const reason = (error as { safeReason?: unknown }).safeReason;
+  if (typeof reason !== 'string') return undefined;
+  const bounded = Array.from(reason, (char) => (char < ' ' || char === '\u007f' ? ' ' : char)).join('').trim();
+  if (!bounded) return undefined;
+  return bounded.length > MAX_SAFE_REASON_CHARS ? `${bounded.slice(0, MAX_SAFE_REASON_CHARS)}…` : bounded;
 }
 
 function isAnalystPolicyRefusal(error: unknown): error is OperationError {
