@@ -105,4 +105,33 @@ describe('pilot installation entry points', () => {
     expect(document).toContain('Gemini API key (source embeddings, all presets; headless fallback only)');
     expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
   });
+
+  test('the agent guide requires the gateway restart and gates the private classifier', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step5 = document.slice(
+      document.indexOf('## Step 5 — Validate, then restart the gateway'),
+      document.indexOf('## Step 6 — Finish installation'),
+    );
+    expect(step5).toContain('**This restart is required on every OpenClaw install. Do not skip it and do\nnot tell the operator "no restart needed."**');
+    const gate = document.slice(
+      document.indexOf('### Privacy classifier approval — its own consent gate'),
+      document.indexOf('## Step 4 — Verify the worker'),
+    );
+    expect(document.indexOf('### Privacy classifier approval')).toBeGreaterThan(document.indexOf('### Headless credential fallback'));
+    expect(gate).toContain('olympus tier classifier status');
+    expect(gate).toContain('olympus tier classifier approve --why');
+    expect(gate).toContain('never an ordinary cloud model');
+    expect(gate).toContain('A no is a complete answer; record nothing.');
+    expect(document).toContain('- **Privacy classifier approval** (end of Step 3)');
+  });
+
+  test('entry points state the OpenClaw Node range, not a stale one', () => {
+    for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md']) {
+      const document = readFileSync(join(ROOT, path), 'utf8');
+      expect(document).toContain('>=24.16.0 <25');
+      expect(document).toContain('npm view openclaw engines');
+      expect(document).not.toContain('24.15.0');
+      expect(document).not.toContain('22.22.3');
+    }
+  });
 });
