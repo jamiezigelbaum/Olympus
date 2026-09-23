@@ -20,13 +20,20 @@ import { classifyItemTiers, type OwnerTierRule } from '../src/workers/classifica
 import {
   addOwnerTierRule,
   loadOwnerTierRules,
-  ownerTierRulesFromMailScope,
   parseOwnerTierRules,
   removeOwnerTierRule,
   tierKeyFromDisplayName,
   validateTierRulesFile,
 } from '../src/workers/classification/tier-rules.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { resolveStoreTierClassification } from '../src/workers/connector-store/tier-placement.ts';
+import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  approveMailSourceScope,
+  defaultMailScopeSelection,
+  defaultMailSourceScopeStatePath,
+  readMailSourceScopeApproval,
+} from '../src/core/mail-source-scope.ts';
 
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
@@ -95,13 +102,6 @@ describe('the rules file', () => {
     expect(tierKeyFromDisplayName('secrets')).toBe('secrets');
     expect(tierKeyFromDisplayName('internal')).toBeUndefined();
     expect(USER_FACING_TIER_MAPPING.private.targetTrustDomain).toBe('internal');
-  });
-
-  test('the mail scope picker rule shape adapts to owner rules', () => {
-    expect(ownerTierRulesFromMailScope([
-      { source: 'gmail', match: { sender: '@therapist.example' }, tier: 'secure', strength: 'force' },
-      { source: 'gmail', match: { sender: 'not valid' }, tier: 'secure', strength: 'force' },
-    ])).toEqual([{ id: 'mail-scope-sender-1', source: 'gmail', match: { kind: 'sender', value: '@therapist.example' }, tier: 'secure', strength: 'force' }]);
   });
 });
 
@@ -272,6 +272,53 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     } finally {
       store.close();
     }
+  });
+
+  test('tier rules list shows the mail scope picker rules, read-only', async () => {
+    const { dir, env } = setup();
+    const registryPath = join(dir, 'handles.json');
+    const registry = {
+      version: 1 as const,
+      handles: [{
+        handle: 'gmail.personal',
+        provider: 'gmail' as const,
+        allowedCapabilities: ['gmail.email.sync'],
+        scopes: [],
+        connectedAt: '2026-09-23T10:00:00.000Z',
+        accountRole: 'personal',
+        providerAccountId: 'account-gmail.personal',
+      }],
+    };
+    writeConnectedHandleRegistry(registry, registryPath);
+    const statePath = defaultMailSourceScopeStatePath(registryPath);
+    const pending = readMailSourceScopeApproval({ registry, statePath });
+    approveMailSourceScope({
+      registry,
+      statePath,
+      accountGeneration: pending.accountGeneration!,
+      expectedRevision: pending.revision,
+      scope: { ...defaultMailScopeSelection(), alwaysPrivateSenders: ['@clinic.example'] },
+      now: new Date('2026-09-23T12:00:00.000Z'),
+    });
+    const listed = await runTierCommand(['rules', 'list'], { env: { ...env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath } });
+    expect(listed).toMatchObject({
+      rules: [],
+      mailScopeRules: [{ source: 'gmail', match: { sender: '@clinic.example' }, tier: 'Private', strength: 'force', origin: 'mail_scope_picker', readOnly: true }],
+    });
+  });
+
+  test('a lane that brings its own rules keeps them, merged with the owner rules file and the sniffer', async () => {
+    const { env, dbPath } = setup();
+    rulesFile(join(env.OLYMPUS_TIER_RULES_PATH, '..'), [
+      { id: 'published', match: { pathPrefix: '/work/published' }, tier: 'public', strength: 'prior' },
+    ]);
+    configureInstalledTierClassification({ env, lane: { kind: 'local', modelId: 'fixture' } });
+    const laneRule: OwnerTierRule = { id: 'lane', match: { kind: 'pathPrefix', value: '/notes' }, tier: 'secure', strength: 'force' };
+    const merged = resolveStoreTierClassification({ rules: [laneRule] }, dbPath, undefined)!;
+    expect(merged.rules?.map((rule) => rule.id)).toEqual(['lane', 'published']);
+    expect(merged.sniffer?.id).toBe('local:v1');
+    clearInstalledTierClassification();
+    expect(resolveStoreTierClassification({ rules: [laneRule] }, dbPath, undefined)).toEqual({ rules: [laneRule] });
   });
 
   test('tier classifier approve records the owner approval; status reads it back', async () => {

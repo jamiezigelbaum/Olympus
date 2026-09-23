@@ -17,6 +17,8 @@
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { lifecycleSourceSpecs, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '../../core/mail-source-scope.ts';
+import { handleRegistryPathFromEnv, readConnectedHandleRegistry } from '../credential-broker/connected-handles.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
@@ -254,9 +256,12 @@ export function runTierRules(args: readonly string[], context: TierCliContext = 
   const [command, ...rest] = args;
   if (command === 'list') {
     const path = resolveTierRulesPath({ env });
-    if (!existsSync(path)) return { path, rules: [], note: 'No tier rules file yet; add one with olympus tier rules add.' };
+    const mailScopeRules = mailScopeTierRules(env);
+    if (!existsSync(path)) {
+      return { path, rules: [], mailScopeRules, note: 'No tier rules file yet; add one with olympus tier rules add.' };
+    }
     const validation = validateTierRulesFile({ env });
-    return { ...validation, rules: loadOwnerTierRules({ env }).map(describeRule) };
+    return { ...validation, rules: loadOwnerTierRules({ env }).map(describeRule), mailScopeRules };
   }
   if (command === 'add') {
     const options = parseFlags(rest, ['id', 'match', 'tier', 'source', 'strength']);
@@ -286,6 +291,30 @@ export function runTierRules(args: readonly string[], context: TierCliContext = 
     return { path, removed: id, rules: rules.length };
   }
   throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier rules']}`);
+}
+
+/**
+ * The mail scope picker's always-Private senders, as the owner tier rules the
+ * mail lane applies (core/mail-source-scope.ts). Read-only here: they are
+ * changed in the picker, not in the rules file.
+ */
+function mailScopeTierRules(env: Record<string, string | undefined>): Array<Record<string, unknown>> {
+  try {
+    const registryPath = handleRegistryPathFromEnv(env, true);
+    if (!registryPath) return [];
+    const approval = readMailSourceScopeApproval({
+      registry: readConnectedHandleRegistry(registryPath),
+      statePath: defaultMailSourceScopeStatePath(registryPath),
+    });
+    if (approval.status !== 'approved') return [];
+    return (approval.ownerTierRules ?? []).map((rule) => ({
+      ...describeRule(rule),
+      origin: 'mail_scope_picker',
+      readOnly: true,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function describeRule(rule: OwnerTierRule): Record<string, unknown> {

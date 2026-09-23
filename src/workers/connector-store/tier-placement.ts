@@ -76,19 +76,31 @@ export interface ConnectorStoreTierClassification {
 }
 
 /**
- * The classification inputs for one sync: the caller's own, else the
- * installed ones (with the lane's map, when it passed one), else the lane's
- * map alone. Never throws.
+ * The classification inputs for one sync. With the installed inputs
+ * configured (the worker), a lane's own inputs are merged into them: the
+ * lane's map wins, the lane's rules (the mail scope's always-Private senders,
+ * say) apply alongside the owner's rules file, and the installed sniffer
+ * answers unless the lane brought one. Unconfigured, the lane's inputs (or
+ * its map alone) are used as they are. Never throws.
  */
 export function resolveStoreTierClassification(
   explicit: ConnectorStoreTierClassification | undefined,
   storeDbPath: string,
   laneMap: SensitivityMap | undefined,
 ): ConnectorStoreTierClassification | undefined {
-  if (explicit) return explicit;
-  const installed = installedTierClassification()?.forStore(storeDbPath, laneMap);
-  if (installed) return installed;
-  return laneMap ? { sensitivityMap: laneMap } : undefined;
+  const map = explicit?.sensitivityMap ?? laneMap;
+  const installed = installedTierClassification()?.forStore(storeDbPath, map);
+  if (!installed) return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
+  if (installed.unavailableReason || !explicit) return installed;
+  if (explicit.unavailableReason) return explicit;
+  const rules = [...(explicit.rules ?? []), ...(installed.rules ?? [])];
+  const sniffer = explicit.sniffer ?? installed.sniffer;
+  const sensitivityMap = explicit.sensitivityMap ?? installed.sensitivityMap;
+  return {
+    ...(sensitivityMap ? { sensitivityMap } : {}),
+    ...(rules.length > 0 ? { rules } : {}),
+    ...(sniffer ? { sniffer } : {}),
+  };
 }
 
 const DEFAULT_TIER_FOR_DOMAIN: Readonly<Record<SourceTrustDomain, SourceTrustTier>> = {

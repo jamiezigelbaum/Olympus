@@ -21,6 +21,12 @@
 // - `source` is optional and matched as opaque data against the item's
 //   provider. This module never names a source.
 //
+// Sender rules are matched by the one sender matcher (core/sender-rules.ts,
+// through the classifier's ownerRuleMatches). The mail scope picker's
+// always-Private senders are rules of the same shape kept in the mail scope
+// approval; the store merges them with these, and `olympus tier rules list`
+// shows them read-only.
+//
 // Per-item overrides are NOT here: they live in the tier ledger, keyed by
 // provider item identity (tier-ledger.ts, `setOverride`).
 
@@ -226,37 +232,6 @@ export function removeOwnerTierRule(id: string, options: Pick<TierRulesLoadOptio
   const rules = existing.filter((rule) => rule.id !== id);
   if (rules.length === existing.length) return { path: resolveTierRulesPath(options), removed: false, rules: existing };
   return { path: writeOwnerTierRules(rules, options), removed: true, rules };
-}
-
-/**
- * The "always Private" senders the mail scope picker stores in its scope
- * approval (the picker records them in the rule shape this file holds:
- * `{ source, match: { sender }, tier: 'secure', strength: 'force' }`).
- *
- * TODO(tiers, mail scope picker): the picker (branch codex/email-scope-picker)
- * had not merged when this landed, so nothing reads its approval yet. When it
- * merges, the installed tier classification (installed-tier-classification.ts)
- * should read `ownerTierRules` from the approved mail scope and pass them
- * through this adapter, alongside the rules file.
- */
-export function ownerTierRulesFromMailScope(
-  rules: ReadonlyArray<{ source: string; match: { sender: string }; tier: string; strength: string }>,
-): OwnerTierRule[] {
-  const parsed: OwnerTierRule[] = [];
-  for (const [index, rule] of rules.entries()) {
-    try {
-      parsed.push(parseOwnerTierRule({
-        id: `mail-scope-sender-${index + 1}`,
-        source: rule.source,
-        match: { sender: rule.match.sender },
-        tier: rule.tier,
-        strength: rule.strength,
-      }, 'mail scope sender rule'));
-    } catch {
-      // A malformed picker entry is skipped here; the picker validates on write.
-    }
-  }
-  return parsed;
 }
 
 /**
