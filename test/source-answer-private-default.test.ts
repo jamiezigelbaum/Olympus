@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { Analyst, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
+import { analystPromptBytes } from '../src/core/analyst.ts';
 import type { LocalContentProviderMap } from '../src/core/evidence-pack.ts';
 import {
   buildSourceIndexCorpusRegistry,
@@ -167,6 +168,43 @@ describe('a private analyst outage never costs an ordinary answer', () => {
     ))).toBe(true);
   });
 
+  test('the fallback pack is fitted to the answering leg and its counts exclude secure_local', async () => {
+    // local-only: the private route is the local model alone; the ordinary
+    // route is cloud then local. The local model refuses secure evidence (the
+    // outage) and the cloud leg fails, so the rebuilt ordinary pack lands on
+    // the local leg, whose prompt budget is far smaller than the pack.
+    const fitted: EvidencePack[] = [];
+    const localModel: Analyst = {
+      async analyze(pack, analyzeOptions) {
+        if (pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local')) {
+          throw new Error('upstream 503');
+        }
+        fitted.push(pack);
+        expect(analystPromptBytes(pack, analyzeOptions)).toBeLessThanOrEqual(13_500);
+        return recordingAnalyst([]).analyze(pack, analyzeOptions);
+      },
+    };
+    const world = answerWorld('local-only', {
+      analystOverrides: { 'local-source-answer': localModel, 'cloud-openclaw-infer': failing() },
+      lanes: countedLanes,
+    });
+    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    expect(result.audit.answer_synthesis.analyst_backend).toBe('local');
+    expect(result.audit.skipped_corpora.find((skip) => skip.corpus_id === SECURE)?.reason)
+      .toBe('private_analyst_unavailable');
+    expect(fitted).toHaveLength(1);
+    const pack = fitted[0]!;
+    // Fitting trimmed the rebuilt pack, and restated inEvidence against the
+    // rebuilt pack's own candidates, not the first (secure) build's.
+    expect(pack.candidates.length).toBeGreaterThan(0);
+    expect(pack.candidates.length).toBeLessThan(COUNTED_INTERNAL_HITS);
+    expect(pack.coverage.matchCounts).toEqual([
+      expect.objectContaining({ corpusId: INTERNAL, matchedItems: 40, inEvidence: pack.candidates.length }),
+    ]);
+    expect(pack.candidates.every((candidate) => candidate.trustDomain === 'internal')).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
+  });
+
   test('an explicit private request keeps the hard failure', async () => {
     const world = answerWorld('private-cloud-only', { analystOverrides: { 'venice-private': failing() } });
     await expect(world.handler.answer({ question: 'What was my LDL?', include_secure_local: true }))
@@ -285,6 +323,7 @@ function answerWorld(preset: Preset, options: {
   analystOverrides?: Readonly<Record<string, Analyst>>;
   secureTitle?: string;
   secureAnalystPoolLastLegTimeoutMs?: number;
+  lanes?: () => ReturnType<typeof lanes>;
 } = {}) {
   const engine = createSovereigntyEngine(presetConfig(preset));
   const calls: Record<string, EvidencePack[]> = {};
@@ -301,7 +340,7 @@ function answerWorld(preset: Preset, options: {
   const fallbackLocal = recordingAnalyst([]);
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
-    lanes: () => lanes(options.secureTitle),
+    lanes: options.lanes ?? (() => lanes(options.secureTitle)),
     ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
       ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }
       : {}),
@@ -392,6 +431,48 @@ function lanes(secureTitle?: string) {
     } as SourceIndexRouterAdapterMap,
     contentProviders: {
       [INTERNAL]: provider('internal', INTERNAL_RAW),
+      [SECURE]: provider('secure_local', SECURE_RAW),
+    } as LocalContentProviderMap,
+  };
+}
+
+// Many long internal hits plus a secure hit, each corpus reporting a match
+// count, so a fitted pack and its restated counts are observable.
+const COUNTED_INTERNAL_HITS = 24;
+function countedLanes(): ReturnType<typeof lanes> {
+  const base = lanes();
+  const hit = (id: string) => {
+    const sourceItem = {
+      family: 'file' as const,
+      provider: 'fixture',
+      accountScope: 'personal',
+      providerItemId: id,
+      localItemId: `personal:${id}`,
+    };
+    return { sourceItem, provenance: { sourceItem, citation: { title: `${id}.pdf` } }, score: 1, rawExposed: false as const };
+  };
+  const adapter = (ids: string[]) => () => ({
+    hits: ids.map(hit),
+    matchCount: { matchedItems: 40, contentMatchedItems: 40, saturated: false },
+    latencyMs: 1,
+    rawExposed: false as const,
+  });
+  const provider = (trustDomain: SourceTrustDomain, text: string) => ({
+    async fetchLocalContent() {
+      return {
+        sensitivity: buildSourceSensitivity({ trustTier: trustDomain === 'secure_local' ? 'S4' : 'S2', trustDomain }),
+        chunks: [text],
+      };
+    },
+  });
+  return {
+    registry: base.registry,
+    adapters: {
+      [INTERNAL]: adapter(Array.from({ length: COUNTED_INTERNAL_HITS }, (_, index) => `note-${index}`)),
+      [SECURE]: adapter(['lab-1']),
+    } as SourceIndexRouterAdapterMap,
+    contentProviders: {
+      [INTERNAL]: provider('internal', `${INTERNAL_RAW} `.repeat(80)),
       [SECURE]: provider('secure_local', SECURE_RAW),
     } as LocalContentProviderMap,
   };

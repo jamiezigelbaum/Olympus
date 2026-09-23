@@ -100,10 +100,25 @@ export interface EvidenceCoverageSkip {
   reason: string;
 }
 
+// Breadth of one searched corpus's match set, counts only (v1.1.0). The pack
+// carries a bounded slice of the evidence; this is how the Analyst can say
+// "23 emails and 6 files match; the most relevant are..." instead of mistaking
+// the slice for the whole. `atLeast` marks a count that stopped at the
+// adapter's probe ceiling.
+export interface EvidenceCoverageMatchCount {
+  corpusId: string;
+  family: SourceFamily;
+  matchedItems: number;
+  contentMatchedItems: number;
+  atLeast: boolean;
+  inEvidence: number;
+}
+
 export interface EvidenceCoverage {
   searchedCorpora: readonly string[];
   skippedCorpora: readonly EvidenceCoverageSkip[];
   extractionGaps: readonly string[];
+  matchCounts?: readonly EvidenceCoverageMatchCount[];
 }
 
 export interface EvidencePack {

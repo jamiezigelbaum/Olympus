@@ -2546,6 +2546,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
             const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
               ?? sourceIndexEmbeddingProvider;
+            const searchEmbeddingProvider = connectorStoreEmbeddingProvider
+              && (connectorStore.trustDomain !== 'secure_local'
+                || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
+              ? connectorStoreEmbeddingProvider
+              : undefined;
+            // An unpinned request gets hybrid exactly when this corpus can
+            // serve it (an approved provider with current embeddings), so a
+            // content match found semantically is not lost behind lexical
+            // title noise. Without embeddings it stays keyword, with no
+            // skipped-lane marker for a lane nobody asked for.
+            const retrievalMode = searchRequest.retrievalMode
+              ?? (searchEmbeddingProvider && connectorStore.hasEmbeddings(searchEmbeddingProvider.modelId)
+                ? 'hybrid'
+                : 'keyword');
             const combinedFilters = searchRequest.filters || mandatoryScope?.filters
               ? normalizeConnectorStoreSearchFilters({
                   ...searchRequest.filters,
@@ -2554,17 +2568,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               : undefined;
             const adapter = createConnectorStoreCorpusAdapter({
               store: connectorStore,
-              retrievalMode: searchRequest.retrievalMode,
+              retrievalMode,
               ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
                 ? { accountScope: mandatoryScope.accountScope }
                 : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
               ...(combinedFilters ? { filters: combinedFilters } : {}),
               ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
-              ...(connectorStoreEmbeddingProvider
-                && (connectorStore.trustDomain !== 'secure_local'
-                  || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
-                ? { embeddingProvider: connectorStoreEmbeddingProvider }
-                : {}),
+              ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
             });
             const result = await retrySqliteBusy(() => adapter({
               query: searchRequest.query,
@@ -3581,7 +3591,8 @@ function parseConnectorStoreIndexSearchRequestRecord(
 ): {
   query: string;
   maxResults: number;
-  retrievalMode: 'keyword' | 'hybrid';
+  /** Absent when the caller did not pin a mode; the route picks the default. */
+  retrievalMode?: 'keyword' | 'hybrid';
   accountScope?: string;
   explicitEmptyChatScope?: boolean;
   locatorsRequested?: true;
@@ -3604,7 +3615,7 @@ function parseConnectorStoreIndexSearchRequestRecord(
   if (typeof record.query !== 'string' || record.query.trim().length === 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'query must be a non-empty string.');
   }
-  const retrievalMode = asOptionalRetrievalMode(record.retrieval_mode) ?? 'keyword';
+  const retrievalMode = asOptionalRetrievalMode(record.retrieval_mode);
   const maxResults = asOptionalNumber(record.max_results);
   const requestedAccountScope = asOptionalNarrowingString(record, 'account')
     ?? (defaultAccountScope?.trim() || undefined);
@@ -3841,7 +3852,7 @@ function parseConnectorStoreIndexSearchRequestRecord(
   return {
     query: record.query,
     maxResults: maxResults ?? 10,
-    retrievalMode,
+    ...(retrievalMode !== undefined ? { retrievalMode } : {}),
     ...(accountScope ? { accountScope } : {}),
     ...(chatScopeResolution?.kind === 'title' && !chatScopeResolution.resolved
       ? { explicitEmptyChatScope: true }

@@ -83,7 +83,29 @@ export interface SourceIndexCorpusSearchResponse {
   hits: readonly SourceIndexSearchHit[];
   latencyMs: number;
   laneAudits?: readonly RetrievalLaneAudit[];
+  /**
+   * How many items in this corpus matched the query, beyond the hits returned.
+   * Counts only; an adapter that cannot count omits it.
+   */
+  matchCount?: SourceIndexCorpusMatchCount;
   rawExposed: false;
+}
+
+/**
+ * Breadth of a corpus's match set. `saturated` means the adapter stopped
+ * counting at its probe ceiling, so `matchedItems` is a lower bound.
+ */
+export interface SourceIndexCorpusMatchCount {
+  matchedItems: number;
+  // Of matchedItems, those with readable content, not a bare name or path.
+  contentMatchedItems: number;
+  saturated: boolean;
+}
+
+export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount {
+  corpusId: string;
+  family: SourceFamily;
+  trustDomain: SourceTrustDomain;
 }
 
 export interface SourceIndexCorpusSearchAdapter {
@@ -141,6 +163,8 @@ export interface SourceIndexRoutedSearchResponse {
   // was nothing to find", which is the whole point of separating them.
   degradations: readonly RetrievalDegradation[];
   corpusTimings: readonly SourceIndexRoutedCorpusTiming[];
+  // Per-corpus match breadth, for every searched corpus whose adapter counts.
+  matchCounts?: readonly SourceIndexRoutedMatchCount[];
   latencyMs: number;
   rawExposed: false;
 }
@@ -234,6 +258,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
   const degradations: RetrievalDegradation[] = [];
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
+  const matchCounts: SourceIndexRoutedMatchCount[] = [];
   const startedAt = Date.now();
 
   const searchableCorpora: SourceIndexCorpusDefinition[] = [];
@@ -308,6 +333,16 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     });
     searchedCorpora.push(corpus.corpusId);
     laneAudits.push(...(response.laneAudits ?? []));
+    if (response.matchCount) {
+      matchCounts.push({
+        corpusId: corpus.corpusId,
+        family: corpus.family,
+        trustDomain: corpus.trustDomain,
+        matchedItems: response.matchCount.matchedItems,
+        contentMatchedItems: response.matchCount.contentMatchedItems,
+        saturated: response.matchCount.saturated,
+      });
+    }
     if (corpus.activationMode !== 'lexical_only') {
       laneAudits.push(sourceIndexRetrievalStateLaneAudit({
         corpusId: corpus.corpusId,
@@ -364,6 +399,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
     laneAudits,
     degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
     corpusTimings,
+    ...(matchCounts.length > 0 ? { matchCounts } : {}),
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };

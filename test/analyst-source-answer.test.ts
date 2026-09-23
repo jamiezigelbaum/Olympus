@@ -271,20 +271,25 @@ describe('analyst-backed source_answer handler', () => {
     const { analyst, calls } = scriptedAnalyst(
       citingFirstCandidate('Bounded answer.', 'bounded claim'),
     );
+    const docs = Array.from({ length: 30 }, (_, index) => `doc-${index + 1}`);
     const handler = createAnalystSourceIndexAnswerHandler({
       analyst,
-      lanes: () =>
-        lanesFixture(
-          { internal: ['doc-1', 'doc-2', 'doc-3', 'doc-4', 'doc-5', 'doc-6'] },
-          { contentFetchCalls },
-        ),
+      lanes: () => lanesFixture({ internal: docs }, { contentFetchCalls }),
     });
 
     const result = await handler.answer({ question: 'What do my docs say?' });
 
+    // A broad match fills the default 24 candidates, which share the
+    // 40,000-char passage budget.
     expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(calls[0]!.pack.candidates).toHaveLength(3);
-    expect(contentFetchCalls).toHaveLength(3);
+    expect(calls[0]!.pack.candidates).toHaveLength(24);
+    expect(contentFetchCalls).toHaveLength(24);
+    expect(contentFetchCalls.every((call) => call.maxChars === 1_666)).toBe(true);
+
+    // A caller asking for fewer gets fewer, each at the per-candidate ceiling.
+    contentFetchCalls.length = 0;
+    await handler.answer({ question: 'What do my docs say?', max_results: 2 });
+    expect(calls[1]!.pack.candidates).toHaveLength(2);
     expect(contentFetchCalls.every((call) => call.maxChars === 3_000)).toBe(true);
   });
 
