@@ -39,10 +39,17 @@ import {
   type SourceItemIdentity,
   type SourceSensitivity,
   type SourceTrustDomain,
+  type SourceTrustTier,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { maxTier, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import {
+  maxTier,
+  type OwnerTierRule,
+  type TierDecidedBy,
+  type TierDecision,
+  type TierKey,
+} from '../classification/tier-classifier.ts';
 import {
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -108,6 +115,25 @@ export interface TieredStoreLegSpec {
   legacy?: boolean;
   /** In-run embedding for this leg; the store's own canonical identity. */
   embeddingProvider?: SourceEmbeddingProvider;
+  /**
+   * The trust tier a routed copy in this leg is stored at. Default: the
+   * domain's default tier (tier-placement.ts). A lane whose items have always
+   * rested at another tier of the same domain declares it here, so a new item
+   * routed into that domain rests exactly where the lane's items always did.
+   */
+  restingTier?: SourceTrustTier;
+}
+
+/**
+ * A lane-level floor (design section 2.1, chats): the lane's items are never
+ * placed below `trustDomain` unless the OWNER said so, either with a per-item
+ * override or with an owner rule of one of `liftedByOwnerRule`'s kinds whose
+ * tier is below the floor. Fail closed: a classifier default, a sensitivity
+ * map category or public evidence never lowers an item below it.
+ */
+export interface TieredLaneFloor {
+  trustDomain: SourceTrustDomain;
+  liftedByOwnerRule: readonly OwnerTierRule['match']['kind'][];
 }
 
 export interface TieredStoreSetOptions {
@@ -122,6 +148,17 @@ export interface TieredStoreSetOptions {
   secretLocations?: SecretLocationsIndex;
   /** Told once when a lazily created leg opens, so a runtime can serve it. */
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
+  /** See TieredLaneFloor. */
+  laneFloor?: TieredLaneFloor;
+  /**
+   * The lane lists items without their text and a later reader (the shared
+   * extraction factory) supplies it. A NEW item is then routed from its
+   * listing by its METADATA tier (names only, `layers: 'metadata'`), and its
+   * content is placed by the content tier decided from the text actually
+   * read, when that text lands (tiered-extraction.ts). Without this, an item
+   * whose text was not read keeps the lane's own placement (phase P1b).
+   */
+  contentArrivesLater?: boolean;
 }
 
 export interface TieredStoreLegRun {
@@ -170,6 +207,8 @@ export class TieredStoreSet {
   private readonly tierClassification: ConnectorStoreTierClassification | undefined;
   private readonly secretLocations: SecretLocationsIndex | undefined;
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
+  private readonly laneFloor: TieredLaneFloor | undefined;
+  private readonly contentArrivesLater: boolean;
 
   constructor(options: TieredStoreSetOptions) {
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
@@ -179,6 +218,8 @@ export class TieredStoreSet {
     this.tierClassification = options.tierClassification;
     this.secretLocations = options.secretLocations;
     this.onLegOpened = options.onLegOpened;
+    this.laneFloor = options.laneFloor;
+    this.contentArrivesLater = options.contentArrivesLater === true;
     this.legs = new Map();
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain)) throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
@@ -228,26 +269,51 @@ export class TieredStoreSet {
   }
 
   /**
-   * Where a decision puts an item. Never lower than the decision; a tier with
-   * no leg in this set goes to the next more private leg.
+   * Where a decision puts an item. Never lower than the decision (nor than the
+   * lane floor, unless the owner lifted it); a tier with no leg in this set
+   * goes to the next more private leg.
+   *
+   * In a lane whose content arrives later (`contentArrivesLater`), an item
+   * whose text has not been read yet gets only its metadata copy, in the
+   * metadata tier's store; its content copy is placed when the text lands.
+   * There, only an open NAME question (the sniffer) makes the whole item
+   * pending (Private); an open CONTENT question holds just the content copy
+   * in the Private store, held back from embedding.
    */
-  placementFor(decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>): TierPlacementPlan {
+  placementFor(
+    decision: Pick<TierDecision, 'metadataTier' | 'contentTier' | 'state' | 'metadataPending' | 'contentPending'>
+      & Partial<Pick<TierDecision, 'contentRead' | 'decidedBy' | 'metadataOwnerRule'>>,
+  ): TierPlacementPlan {
     if (decision.contentTier === 'secrets' || decision.metadataTier === 'secrets') {
       return { copies: [], embedHold: false };
     }
-    const pending = decision.state === 'pending' || decision.metadataPending || decision.contentPending;
-    if (pending) {
+    const wholePending = this.contentArrivesLater
+      ? decision.metadataPending
+      : decision.state === 'pending' || decision.metadataPending || decision.contentPending;
+    if (wholePending) {
       const domain = this.domainAtLeast('secure_local');
       return {
         copies: [{ corpusId: this.corpusFor(domain), trustDomain: domain, layers: 'both' }],
         embedHold: true,
-        stored: { trustDomain: domain, trustTier: defaultStoreTrustTier(domain) },
+        stored: { trustDomain: domain, trustTier: this.restingTierFor(domain) },
       };
     }
-    const metadataDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[decision.metadataTier]);
-    const contentDomain = this.domainAtLeast(
-      TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier) as Exclude<TierKey, 'secrets'>],
-    );
+    const floor = this.floorFor(decision);
+    const metadataDomain = this.domainAtLeast(atLeastDomain(TIER_KEY_TRUST_DOMAIN[decision.metadataTier], floor));
+    if (this.contentArrivesLater && decision.contentRead !== true) {
+      return {
+        copies: [{ corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: 'metadata' }],
+        embedHold: false,
+        stored: { trustDomain: metadataDomain, trustTier: this.restingTierFor(metadataDomain) },
+      };
+    }
+    const contentHeld = this.contentArrivesLater && decision.contentPending;
+    const contentDomain = contentHeld
+      ? this.domainAtLeast('secure_local')
+      : this.domainAtLeast(atLeastDomain(
+          TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier) as Exclude<TierKey, 'secrets'>],
+          floor,
+        ));
     const copies: TierCopyPlan[] = !this.splitLayers || metadataDomain === contentDomain
       ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: 'both' }]
       : [
@@ -256,9 +322,38 @@ export class TieredStoreSet {
         ];
     return {
       copies,
-      embedHold: false,
-      stored: { trustDomain: contentDomain, trustTier: defaultStoreTrustTier(contentDomain) },
+      embedHold: contentHeld,
+      stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) },
     };
+  }
+
+  /** @internal Whether this lane's content arrives after listing (see the option). */
+  readsContentLater(): boolean {
+    return this.contentArrivesLater;
+  }
+
+  /** @internal The tier a routed copy in this domain's leg is stored at. */
+  restingTierFor(domain: SourceTrustDomain): SourceTrustTier {
+    return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
+  }
+
+  /**
+   * The lane floor that applies to this decision: undefined when the lane has
+   * none, or when the OWNER lifted it (a per-item override, or an owner rule of
+   * a lifting kind that set a tier below the floor).
+   */
+  private floorFor(decision: Partial<Pick<TierDecision, 'decidedBy' | 'metadataOwnerRule'>>): SourceTrustDomain | undefined {
+    const floor = this.laneFloor;
+    if (!floor) return undefined;
+    if (decision.decidedBy === 'override') return undefined;
+    const rule = decision.metadataOwnerRule;
+    if (rule
+      && floor.liftedByOwnerRule.includes(rule.kind)
+      && rule.tier !== 'secrets'
+      && trustDomainRank(TIER_KEY_TRUST_DOMAIN[rule.tier]) < trustDomainRank(floor.trustDomain)) {
+      return undefined;
+    }
+    return floor.trustDomain;
   }
 
   /**
@@ -460,6 +555,76 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
   });
 }
 
+/** One leg of `createTieredLaneSet`: an open store, or one created on first need. */
+export interface TieredLaneLeg {
+  store?: LocalConnectorStore;
+  onDemand?: OnDemandTierStore;
+  /** One of the lane's pre-P1b stores: only these take the lane's own (legacy) placement. */
+  legacy?: boolean;
+  embeddingProvider?: SourceEmbeddingProvider;
+  restingTier?: SourceTrustTier;
+}
+
+export interface TieredLaneSetOptions {
+  setId: string;
+  legs: Partial<Record<SourceTrustDomain, TieredLaneLeg>> & { secure_local: TieredLaneLeg };
+  splitLayers?: boolean;
+  tierClassification?: ConnectorStoreTierClassification;
+  secretLocations?: SecretLocationsIndex;
+  /**
+   * Default: the ledger co-located with the secure_local store's path (its own
+   * ledger when it is open), even when that store is not created yet, so the
+   * data lifecycle finds the set ledger wherever it finds the secure store.
+   */
+  ledger?: TierLedger;
+  onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
+  laneFloor?: TieredLaneFloor;
+  contentArrivesLater?: boolean;
+}
+
+/**
+ * A lane's set where any leg, the secure one included, may be created on first
+ * need: for a lane whose existing store is its only one (Readwise and X keep an
+ * internal store, WhatsApp and Dropbox a secure one).
+ */
+export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreSet {
+  const secure = options.legs.secure_local;
+  const secureDbPath = secure.store?.dbPath ?? secure.onDemand?.dbPath;
+  if (!secureDbPath) throw new Error('A tiered lane needs a secure_local store or a way to create one.');
+  const ledger = options.ledger
+    ?? secure.store?.tierLedger()
+    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+  const legs: TieredStoreLegSpec[] = [];
+  for (const domain of TIER_DOMAIN_ORDER) {
+    const leg = options.legs[domain];
+    if (!leg) continue;
+    const corpusId = leg.store?.corpusId ?? leg.onDemand?.corpusId;
+    if (!corpusId) throw new Error(`A tiered lane's ${domain} leg needs a store or a way to create one.`);
+    legs.push({
+      trustDomain: domain,
+      corpusId,
+      ...(leg.store ? { store: leg.store } : {}),
+      ...(!leg.store && leg.onDemand
+        ? { open: () => leg.onDemand!.open(), exists: () => leg.onDemand!.exists() }
+        : {}),
+      ...(leg.legacy === true ? { legacy: true } : {}),
+      ...(leg.embeddingProvider ? { embeddingProvider: leg.embeddingProvider } : {}),
+      ...(leg.restingTier ? { restingTier: leg.restingTier } : {}),
+    });
+  }
+  return new TieredStoreSet({
+    setId: options.setId,
+    ledger,
+    legs,
+    ...(options.splitLayers === false ? { splitLayers: false } : {}),
+    ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+    ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
+    ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
+    ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
+  });
+}
+
 /**
  * A per-tier store whose file is created only when its first item is routed
  * there: opened once, on demand or at boot when the file already exists.
@@ -637,27 +802,38 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted' };
     }
 
-    const text = connectorStoreItemText(item);
-    const decision = decideItemTiers(connector, item, text, this.set.classification(), ledger);
+    // A lane whose text arrives later reads none at listing; an owner
+    // metadata-only disposition means none ever arrives.
+    const deferred = this.set.readsContentLater();
+    const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
+    let decision = decideItemTiers(connector, item, text, this.set.classification(), ledger);
     this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
     if (!routed) {
-      // Only a NEW item, judged from text actually read, is routed. Metadata-
-      // only dispositions and unread content keep the lane's placement.
-      if (hasRow || !contentRead || input.metadataOnly) {
+      // Only a NEW item is routed. In P1b lanes it must also be judged from
+      // text actually read; metadata-only dispositions and unread content keep
+      // the lane's placement. A lane whose text arrives later routes a new
+      // item by its names now and its content when the text lands.
+      if (hasRow || (!deferred && (!contentRead || input.metadataOnly))) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
     } else if (!contentRead) {
-      // A routed item seen without its text: nothing proves its content tier,
-      // so its copies are left exactly as they are.
-      this.counts.contentUnreadHeld += 1;
-      return { kind: 'hold', reason: 'content_unread' };
+      if (!deferred) {
+        // A routed item seen without its text: nothing proves its content
+        // tier, so its copies are left exactly as they are.
+        this.counts.contentUnreadHeld += 1;
+        return { kind: 'hold', reason: 'content_unread' };
+      }
+      // Re-listed without text in a lane whose text arrives later: the names
+      // are judged afresh, the content half stays what its text decided.
+      decision = withRecordedContent(decision, ledger.getCurrent(identity));
     }
 
     const placement = this.set.placementFor(decision);
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),
+      ...(deferred ? { stagedLandingAllowed: true } : {}),
     });
     switch (recorded.outcome) {
       case 'secrets':
@@ -679,7 +855,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           this.set.store(copy.trustDomain, { create: true })!.bindTierSet(ledger);
           copies.set(copy.corpusId, copy.layers);
           sensitivity.set(copy.corpusId, buildSourceSensitivity({
-            trustTier: defaultStoreTrustTier(copy.trustDomain),
+            trustTier: this.set.restingTierFor(copy.trustDomain),
             trustDomain: copy.trustDomain,
           }));
           this.routedDomains.add(copy.trustDomain);
@@ -770,6 +946,43 @@ function tieredRun(legs: TieredStoreLegRun[], routing: TieredStoreRoutingCounts,
   const byDomain: Partial<Record<SourceTrustDomain, TieredStoreLegRun>> = {};
   for (const leg of legs) byDomain[leg.trustDomain] = leg;
   return { legs, byDomain, ...(cursor ? { cursor } : {}), routing: { ...routing } };
+}
+
+function atLeastDomain(domain: SourceTrustDomain, floor: SourceTrustDomain | undefined): SourceTrustDomain {
+  return floor !== undefined && trustDomainRank(floor) > trustDomainRank(domain) ? floor : domain;
+}
+
+/**
+ * A listing-time decision (names only) completed with the content half the
+ * ledger already holds from text read earlier, so re-listing an item never
+ * forgets or lowers a content tier that was decided from its text.
+ */
+export function withRecordedContent(
+  decision: TierDecision,
+  record: Pick<TierLedgerRecordLike, 'contentRead' | 'contentTier' | 'contentPending' | 'decidedBy' | 'reasons'> | undefined,
+): TierDecision {
+  if (decision.contentRead || !record?.contentRead) return decision;
+  const contentPending = record.contentPending;
+  return {
+    ...decision,
+    contentTier: maxTier(record.contentTier, decision.metadataTier),
+    contentRead: true,
+    contentPending,
+    decidedBy: record.decidedBy as TierDecidedBy,
+    reasons: [
+      ...decision.reasons.filter((reason) => !reason.startsWith('content:')),
+      ...record.reasons.filter((reason) => reason.startsWith('content:')),
+    ],
+    state: decision.metadataPending || contentPending ? 'pending' : 'current',
+  };
+}
+
+interface TierLedgerRecordLike {
+  contentRead: boolean;
+  contentTier: TierKey;
+  contentPending: boolean;
+  decidedBy: string;
+  reasons: string[];
 }
 
 function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): string {

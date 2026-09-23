@@ -2254,6 +2254,63 @@ export class LocalConnectorStore {
       || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
   }
 
+  /**
+   * The active row for a local item id, whatever the tier ledger says about
+   * serving it: identity, locator and stored tier only, never text. For a
+   * tiered store set's own bookkeeping (tiered-extraction.ts), not for reads.
+   */
+  activeLocalItemRow(localItemId: string): {
+    identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string };
+    locatorUri?: string;
+    trustTier: SourceTrustTier;
+    /** The approved-scope stamp the lane put on the row, when it has one. */
+    sourceScope?: { accountGeneration: string; scopeRevision: string; folderKeys: string[] };
+  } | undefined {
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
+      FROM items WHERE local_item_id = ? AND tombstoned = 0
+      LIMIT 1
+    `).get(localItemId) as {
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+      locator_uri: string | null;
+      trust_tier: string;
+      source_scope_generation: string | null;
+      source_scope_revision: string | null;
+      source_scope_folder_keys_json: string | null;
+    } | null;
+    if (!row) return undefined;
+    let folderKeys: string[] = [];
+    try {
+      const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) as unknown : [];
+      if (Array.isArray(parsed)) folderKeys = parsed.filter((key): key is string => typeof key === 'string');
+    } catch {
+      folderKeys = [];
+    }
+    return {
+      identity: {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      },
+      ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
+      trustTier: trustTierFromRow(row.trust_tier),
+      ...(row.source_scope_generation && row.source_scope_revision
+        ? {
+            sourceScope: {
+              accountGeneration: row.source_scope_generation,
+              scopeRevision: row.source_scope_revision,
+              folderKeys,
+            },
+          }
+        : {}),
+    };
+  }
+
   /** Whether this store has ANY row for the identity, active or tombstoned. */
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
     return this.db.query(`

@@ -133,6 +133,13 @@ export interface ConnectorStoreExtractionSinkOptions {
    * Map and sniffer for the recorded content decision. Optional.
    */
   tierClassification?: ConnectorStoreTierClassification;
+  /**
+   * Whether this sink records the content half of the item's tier decision
+   * itself (the phase P1a record). Default true. A tiered store set's sink
+   * records it through the set instead, in the same step that places the
+   * content copy, so it turns this off.
+   */
+  recordContentTier?: boolean;
 }
 
 /**
@@ -402,7 +409,7 @@ export function createConnectorStoreExtractionSink(
       const coverage = store.itemRepresentationCoverage(plan.expectation);
       // The text was read at last: record the content half of the item's
       // four-tier decision. Best-effort and storage-neutral (phase P1a).
-      if (plan.item.content.kind === 'text') {
+      if (options.recordContentTier !== false && plan.item.content.kind === 'text') {
         store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
       }
       return {
