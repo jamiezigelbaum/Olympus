@@ -98,8 +98,9 @@ extension form. See open question 3 before minting a new one.
 
 Also decide, and state the reasoning:
 
-- **Trust domain and tier** — the floor your `classify()` returns. `internal`
-  and `secure_local` never share a store.
+- **Trust domain and tier** — the placement your store lane declares
+  (`placement` on the sync options). `internal` and `secure_local` never share
+  a store. The connector itself decides no tier.
 - **Identity tuple** — the store's uniqueness key is
   `(provider, account_scope, normalized_conversation, provider_item_id)`
   (`LocalConnectorStore.upsertItem`). Decide what your
@@ -151,10 +152,12 @@ Create `src/workers/<source>/connector.ts` from
       provider round trip. Both Readwise and Drive resolve from a map populated
       during `listItems`. Drive's comment records why: re-deciding the content
       cap in `fetchItem` is what made the cap decorative.
-- [ ] `classify(item)` — the single place trust policy may be source-aware
-      (`src/core/contracts.ts`, Contract 1 comment). Return
-      `buildSourceSensitivity({ trustTier, trustDomain })`. Nothing downstream
-      may classify below what you return here.
+- [ ] `classificationSignals(item)` — source facts only (SourceConnector
+      2.0.0): title, path, folder keys, sender, recipients, labels,
+      conversation kind, a provider `floor` (e.g. a secret chat), a configured
+      `prior`, and `sharing` only when the provider actually reports it. Use
+      the helpers in `src/core/classification-signals.ts`. Never return a
+      tier decision; the shared tier classifier makes it.
 
 ### RawItem shape
 
@@ -242,8 +245,8 @@ Two distinct behaviors, both present in the repo — pick the right one:
 ## Leg 3 — Mount the store
 
 One database per corpus. Trust domains are **never** mixed in one store — an
-item your `classify()` puts in a different trust domain is rejected and recorded
-as a coverage gap, fail-closed.
+item the lane's placement puts in a different trust domain is rejected and
+recorded as a coverage gap, fail-closed.
 
 ```ts
 export function create<Source>ConnectorStore(dbPath = default<Source>ConnectorStoreDbPath()) {
@@ -408,7 +411,7 @@ Required cases:
 
 | # | Case | Asserts |
 | --- | --- | --- |
-| 1 | Pagination + identity | exact provider URL sequence, `Authorization` on every call, last page `done: true`, full identity tuple, `classify()` result, `fetchItem` returns the listed item, budget status |
+| 1 | Pagination + identity | exact provider URL sequence, `Authorization` on every call, last page `done: true`, full identity tuple, `classificationSignals()` result, `fetchItem` returns the listed item, budget status |
 | 2 | Budget refusal | throws the typed error, `calls` stopped at the budget, and the env parser rejects a non-integer with the exact message |
 | 3 | Store sync idempotence | first run indexes N items/chunks; second run re-sees them and embeds **0**; store counts stable; `expect(JSON.stringify([first, second])).not.toContain('PRIVATE_<SOURCE>_MARKER')` |
 | 4 | Runtime factory gating | `enabled: false` → `undefined` **and no db file**; invalid budget env → throws **and no db file**; enabled → store with the right `corpusId`/`family`/`trustDomain` |

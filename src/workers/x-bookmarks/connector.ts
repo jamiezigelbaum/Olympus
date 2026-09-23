@@ -3,11 +3,14 @@
 // completeness, fetch, and classification; this module converts its bounded
 // acquisition into stable RawItems for the shared connector store.
 
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -68,11 +71,26 @@ export function createXBookmarksSourceConnector(
       if (!item) throw new Error('X bookmark connector cannot fetch an unknown item.');
       return item;
     },
-    classify(_item: RawItem): SourceSensitivity {
-      return buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' });
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // A bookmarked post. The post itself was published, but the bookmark
+      // (the owner's saving of it) is the item, so no Public evidence is
+      // claimed.
+      return compactClassificationSignals({
+        title: signalText(item.metadata, 'title'),
+        sender: signalText(item.metadata, 'authorUsername', 'senderLabel'),
+      });
     },
   };
 }
+
+/**
+ * Where X bookmarks rest in the existing store: S1/internal, the placement the
+ * retired connector classify() returned for every bookmark.
+ */
+export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
+  trustTier: 'S1',
+  trustDomain: 'internal',
+});
 
 export function createXBookmarksConnectorStore(
   dbPath = defaultXBookmarksConnectorStoreDbPath(),

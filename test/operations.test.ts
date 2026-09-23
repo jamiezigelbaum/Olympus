@@ -754,8 +754,8 @@ describe('operations', () => {
         if (!item) throw new Error(`missing operation search fixture ${localItemId}`);
         return item;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
+      classificationSignals() {
+        return {};
       },
     };
     const ctx: OperationContext = {
@@ -1020,8 +1020,8 @@ describe('operations', () => {
       async fetchItem(): Promise<RawItem> {
         return item;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+      classificationSignals() {
+        return {};
       },
     };
     const worker = createEmailSourceWorker({

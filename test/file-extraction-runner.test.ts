@@ -1034,7 +1034,7 @@ function e2eConnector(): SourceConnector {
       if (!found) throw new Error(`no such item: ${localItemId}`);
       return found;
     },
-    classify: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'secure_local' }),
+    classificationSignals: () => ({}),
   };
 }
 

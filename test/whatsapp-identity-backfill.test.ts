@@ -90,8 +90,8 @@ function createConnector(items: readonly RawItem[]): SourceConnector {
       if (!found) throw new Error(`missing item ${localItemId}`);
       return found;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

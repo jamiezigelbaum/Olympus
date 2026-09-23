@@ -45,6 +45,18 @@ export interface PublicReachability {
 const TYPE_ONLY_STATEMENT = /(?:^|[^\w$])(?:import|export)\s+type\s[^;]*?['"]\.[^'"]+['"]\s*;?/g;
 const IMPORT_SPECIFIER = /(?:^|[^\w$])(?:import|export)\b[^'"]*?\bfrom\s*['"](\.[^'"]+)['"]|(?:^|[^\w$])import\s*\(\s*['"](\.[^'"]+)['"]\s*\)|(?:^|[^\w$])import\s*['"](\.[^'"]+)['"]/g;
 
+/**
+ * Comments removed before import matching. An apostrophe inside a comment in a
+ * multi-line `export { ... } from` list (connector-store/index.ts: "the
+ * store's own chunking recipe") ended the specifier match early, so the scan
+ * lost that re-export and everything reached only through it.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
+}
+
 function resolveSpecifier(fromFile: string, specifier: string, repoRoot: string): string | undefined {
   const base = resolve(repoRoot, dirname(fromFile), specifier);
   const candidates = [base, `${base}.ts`, join(base, 'index.ts')];
@@ -70,7 +82,7 @@ export function publicReachability(repoRoot: string): PublicReachability {
     reachable.add(file);
     let source = readFileSync(absolute, 'utf8');
     if (stripped.has(file)) source = stripPublicRuntimeExcludedBlocks(source, absolute);
-    source = source.replace(TYPE_ONLY_STATEMENT, '');
+    source = stripComments(source).replace(TYPE_ONLY_STATEMENT, '');
     for (const match of source.matchAll(IMPORT_SPECIFIER)) {
       const specifier = match[1] ?? match[2] ?? match[3];
       if (!specifier) continue;

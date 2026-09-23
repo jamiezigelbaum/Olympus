@@ -174,7 +174,7 @@ describe('canonical connector-store embedding drain', () => {
       async authenticate() {},
       async *listItems() { yield { items: [item], done: true }; },
       async fetchItem() { return item; },
-      classify() { return { trustTier: 'S3', trustDomain: 'internal', cloudEmbeddingEligible: true, localOnly: false }; },
+      classificationSignals() { return {}; },
     };
     await store.syncFromConnector(connector, { fetchContent: true });
     store.close();

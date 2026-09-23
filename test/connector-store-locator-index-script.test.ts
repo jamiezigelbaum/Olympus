@@ -152,8 +152,8 @@ function fixtureConnector(items: readonly RawItem[]): SourceConnector {
       if (!item) throw new Error('missing fixture');
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

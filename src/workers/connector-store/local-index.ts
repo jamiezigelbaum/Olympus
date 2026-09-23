@@ -49,6 +49,14 @@ import {
 } from '../../core/sqlite-migrations.ts';
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
+import { TierLedger, tierLedgerPathForStore } from '../classification/tier-ledger.ts';
+import { classifyContentTier } from '../classification/tier-classifier.ts';
+import {
+  decideItemTiers,
+  placeInExistingStore,
+  type ConnectorStorePlacement,
+  type ConnectorStoreTierClassification,
+} from './tier-placement.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -352,6 +360,12 @@ export interface LocalConnectorStoreOptions {
    * reserved for a genuine gate bypass rather than ordinary operation.
    */
   exclusions?: SourceExclusionMatcher;
+  /**
+   * Where this store records each item's four-tier decision. Omitted: a
+   * ledger co-located with this store (`<store>.tier-ledger.sqlite`), opened on
+   * first use. `null` records nothing. Read-only stores never record.
+   */
+  tierLedger?: TierLedger | null;
 }
 
 export interface ConnectorStoreLocatorIdentityIndexStatus {
@@ -604,6 +618,14 @@ export interface ConnectorStoreSyncOptions {
   deferMetadataOnlyContent?: boolean;
   maxChunkChars?: number;
   classification?: ConnectorStoreClassificationOptions;
+  /**
+   * How this lane places items into its existing store when no shared
+   * `classification` policy is supplied. Replaces the retired connector
+   * classify(); see tier-placement.ts.
+   */
+  placement?: ConnectorStorePlacement;
+  /** Map, owner rules and sniffer for the recorded four-tier decision. */
+  tierClassification?: ConnectorStoreTierClassification;
   reconcileFullSnapshot?: boolean;
   reconcileFullSnapshotScope?: ConnectorStoreFullSnapshotScope | readonly ConnectorStoreFullSnapshotScope[];
   /** Durable owner semantics independent of the item's latest sync run. */
@@ -1779,6 +1801,11 @@ export class LocalConnectorStore {
   // not opened it yet). Such a store has no reactions, and saying so is
   // cheaper and more honest than refusing to serve it.
   private reactionsColumnPresent = false;
+  // The four-tier ledger. Declared without an initializer on purpose (see the
+  // tree-shaking note on trustReconciliationReadyCursors).
+  private tierLedgerHandle: TierLedger | undefined;
+  private tierLedgerOwned: boolean | undefined;
+  private tierLedgerDisabled: boolean | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
@@ -1787,6 +1814,12 @@ export class LocalConnectorStore {
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
+    if (options.tierLedger === null || options.readOnly === true) {
+      this.tierLedgerDisabled = true;
+    } else if (options.tierLedger) {
+      this.tierLedgerHandle = options.tierLedger;
+      this.tierLedgerOwned = false;
+    }
     // Build the storage profile via the shared policy builder, then assert the
     // invariant this store depends on rather than trusting defaults: a
     // secure_local corpus must stay local_private on sqlite+fts5.
@@ -1835,7 +1868,87 @@ export class LocalConnectorStore {
   }
 
   close(): void {
-    closeSqliteStore(this.db);
+    try {
+      if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+    } finally {
+      this.tierLedgerHandle = undefined;
+      closeSqliteStore(this.db);
+    }
+  }
+
+  /** The ledger this store records tier decisions in, opening the default one on first use. */
+  tierLedger(): TierLedger | undefined {
+    if (this.tierLedgerDisabled === true) return undefined;
+    if (!this.tierLedgerHandle) {
+      this.tierLedgerHandle = new TierLedger({ dbPath: tierLedgerPathForStore(this.dbPath), now: this.now });
+      this.tierLedgerOwned = true;
+    }
+    return this.tierLedgerHandle;
+  }
+
+  /**
+   * Record the content decision for an item whose text arrived after it was
+   * listed (the shared extraction factory). Pass 2 starts from the metadata
+   * decision already in the ledger and can only raise it. Like every ledger
+   * write in phase P1a it is best-effort and changes nothing about storage:
+   * it returns false when there was nothing to record or the ledger failed.
+   */
+  recordExtractedContentTier(
+    item: RawItem,
+    text: string,
+    tierClassification?: ConnectorStoreTierClassification,
+  ): boolean {
+    try {
+      const ledger = this.tierLedger();
+      if (!ledger) return false;
+      const existing = ledger.getCurrent(item.identity);
+      if (!existing) return false;
+      const override = ledger.getOverride(item.identity);
+      const content = classifyContentTier(
+        {
+          text,
+          metadataTier: existing.metadataTier,
+          metadataForced: existing.metadataForced,
+          metadataFlagged: existing.metadataFlagged,
+        },
+        {
+          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
+          ...(override ? { override } : {}),
+        },
+      );
+      return ledger.recordContentDecision(item.identity, content) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Record one item's four-tier decision. Phase P1a: the ledger records, the
+   * store's placement is unchanged, so a ledger failure must not stop
+   * ingestion. It is reported once per run as a content-free gap and the rest
+   * of the run skips recording.
+   */
+  private recordTierDecision(
+    connector: SourceConnector,
+    item: RawItem,
+    stored: SourceSensitivity,
+    tierClassification: ConnectorStoreTierClassification | undefined,
+    run: { gaps: string[]; ledgerFailed: boolean },
+  ): void {
+    if (run.ledgerFailed) return;
+    try {
+      const ledger = this.tierLedger();
+      if (!ledger) return;
+      const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger);
+      ledger.recordDecision(item.identity, decision, {
+        trustDomain: stored.trustDomain,
+        trustTier: stored.trustTier,
+      });
+    } catch {
+      run.ledgerFailed = true;
+      run.gaps.push('tier_ledger_unavailable: four-tier decisions were not recorded for the rest of this run; storage was unaffected.');
+    }
   }
 
   /** Current-row scope check used immediately before a queued content read. */
@@ -4250,6 +4363,9 @@ export class LocalConnectorStore {
     const fetchContent = options?.fetchContent === true;
     const deferMetadataOnlyContent = options?.deferMetadataOnlyContent === true;
     const classification = normalizeClassificationOptions(options?.classification);
+    const placement = options?.placement;
+    const tierClassification: ConnectorStoreTierClassification | undefined = options?.tierClassification
+      ?? (classification?.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : undefined);
     const ownershipKind = options?.ownershipKind ?? 'observed';
     const reconcileAbsenceAuthority = options?.reconcileAbsenceAuthority ?? 'complete_snapshot';
     const reconcileCurrentMembershipAuthority = options?.reconcileCurrentMembershipAuthority ?? 'connector_owned';
@@ -4309,6 +4425,7 @@ export class LocalConnectorStore {
     let sawDonePage = false;
     let consecutiveContentFetchFailures = 0;
     const gaps: string[] = [];
+    const tierRun = { gaps, ledgerFailed: false };
     const coverageGaps: ConnectorStoreCoverageGap[] = [];
     const fullSnapshotScopes = new Map<string, ConnectorStoreFullSnapshotScope>();
     for (const scope of configuredFullSnapshotScopes) {
@@ -4403,12 +4520,15 @@ export class LocalConnectorStore {
             }
           }
 
-          // Default contract behavior still uses connector.classify(). When a
-          // shared classification policy is supplied, the spine applies it
-          // locally over metadata plus any pre-fetched text before storing or
-          // embedding content. That keeps Google-style per-item routing out of
-          // source-specific downstream code.
-          const sensitivity = classifyConnectorStoreItem(connector, itemForStorage, classification);
+          // Placement into the existing store: the lane's declared placement,
+          // or, when a shared classification policy is supplied, that policy
+          // applied locally over metadata plus any pre-fetched text before
+          // storing or embedding content. The four-tier decision is recorded
+          // beside it and does not change it (phase P1a).
+          const sensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
+          if (itemForStorage.metadata['deleted'] !== true) {
+            this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun);
+          }
           if (sensitivity.trustDomain !== this.trustDomain) {
             // Cross-tier deletion requires classification evidence at least as
             // complete as the copy this store accepted. A failed fetch, an
@@ -4420,7 +4540,7 @@ export class LocalConnectorStore {
             // classification it feeds was computed from strictly less input
             // than the body this store accepted and chunked.
             const stored = this.activeStoredCopy(itemForStorage);
-            // In connector-classify mode the connector is the classification
+            // In declared-placement mode the lane's placement is the classification
             // authority and does not derive its verdict from the fetched
             // body, so only the shared-classifier mode demands one: there the
             // verdict is computed from exactly the text handed over, and a
@@ -4541,6 +4661,14 @@ export class LocalConnectorStore {
           ) {
             const indexed = await this.indexItemContent(
               connector,
+              (fetched) => classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain),
+              (fetched, fetchedSensitivity) => this.recordTierDecision(
+                connector,
+                fetched,
+                fetchedSensitivity,
+                tierClassification,
+                tierRun,
+              ),
               itemForStorage,
               upsert.itemPk,
               maxChunkChars,
@@ -5283,6 +5411,8 @@ export class LocalConnectorStore {
   // non-text-able content become gaps, never raised raw.
   private async indexItemContent(
     connector: SourceConnector,
+    place: (item: RawItem) => SourceSensitivity,
+    recordDecision: (item: RawItem, sensitivity: SourceSensitivity) => void,
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
@@ -5304,7 +5434,8 @@ export class LocalConnectorStore {
       // Fetched content gets its own classification: bytes can reveal more
       // than the listing did. A mismatched trust domain rejects the CONTENT
       // (fail closed) while the metadata row, which classified clean, stays.
-      const fetchedSensitivity = connector.classify(fetched);
+      const fetchedSensitivity = place(fetched);
+      recordDecision(fetched, fetchedSensitivity);
       if (fetchedSensitivity.trustDomain !== this.trustDomain) {
         gaps.push(trustDomainMismatchGap(fetched, fetchedSensitivity.trustDomain, this.trustDomain, 'content skipped'));
         return { chunksIndexed: 0, ftsContentChanged: false, secretsTierExcluded: false };
@@ -7178,7 +7309,7 @@ export async function syncAndEmbedFromConnector(
       })();
     },
     fetchItem: (localItemId) => options.connector.fetchItem(localItemId),
-    classify: (item) => options.connector.classify(item),
+    classificationSignals: (item) => options.connector.classificationSignals(item),
   };
   const sync = await options.store.syncFromConnector(connector, options.sync);
   const selectedIds = [...localItemIds];
@@ -8004,12 +8135,27 @@ function normalizeClassificationOptions(
   };
 }
 
+/**
+ * The placement a sync applies to one item: the shared classification policy
+ * when one is supplied, otherwise the lane's declared placement. Exported for
+ * the per-lane parity tests against the retired connector classify().
+ */
+export function connectorStoreItemPlacement(
+  item: RawItem,
+  classification: ConnectorStoreClassificationOptions | undefined,
+  placement: ConnectorStorePlacement | undefined,
+  storeTrustDomain: SourceTrustDomain,
+): SourceSensitivity {
+  return classifyConnectorStoreItem(item, normalizeClassificationOptions(classification), placement, storeTrustDomain);
+}
+
 function classifyConnectorStoreItem(
-  connector: SourceConnector,
   item: RawItem,
   classification: NormalizedConnectorStoreClassification | undefined,
+  placement: ConnectorStorePlacement | undefined,
+  storeTrustDomain: SourceTrustDomain,
 ): SourceSensitivity {
-  if (!classification) return connector.classify(item);
+  if (!classification) return placeInExistingStore(item, placement, storeTrustDomain);
 
   // The SHARED per-item engine, not just the sensitivity map.
   //
@@ -8019,9 +8165,9 @@ function classifyConnectorStoreItem(
   // identity — never ran on a store lane at all: a bank statement classified
   // as ordinary internal mail and became cloud-embedding eligible, and a
   // message carrying key material was stored instead of being tombstoned by
-  // the S5 rule in the sync loop. The connectors still ship a detector-backed
-  // classify() for exactly this decision; supplying a policy silently replaced
-  // it with the weaker half.
+  // the S5 rule in the sync loop. The mail and file connectors then shipped a
+  // detector-backed classify() for exactly this decision; supplying a policy
+  // silently replaced it with the weaker half.
   //
   // The engine consults the map itself, and in its own order: a credential
   // finding outranks a map category (fail closed), which is the one behaviour

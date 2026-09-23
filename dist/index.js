@@ -6264,190 +6264,7 @@ var init_ingest_filter = __esm(() => {
 });
 
 // src/core/sensitivity-map.ts
-import { chmodSync as chmodSync2, existsSync as existsSync9, lstatSync as lstatSync2, readFileSync as readFileSync12 } from "node:fs";
-import { homedir as homedir8 } from "node:os";
-import { dirname as dirname11, join as join12 } from "node:path";
-function defaultSensitivityMapPath() {
-  return join12(homedir8(), ".olympus", "sensitivity-map.json");
-}
-function resolveSensitivityMapPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_SENSITIVITY_MAP_ENV]?.trim() || defaultSensitivityMapPath();
-}
-function loadSensitivityMap(options = {}) {
-  const path = resolveSensitivityMapPath(options);
-  if (!existsSync9(path)) {
-    if (options.allowMissing)
-      return;
-    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
-  }
-  try {
-    return parseSensitivityMap(JSON.parse(readFileSync12(path, "utf8")), path);
-  } catch (error) {
-    if (options.ignoreInvalid)
-      return;
-    throw error;
-  }
-}
-function sensitivityMapRemedy(path) {
-  return `Write the map to ${path}. Run olympus setup first if ${dirname11(path)} does not exist yet; it creates that directory with owner-only permissions.`;
-}
-function parseSensitivityMap(rawMap, label = "sensitivity map") {
-  const root = asRecord13(rawMap);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be 1.`);
-  }
-  assertUserFacingTierMapping(root.userFacingTiers, `${label}.userFacingTiers`);
-  if (!Array.isArray(root.categories)) {
-    throw new OperationError("config_error", `${label}.categories must be an array.`);
-  }
-  if (root.categories.length === 0) {
-    throw new OperationError("config_error", `${label}.categories must include at least one category.`);
-  }
-  if (root.categories.length > MAX_CATEGORIES) {
-    throw new OperationError("config_error", `${label}.categories must include at most ${MAX_CATEGORIES} categories.`);
-  }
-  const seenIds = new Set;
-  const categories = root.categories.map((value, index) => {
-    const category = parseCategory(value, `${label}.categories[${index}]`);
-    if (seenIds.has(category.id)) {
-      throw new OperationError("config_error", `${label}.categories id "${category.id}" must be unique.`);
-    }
-    seenIds.add(category.id);
-    return category;
-  });
-  return {
-    schemaVersion: SENSITIVITY_MAP_SCHEMA_VERSION,
-    userFacingTiers: USER_FACING_TIER_MAPPING,
-    categories
-  };
-}
-function matchSensitivityMap(map, input) {
-  if (!map)
-    return;
-  const textHaystack = [input.subject, input.title, input.text].map((part) => part?.trim().toLowerCase()).filter((part) => Boolean(part)).join(`
-`);
-  const sender = input.sender?.trim().toLowerCase() ?? "";
-  const path = input.path?.trim().toLowerCase() ?? "";
-  const categoryIds = [];
-  let targetTrustTier = "S4";
-  for (const category of map.categories) {
-    if (!categoryMatches(category, { textHaystack, sender, path }))
-      continue;
-    categoryIds.push(category.id);
-    if (category.targetTrustTier === "S5")
-      targetTrustTier = "S5";
-  }
-  if (categoryIds.length === 0)
-    return;
-  return {
-    categoryIds,
-    targetTrustTier,
-    targetTrustDomain: "secure_local"
-  };
-}
-function categoryMatches(category, input) {
-  return category.match.keywords.some((keyword) => input.textHaystack.includes(keyword.toLowerCase())) || category.match.senderPatterns.some((pattern) => input.sender.includes(pattern.toLowerCase())) || category.match.pathPatterns.some((pattern) => input.path.includes(pattern.toLowerCase()));
-}
-function assertUserFacingTierMapping(value, label) {
-  const record = asRecord13(value);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  for (const tierName of USER_FACING_TIER_NAMES) {
-    const mapped = asRecord13(record[tierName]);
-    const expected = USER_FACING_TIER_MAPPING[tierName];
-    if (!mapped || mapped.targetTrustTier !== expected.targetTrustTier || mapped.targetTrustDomain !== expected.targetTrustDomain) {
-      throw new OperationError("config_error", `${label}.${tierName} must map to ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
-    }
-  }
-}
-function parseCategory(value, label) {
-  const record = asRecord13(value);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const id = boundedString(record.id, `${label}.id`);
-  if (!CATEGORY_ID_PATTERN.test(id)) {
-    throw new OperationError("config_error", `${label}.id must be a stable lowercase slug like "therapy" or "family-finance".`);
-  }
-  const targetTierName = enumString2(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`);
-  if (targetTierName === "public" || targetTierName === "private") {
-    throw new OperationError("config_error", `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`);
-  }
-  const targetTrustTier = enumString2(record.targetTrustTier, SOURCE_TRUST_TIERS, `${label}.targetTrustTier`);
-  const targetTrustDomain = enumString2(record.targetTrustDomain, SOURCE_TRUST_DOMAINS, `${label}.targetTrustDomain`);
-  const expected = USER_FACING_TIER_MAPPING[targetTierName];
-  if (targetTrustTier !== expected.targetTrustTier || targetTrustDomain !== expected.targetTrustDomain) {
-    throw new OperationError("config_error", `${label} target fields must match ${targetTierName}: ${expected.targetTrustTier}/${expected.targetTrustDomain}.`);
-  }
-  const examples = boundedStringList(record.examples, `${label}.examples`, {
-    min: 1,
-    max: MAX_EXAMPLES_PER_CATEGORY
-  });
-  const matchRecord = asRecord13(record.match);
-  if (!matchRecord)
-    throw new OperationError("config_error", `${label}.match must be an object.`);
-  const match = {
-    keywords: boundedStringList(matchRecord.keywords, `${label}.match.keywords`, { max: MAX_MATCH_TERMS_PER_FIELD }),
-    senderPatterns: boundedStringList(matchRecord.senderPatterns, `${label}.match.senderPatterns`, { max: MAX_MATCH_TERMS_PER_FIELD }),
-    pathPatterns: boundedStringList(matchRecord.pathPatterns, `${label}.match.pathPatterns`, { max: MAX_MATCH_TERMS_PER_FIELD })
-  };
-  if (match.keywords.length + match.senderPatterns.length + match.pathPatterns.length === 0) {
-    throw new OperationError("config_error", `${label}.match must include at least one keyword, sender pattern, or path pattern.`);
-  }
-  return {
-    id,
-    label: boundedString(record.label, `${label}.label`),
-    targetTierName,
-    targetTrustTier,
-    targetTrustDomain,
-    examples,
-    notes: typeof record.notes === "string" ? record.notes.trim().slice(0, 2000) : "",
-    match
-  };
-}
-function asRecord13(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-function enumString2(value, allowed, label) {
-  if (typeof value !== "string" || !allowed.includes(value)) {
-    throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
-  }
-  return value;
-}
-function boundedString(value, label) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new OperationError("config_error", `${label} must be a non-empty string.`);
-  }
-  const trimmed = value.trim();
-  if (trimmed.length > MAX_STRING_LENGTH) {
-    throw new OperationError("config_error", `${label} must be ${MAX_STRING_LENGTH} characters or fewer.`);
-  }
-  return trimmed;
-}
-function boundedStringList(value, label, bounds) {
-  if (!Array.isArray(value))
-    throw new OperationError("config_error", `${label} must be an array.`);
-  if (bounds.min !== undefined && value.length < bounds.min) {
-    throw new OperationError("config_error", `${label} must include at least ${bounds.min} item.`);
-  }
-  if (value.length > bounds.max) {
-    throw new OperationError("config_error", `${label} must include at most ${bounds.max} items.`);
-  }
-  const normalized = [];
-  const seen = new Set;
-  for (const entry of value) {
-    const text = boundedString(entry, label);
-    const key = text.toLowerCase();
-    if (!seen.has(key)) {
-      normalized.push(text);
-      seen.add(key);
-    }
-  }
-  return normalized;
-}
-var SENSITIVITY_MAP_SCHEMA_VERSION = 1, OLYMPUS_SENSITIVITY_MAP_ENV = "OLYMPUS_SENSITIVITY_MAP_PATH", USER_FACING_TIER_MAPPING, USER_FACING_TIER_NAMES, USER_FACING_TIER_SET, TRUST_TIER_SET, TRUST_DOMAIN_SET, MAX_CATEGORIES = 64, MAX_EXAMPLES_PER_CATEGORY = 12, MAX_MATCH_TERMS_PER_FIELD = 64, MAX_STRING_LENGTH = 240, CATEGORY_ID_PATTERN;
+var USER_FACING_TIER_MAPPING, USER_FACING_TIER_NAMES, USER_FACING_TIER_SET, TRUST_TIER_SET, TRUST_DOMAIN_SET, RAISING_TIER_NAMES;
 var init_sensitivity_map = __esm(() => {
   init_operation_error();
   init_types();
@@ -6461,511 +6278,10 @@ var init_sensitivity_map = __esm(() => {
   USER_FACING_TIER_SET = new Set(USER_FACING_TIER_NAMES);
   TRUST_TIER_SET = new Set(SOURCE_TRUST_TIERS);
   TRUST_DOMAIN_SET = new Set(SOURCE_TRUST_DOMAINS);
-  CATEGORY_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-});
-
-// src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash4 } from "node:crypto";
-function scanDropboxContentPolicyText(input) {
-  const text = input.text?.trim() ?? "";
-  if (!text) {
-    return {
-      trust_tier: "S4",
-      trust_domain: "secure_local",
-      policy_decision: "metadata_only",
-      review_status: "auto_classified",
-      classifier_kind: DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND,
-      classifier_version: DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION,
-      findings: []
-    };
-  }
-  const secretFindings = scanPatterns(text, SECRET_PATTERNS, input.structuralRefJson);
-  const reviewFindings = scanPatterns(text, REVIEW_PATTERNS, input.structuralRefJson);
-  const findings = dedupeFindings([...secretFindings, ...reviewFindings]);
-  const hasSecret = secretFindings.length > 0;
-  const hasReview = reviewFindings.length > 0;
-  return {
-    trust_tier: hasSecret ? "S5" : "S4",
-    trust_domain: "secure_local",
-    policy_decision: hasSecret ? "blocked_sensitive" : hasReview ? "needs_review" : "index_allowed",
-    review_status: hasSecret ? "blocked" : hasReview ? "needs_review" : "auto_classified",
-    classifier_kind: DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND,
-    classifier_version: DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION,
-    findings
-  };
-}
-function scanPatterns(text, patterns, structuralRefJson) {
-  const findings = [];
-  for (const pattern of patterns) {
-    pattern.pattern.lastIndex = 0;
-    const matches = text.matchAll(pattern.pattern);
-    for (const match of matches) {
-      const matchedText = match[0]?.trim();
-      if (!matchedText)
-        continue;
-      findings.push({
-        finding_type: pattern.findingType,
-        finding_hash: hashFinding(pattern.findingType, matchedText),
-        confidence: pattern.confidence,
-        ...structuralRefJson ? { structural_ref_json: structuralRefJson } : {}
-      });
-    }
-  }
-  return findings;
-}
-function dedupeFindings(findings) {
-  const seen = new Set;
-  const unique2 = [];
-  for (const finding of findings) {
-    const key = `${finding.finding_type}:${finding.finding_hash}:${finding.structural_ref_json ?? ""}`;
-    if (seen.has(key))
-      continue;
-    seen.add(key);
-    unique2.push(finding);
-  }
-  return unique2;
-}
-function hashFinding(type, matchedText) {
-  return createHash4("sha256").update(type).update("\x00").update(matchedText).digest("hex");
-}
-var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-05-22", SECRET_PATTERNS, REVIEW_PATTERNS;
-var init_content_policy = __esm(() => {
-  SECRET_PATTERNS = [
-    {
-      findingType: "private_key_material",
-      pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g,
-      confidence: 1,
-      trustTier: "S5"
-    },
-    {
-      findingType: "aws_access_key_id",
-      pattern: /\bAKIA[0-9A-Z]{16}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "slack_token",
-      pattern: /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g,
-      confidence: 0.98,
-      trustTier: "S5"
-    },
-    {
-      findingType: "api_secret_token",
-      pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-      confidence: 0.95,
-      trustTier: "S5"
-    },
-    {
-      findingType: "credential_assignment",
-      pattern: /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['"]?[^'"\s]{12,}/gi,
-      confidence: 0.9,
-      trustTier: "S5"
-    },
-    {
-      findingType: "explicit_s5_marker",
-      pattern: /\b(S5|highly confidential|do not distribute)\b/gi,
-      confidence: 0.72,
-      trustTier: "S5"
-    }
-  ];
-  REVIEW_PATTERNS = [
-    {
-      findingType: "hostile_instruction",
-      pattern: /\b(ignore previous instructions|system prompt|developer message|exfiltrate|prompt injection)\b/gi,
-      confidence: 0.8,
-      trustTier: "S4"
-    },
-    {
-      findingType: "financial_record_signal",
-      pattern: /\b(bank account|routing number|tax return|irs|invoice|payroll|wire transfer|accountant)\b/gi,
-      confidence: 0.65,
-      trustTier: "S4"
-    },
-    {
-      findingType: "medical_record_signal",
-      pattern: /\b(diagnosis|medical record|prescription|patient|health insurance|lab result)\b/gi,
-      confidence: 0.65,
-      trustTier: "S4"
-    },
-    {
-      findingType: "legal_record_signal",
-      pattern: /\b(attorney|lawyer|legal advice|privileged|nda|settlement agreement|contract)\b/gi,
-      confidence: 0.65,
-      trustTier: "S4"
-    }
-  ];
-});
-
-// src/workers/classification/engine.ts
-function classifyItemTier(input, options = {}) {
-  const haystack = buildHaystack(input);
-  const sensitive = detectSensitiveSignals(input, haystack);
-  if (sensitive.signals.length > 0 && sensitive.tier === "S5") {
-    return {
-      tier: "S5",
-      trustDomain: "secure_local",
-      decidedBy: "sensitive_detector",
-      signals: sensitive.signals
-    };
-  }
-  const senderLower = (input.sender ?? "").toLowerCase();
-  for (const pattern of options.sensitiveSenderPatterns ?? []) {
-    const needle = pattern.trim().toLowerCase();
-    if (needle && senderLower.includes(needle)) {
-      return {
-        tier: "S4",
-        trustDomain: "secure_local",
-        decidedBy: "sensitive_detector",
-        signals: ["sensitive_sender_override"]
-      };
-    }
-  }
-  const sensitivityMapMatch = matchSensitivityMap(options.sensitivityMap, input);
-  if (sensitivityMapMatch) {
-    return {
-      tier: sensitivityMapMatch.targetTrustTier,
-      trustDomain: sensitivityMapMatch.targetTrustDomain,
-      decidedBy: "sensitivity_map",
-      signals: sensitivityMapMatch.categoryIds.map((categoryId) => `sensitivity_map:${categoryId}`)
-    };
-  }
-  if (sensitive.signals.length > 0) {
-    return {
-      tier: sensitive.tier,
-      trustDomain: "secure_local",
-      decidedBy: "sensitive_detector",
-      signals: sensitive.signals
-    };
-  }
-  const clean = detectCleanSignals(input, haystack);
-  if (clean.signals.length > 0) {
-    return {
-      tier: clean.tier,
-      trustDomain: "internal",
-      decidedBy: "clean_rules",
-      signals: clean.signals
-    };
-  }
-  if (options.scorer) {
-    const verdict = options.scorer.scoreClean(input);
-    if (isSyncVerdict(verdict) && verdict.confidentClean) {
-      return {
-        tier: "S3",
-        trustDomain: "internal",
-        decidedBy: "clean_rules",
-        signals: [`scorer:${options.scorer.id}`, ...verdict.signals ?? []]
-      };
-    }
-  }
-  return defaultSecureClassification(input);
-}
-function deriveClassificationPatternKey(input) {
-  const sender = input.sender?.trim();
-  if (sender) {
-    const matches = [...sender.matchAll(/@([a-z0-9][a-z0-9._-]*)/gi)];
-    const domain = matches.at(-1)?.[1]?.toLowerCase().replace(/[.>]+$/, "");
-    return domain ? `sender:${domain}` : "sender:unparsed";
-  }
-  const path = input.path?.trim();
-  if (path) {
-    const segments = path.split(/[\\/]+/).filter(Boolean);
-    const folders = segments.slice(0, -1);
-    const subtree = folders.slice(0, 2).join("/");
-    return `folder:/${subtree.toLowerCase()}`;
-  }
-  return "chat";
-}
-function defaultSecureClassification(input) {
-  return {
-    tier: "S4",
-    trustDomain: "secure_local",
-    decidedBy: "default_secure",
-    signals: ["default:no_confident_signal"],
-    patternKey: deriveClassificationPatternKey(input)
-  };
-}
-function isSyncVerdict(value) {
-  return typeof value.then !== "function";
-}
-function buildHaystack(input) {
-  return [input.subject, input.title, input.text].map((part) => part?.trim()).filter((part) => Boolean(part)).join(`
-`);
-}
-function detectSensitiveSignals(input, haystack) {
-  const signals = [];
-  const scan = scanDropboxContentPolicyText({ text: haystack });
-  const secretTypes = [...new Set(scan.findings.map((finding) => finding.finding_type).filter((type) => SECRET_FINDING_TYPES.has(type)))];
-  for (const type of secretTypes)
-    signals.push(`secret:${type}`);
-  signals.push(...detectFinancialSignals(haystack));
-  signals.push(...detectHealthSignals(input, haystack));
-  signals.push(...detectIdentityDocumentSignals(haystack));
-  return { tier: secretTypes.length > 0 ? "S5" : "S4", signals };
-}
-function detectFinancialSignals(haystack) {
-  const signals = [];
-  if (findValidIban(haystack))
-    signals.push("financial:iban");
-  if (findLuhnCardNumber(haystack))
-    signals.push("financial:card_luhn");
-  if (/\b(?:aba|routing)\s*(?:number|no\.?|#)?\s*[:#-]?\s*\d{9}\b/i.test(haystack)) {
-    signals.push("financial:routing_number");
-  }
-  if (/\baccount\s*(?:number|no\.?|#)\s*[:#-]?\s*[\dXx*][\dXx* -]{5,}/i.test(haystack)) {
-    signals.push("financial:account_number");
-  }
-  const strong = matchTerms(haystack, FINANCIAL_STRONG_TERMS);
-  const weak = matchTerms(haystack, FINANCIAL_WEAK_TERMS);
-  if (strong.length >= 1 || weak.length >= 2) {
-    for (const term of [...strong, ...weak])
-      signals.push(`financial:vocabulary:${term}`);
-  }
-  return signals;
-}
-function detectHealthSignals(input, haystack) {
-  const strong = matchTerms(haystack, HEALTH_STRONG_TERMS);
-  const weak = matchTerms(haystack, HEALTH_WEAK_TERMS);
-  const origin = `${input.sender ?? ""}
-${input.path ?? ""}`;
-  const originHint = HEALTH_ORIGIN_HINT.test(origin);
-  const hit = strong.length >= 1 || weak.length >= 2 || originHint && strong.length + weak.length >= 1;
-  if (!hit)
-    return [];
-  const signals = [...strong, ...weak].map((term) => `health:vocabulary:${term}`);
-  if (originHint)
-    signals.push("health:origin_hint");
-  return signals;
-}
-function detectIdentityDocumentSignals(haystack) {
-  const signals = [];
-  if (/\b\d{3}-\d{2}-\d{4}\b/.test(haystack) || /\b(?:ssn|social security number)\b[:\s#]*\d{3}-?\d{2}-?\d{4}\b/i.test(haystack)) {
-    signals.push("identity:ssn");
-  }
-  const passport = haystack.match(/\bpassport\s*(?:no\.?|number|#)\s*[:#-]?\s*([A-Z0-9]{6,9})\b/i);
-  if (passport?.[1] && /\d{4,}/.test(passport[1])) {
-    signals.push("identity:passport_number");
-  }
-  if (findValidNif(haystack))
-    signals.push("identity:nif");
-  return signals;
-}
-function findValidIban(haystack) {
-  const candidates = haystack.toUpperCase().matchAll(/\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b/g);
-  for (const candidate of candidates) {
-    if (isValidIban(candidate[0]))
-      return true;
-  }
-  return false;
-}
-function isValidIban(candidate) {
-  const compact = candidate.replace(/[\s-]/g, "").toUpperCase();
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact))
-    return false;
-  const rearranged = compact.slice(4) + compact.slice(0, 4);
-  let remainder = 0;
-  for (const char of rearranged) {
-    const value = char >= "0" && char <= "9" ? char : String(char.charCodeAt(0) - 55);
-    for (const digit of value)
-      remainder = (remainder * 10 + (digit.charCodeAt(0) - 48)) % 97;
-  }
-  return remainder === 1;
-}
-function findLuhnCardNumber(haystack) {
-  const runs = haystack.matchAll(/\d(?:[ -]?\d)*/g);
-  for (const run of runs) {
-    const digits = run[0].replace(/[ -]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits))
-      return true;
-  }
-  return false;
-}
-function passesLuhn(digits) {
-  let sum = 0;
-  let double = false;
-  for (let index = digits.length - 1;index >= 0; index -= 1) {
-    let digit = digits.charCodeAt(index) - 48;
-    if (double) {
-      digit *= 2;
-      if (digit > 9)
-        digit -= 9;
-    }
-    sum += digit;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-function findValidNif(haystack) {
-  const candidates = haystack.matchAll(/\b(\d{8})([A-Za-z])\b/g);
-  for (const candidate of candidates) {
-    const number = Number.parseInt(candidate[1], 10);
-    const letter = candidate[2].toUpperCase();
-    if (NIF_CHECK_LETTERS[number % 23] === letter)
-      return true;
-  }
-  return false;
-}
-function matchTerms(haystack, terms) {
-  const matched = [];
-  for (const term of terms) {
-    const pattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-    if (pattern.test(haystack))
-      matched.push(term);
-  }
-  return matched;
-}
-function detectCleanSignals(input, haystack) {
-  const signals = [];
-  for (const label of input.labels ?? []) {
-    const normalized = label.trim().toUpperCase();
-    if (CLEAN_GMAIL_CATEGORIES.has(normalized))
-      signals.push(`clean:gmail_category:${normalized}`);
-  }
-  const sender = input.sender?.trim() ?? "";
-  if (sender && (LIST_SENDER_LOCAL_PART.test(sender) || LIST_SENDER_DOMAIN.test(sender))) {
-    signals.push("clean:list_sender");
-  }
-  const path = input.path?.trim().toLowerCase() ?? "";
-  if (path) {
-    const normalizedPath = path.endsWith("/") ? path : `${path}/`;
-    for (const segment of PUBLICISH_PATH_SEGMENTS) {
-      if (normalizedPath.includes(segment)) {
-        signals.push(`clean:public_path:${segment.replace(/\/$/, "")}`);
-        break;
-      }
-    }
-    if (PRESENTATION_EXTENSIONS.some((extension) => path.endsWith(extension))) {
-      signals.push("clean:presentation_document");
-    }
-  }
-  const pleasantry = isShortPleasantry(haystack);
-  if (pleasantry)
-    signals.push("clean:short_pleasantry");
-  if (SCHEDULING_PATTERN.test(haystack))
-    signals.push("clean:scheduling_coordination");
-  if (COMMERCE_NOTICE_PATTERN.test(haystack))
-    signals.push("clean:commerce_notice");
-  if (WORK_COORDINATION_PATTERN.test(haystack))
-    signals.push("clean:work_coordination");
-  const tier = pleasantry && signals.length === 1 ? "S2" : "S3";
-  return { tier, signals };
-}
-function isShortPleasantry(haystack) {
-  const text = haystack.trim();
-  if (!text || text.length > 200)
-    return false;
-  if (text.split(/\s+/).length > 30)
-    return false;
-  if (/\d{5,}/.test(text))
-    return false;
-  if (/https?:\/\//i.test(text))
-    return false;
-  return PLEASANTRY_PATTERN.test(text);
-}
-var SECRET_FINDING_TYPES, FINANCIAL_STRONG_TERMS, FINANCIAL_WEAK_TERMS, HEALTH_STRONG_TERMS, HEALTH_WEAK_TERMS, HEALTH_ORIGIN_HINT, NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE", CLEAN_GMAIL_CATEGORIES, LIST_SENDER_LOCAL_PART, LIST_SENDER_DOMAIN, PUBLICISH_PATH_SEGMENTS, PRESENTATION_EXTENSIONS, PLEASANTRY_PATTERN, SCHEDULING_PATTERN, COMMERCE_NOTICE_PATTERN, WORK_COORDINATION_PATTERN;
-var init_engine = __esm(() => {
-  init_content_policy();
-  init_sensitivity_map();
-  SECRET_FINDING_TYPES = new Set([
-    "private_key_material",
-    "aws_access_key_id",
-    "slack_token",
-    "api_secret_token",
-    "credential_assignment",
-    "explicit_s5_marker"
-  ]);
-  FINANCIAL_STRONG_TERMS = [
-    "bank statement",
-    "account statement",
-    "tax return",
-    "wire transfer",
-    "payroll",
-    "direct deposit",
-    "bank account",
-    "iban"
-  ];
-  FINANCIAL_WEAK_TERMS = [
-    "invoice",
-    "salary",
-    "tax",
-    "banking",
-    "remittance",
-    "billing",
-    "balance due",
-    "payment due",
-    "swift",
-    "irs",
-    "accountant",
-    "payslip"
-  ];
-  HEALTH_STRONG_TERMS = [
-    "medical record",
-    "patient portal",
-    "lab result",
-    "lab results",
-    "health insurance",
-    "blood test"
-  ];
-  HEALTH_WEAK_TERMS = [
-    "diagnosis",
-    "prescription",
-    "clinical",
-    "patient",
-    "medication",
-    "dosage",
-    "symptom",
-    "symptoms",
-    "treatment",
-    "biopsy",
-    "radiology",
-    "pathology",
-    "mri",
-    "immunization",
-    "vaccination",
-    "physician",
-    "pediatric",
-    "cardiology",
-    "clinic",
-    "hospital"
-  ];
-  HEALTH_ORIGIN_HINT = /clinic|hospital|medic|health|pharma|doctor/i;
-  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
-  LIST_SENDER_LOCAL_PART = /\b(?:no-?reply|donotreply|newsletter|mailer(?:-daemon)?|notifications?|updates|digest|news)@/i;
-  LIST_SENDER_DOMAIN = /@(?:[a-z0-9-]+\.)*(?:substack\.com|mailchimp\.com|mailchimpapp\.net|mailgun\.(?:com|org|net)|sendgrid\.(?:com|net)|beehiiv\.com|buttondown\.email|list-manage\.com|lists?\.[a-z0-9.-]+)\b/i;
-  PUBLICISH_PATH_SEGMENTS = ["/2 areas/work/", "/presentations/", "/published/", "/public/"];
-  PRESENTATION_EXTENSIONS = [".pptx", ".key", ".odp"];
-  PLEASANTRY_PATTERN = /\b(?:thanks|thank you|thx|sounds good|see you|congrats|congratulations|happy birthday|no problem|you'?re welcome|lgtm|great work|well done|good night|good morning|safe travels|haha|lol)\b|👍|🎉|❤️/i;
-  SCHEDULING_PATTERN = /\b(?:calendar invite|meeting invite|meeting notes|agenda|zoom link|google meet|rescheduled|schedule|scheduling|available (?:at|on)|see you (?:at|on)|call notes|weekly sync|standup)\b/i;
-  COMMERCE_NOTICE_PATTERN = /\b(?:order confirmation|your order|receipt|shipped|shipping update|delivery update|delivered|tracking number|return label|subscription renewal|trial expires|invoice received)\b/i;
-  WORK_COORDINATION_PATTERN = /\b(?:project update|status update|roadmap|milestone|pull request|pr review|design review|launch plan|offsite agenda|meeting recap|action items|next steps)\b/i;
+  RAISING_TIER_NAMES = new Set(["secure", "secrets"]);
 });
 
 // src/workers/google-connectors/classification.ts
-function loadGoogleSensitivityMap(env = process.env) {
-  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
-}
-function classifyGoogleItemRaiseOnly(input, options) {
-  const classifier = options.classifier ?? ((value, classifyOptions) => classifyItemTier(value, classifyOptions));
-  const classified = classifier(input, {
-    ...options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}
-  });
-  if (classified.decidedBy === "default_secure") {
-    return buildSourceSensitivity({
-      trustTier: options.defaultTrustTier,
-      trustDomain: options.defaultTrustDomain
-    });
-  }
-  const classifiedTier = classified.tier;
-  if (TRUST_TIER_RANK[classifiedTier] <= TRUST_TIER_RANK[options.defaultTrustTier]) {
-    return buildSourceSensitivity({
-      trustTier: options.defaultTrustTier,
-      trustDomain: options.defaultTrustDomain
-    });
-  }
-  return buildSourceSensitivity({
-    trustTier: classifiedTier,
-    trustDomain: classified.trustDomain
-  });
-}
 function accountFromGoogleHandle(handle, fallback = "personal") {
   const trimmed = handle?.trim();
   if (!trimmed)
@@ -6983,20 +6299,8 @@ function metadataStringArray(metadata, key) {
     return [];
   return value.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
 }
-var TRUST_TIER_RANK;
 var init_classification = __esm(() => {
   init_sensitivity_map();
-  init_types();
-  init_engine();
-  TRUST_TIER_RANK = {
-    S0: 0,
-    S1: 1,
-    S2: 2,
-    S3: 3,
-    S4: 4,
-    "S4+": 4.5,
-    S5: 5
-  };
 });
 
 // src/workers/google-connectors/request-budget.ts
@@ -7019,7 +6323,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -7031,8 +6335,6 @@ class GoogleGmailSourceConnector {
   apiBaseUrl;
   defaultMaxMessages;
   query;
-  sensitivityMap;
-  classifier;
   requestBudget;
   provenance;
   maxRetries;
@@ -7060,8 +6362,6 @@ class GoogleGmailSourceConnector {
     this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, "") || GMAIL_API_BASE_URL;
     this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
     this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
-    this.sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
-    this.classifier = options.classifier;
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = options.maxRetries;
@@ -7166,20 +6466,15 @@ class GoogleGmailSourceConnector {
   requestBudgetStatus() {
     return this.requestBudget?.status();
   }
-  classify(item) {
+  classificationSignals(item) {
     const subject = metadataString(item.metadata, "subject") ?? metadataString(item.metadata, "title");
     const sender = metadataString(item.metadata, "from");
-    return classifyGoogleItemRaiseOnly({
-      labels: metadataStringArray(item.metadata, "labels"),
-      text: item.content.kind === "text" ? item.content.text : metadataString(item.metadata, "snippet") ?? "",
-      ...subject ? { subject } : {},
-      ...sender ? { sender } : {}
-    }, {
-      defaultTrustTier: "S3",
-      defaultTrustDomain: "internal",
-      ...this.sensitivityMap ? { sensitivityMap: this.sensitivityMap } : {},
-      ...this.classifier ? { classifier: this.classifier } : {}
-    });
+    const labels = metadataStringArray(item.metadata, "labels");
+    return {
+      ...subject ? { title: subject } : {},
+      ...sender ? { sender } : {},
+      ...labels.length > 0 ? { labels } : {}
+    };
   }
   async clientForRequest() {
     if (this.client)
@@ -7303,9 +6598,9 @@ class RestGmailApiClient {
     if (request.query)
       params.set("q", request.query);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord14(json, "Gmail messages list response");
+    const record = asRecord13(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord14(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord13(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -7481,7 +6776,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord14(value, label) {
+function asRecord13(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -7498,7 +6793,7 @@ function safeProviderDetail(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString(value) {
-  return createHash5("sha256").update(value).digest("hex");
+  return createHash4("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
 var init_gmail = __esm(() => {
@@ -7509,7 +6804,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -7523,8 +6818,6 @@ class GoogleDriveSourceConnector {
   maxContentFiles;
   maxTextBytes;
   query;
-  sensitivityMap;
-  classifier;
   requestBudget;
   provenance;
   maxRetries;
@@ -7551,8 +6844,6 @@ class GoogleDriveSourceConnector {
     this.maxContentFiles = normalizeDriveMaxFiles(options.maxContentFiles ?? DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES);
     this.maxTextBytes = normalizeMaxTextBytes(options.maxTextBytes);
     this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_QUERY?.trim() || undefined;
-    this.sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
-    this.classifier = options.classifier;
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = options.maxRetries;
@@ -7646,19 +6937,15 @@ class GoogleDriveSourceConnector {
   requestBudgetStatus() {
     return this.requestBudget?.status();
   }
-  classify(item) {
+  classificationSignals(item) {
     const title = metadataString(item.metadata, "title") ?? metadataString(item.metadata, "name");
-    const path = metadataString(item.metadata, "pathDisplay") ?? title;
-    return classifyGoogleItemRaiseOnly({
-      text: item.content.kind === "text" ? item.content.text : "",
+    const path = metadataString(item.metadata, "pathDisplay");
+    const folderKeys = metadataStringArray(item.metadata, "folderAncestorIds");
+    return {
       ...title ? { title } : {},
-      ...path ? { path } : {}
-    }, {
-      defaultTrustTier: "S3",
-      defaultTrustDomain: "internal",
-      ...this.sensitivityMap ? { sensitivityMap: this.sensitivityMap } : {},
-      ...this.classifier ? { classifier: this.classifier } : {}
-    });
+      ...path ? { path } : {},
+      ...folderKeys.length > 0 ? { folderKeys } : {}
+    };
   }
   async rawItemFromDriveFile(file) {
     const title = file.name ?? file.id;
@@ -7933,16 +7220,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord15(json, "Google Drive files list response");
+    const record = asRecord14(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord15(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord14(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord15(json, "Google Drive folder");
+    const record = asRecord14(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -8037,7 +7324,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord15(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord14(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -8065,7 +7352,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord15(value, label) {
+function asRecord14(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -8082,7 +7369,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString2(value) {
-  return createHash6("sha256").update(value).digest("hex");
+  return createHash5("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -8122,6 +7409,47 @@ var init_api = () => {};
 var init_corpus_adapter = __esm(() => {
   init_corpus();
   init_source_corpus_registry();
+});
+// src/workers/dropbox-files/content-policy.ts
+var init_content_policy = () => {};
+
+// src/workers/classification/engine.ts
+var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
+var init_engine = __esm(() => {
+  init_content_policy();
+  init_sensitivity_map();
+  SECRET_FINDING_TYPES = new Set([
+    "private_key_material",
+    "aws_access_key_id",
+    "slack_token",
+    "api_secret_token",
+    "credential_assignment",
+    "explicit_s5_marker"
+  ]);
+  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
+});
+
+// src/workers/classification/tier-classifier.ts
+var UNDECIDED_TIER_SNIFFER;
+var init_tier_classifier = __esm(() => {
+  init_sensitivity_map();
+  init_engine();
+  UNDECIDED_TIER_SNIFFER = Object.freeze({
+    id: "undecided",
+    judge: () => ({ verdict: "undecided" })
+  });
+});
+// src/workers/classification/tier-ledger.ts
+var init_tier_ledger = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
+// src/workers/connector-store/tier-placement.ts
+var init_tier_placement = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
 });
 
 // src/core/source-index/fts.ts
@@ -8295,6 +7623,9 @@ var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
   init_engine();
+  init_tier_ledger();
+  init_tier_classifier();
+  init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -8436,13 +7767,17 @@ var init_connector_store = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
+var READWISE_STORE_PLACEMENT;
 var init_connector = __esm(() => {
   init_atomic_file();
-  init_types();
   init_credential_broker();
   init_connector_store();
   init_api();
   init_corpus_adapter();
+  READWISE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
 });
 
 // src/workers/readwise/live-control.ts
@@ -8889,11 +8224,15 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
+var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
-  init_types();
   init_connector_store();
   init_corpus_adapter2();
   init_folder_facets();
+  X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
 });
 
 // src/workers/x-bookmarks/live-control.ts
@@ -8980,15 +8319,38 @@ var init_provider_client = () => {};
 
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
-  init_types();
   init_credential_broker();
-  init_content_policy();
   init_provider_client();
+});
+
+// src/workers/dropbox-files/corpus-adapter.ts
+var init_corpus_adapter3 = __esm(() => {
+  init_corpus();
+});
+
+// src/workers/dropbox-files/connector-store.ts
+var DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
+var init_connector_store2 = __esm(() => {
+  init_source_ingestion_exclusions();
+  init_source_ingestion_policy();
+  init_connector_store();
+  init_corpus_adapter3();
+  DROPBOX_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+  POLICY_ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
+  init_connector_store2();
   init_connector3();
   init_provider_client();
 });
@@ -9080,7 +8442,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join13 } from "node:path";
+import { join as join12 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -9126,7 +8488,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join13(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join12(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -9192,11 +8554,6 @@ var init_dropbox_content_hash = __esm(() => {
   DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 });
 
-// src/workers/dropbox-files/corpus-adapter.ts
-var init_corpus_adapter3 = __esm(() => {
-  init_corpus();
-});
-
 // src/workers/source-export/dropbox.ts
 var init_dropbox = __esm(() => {
   init_credential_broker();
@@ -9228,20 +8585,6 @@ var init_qualification2 = __esm(() => {
   init_corpus_adapter3();
 });
 
-// src/workers/dropbox-files/connector-store.ts
-var POLICY_ADMITTED;
-var init_connector_store2 = __esm(() => {
-  init_source_ingestion_exclusions();
-  init_source_ingestion_policy();
-  init_connector_store();
-  init_corpus_adapter3();
-  POLICY_ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
-  });
-});
-
 // src/workers/dropbox-files/index.ts
 var init_dropbox_files = __esm(() => {
   init_connector3();
@@ -9266,7 +8609,6 @@ var init_corpus_adapter4 = __esm(() => {
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID;
 var init_capture_spool_connector = __esm(() => {
-  init_types();
   init_corpus_adapter4();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
@@ -9426,11 +8768,11 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { homedir as homedir9 } from "node:os";
-import { dirname as dirname12, join as join14 } from "node:path";
+import { homedir as homedir8 } from "node:os";
+import { dirname as dirname11, join as join13 } from "node:path";
 function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir9(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir8(), ".local", "share");
+  return join13(dataHome, "openclaw", "olympus", "source-dashboard.sqlite");
 }
 var MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
@@ -11186,7 +10528,7 @@ function asRecord6(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -13546,8 +12888,8 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/doctor.ts
 init_config();
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname13, join as join15 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname12, join as join14 } from "node:path";
 init_sovereignty();
 
 // src/core/setup-preflight.ts
@@ -14041,7 +13383,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync10(configPath))
+  if (configPath === undefined || !existsSync9(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -14053,7 +13395,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? join15(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? join14(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -14229,14 +13571,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? fetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord16(await response.json());
-    const readiness = asRecord16(body.credential_readiness);
-    const policy = asRecord16(readiness.policy);
+    const body = asRecord15(await response.json());
+    const readiness = asRecord15(body.credential_readiness);
+    const policy = asRecord15(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord16(entry);
+      const profile = asRecord15(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -14289,7 +13631,7 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord16(await response.json());
+  const health = asRecord15(await response.json());
   const degradedCredentials = degradedCredentialDetails(health);
   if (degradedCredentials.length > 0) {
     return {
@@ -14342,7 +13684,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord15(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -14350,7 +13692,7 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   for (const entry of corpora) {
-    const corpus = asRecord16(entry);
+    const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
@@ -14364,8 +13706,8 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord16(corpus.counts);
-    const embeddingParity = asRecord16(corpus.embedding_parity);
+    const counts = asRecord15(corpus.counts);
+    const embeddingParity = asRecord15(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
     const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
     const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
@@ -14425,7 +13767,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord15(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -14470,7 +13812,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord15(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -14482,8 +13824,8 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord16(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord16(corpus?.counts);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord15(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord15(corpus?.counts);
     const actionable = asCount(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
@@ -14540,7 +13882,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record = asRecord16(value);
+  const record = asRecord15(value);
   if (!("actionable_queued" in record) || !("actionable_retryable_due" in record))
     return;
   return {
@@ -14553,7 +13895,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record, options = {}) {
   const credentials = Array.isArray(record.degraded_credentials) ? record.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord16(entry);
+    const credential = asRecord15(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -14605,7 +13947,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord15(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -14633,7 +13975,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord16(entry);
+    const source = asRecord15(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -14643,7 +13985,7 @@ async function sourceSchedulerStatusCheck(deps) {
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
     for (const taskEntry of tasks) {
-      const task = asRecord16(taskEntry);
+      const task = asRecord15(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
       const failures = asCount(task.consecutive_failures);
       if (task.stale_anomaly === true) {
@@ -14779,7 +14121,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord16(await response.json());
+    return asRecord15(await response.json());
   } catch {
     return;
   }
@@ -14789,7 +14131,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord16(await response.json());
+    const status = asRecord15(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -14798,7 +14140,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord16(status.ingestion_ledger);
+  const ledger = asRecord15(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -14806,7 +14148,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join15(dirname13(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return join14(dirname12(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -14827,15 +14169,15 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync10(path))
+    if (!existsSync9(path))
       return;
-    const parsed = JSON.parse(readFileSync13(path, "utf8"));
-    const record = asRecord16(parsed);
-    const sources = asRecord16(record.sources);
+    const parsed = JSON.parse(readFileSync12(path, "utf8"));
+    const record = asRecord15(parsed);
+    const sources = asRecord15(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord16(sourceValue);
-      const terminal = asRecord16(source.failed_terminal_by_class);
+      const source = asRecord15(sourceValue);
+      const terminal = asRecord15(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -14850,7 +14192,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync8(dirname13(path), { recursive: true });
+  mkdirSync8(dirname12(path), { recursive: true });
   writeFileSync5(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -14863,9 +14205,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? fetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord16(await response.json());
+    const status = asRecord15(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord16(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord15(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -15006,7 +14348,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord15(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -15021,13 +14363,13 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord15(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord16(corpus.last_sync);
+  const lastSync = asRecord15(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord16(corpus.counts);
+  const counts = asRecord15(corpus.counts);
   return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
@@ -15058,13 +14400,13 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync10(join15(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync9(join14(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync2(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord16(value) {
+function asRecord15(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -16036,7 +15378,7 @@ function parseDashboardReadParams(value) {
   if (record.action !== undefined || record.parent_key !== undefined || record.cursor !== undefined) {
     throw new DashboardGatewayInvalidRequestError("Unexpected folder browse parameters.");
   }
-  const sourceId = record.source_id === undefined ? undefined : boundedString2(record.source_id, 256, "source_id");
+  const sourceId = record.source_id === undefined ? undefined : boundedString(record.source_id, 256, "source_id");
   if (view === "source" && sourceId === undefined) {
     throw new DashboardGatewayInvalidRequestError("source_id is required for the source view.");
   }
@@ -16082,10 +15424,10 @@ function parseDashboardControlParams(value) {
         if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
           throw new DashboardGatewayInvalidRequestError("ancestor_keys must be an array of at most 100 folder keys.");
         }
-        ancestorKeys = selection.ancestor_keys.map((key) => boundedString2(key, 4096, "ancestor_keys[]", false));
+        ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4096, "ancestor_keys[]", false));
       }
       return {
-        key: boundedString2(selection.key, 4096, "key", false),
+        key: boundedString(selection.key, 4096, "key", false),
         state: selection.state,
         ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
       };
@@ -16096,8 +15438,8 @@ function parseDashboardControlParams(value) {
     return {
       action,
       source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
-      account_generation: boundedString2(record.account_generation, 128, "account_generation", false),
-      expected_scope_revision: boundedString2(record.expected_scope_revision, 256, "expected_scope_revision", false),
+      account_generation: boundedString(record.account_generation, 128, "account_generation", false),
+      expected_scope_revision: boundedString(record.expected_scope_revision, 256, "expected_scope_revision", false),
       selections,
       whole_account: record.whole_account,
       explicit_whole_account_confirmation: record.explicit_whole_account_confirmation
@@ -16105,13 +15447,13 @@ function parseDashboardControlParams(value) {
   }
   if (action === "save_dispositions") {
     const record = exactRecord(outer, ["action", "source", "edits"]);
-    const source = boundedString2(record.source, 256, "source");
+    const source = boundedString(record.source, 256, "source");
     if (!Array.isArray(record.edits) || record.edits.length === 0 || record.edits.length > 1000) {
       throw new DashboardGatewayInvalidRequestError("edits must contain between 1 and 1000 changes.");
     }
     const edits = record.edits.map((entry) => {
       const edit = exactRecord(entry, ["path", "state"]);
-      const path = boundedString2(edit.path, 4096, "path", false);
+      const path = boundedString(edit.path, 4096, "path", false);
       if (edit.state !== "ingest" && edit.state !== "metadata_only" && edit.state !== "exclude") {
         throw new DashboardGatewayInvalidRequestError("Unknown source disposition state.");
       }
@@ -16139,7 +15481,7 @@ function parseDashboardControlParams(value) {
     return {
       action,
       source: enumValue(record.source, ["gemini", "venice", "readwise"], "source"),
-      api_key: boundedString2(record.api_key, 8192, "api_key", false)
+      api_key: boundedString(record.api_key, 8192, "api_key", false)
     };
   }
   if (action === "sync_now") {
@@ -16416,8 +15758,8 @@ function parseDashboardReadResult(value, expectedCanWrite) {
   if (!Number.isInteger(record.status) || record.status < 100 || record.status > 599) {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   }
-  const title = boundedString2(record.title, 256, "title", false);
-  const body = boundedString2(record.body, DASHBOARD_READ_RESPONSE_MAX_BYTES, "body", false);
+  const title = boundedString(record.title, 256, "title", false);
+  const body = boundedString(record.body, DASHBOARD_READ_RESPONSE_MAX_BYTES, "body", false);
   if (containsExecutableMarkup(body)) {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned executable markup.");
   }
@@ -16427,7 +15769,7 @@ function parseDashboardReadResult(value, expectedCanWrite) {
   if (record.can_write !== expectedCanWrite) {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned mismatched control authority.");
   }
-  const signature = boundedString2(record.signature, 128, "signature");
+  const signature = boundedString(record.signature, 128, "signature");
   if (!Number.isInteger(record.poll_interval_ms) || record.poll_interval_ms < 1000 || record.poll_interval_ms > 300000) {
     throw new DashboardGatewayUnavailableError("Olympus dashboard worker returned an invalid response.");
   }
@@ -16466,9 +15808,9 @@ function parseFolderScopeBrowseResult(value) {
     }
     const parentKey = optionalBoundedString(node.parent_key, 4096, "parent_key", false);
     return {
-      key: boundedString2(node.key, 4096, "key", false),
+      key: boundedString(node.key, 4096, "key", false),
       ...parentKey ? { parent_key: parentKey } : {},
-      name: boundedString2(node.name, 1024, "name", false),
+      name: boundedString(node.name, 1024, "name", false),
       kind: "folder",
       has_children: node.has_children,
       selectable: node.selectable
@@ -16487,10 +15829,10 @@ function parseFolderScopeBrowseResult(value) {
       if (!Array.isArray(selection.ancestor_keys) || selection.ancestor_keys.length > 100) {
         throw new DashboardGatewayUnavailableError("Olympus folder scope ancestry is invalid.");
       }
-      ancestorKeys = selection.ancestor_keys.map((key) => boundedString2(key, 4096, "ancestor_keys[]", false));
+      ancestorKeys = selection.ancestor_keys.map((key) => boundedString(key, 4096, "ancestor_keys[]", false));
     }
     return {
-      key: boundedString2(selection.key, 4096, "key", false),
+      key: boundedString(selection.key, 4096, "key", false),
       state: selection.state,
       ...ancestorKeys?.length ? { ancestor_keys: ancestorKeys } : {}
     };
@@ -16501,8 +15843,8 @@ function parseFolderScopeBrowseResult(value) {
   const nextCursor = optionalBoundedString(record.next_cursor, 8192, "next_cursor", false);
   return {
     source_id: enumValue(record.source_id, ["google_drive.docs", "dropbox.files"], "source_id"),
-    account_generation: boundedString2(record.account_generation, 128, "account_generation", false),
-    scope_revision: boundedString2(record.scope_revision, 256, "scope_revision", false),
+    account_generation: boundedString(record.account_generation, 128, "account_generation", false),
+    scope_revision: boundedString(record.scope_revision, 256, "scope_revision", false),
     status: record.status,
     nodes,
     ...nextCursor ? { next_cursor: nextCursor } : {},
@@ -16648,7 +15990,7 @@ function recordValue(value) {
 function isRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function boundedString2(value, maxLength, label, trim = true) {
+function boundedString(value, maxLength, label, trim = true) {
   if (typeof value !== "string")
     throw new DashboardGatewayInvalidRequestError(`${label} must be a string.`);
   const normalized = trim ? value.trim() : value;
@@ -16660,7 +16002,7 @@ function boundedString2(value, maxLength, label, trim = true) {
 function optionalBoundedString(value, maxLength, label, trim = true) {
   if (value === undefined)
     return;
-  return boundedString2(value, maxLength, label, trim);
+  return boundedString(value, maxLength, label, trim);
 }
 function enumValue(value, values, label) {
   if (typeof value === "string" && values.includes(value))
@@ -16689,13 +16031,13 @@ function contentTextForOperation(operation, payload) {
   return JSON.stringify(payload, null, 2);
 }
 function sourceAnswerContentText(payload) {
-  const result = asRecord17(payload);
+  const result = asRecord16(payload);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord17(result.audit);
-  const policy = asRecord17(result.policy);
-  const synthesis = asRecord17(audit?.answer_synthesis);
-  const timings = asRecord17(audit?.phase_timings);
+  const audit = asRecord16(result.audit);
+  const policy = asRecord16(result.policy);
+  const synthesis = asRecord16(audit?.answer_synthesis);
+  const timings = asRecord16(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -16705,7 +16047,7 @@ function sourceAnswerContentText(payload) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record = asRecord17(item);
+    const record = asRecord16(item);
     if (!record)
       return;
     const label = firstString(record.source_label, record.title, record.corpus_id, "source");
@@ -16716,7 +16058,7 @@ function sourceAnswerContentText(payload) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord17(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord16(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -16768,7 +16110,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord17(value) {
+function asRecord16(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -16953,18 +16295,18 @@ function parseSourceWatchDeliveryRequest(value) {
   const kind = route.kind;
   if (kind !== "openclaw_channel" && kind !== "openclaw_task")
     throw new TypeError("Invalid route kind.");
-  const targetId = boundedString3(route.targetId, 256);
+  const targetId = boundedString2(route.targetId, 256);
   if (kind === "openclaw_channel")
     splitChannelTarget(targetId);
   const payload = parseEvidencePointerPayload(record.payload);
-  const downstreamIdempotencyKey = boundedString3(record.downstream_idempotency_key, 64);
+  const downstreamIdempotencyKey = boundedString2(record.downstream_idempotency_key, 64);
   if (!/^[a-f0-9]{64}$/.test(downstreamIdempotencyKey))
     throw new TypeError("Invalid idempotency key.");
   return {
     route: {
       kind,
       targetId,
-      ...route.accountId === undefined ? {} : { accountId: boundedString3(route.accountId, 256) }
+      ...route.accountId === undefined ? {} : { accountId: boundedString2(route.accountId, 256) }
     },
     downstreamIdempotencyKey,
     payload
@@ -16990,20 +16332,20 @@ function parseEvidencePointerPayload(value) {
   if (!Array.isArray(record.items) || record.items.length !== 1)
     throw new TypeError("Invalid watch delivery items.");
   const item = exactRecord2(record.items[0], ["local_item_id", "source_version", "matched_at"]);
-  const sourceVersion = boundedString3(item.source_version, 64);
-  const matchedAt = boundedString3(item.matched_at, 64);
+  const sourceVersion = boundedString2(item.source_version, 64);
+  const matchedAt = boundedString2(item.matched_at, 64);
   if (!Number.isFinite(Date.parse(sourceVersion)) || !Number.isFinite(Date.parse(matchedAt))) {
     throw new TypeError("Invalid watch delivery timestamp.");
   }
   return {
     headline: SOURCE_WATCH_DELIVERY_HEADLINE,
-    watch_id: boundedString3(record.watch_id, 256),
-    corpus_id: boundedString3(record.corpus_id, 256),
-    query_text: boundedString3(record.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
+    watch_id: boundedString2(record.watch_id, 256),
+    corpus_id: boundedString2(record.corpus_id, 256),
+    query_text: boundedString2(record.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
     watch_mode: watchMode,
     match_count: 1,
     items: [{
-      local_item_id: boundedString3(item.local_item_id, 4096),
+      local_item_id: boundedString2(item.local_item_id, 4096),
       source_version: sourceVersion,
       matched_at: matchedAt
     }]
@@ -17016,13 +16358,13 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord2(value, allowed) {
-  const record = asRecord17(value);
+  const record = asRecord16(value);
   if (!record || Object.keys(record).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
   return record;
 }
-function boundedString3(value, maximum) {
+function boundedString2(value, maximum) {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new TypeError("Invalid watch delivery string.");
   }
@@ -17052,7 +16394,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash7("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash6("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

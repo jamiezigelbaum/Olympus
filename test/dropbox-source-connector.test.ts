@@ -1,3 +1,5 @@
+import { placeInExistingStore } from '../src/workers/connector-store/tier-placement.ts';
+import { DROPBOX_STORE_PLACEMENT } from '../src/workers/dropbox-files/connector-store.ts';
 // Contract 1 (SourceConnector) conformance tests for the Dropbox connector.
 // Everything runs against fakes: a counting credential broker, a paging
 // metadata client, and a bounded download client. The final test is the
@@ -536,20 +538,19 @@ describe('Dropbox SourceConnector (Contract 1)', () => {
     await expect(connector.fetchItem('work:id:file-receipt')).rejects.toThrow(/personal:<provider item id>/);
   });
 
-  test('classify defaults to the conservative S4/secure_local floor', async () => {
+  test('signals carry file facts only: no prior, no sharing claim, no tier', async () => {
     const connector = connectorWithFakes();
     const pages = await drain(connector.listItems());
-    const sensitivity = connector.classify(pages[0]?.items[0] as RawItem);
+    const item = pages[0]?.items[0] as RawItem;
+    const signals = connector.classificationSignals(item);
 
-    expect(sensitivity).toEqual({
-      trustTier: 'S4',
-      trustDomain: 'secure_local',
-      localOnly: true,
-      cloudEmbeddingEligible: false,
-    });
+    expect(signals.prior).toBeUndefined();
+    expect(signals.floor).toBeUndefined();
+    expect(signals.sharing).toBeUndefined();
+    expect(signals.title).toBe(item.metadata['name'] as string);
   });
 
-  test('classify upgrades secret-bearing text to S5 and never downgrades', async () => {
+  test('the lane placement keeps S4/secure_local and raises secret-bearing text to S5', async () => {
     const connector = connectorWithFakes();
     const item = await connector.fetchItem('personal:id:file-receipt');
     const secretItem: RawItem = {
@@ -561,16 +562,20 @@ describe('Dropbox SourceConnector (Contract 1)', () => {
       },
     };
 
-    const sensitivity = connector.classify(secretItem);
+    const sensitivity = placeInExistingStore(secretItem, DROPBOX_STORE_PLACEMENT, 'secure_local');
 
     expect(sensitivity.trustTier).toBe('S5');
     expect(sensitivity.trustDomain).toBe('secure_local');
     expect(sensitivity.localOnly).toBe(true);
     expect(sensitivity.cloudEmbeddingEligible).toBe(false);
 
-    const benign = connector.classify(item);
-    expect(benign.trustTier).toBe('S4');
-    expect(benign.trustDomain).toBe('secure_local');
+    const benign = placeInExistingStore(item, DROPBOX_STORE_PLACEMENT, 'secure_local');
+    expect(benign).toEqual({
+      trustTier: 'S4',
+      trustDomain: 'secure_local',
+      localOnly: true,
+      cloudEmbeddingEligible: false,
+    });
   });
 
   test('connector stays thin: no storage imports from local-index', () => {

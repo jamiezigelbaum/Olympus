@@ -281,7 +281,7 @@ test('cached rows from a prior approval revision stay quarantined after a same-a
     id: 'dropbox-scope-test', family: 'file', async authenticate() {},
     async *listItems() { yield { items: [raw], done: true }; },
     async fetchItem() { return raw; },
-    classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
+    classificationSignals() { return {}; },
   });
   await store.syncFromConnector(connector(item()), {
     fetchContent: true,
@@ -345,7 +345,7 @@ test('metadata-only scope excludes retained chunks from direct and hybrid vector
     id: 'metadata-vector-scope-test', family: 'file', async authenticate() {},
     async *listItems() { yield { items: [raw], done: true }; },
     async fetchItem() { return raw; },
-    classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
+    classificationSignals() { return {}; },
   };
   await store.syncFromConnector(connector, {
     fetchContent: true,
@@ -395,7 +395,7 @@ test('a forged Drive folder alias cannot satisfy the trusted folder scope', asyn
     id: 'drive-scope-test', family: 'file', async authenticate() {},
     async *listItems() { yield { items: [raw], done: true }; },
     async fetchItem() { return raw; },
-    classify() { return { trustTier: 'S3', trustDomain: 'internal', cloudEmbeddingEligible: true, localOnly: false }; },
+    classificationSignals() { return {}; },
   };
   await store.syncFromConnector(connector, {
     fetchContent: true,

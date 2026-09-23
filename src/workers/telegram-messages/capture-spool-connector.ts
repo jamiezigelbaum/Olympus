@@ -6,11 +6,14 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
+  SourceConversationKind,
 } from '../../core/contracts.ts';
 import {
   buildSourceSensitivity,
@@ -175,10 +178,20 @@ export function createTelegramCaptureSpoolConnector(options: {
       return found;
     },
 
-    classify(): SourceSensitivity {
-      return buildSourceSensitivity({
-        trustTier: trustDomain === 'secure_local' ? 'S4' : 'S3',
-        trustDomain,
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // The chat's configured trust domain is a chat-level rule: a prior that
+      // messages rest at and are never lowered below. A Secret Chat is a
+      // provider fact and floors the item at Private.
+      const conversationKind = telegramConversationKind(signalText(item.metadata, 'chatType'));
+      return compactClassificationSignals({
+        prior: trustDomainPrior(trustDomain, 'source_config'),
+        ...(conversationKind === 'secret_chat'
+          ? { floor: { tier: 'secure' as const, basis: 'provider:secret_chat' } }
+          : {}),
+        conversationKind,
+        title: signalText(item.metadata, 'title'),
+        sender: signalText(item.metadata, 'senderDisplayName', 'senderId'),
+        folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
       });
     },
   };
@@ -559,4 +572,27 @@ function normalizeBudget(value: number | undefined): number | undefined {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * The capture's chat-type vocabulary mapped to the contract's conversation
+ * kinds. An unknown or missing value claims nothing.
+ */
+function telegramConversationKind(chatType: string | undefined): SourceConversationKind | undefined {
+  switch (chatType?.toLowerCase()) {
+    case 'dm':
+    case 'private':
+    case 'direct':
+      return 'direct';
+    case 'group':
+    case 'supergroup':
+      return 'group';
+    case 'channel':
+      return 'channel';
+    case 'secret':
+    case 'secret_chat':
+      return 'secret_chat';
+    default:
+      return undefined;
+  }
 }

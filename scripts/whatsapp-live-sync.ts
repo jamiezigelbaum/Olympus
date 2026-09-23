@@ -13,6 +13,7 @@
 // Output is a Castor-safe JSON summary (counts + spool gap diagnostics only,
 // never message text).
 
+import { WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
       store.lastCompletedSyncRun(WHATSAPP_LIVE_CONNECTOR_ID)?.cursor,
     );
     const summary = await store.syncFromConnector(connector, {
+      placement: WHATSAPP_STORE_PLACEMENT,
       ...(cursor ? { cursor } : {}),
       ...(args.maxItems !== undefined ? { maxItems: args.maxItems } : {}),
       fetchContent: true,

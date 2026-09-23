@@ -138,7 +138,7 @@ function fixtureConnector(): SourceConnector {
       if (!item) throw new Error('preview fixture item missing');
       return item;
     },
-    classify: () => ({ trustDomain: 'secure_local' as const, trustTier: 'S3' as const }),
+    classificationSignals: () => ({}),
   } as unknown as SourceConnector;
 }
 

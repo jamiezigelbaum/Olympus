@@ -1,3 +1,4 @@
+import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './workers/classification/tier-ledger-path.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -755,8 +756,15 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
   const legacyIndexPath = source.sqlitePath?.(context);
   return [
     ...(legacyIndexPath ? sqliteDeleteTargets(legacyIndexPath, legacyStoreIdFor(source), context) : []),
-    ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) =>
-      sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context)),
+    ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
+      ...sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context),
+      // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
+      // so it is found wherever the store is — a *_DB_PATH override, XDG, the
+      // WhatsApp state directory — and deleting a source takes its ledger rows.
+      ...(storePath === ':memory:'
+        ? []
+        : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context)),
+    ]),
     ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,
       kind: 'source_state_path',

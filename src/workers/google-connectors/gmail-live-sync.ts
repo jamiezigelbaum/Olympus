@@ -9,6 +9,7 @@
 // handling. Existing history lives in those canonical stores; normal runtime
 // has no migration source or fallback index.
 
+import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -167,6 +168,11 @@ export interface GmailConnectorStoreSyncHandler {
 }
 
 export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnectorOptions {
+  /**
+   * The owner's sensitivity map for this lane's placement policy and its
+   * recorded four-tier decisions. Loaded from the environment when omitted.
+   */
+  sensitivityMap?: SensitivityMap;
   internalStore: LocalConnectorStore;
   secureStore: LocalConnectorStore;
   /**
@@ -391,7 +397,7 @@ function sharedTraversal(connector: SourceConnector): SourceConnector {
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
-    classify: (item: RawItem) => connector.classify(item),
+    classificationSignals: (item: RawItem) => connector.classificationSignals(item),
     listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
       if (recorded) {
         return (async function* (): AsyncGenerator<SourceConnectorListPage> {

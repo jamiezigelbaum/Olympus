@@ -288,8 +288,8 @@ function scopeConnector(items: readonly ScopeItem[]): SourceConnector {
       if (!item) throw new Error(`missing scope fixture ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

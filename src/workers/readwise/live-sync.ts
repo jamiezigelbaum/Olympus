@@ -20,6 +20,7 @@ import { ReadwiseApiError, type ReadwiseApiClientOptions } from './api.ts';
 import {
   READWISE_CONNECTOR_ID,
   READWISE_PROVIDER,
+  READWISE_STORE_PLACEMENT,
   ReadwiseDailyRequestBudget,
   createReadwiseSourceConnector,
   isReadwiseConnectorCursor,
@@ -192,6 +193,7 @@ export function createReadwiseConnectorStoreSyncHandler(
         connector,
         embeddingProvider: options.embeddingProvider,
         sync: {
+          placement: READWISE_STORE_PLACEMENT,
           fetchContent: true,
         },
       });
@@ -248,6 +250,7 @@ export function createReadwiseConnectorStoreSyncHandler(
           connector,
           embeddingProvider: options.embeddingProvider,
           sync: {
+            placement: READWISE_STORE_PLACEMENT,
             fetchContent: true,
             maxItems,
             ...(resume ? { cursor: resume } : {}),
@@ -266,6 +269,7 @@ export function createReadwiseConnectorStoreSyncHandler(
           connector,
           embeddingProvider: options.embeddingProvider,
           sync: {
+            placement: READWISE_STORE_PLACEMENT,
             fetchContent: true,
             maxItems,
           },
@@ -293,6 +297,7 @@ export function createReadwiseConnectorStoreSyncHandler(
         connector,
         embeddingProvider: options.embeddingProvider,
         sync: {
+          placement: READWISE_STORE_PLACEMENT,
           fetchContent: true,
           reconcileFullSnapshot: true,
           reconcileFullSnapshotScope: { provider: READWISE_PROVIDER, accountScope: account },

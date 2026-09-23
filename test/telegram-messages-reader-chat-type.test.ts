@@ -46,10 +46,11 @@ describe('Telethon capture-spool chat-type vocabulary', () => {
       expect(pages[0]!.done).toBe(true);
       expect(pages[0]!.items[0]!.metadata.chatType).toBe('dm');
       expect(pages[0]!.items[1]!.metadata.chatType).toBeUndefined();
-      expect(connector.classify(pages[0]!.items[0]!)).toMatchObject({
-        trustDomain: 'internal',
-        trustTier: 'S3',
+      expect(connector.classificationSignals(pages[0]!.items[0]!)).toMatchObject({
+        prior: { tier: 'private', strength: 'prior', basis: 'source_config:trust_domain:internal' },
+        conversationKind: 'direct',
       });
+      expect(connector.classificationSignals(pages[0]!.items[1]!).conversationKind).toBeUndefined();
     } finally {
       fixture.close();
     }

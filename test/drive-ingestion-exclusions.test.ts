@@ -130,8 +130,8 @@ function driveConnector(items: readonly RawItem[]): SourceConnector {
       if (!item) throw new Error('unknown item');
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' });
+    classificationSignals() {
+      return {};
     },
   };
 }

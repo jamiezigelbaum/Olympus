@@ -11,8 +11,10 @@
 
 import { readFile } from 'node:fs/promises';
 import { inflateRawSync } from 'node:zlib';
+import { compactClassificationSignals, signalText, signalTexts, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -120,15 +122,14 @@ export function createReflectSourceConnector(options: ReflectSourceConnectorOpti
       return toRawItem(note, nowIso());
     },
 
-    classify(item: RawItem): SourceSensitivity {
-      // Archive-wide policy, not per-note: Reflect notes are private writing,
-      // so the floor is S4/secure_local. The internal override exists for
-      // exports the owner has explicitly marked shareable inside the trust
-      // boundary; nothing here may classify below the configured domain.
-      void item;
-      return trustDomain === 'internal'
-        ? buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' })
-        : buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // Archive-wide configuration, published as a prior: notes rest at the
+      // configured domain and item-level raises still apply.
+      return compactClassificationSignals({
+        prior: trustDomainPrior(trustDomain, 'source_config'),
+        title: signalText(item.metadata, 'title'),
+        labels: signalTexts(item.metadata, 'tags'),
+      });
     },
   };
 }

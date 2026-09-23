@@ -83,11 +83,6 @@
       "retire_when": "The script moves to the ops repository or is deleted."
     },
     {
-      "path": "src/workers/connector-store/local-index.ts",
-      "reason": "Reached only by a repository script that the package does not ship. scripts/embedding-identity-repair.ts.",
-      "retire_when": "The script moves to the ops repository or is deleted."
-    },
-    {
       "path": "src/workers/dropbox-files/extraction-readiness.ts",
       "reason": "Reached only by a repository script that the package does not ship. scripts/source-ingestion-live-dashboard.ts.",
       "retire_when": "The script moves to the ops repository or is deleted."

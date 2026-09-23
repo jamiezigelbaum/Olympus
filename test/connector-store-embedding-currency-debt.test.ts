@@ -59,8 +59,8 @@ function connector(items: readonly (readonly [string, string])[]): SourceConnect
       if (!entry) throw new Error(`no such item ${localItemId}`);
       return rawItem(entry[0], entry[1]);
     },
-    classify(): ReturnType<SourceConnector['classify']> {
-      return buildSourceSensitivity({ trustDomain: 'secure_local', trustTier: 'S4' });
+    classificationSignals() {
+      return {};
     },
   };
 }

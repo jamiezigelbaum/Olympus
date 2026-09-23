@@ -295,18 +295,13 @@ describe('WhatsApp SourceConnector (Contract 1)', () => {
     await expect(connector.fetchItem(`personal:${'0'.repeat(32)}`)).rejects.toThrow(/was not found/);
   });
 
-  test('classify is ALWAYS S4/secure_local for chats and system items alike', async () => {
+  test('signals keep chats and system items alike at a Private resting prior', async () => {
     const connector = fixtureConnector();
     const items = await drainItems(connector);
-    const expected = {
-      trustTier: 'S4',
-      trustDomain: 'secure_local',
-      localOnly: true,
-      cloudEmbeddingEligible: false,
-    } as const;
+    const expected = { tier: 'secure', strength: 'prior', basis: 'source_default:trust_domain:secure_local' } as const;
 
-    expect(connector.classify(items[1] as RawItem)).toEqual(expected);
-    expect(connector.classify(items[0] as RawItem)).toEqual(expected);
+    expect(connector.classificationSignals(items[1] as RawItem).prior).toEqual(expected);
+    expect(connector.classificationSignals(items[0] as RawItem).prior).toEqual(expected);
   });
 
   test('zip exports are read (stored + deflated), macOS noise entries skipped', async () => {

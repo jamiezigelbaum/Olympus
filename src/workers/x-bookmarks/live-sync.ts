@@ -30,7 +30,7 @@ import {
 } from './live-control.ts';
 import type { LocalXBookmarksReconcileStateStore } from './reconcile-state.ts';
 import { LocalXBookmarksReconcileStateStore as XBookmarksReconcileStateStore } from './reconcile-state.ts';
-import { X_BOOKMARKS_PROVIDER } from './connector.ts';
+import { X_BOOKMARKS_PROVIDER, X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
 import {
   runXBookmarksWindowDiagnostic,
   type XBookmarksWindowDiagnosticResult,
@@ -229,6 +229,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         connector,
         embeddingProvider: options.embeddingProvider,
         sync: {
+          placement: X_BOOKMARKS_STORE_PLACEMENT,
           fetchContent: true,
           ...(request.checkpoint?.trim() ? { cursor: request.checkpoint.trim() } : {}),
         },
@@ -307,6 +308,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         connector,
         embeddingProvider: options.embeddingProvider,
         sync: {
+          placement: X_BOOKMARKS_STORE_PLACEMENT,
           fetchContent: true,
           reconcileFullSnapshot: true,
           reconcileFullSnapshotScope: { provider: X_BOOKMARKS_PROVIDER, accountScope: account },

@@ -129,8 +129,8 @@ function connector(items: RawItem[]): SourceConnector {
       if (!found) throw new Error(`missing item ${localItemId}`);
       return found;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' });
+    classificationSignals() {
+      return {};
     },
   };
 }

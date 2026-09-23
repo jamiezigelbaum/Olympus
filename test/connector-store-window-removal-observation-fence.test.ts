@@ -68,8 +68,8 @@ function connector(connectorId: string, posts: readonly PostSpec[]): SourceConne
       if (!spec) throw new Error(`no such item ${localItemId}`);
       return rawItem(spec);
     },
-    classify(): ReturnType<SourceConnector['classify']> {
-      return buildSourceSensitivity({ trustDomain: 'secure_local', trustTier: 'S4' });
+    classificationSignals() {
+      return {};
     },
   };
 }

@@ -20,6 +20,15 @@
       "migrationReceipt": "Not required: no stored data or persisted pack shape changes; packs are built per request.",
       "evalReceipt": "Fixture held-out harness tests (test/eval-harness.test.ts, test/eval-real.test.ts, test/source-qualification-eval.test.ts) green on the PR head. The instantiated private held-out run (bun run eval:real) needs the owner-private dataset and a hydrated connector store, which the implementing machine does not have; it is an open merge precondition recorded on the pull request.",
       "reviewReceipt": "Critical change: independent review receipt is recorded as the critical-review commit status on the exact pull-request head (bun scripts/critical-review-receipt.ts)."
+    },
+    {
+      "version": "2.0.0",
+      "fingerprint": "sha256:bfcc0c9bc01285438bf399810a42b8baace0b57c2ef769ab733d3c6f5d2a4af9",
+      "recordedAt": "2026-09-23",
+      "compatibility": "Breaking for SourceConnector only: classify(item): SourceSensitivity is removed and replaced by classificationSignals(item): SourceClassificationSignals (source facts only; the shared four-tier classifier decides). Every in-tree connector moved in the same change. EvidencePack (1.1.0, optional coverage matchCounts) and Analyst shapes are unchanged by this version. Storage placement is unchanged: each lane declares the placement its connector's classify() returned (ConnectorStoreSyncOptions.placement), so no item moves and no vector changes.",
+      "migrationReceipt": "docs/CONTRACTS.md change log 2026-09-23 (SourceConnector 2.0.0): no stored-data migration in this version. Declared-placement lanes keep every row and vector: test/tier-p1a-storage-unchanged.test.ts proves byte-identical items, chunks and vectors with and without the tier ledger, and that re-syncing never re-embeds or reaches invalidateEmbeddingModelCurrency; test/tier-p1a-review-fixes.test.ts pins per-lane parity with the retired classify() answers. Gmail and Drive keep the shared raise-only classification policy; their re-fetch path now uses that policy instead of the connector's own classify(), so there the guarantee is the unchanged policy, not byte identity. The tier ledger is a new, additive SQLite file co-located with each store and covered by data delete. Moving items between tier stores is phase P1b (design section 4.6, owner-approved batches).",
+      "evalReceipt": "Held-out eval NOT run for this version: it needs a live corpus and analyst, and this change touches no retrieval, EvidencePack or Analyst path. Offline receipts that did run: contract freeze, the eval harness unit suites (eval-harness, eval-real, eval-diagnose, eval-process-boundary), the new tier-classifier precedence and source-agnostic suites, and the P1a storage-invariance suite. The design's classification eval (secret recall, Private leakage) arrives with the sniffer in P2. A reviewer may require an exact-head held-out run before merge.",
+      "reviewReceipt": "Pending: critical-review receipt on the pull request head (docs/ENGINEERING_PROCESS.md, critical risk). Owner approved building the design on 2026-09-23."
     }
   ]
 }

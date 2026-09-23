@@ -21,7 +21,7 @@ const ledger = JSON.parse(
 describe('versioned source-pipeline contracts', () => {
   test('current shapes match the latest complete version entry', () => {
     const latest = validateContractVersion(sources, ledger);
-    expect(latest.version).toBe('1.1.0');
+    expect(latest.version).toBe('2.0.0');
     expect(latest.fingerprint).toBe(contractFingerprint(sources));
   });
 
@@ -34,7 +34,7 @@ describe('versioned source-pipeline contracts', () => {
     const changed = { ...sources, contracts: sources.contracts.replace('question: string;', 'question: string;\n  locale?: string;') };
     const incomplete = structuredClone(ledger);
     incomplete.history.push({
-      version: '1.2.0',
+      version: '2.1.0',
       fingerprint: contractFingerprint(changed),
       recordedAt: '2026-08-29',
       compatibility: '',
@@ -49,7 +49,7 @@ describe('versioned source-pipeline contracts', () => {
     const changed = { ...sources, contracts: sources.contracts.replace('question: string;', 'question: string;\n  locale?: string;') };
     const updated = structuredClone(ledger);
     updated.history.push({
-      version: '1.2.0',
+      version: '2.1.0',
       fingerprint: contractFingerprint(changed),
       recordedAt: '2026-08-29',
       compatibility: 'Optional field; existing producers and consumers remain compatible.',
@@ -57,7 +57,7 @@ describe('versioned source-pipeline contracts', () => {
       evalReceipt: 'Fixture receipt for gate behavior.',
       reviewReceipt: 'Fixture independent review receipt.',
     });
-    expect(validateContractVersion(changed, updated).version).toBe('1.2.0');
+    expect(validateContractVersion(changed, updated).version).toBe('2.1.0');
   });
 
   test('reachable imported type drift is rejected without a new version entry', () => {

@@ -605,9 +605,12 @@ So a therapy category is written with `"targetTierName": "secure"` — never
 `"targetTierName": "private"` — even though you will describe that result to
 the operator as Private.
 
-For this phase, do not write Public/Personal categories into the map: Olympus
-uses it only as raise-only guidance. It may raise matching items to Private or
-Secrets, never downgrade them. Validate it before continuing:
+During install, do not write Public/Personal categories into the map: a
+schemaVersion 1 map is raise-only guidance. It may raise matching items to
+Private or Secrets, never downgrade them. (A schemaVersion 2 map may also name
+Public and Personal categories; the tier classifier records them as lowering
+guidance that any raise still beats. Write one only when the operator asks.)
+Validate it before continuing:
 
 ```bash
 olympus sensitivity validate

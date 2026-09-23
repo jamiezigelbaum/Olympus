@@ -495,8 +495,11 @@ function fixtureConnector(
       if (!item) throw new Error(`missing fixture ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: trustDomain === 'secure_local' ? 'S4' : 'S3', trustDomain });
+    // SourceConnector 2.0.0: no tier here. The store's default placement is
+    // the S4/secure_local or S3/internal answer this fixture used to return.
+    classificationSignals() {
+      void trustDomain;
+      return {};
     },
   };
 }

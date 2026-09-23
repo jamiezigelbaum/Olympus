@@ -25,6 +25,7 @@
  *      back and folded in before the write.
  */
 
+import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
@@ -128,6 +129,10 @@ export interface ConnectorStoreExtractionSinkOptions {
    * worker and the current holder's content.
    */
   claims?: ExtractionClaimReader;
+  /**
+   * Map and sniffer for the recorded content decision. Optional.
+   */
+  tierClassification?: ConnectorStoreTierClassification;
 }
 
 /**
@@ -395,6 +400,11 @@ export function createConnectorStoreExtractionSink(
       // expectation describes, and reporting zero for it would understate the
       // representation that is actually there.
       const coverage = store.itemRepresentationCoverage(plan.expectation);
+      // The text was read at last: record the content half of the item's
+      // four-tier decision. Best-effort and storage-neutral (phase P1a).
+      if (plan.item.content.kind === 'text') {
+        store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
+      }
       return {
         accepted: true,
         chunksIndexed: coverage.chunksIndexed,

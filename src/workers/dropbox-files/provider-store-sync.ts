@@ -17,6 +17,7 @@ import {
 } from '../source-index/embeddings.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { DROPBOX_STORE_PLACEMENT } from './connector-store.ts';
 import {
   createDropboxSourceConnector,
   type DropboxContentScope,
@@ -143,6 +144,7 @@ export function createDropboxProviderStoreSyncHandler(
           },
         }));
         const sync = await options.store.syncFromConnector(observed.connector, {
+          placement: DROPBOX_STORE_PLACEMENT,
           fetchContent: false,
           ...(options.scope
             ? {
@@ -291,7 +293,7 @@ function observedCompletion(connector: SourceConnector): {
       family: connector.family,
       authenticate: () => connector.authenticate(),
       fetchItem: (localItemId) => connector.fetchItem(localItemId),
-      classify: (item) => connector.classify(item),
+      classificationSignals: (item) => connector.classificationSignals(item),
       listItems(options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> {
         const pages = connector.listItems(options);
         return (async function* (): AsyncGenerator<SourceConnectorListPage> {

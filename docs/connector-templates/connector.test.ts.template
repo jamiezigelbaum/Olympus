@@ -71,11 +71,8 @@ describe('<Source> thin connector and dark store', () => {
       },
       content: { kind: 'text' },
     });
-    expect(connector.classify(items[0]!)).toMatchObject({
-      trustTier: 'S1',
-      trustDomain: 'internal',
-      localOnly: false,
-    });
+    // Signals are source facts; no tier is decided here.
+    expect(connector.classificationSignals(items[0]!)).toMatchObject({ title: 'TODO' });
     // fetchItem is the in-run cache, not a second provider round trip.
     const before = calls.length;
     expect(await connector.fetchItem(items[0]!.identity.localItemId)).toBe(items[0]!);

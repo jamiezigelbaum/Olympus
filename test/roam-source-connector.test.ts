@@ -272,27 +272,25 @@ describe('Roam SourceConnector (Contract 1)', () => {
     await expect(connector.fetchItem('personal:uid-missing')).rejects.toThrow(/no page with provider item id uid-missing/);
   });
 
-  test('classify defaults to the conservative S4/secure_local floor', async () => {
+  test('signals publish the configured secure_local domain as a Private prior by default', async () => {
     const connector = connectorFor(MAIN_EXPORT_PATH);
     const items = await allItems(connector);
 
-    expect(connector.classify(items[0] as RawItem)).toEqual({
-      trustTier: 'S4',
-      trustDomain: 'secure_local',
-      localOnly: true,
-      cloudEmbeddingEligible: false,
+    expect(connector.classificationSignals(items[0] as RawItem).prior).toEqual({
+      tier: 'secure',
+      strength: 'prior',
+      basis: 'source_config:trust_domain:secure_local',
     });
   });
 
-  test('classify honors an explicitly configured internal trust domain as S3/internal', async () => {
+  test('signals honor an explicitly configured internal trust domain as a Personal prior', async () => {
     const connector = connectorFor(MAIN_EXPORT_PATH, 'internal');
     const items = await allItems(connector);
 
-    expect(connector.classify(items[0] as RawItem)).toEqual({
-      trustTier: 'S3',
-      trustDomain: 'internal',
-      localOnly: false,
-      cloudEmbeddingEligible: false,
+    expect(connector.classificationSignals(items[0] as RawItem).prior).toEqual({
+      tier: 'private',
+      strength: 'prior',
+      basis: 'source_config:trust_domain:internal',
     });
   });
 });

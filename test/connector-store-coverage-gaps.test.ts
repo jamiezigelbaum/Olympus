@@ -284,8 +284,8 @@ function fakeConnector(specs: readonly ItemSpec[]): SourceConnector {
       if (!spec) throw new Error('unknown item');
       return rawItem(spec);
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

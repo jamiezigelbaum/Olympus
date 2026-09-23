@@ -57,8 +57,8 @@ function connector(name: string): SourceConnector {
     async fetchItem(): Promise<RawItem> {
       return rawItem(name);
     },
-    classify(): ReturnType<SourceConnector['classify']> {
-      return buildSourceSensitivity({ trustDomain: 'secure_local', trustTier: 'S4' });
+    classificationSignals() {
+      return {};
     },
   };
 }

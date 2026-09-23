@@ -54,6 +54,9 @@ function seedItem(spec: SeedSpec): RawItem {
   };
 }
 
+// The fixture lane rests files at S2 inside the secure store.
+const FIXTURE_PLACEMENT = { trustTier: 'S2', trustDomain: 'secure_local' } as const;
+
 function createConnector(specs: readonly SeedSpec[]): SourceConnector {
   const live = specs.map(seedItem);
   return {
@@ -68,7 +71,7 @@ function createConnector(specs: readonly SeedSpec[]): SourceConnector {
       if (!found) throw new Error(`no such item: ${localItemId}`);
       return found;
     },
-    classify: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'secure_local' }),
+    classificationSignals: () => ({}),
   };
 }
 
@@ -84,11 +87,11 @@ async function seededStore(specs: readonly SeedSpec[]): Promise<LocalConnectorSt
   });
   await store.syncFromConnector(
     createConnector(specs.map((spec) => ({ ...spec, deleted: false }))),
-    { fetchContent: true },
+    { fetchContent: true, placement: FIXTURE_PLACEMENT },
   );
   const removed = specs.filter((spec) => spec.deleted === true);
   if (removed.length > 0) {
-    await store.syncFromConnector(createConnector(removed), { fetchContent: true });
+    await store.syncFromConnector(createConnector(removed), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     expect(store.status().counts.tombstonedItems).toBe(removed.length);
   }
   return store;

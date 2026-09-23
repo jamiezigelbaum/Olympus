@@ -555,15 +555,14 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(first.map((item) => item.identity)).toEqual(second.map((item) => item.identity));
   });
 
-  test('classify is ALWAYS S4/secure_local for live chat history', async () => {
+  test('signals keep live chat history at a Private resting prior', async () => {
     const dir = makeSpoolDir({
       '2026-06-11.jsonl': spoolLine({ id: 'a1' }) + spoolLine({ id: 'media-1', text: '', media_type: 'image' }),
     });
     const connector = connectorFor(dir);
     for (const item of await drainItems(connector)) {
-      const sensitivity = connector.classify(item);
-      expect(sensitivity.trustTier).toBe('S4');
-      expect(sensitivity.trustDomain).toBe('secure_local');
+      const signals = connector.classificationSignals(item);
+      expect(signals.prior).toEqual({ tier: 'secure', strength: 'prior', basis: 'source_default:trust_domain:secure_local' });
     }
   });
 

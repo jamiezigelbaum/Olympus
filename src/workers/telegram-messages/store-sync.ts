@@ -233,6 +233,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           ...resolved,
         }),
         {
+          placement: { trustTier: 'S3', trustDomain: 'internal' },
           ...(cursors.internal ? { cursor: cursors.internal } : {}),
           maxItems,
           fetchContent: true,
@@ -247,6 +248,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           ...resolved,
         }),
         {
+          placement: { trustTier: 'S4', trustDomain: 'secure_local' },
           ...(cursors.secureLocal ? { cursor: cursors.secureLocal } : {}),
           maxItems,
           fetchContent: true,

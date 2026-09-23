@@ -127,8 +127,8 @@ function connectorOver(items: readonly RawItem[]): SourceConnector {
       if (!found) throw new Error('unknown item');
       return found;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }
