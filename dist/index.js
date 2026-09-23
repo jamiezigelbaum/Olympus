@@ -9052,6 +9052,48 @@ var init_telegram_messages = __esm(() => {
   init_store_sync();
 });
 
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS2;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
@@ -9063,6 +9105,7 @@ var init_status = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_operation_error();
+  init_secret_locations();
 });
 
 // src/core/public-source-capabilities.ts
@@ -14190,6 +14233,8 @@ async function sourceIndexStatusCheck(deps) {
   const summaries = [];
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
+  const migration = approvedTierMigrationInProgress(status.tier_migration);
+  const migrationCorpora = new Set(migration?.corpora ?? []);
   for (const entry of corpora) {
     const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
@@ -14215,7 +14260,11 @@ async function sourceIndexStatusCheck(deps) {
       summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
-      problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      if (migration && migrationCorpora.has(corpusId)) {
+        informational.push(`${corpusId}: migration in progress (${migration.state}, approved, ledger entry ` + `${migration.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks is expected`);
+      } else {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      }
     }
   }
   const summary = summaries.length > 0 ? ` ${summaries.join("; ")}.` : "";
@@ -14235,6 +14284,20 @@ async function sourceIndexStatusCheck(deps) {
     name,
     ok: true,
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? "" : "s"}.${summary}${info}`
+  };
+}
+function approvedTierMigrationInProgress(value) {
+  const migration = asRecord15(value);
+  if (migration.in_progress !== true)
+    return;
+  const approvalEntryId = typeof migration.approval_entry_id === "string" ? migration.approval_entry_id : undefined;
+  if (!approvalEntryId)
+    return;
+  const corpora = Array.isArray(migration.corpora) ? migration.corpora.filter((corpus) => typeof corpus === "string") : [];
+  return {
+    state: typeof migration.state === "string" ? migration.state : "approved",
+    approvalEntryId,
+    corpora
   };
 }
 async function workerCredentialLanesCheck(deps) {
