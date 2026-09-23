@@ -120,7 +120,15 @@ export type SourceIndexSkippedCorpusReason =
   | 'corpus_not_allowed'
   | 'cloud_query_not_allowed'
   | 'no_adapter'
-  | 'lane_timeout';
+  | 'lane_timeout'
+  // The next three are never produced by routeSourceIndexSearch. The answer
+  // handler rewrites a secure_local corpus's trust_domain_not_allowed skip to
+  // one of them when the caller did not decide include_secure_local:
+  // no approved private analyst route before retrieval, a bulk-shaped request
+  // that did not opt in, or a private route that failed at analysis time.
+  | 'no_private_analyst_route'
+  | 'bulk_secure_local_release_requires_approval'
+  | 'private_analyst_unavailable';
 
 export interface SourceIndexRoutedSearchResponse {
   hits: readonly SourceIndexRoutedSearchHit[];

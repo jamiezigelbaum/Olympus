@@ -42,6 +42,7 @@ import {
   buildOpsecReleaseAudit,
   createStructuredEvidenceFact,
   evaluateReleaseGate,
+  secretLabelsInText,
   type OpsecReleaseAudit,
   type ReleaseDecision,
   type StructuredEvidenceFact,
@@ -162,12 +163,33 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
     localOnly: boolean;
     requestedProvider: SourceAnswerAnalystProvider;
   }) => SovereigntyAnalystRouteStep[] | SovereigntyAnalystRoutePlan;
+  // Whether the active sovereignty policy approves a private analyst route
+  // (Argus: a local model or Venice Private, per preset) for secure_local
+  // evidence under this request's provider constraint. When it does, a
+  // request that does not decide include_secure_local searches secure_local
+  // too, and that evidence is answered only through the approved route; the
+  // caller still receives only the OPSEC-scanned derived answer and citations.
+  // Absent, secure_local stays opt-in (the pre-sovereignty wiring).
+  secureLocalAnalystRoute?: (input: {
+    requestedProvider: SourceAnswerAnalystProvider;
+  }) => SecureLocalAnalystRouteStatus;
   secureAnalystPool?: SecureAnalystPoolStateOptions & {
     sloMs?: number;
     reserveMs?: number;
     lastLegTimeoutMs?: number;
   };
 }
+
+export type SecureLocalAnalystRouteStatus =
+  | { approved: true }
+  | { approved: false; reason: string };
+
+// Why a request that did not decide include_secure_local still left
+// secure_local out. Each becomes the corpus skip reason and a coverage note.
+type SecureLocalDefaultExclusion =
+  | 'no_private_analyst_route'
+  | 'bulk_secure_local_release_requires_approval'
+  | 'private_analyst_unavailable';
 
 export interface SourceAnswerSelfHealResult {
   audit: SourceIndexAnswerSelfHealAudit;
@@ -217,14 +239,19 @@ export function createAnalystSourceIndexAnswerHandler(
         : request;
       const lanes = options.lanes(retrievalRequest);
       const laneSetupMs = Date.now() - laneSetupStartedAt;
-      const includeSecureLocal = request.include_secure_local
-        ?? requestExplicitlyTargetsSecureLocal(request, lanes.registry);
+      const requestedAnalystProviderForGate =
+        request.analyst_provider ?? (request.analyst_model?.trim() ? 'venice' : 'default');
+      const secureLocalChoice = secureLocalInclusion(
+        request,
+        lanes.registry,
+        requestedAnalystProviderForGate,
+        options.secureLocalAnalystRoute,
+      );
+      const includeSecureLocal = secureLocalChoice.include;
 
       const allowedTrustDomains: SourceTrustDomain[] = ['public_safe'];
       if (includeInternal) allowedTrustDomains.push('internal');
       if (includeSecureLocal) allowedTrustDomains.push('secure_local');
-      const requestedAnalystProviderForGate =
-        request.analyst_provider ?? (request.analyst_model?.trim() ? 'venice' : 'default');
       const requestedCorpusIds = sourceAnswerCorpusIds(request);
       const bulkGateStartedAt = Date.now();
       const bulkSecureLocalScope = secureLocalApprovalScopeForBulkRequest(
@@ -350,12 +377,15 @@ export function createAnalystSourceIndexAnswerHandler(
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
       }
-      const pack = detail.pack;
+      if (secureLocalChoice.exclusion) {
+        detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
+      }
+      let pack = detail.pack;
       assertEvidencePackModelEligible(pack);
       const policyDeniedEmptyPack = pack.candidates.length === 0
         && (detail.policyDeniedCandidates ?? 0) > 0;
 
-      const localOnly = pack.candidates.some(
+      let localOnly = pack.candidates.some(
         (candidate) => candidate.trustDomain === 'secure_local',
       );
       const requestedAnalystModel = request.analyst_model?.trim();
@@ -366,8 +396,6 @@ export function createAnalystSourceIndexAnswerHandler(
       const veniceAnalyst = policyDeniedEmptyPack
         ? undefined
         : createOptionalVeniceAnalyst(options, request).analyst;
-      const secureCandidates = pack.candidates.filter((c) => c.trustDomain === 'secure_local');
-      const internalCandidates = pack.candidates.filter((c) => c.trustDomain === 'internal');
 
       // Route by the owner's explicit provider choice when present. The default
       // remains the runtime-configured posture. The release gate below still
@@ -375,35 +403,71 @@ export function createAnalystSourceIndexAnswerHandler(
       // over the internal EvidencePack. Secure packs may run raw on local or
       // venice (encrypted_cloud) analysts only. An explicitly requested
       // ordinary-cloud route is refused rather than silently changed to local.
+      const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
+      const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs
+        ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
+      // Private legs keep the operator's configured budgets whether secure_local
+      // was included by default or explicitly: slow-but-working private answers
+      // are the product posture, so no default-path cap cuts them short.
+      const analyze = (analysisPack: EvidencePack, analysisLocalOnly: boolean) => routeAnalysis({
+        pack: analysisPack,
+        localOnly: analysisLocalOnly,
+        requestedProvider: requestedAnalystProvider,
+        local: options.analyst,
+        ...(options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {}),
+        ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
+        // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
+        // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
+        // it must never inflate this bound, or a ~20s Venice attempt silently
+        // becomes a 10-minute one. (2026-07-15 answer-latency WO.)
+        trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
+        localAnalystTimeoutMs,
+        cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+        ...(options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {}),
+        secureAnalystPoolState,
+        ...(options.secureAnalystPool?.sloMs !== undefined
+          ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs }
+          : {}),
+        ...(options.secureAnalystPool?.reserveMs !== undefined
+          ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
+          : {}),
+        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
+      });
       const analystStartedAt = Date.now();
-      const routedAnalysis: RoutedAnalysis = policyDeniedEmptyPack
-        ? { result: noEvidenceAnalystResult(pack), backend: 'local' as const }
-        : await routeAnalysis({
-            pack,
-            localOnly,
-            requestedProvider: requestedAnalystProvider,
-            local: options.analyst,
-            ...(options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {}),
-            ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
-            // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
-            // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
-            // it must never inflate this bound, or a ~20s Venice attempt silently
-            // becomes a 10-minute one. (2026-07-15 answer-latency WO.)
-            trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-            localAnalystTimeoutMs: options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS,
-            cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-            ...(options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {}),
-            secureAnalystPoolState,
-            ...(options.secureAnalystPool?.sloMs !== undefined
-              ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs }
-              : {}),
-            ...(options.secureAnalystPool?.reserveMs !== undefined
-              ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
-              : {}),
-            secureAnalystPoolLastLegTimeoutMs:
-              options.secureAnalystPool?.lastLegTimeoutMs
-              ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS,
-          });
+      let routedAnalysis: RoutedAnalysis;
+      if (policyDeniedEmptyPack) {
+        routedAnalysis = { result: noEvidenceAnalystResult(pack), backend: 'local' as const };
+      } else {
+        // Private material the caller did not ask for must not cost them the
+        // answer. When secure_local was included by default and the private
+        // route is genuinely unavailable (every breaker open, or every leg
+        // failed under its configured budget), the pack is rebuilt WITHOUT
+        // secure_local and answered on the ordinary route. The secure evidence
+        // itself never reaches that route. An explicit opt-in keeps the hard
+        // failure.
+        const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
+        try {
+          routedAnalysis = await analyze(pack, localOnly);
+        } catch (error) {
+          if (!privateDefaulted || !isPrivateRouteUnavailable(error)) throw error;
+          const secureIndex = allowedTrustDomains.indexOf('secure_local');
+          if (secureIndex >= 0) allowedTrustDomains.splice(secureIndex, 1);
+          const rebuilt = await buildDetail(lanes, initialAttempt);
+          detail = withSecureLocalExclusionReason({
+            ...rebuilt,
+            skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
+            degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
+            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
+          }, 'private_analyst_unavailable');
+          pack = detail.pack;
+          assertEvidencePackModelEligible(pack);
+          localOnly = pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
+          if (localOnly) throw error;
+          routedAnalysis = await analyze(pack, false);
+        }
+      }
+      const secureCandidates = pack.candidates.filter((c) => c.trustDomain === 'secure_local');
+      const internalCandidates = pack.candidates.filter((c) => c.trustDomain === 'internal');
       const {
         result: analystResult,
         backend: analystBackend,
@@ -523,6 +587,122 @@ export function sourceAnswerCorpusIds(request: SourceIndexAnswerRequest): string
     ids.map((id) => id.trim()).filter(Boolean).map((id) => canonicalSourceCorpusId(id)),
   )];
   return unique.length > 0 ? unique : undefined;
+}
+
+// The caller decides first: include_secure_local true or false, or a request
+// that targets secure_local material (a secure corpus, scope, selected item,
+// or the words). Otherwise secure_local is searched by default exactly when
+// the sovereignty policy approves a private analyst route for it, because
+// private material is supposed to show up in answers, reasoned over by Argus
+// and released only as scanned derivatives. Two defaults still leave it out:
+// no approved route (for example the no-sensitive preset, or a standard-cloud
+// analyst request, which may never see secure evidence), and a bulk-shaped
+// request, where searching secure_local would trip the bulk release approval
+// gate for an answer the caller never asked to include private material in.
+// An explicit include keeps that gate exactly as before.
+function secureLocalInclusion(
+  request: SourceIndexAnswerRequest,
+  registry: SourceIndexCorpusRegistry,
+  requestedProvider: SourceAnswerAnalystProvider,
+  routeStatus: AnalystSourceIndexAnswerHandlerOptions['secureLocalAnalystRoute'],
+): { include: boolean; defaulted?: true; exclusion?: SecureLocalDefaultExclusion } {
+  if (request.include_secure_local !== undefined) return { include: request.include_secure_local };
+  if (requestExplicitlyTargetsSecureLocal(request, registry)) return { include: true };
+  if (!routeStatus) return { include: false };
+  const route: SecureLocalAnalystRouteStatus = requestedProvider === 'cloud'
+    ? { approved: false, reason: 'standard_cloud_analyst_requested' }
+    : requestedModelGatedForSecureLocal(request)
+      ? { approved: false, reason: 'requested_model_gated_for_secure_local' }
+      : routeStatus({ requestedProvider });
+  if (!route.approved) return { include: false, exclusion: 'no_private_analyst_route' };
+  if (isBulkSecureLocalReleaseRequest(request)) {
+    return { include: false, exclusion: 'bulk_secure_local_release_requires_approval' };
+  }
+  return { include: true, defaulted: true };
+}
+
+// An explicitly named analyst model the secure pool refuses (e2ee-* ids are
+// gated pending local key handling) is no private route for a request that
+// did not opt in; an explicit opt-in still gets the hard refusal.
+function requestedModelGatedForSecureLocal(request: SourceIndexAnswerRequest): boolean {
+  const model = request.analyst_model?.trim();
+  if (!model) return false;
+  try {
+    assertSecureAnalystPoolModelIdAllowed('requested-venice', model);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+// Route-level unavailability of the private analyst: every member's breaker
+// open (the route is empty) or every dispatched leg failed. A policy refusal
+// is not unavailability and never falls back.
+function isPrivateRouteUnavailable(error: unknown): boolean {
+  if (isAnalystPolicyRefusal(error)) return false;
+  return error instanceof Error
+    && (error.message.startsWith(EMPTY_ROUTE_MESSAGE) || error.message.startsWith(EXHAUSTED_ROUTE_MESSAGE));
+}
+
+// The router reports a default-excluded secure corpus as
+// trust_domain_not_allowed, which reads like a scoping decision the caller
+// made. Name the real reason, in the audit and in the Analyst's coverage line.
+function withSecureLocalExclusionReason(
+  detail: EvidencePackBuildDetail,
+  exclusion: SecureLocalDefaultExclusion,
+): EvidencePackBuildDetail {
+  const secureCorpora = new Set(detail.skippedCorpora
+    .filter((skip) => skip.trustDomain === 'secure_local' && skip.reason === 'trust_domain_not_allowed')
+    .map((skip) => skip.corpusId));
+  if (secureCorpora.size === 0) return detail;
+  return {
+    ...detail,
+    skippedCorpora: detail.skippedCorpora.map((skip) => (
+      secureCorpora.has(skip.corpusId) && skip.reason === 'trust_domain_not_allowed'
+        ? { ...skip, reason: exclusion }
+        : skip
+    )),
+    pack: {
+      ...detail.pack,
+      coverage: {
+        ...detail.pack.coverage,
+        skippedCorpora: detail.pack.coverage.skippedCorpora.map((skip) => (
+          secureCorpora.has(skip.corpusId) && skip.reason === 'trust_domain_not_allowed'
+            ? { ...skip, reason: exclusion }
+            : skip
+        )),
+      },
+    },
+  };
+}
+
+function secureLocalExclusionCoverageNotes(detail: EvidencePackBuildDetail): string[] {
+  const corpora = (reason: SecureLocalDefaultExclusion) => [...new Set(detail.skippedCorpora
+    .filter((skip) => skip.reason === reason)
+    .map((skip) => skip.corpusId))].sort();
+  const notes: string[] = [];
+  const noRoute = corpora('no_private_analyst_route');
+  if (noRoute.length > 0) {
+    notes.push(
+      `Private sources were not searched (${noRoute.join(', ')}): the active sovereignty policy `
+      + 'approves no private analyst for them under this request.',
+    );
+  }
+  const unavailable = corpora('private_analyst_unavailable');
+  if (unavailable.length > 0) {
+    notes.push(
+      `Private sources were left out of this answer (${unavailable.join(', ')}): `
+      + 'the private analyst is unavailable right now.',
+    );
+  }
+  const bulk = corpora('bulk_secure_local_release_requires_approval');
+  if (bulk.length > 0) {
+    notes.push(
+      `Private sources were not searched for this bulk request (${bulk.join(', ')}); `
+      + 'ask again with include_secure_local set to true to request release approval.',
+    );
+  }
+  return notes;
 }
 
 function requestExplicitlyTargetsSecureLocal(
@@ -1064,6 +1244,15 @@ function secureMetadataOnlyGapResult(error: unknown, pack: EvidencePack): Analys
   };
 }
 
+function isCallerCancellation(error: unknown): boolean {
+  return error instanceof Error
+    && error.name === 'AbortError'
+    && !(error instanceof TrustedAnalystTimeoutError);
+}
+
+const EMPTY_ROUTE_MESSAGE = 'Sovereignty analyst route is empty';
+const EXHAUSTED_ROUTE_MESSAGE = 'Sovereignty analyst fallback chain exhausted';
+
 async function routeAnalysisThroughSovereignty(input: {
   pack: EvidencePack;
   localOnly: boolean;
@@ -1082,7 +1271,7 @@ async function routeAnalysisThroughSovereignty(input: {
   secureAnalystPoolLastLegTimeoutMs: number;
 }): Promise<RoutedAnalysis> {
   if (input.route.length === 0) {
-    throw new Error('Sovereignty analyst route is empty; refusing to fall through to another trust class.');
+    throw new Error(`${EMPTY_ROUTE_MESSAGE}; refusing to fall through to another trust class.`);
   }
   let lastFallback: SourceIndexAnalystFallback | undefined;
   const legOutcomes: string[] = [];
@@ -1198,6 +1387,11 @@ async function routeAnalysisThroughSovereignty(input: {
       return { result, backend: step.backend, ...(lastFallback ? { fallback: lastFallback } : {}) };
     } catch (error) {
       if (isAnalystPolicyRefusal(error)) throw error;
+      // A cancellation from the caller's side is not the member's failure:
+      // it must never open the shared breaker, and there is no one left to
+      // answer, so it ends the route. The handler's own budget expiry arrives
+      // as TrustedAnalystTimeoutError and still counts.
+      if (isCallerCancellation(error)) throw error;
       if (input.trustDomain === 'secure_local') {
         input.secureAnalystPoolState.recordFailure(input.poolId, step.profile.id);
       }
@@ -1218,7 +1412,7 @@ async function routeAnalysisThroughSovereignty(input: {
           });
     }
   }
-  const exhausted = `Sovereignty analyst fallback chain exhausted; route outcomes=${legOutcomes.join(',') || 'none'}.`;
+  const exhausted = `${EXHAUSTED_ROUTE_MESSAGE}; route outcomes=${legOutcomes.join(',') || 'none'}.`;
   if (legReasons.length === 0) throw new Error(exhausted);
   // Only adapter-supplied safe reasons reach the caller: bounded, redacted,
   // and free of prompt, evidence, and credentials by construction.
@@ -1443,6 +1637,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
       ...(releasedEvidenceCount === 0
         ? corpusReadabilityCoverageNotes(input.detail)
         : []),
+      ...secureLocalExclusionCoverageNotes(input.detail),
     ],
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
@@ -1788,7 +1983,31 @@ function releasedEvidence(
   releaseSecureContent: boolean,
 ): SourceIndexAnswerEvidence[] {
   const cited = evidenceFromCitations(citations, detail);
-  return appendUnreadableMatchedEvidence(cited, detail, releaseSecureContent);
+  return appendUnreadableMatchedEvidence(cited, detail, releaseSecureContent)
+    .map(withoutSecretLikeLabels);
+}
+
+// Citation labels (title, source, conversation, author) and the locator are
+// released beside the answer, so they get the same secret scan the release
+// gate runs over the answer text. A label that looks like a secret is
+// withheld from the released evidence; the item's identifiers remain.
+const RELEASED_EVIDENCE_LABEL_FIELDS = [
+  'title',
+  'source_label',
+  'conversation_label',
+  'author_label',
+  'uri',
+] as const;
+
+function withoutSecretLikeLabels(evidence: SourceIndexAnswerEvidence): SourceIndexAnswerEvidence {
+  const flagged = RELEASED_EVIDENCE_LABEL_FIELDS.filter((field) => {
+    const value = evidence[field];
+    return typeof value === 'string' && secretLabelsInText(value).length > 0;
+  });
+  if (flagged.length === 0) return evidence;
+  const redacted: SourceIndexAnswerEvidence = { ...evidence };
+  for (const field of flagged) delete redacted[field];
+  return redacted;
 }
 
 /**

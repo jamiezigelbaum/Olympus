@@ -37,6 +37,7 @@ import {
 import {
   createAnalystSourceIndexAnswerHandler,
   type AnalystAnswerLanes,
+  type SecureLocalAnalystRouteStatus,
   type SovereigntyAnalystRoutePlan,
   type SovereigntyAnalystRouteStep,
 } from '../source-index/analyst-answer.ts';
@@ -996,6 +997,41 @@ export function sovereigntyAnalystRoutePlan(input: {
     selection: input.pool.explicitOrder ? 'explicit_order' : 'health_latency',
     steps,
   };
+}
+
+/**
+ * Whether secure_local evidence has an approved, constructible private analyst
+ * under the active sovereignty policy — the same resolution the answer path
+ * dispatches through, asked before retrieval so the handler can decide whether
+ * secure_local is searched by default. A disabled route (no-sensitive), a
+ * metadata-only secure handling policy, a pool with no member matching the
+ * requested provider, or a pool whose every credential failed to resolve all
+ * answer "not approved"; any other failure is a real error.
+ */
+export function secureLocalAnalystRouteStatus(input: {
+  engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>;
+  analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
+}): SecureLocalAnalystRouteStatus {
+  if (input.engine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
+    return { approved: false, reason: 'secure_local_metadata_only_policy' };
+  }
+  try {
+    sovereigntyAnalystRoutePlan({
+      trustDomain: 'secure_local',
+      pool: input.engine.resolveAnalystPool({
+        trustDomain: 'secure_local',
+        requestedProvider: input.requestedProvider,
+      }),
+      analysts: input.analysts,
+    });
+    return { approved: true };
+  } catch (error) {
+    if (error instanceof OperationError && error.code === 'config_error') {
+      return { approved: false, reason: 'no_approved_private_analyst' };
+    }
+    throw error;
+  }
 }
 
 export async function validateSecureVeniceAnalystProfileAtConstruction(input: {
@@ -2406,6 +2442,11 @@ export async function main(): Promise<void> {
             analysts: sovereigntyAnalysts,
           });
         },
+        secureLocalAnalystRoute: ({ requestedProvider }) => secureLocalAnalystRouteStatus({
+          engine: sovereigntyEngine,
+          analysts: sovereigntyAnalysts,
+          requestedProvider,
+        }),
         ...(sourceIndexAnswerMaxResults !== undefined
           ? { defaultMaxResults: sourceIndexAnswerMaxResults }
           : {}),

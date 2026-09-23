@@ -239,7 +239,7 @@ function defaultReleaseSurfaceForSensitivity(sensitivity: SourceSensitivity): Ev
   return 'castor_answer';
 }
 
-function secretLabelsInText(text: string): string[] {
+export function secretLabelsInText(text: string): string[] {
   return SECRET_PATTERNS
     .filter(({ pattern }) => pattern.test(text))
     .map(({ label }) => label);
