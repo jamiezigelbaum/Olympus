@@ -2127,6 +2127,12 @@ export class LocalConnectorStore {
     };
   }
 
+  /** Whether this store's copy of an item may be served for any layer. */
+  private copyServable(identity: { provider: string; accountScope: string; providerItemId: string }): boolean {
+    return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
+      || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+  }
+
   /** Whether this store has ANY row for the identity, active or tombstoned. */
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
     return this.db.query(`
@@ -3067,6 +3073,9 @@ export class LocalConnectorStore {
       locator_uri: string | null;
     } | null;
     if (!row?.locator_uri) return undefined;
+    // Source export serves the item: a superseded or staged copy is never
+    // exported (design section 3.4).
+    if (!this.copyServable(identity)) return undefined;
     return {
       identity,
       trustTier: trustTierFromRow(row.trust_tier),
@@ -7696,16 +7705,9 @@ export class LocalConnectorStore {
     if (!row) return undefined;
     // Never serve a superseded or staged copy. A metadata-layer copy has no
     // chunks, so serving it can only ever hand over names.
-    const servable = this.tierVisibleRows(
-      [row],
-      (entry) => ({ provider: entry.provider, accountScope: entry.account_scope, providerItemId: entry.provider_item_id }),
-      () => 'metadata',
-    ).length > 0 || this.tierVisibleRows(
-      [row],
-      (entry) => ({ provider: entry.provider, accountScope: entry.account_scope, providerItemId: entry.provider_item_id }),
-      () => 'content',
-    ).length > 0;
-    if (!servable) return undefined;
+    if (!this.copyServable({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id })) {
+      return undefined;
+    }
     const chunkRows = this.db.query(
       'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
     ).all(row.item_pk) as Array<{ bounded_text: string }>;
