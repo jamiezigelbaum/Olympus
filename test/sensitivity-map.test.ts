@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
   USER_FACING_TIER_MAPPING,
+  matchSensitivityMap,
+  matchSensitivityMapTiers,
   parseSensitivityMap,
   validateSensitivityMapFile,
 } from '../src/core/sensitivity-map.ts';
@@ -204,5 +206,59 @@ describe('sensitivity map schema', () => {
     expect(() => parseSensitivityMap(validMap({
       categories: [{ ...category, match: { keywords: [], senderPatterns: [], pathPatterns: [] } }],
     }))).toThrow(/must include at least one keyword/);
+  });
+});
+
+describe('sensitivity map schemaVersion 2', () => {
+  function lowering(tier: 'public' | 'private', id: string, keyword: string): Record<string, unknown> {
+    const target = USER_FACING_TIER_MAPPING[tier];
+    return {
+      id,
+      label: id,
+      targetTierName: tier,
+      targetTrustTier: target.targetTrustTier,
+      targetTrustDomain: target.targetTrustDomain,
+      examples: ['example'],
+      match: { keywords: [keyword], senderPatterns: [], pathPatterns: [] },
+    };
+  }
+
+  test('a v2 map may target all four tiers, including lowering targets', () => {
+    const base = validMap();
+    const parsed = parseSensitivityMap({
+      ...base,
+      schemaVersion: 2,
+      categories: [
+        ...(base.categories as object[]),
+        lowering('public', 'published-talks', 'conference talk'),
+        lowering('private', 'family-logistics', 'school pickup'),
+      ],
+    });
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.categories.map((category) => category.targetTierName)).toEqual(['secure', 'public', 'private']);
+    expect(matchSensitivityMapTiers(parsed, { text: 'my conference talk and therapy notes' })).toEqual([
+      { categoryId: 'therapy', tierName: 'secure' },
+      { categoryId: 'published-talks', tierName: 'public' },
+    ]);
+  });
+
+  test('the legacy raise-only matcher ignores lowering categories, so existing placement is unchanged', () => {
+    const base = validMap();
+    const parsed = parseSensitivityMap({
+      ...base,
+      schemaVersion: 2,
+      categories: [...(base.categories as object[]), lowering('public', 'published-talks', 'conference talk')],
+    });
+    expect(matchSensitivityMap(parsed, { text: 'my conference talk' })).toBeUndefined();
+    expect(matchSensitivityMap(parsed, { text: 'therapy' })).toMatchObject({ categoryIds: ['therapy'], targetTrustTier: 'S4' });
+  });
+
+  test('a v1 map still loads and still refuses lowering targets', () => {
+    expect(parseSensitivityMap(validMap()).schemaVersion).toBe(1);
+    const base = validMap();
+    expect(() => parseSensitivityMap({
+      ...base,
+      categories: [lowering('public', 'published-talks', 'conference talk')],
+    })).toThrow(/schemaVersion 1 map is raise-only/);
   });
 });
