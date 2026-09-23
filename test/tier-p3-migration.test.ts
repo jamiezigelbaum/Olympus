@@ -24,7 +24,8 @@ import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
-import type { TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
+import { TierLedger, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
+import type { TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import {
   approveTierMigration,
   planTierMigration,
@@ -665,13 +666,13 @@ describe('tier migration M2-M6', () => {
     });
     // Every other move fits the approval exactly; the launch move, which would
     // now embed a chunk nobody approved, is refused BEFORE it moves.
-    expect(result).toMatchObject({ state: 'stopped', stopReason: 'chunk_cap', planState: 'stopped', remaining: 1 });
+    expect(result).toMatchObject({ state: 'stopped', stopReason: 'copy_only_destination_needs_embed', planState: 'stopped', remaining: 1 });
     const consumed = Object.values(result.chunksToEmbed).reduce((sum, count) => sum + count, 0);
     expect(consumed).toBe(planned);
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
     expect(existsSync(context.library.public_safe)).toBe(false);
     const entries = (await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries;
-    expect(entries.find((entry) => entry.kind === 'note' && entry.what.includes('stopped (chunk_cap)'))).toMatchObject({
+    expect(entries.find((entry) => entry.kind === 'note' && entry.what.includes('stopped (copy_only_destination_needs_embed)'))).toMatchObject({
       approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
       status: 'in_progress',
     });
@@ -1021,6 +1022,177 @@ describe('tier migration review fixes', () => {
       target: { metadataTier: 'private', contentTier: 'private' },
     })).rejects.toThrow(TierMoveRefusedError);
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+  });
+});
+
+function p1aDecision(tier: 'public' | 'private'): TierDecision {
+  return {
+    metadataTier: tier,
+    contentTier: tier,
+    decidedBy: 'default',
+    reasons: [],
+    state: 'current',
+    contentRead: true,
+    metadataPending: false,
+    contentPending: false,
+    metadataForced: false,
+    metadataFlagged: false,
+    engineVersion: 'p1a',
+    mapRevision: 'none',
+    snifferId: 'undecided',
+  };
+}
+
+describe('tier migration P3 follow-ups', () => {
+  test('a store approved for copied vectors only receives no embed, even with slack approved for other stores', async () => {
+    const context = await rehearsal();
+    const read = lanes(context, 'read');
+    read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'launch'), { kind: 'tier', tier: 'public' });
+    const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+    read.close();
+    cleanups.shift();
+    // Approved: the Public library store only receives copied vectors.
+    const publicLibrary = plan.totals.destinations.find((destination) => destination.corpusId === LIBRARY_CORPORA.public_safe)!;
+    expect(publicLibrary).toMatchObject({ chunksToEmbed: 0, estimatedCostUsd: 0 });
+    // The plan approved embeds for the file lane's stores, which this batch
+    // does not run: the plan-wide budget alone would have room for this move.
+    const fileLaneSlack = plan.totals.destinations
+      .filter((destination) => Object.values(FILE_CORPORA).includes(destination.corpusId))
+      .reduce((sum, destination) => sum + destination.chunksToEmbed, 0);
+    expect(fileLaneSlack).toBeGreaterThan(0);
+    // At run time the launch essay's vectors are gone: moving it would embed.
+    const db = new Database(context.library.internal);
+    try {
+      db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (SELECT item_pk FROM items WHERE provider_item_id = 'launch')`).run();
+    } finally {
+      closeSqliteStore(db);
+    }
+    const write = lanes(context, 'write');
+    const run = () => runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.library',
+    });
+    const result = await run();
+    expect(result).toMatchObject({ state: 'stopped', stopReason: 'copy_only_destination_needs_embed', planState: 'stopped' });
+    expect(result.chunksToEmbed[LIBRARY_CORPORA.public_safe]).toBeUndefined();
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.internal]);
+    expect(existsSync(context.library.public_safe)).toBe(false);
+    // Resuming cannot get past it: the owner must re-plan and approve.
+    const again = await run();
+    expect(again).toMatchObject({ state: 'stopped', stopReason: 'copy_only_destination_needs_embed' });
+    expect(existsSync(context.library.public_safe)).toBe(false);
+    const entries = (await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries;
+    expect(entries.find((entry) => entry.kind === 'note' && entry.what.includes('stopped (copy_only_destination_needs_embed)'))?.what)
+      .toContain('plans again and approves the new costs');
+    expect(entries.some((entry) => entry.kind === 're_embed_completed')).toBe(false);
+    // Status says when it stopped (the doctor ages a stopped plan's lag exception).
+    const summary = tierMigrationStatusSummary(context.paths.statePath)!;
+    expect(summary).toMatchObject({ state: 'stopped', in_progress: true });
+    expect(Number.isFinite(Date.parse(summary.stopped_at!))).toBe(true);
+  });
+
+  test('a legacy item that already had a P1a ledger row resumes after a crash right after adoption', async () => {
+    const context = await rehearsal();
+    const journal = identityOf('rehearsal-library', 'journal');
+    // P1a recorded a decision for the legacy journal (it moved once: generation 2).
+    {
+      const setup = lanes(context, 'write');
+      setup.lanes[1]!.set.ledger.recordDecision({ ...journal, family: 'readwise' }, p1aDecision('public'));
+      setup.lanes[1]!.set.ledger.recordDecision({ ...journal, family: 'readwise' }, p1aDecision('private'));
+      expect(setup.lanes[1]!.set.ledger.getCurrent(journal)).toMatchObject({ generation: 2, routed: false });
+      setup.close();
+      cleanups.shift();
+    }
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const stageMove = TierLedger.prototype.stageMove;
+    let crashes = 0;
+    const crash = spyOn(TierLedger.prototype, 'stageMove').mockImplementation(function (this: TierLedger, ...args) {
+      // Die right after the migration adopted the journal's legacy placement.
+      if (args[0].providerItemId === 'journal' && crashes === 0) {
+        crashes += 1;
+        throw new Error('simulated crash right after adoption');
+      }
+      return stageMove.apply(this, args);
+    });
+    try {
+      await expect(runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.library',
+      })).rejects.toThrow(/simulated crash/u);
+    } finally {
+      crash.mockRestore();
+    }
+    const ledger = write.lanes[1]!.set.ledger;
+    expect(ledger.getCurrent(journal)).toMatchObject({ generation: 2, routed: true, state: 'current' });
+    const resumed = await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.library',
+    });
+    expect(resumed).toMatchObject({ state: 'done', skipped: 0 });
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.secure_local]);
+  });
+
+  test('a P1a row recorded after planning is left unadopted for the next plan, never stranded routed but unmoved', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const journal = identityOf('rehearsal-library', 'journal');
+    const write = lanes(context, 'write');
+    const ledger = write.lanes[1]!.set.ledger;
+    // A sync's P1a pass recorded the journal after the plan saw no row.
+    ledger.recordDecision({ ...journal, family: 'readwise' }, p1aDecision('private'));
+    const stageMove = TierLedger.prototype.stageMove;
+    let crashes = 0;
+    const crash = spyOn(TierLedger.prototype, 'stageMove').mockImplementation(function (this: TierLedger, ...args) {
+      // Were it adopted, the run would die right after adoption.
+      if (args[0].providerItemId === 'journal' && crashes === 0) {
+        crashes += 1;
+        throw new Error('simulated crash right after adoption');
+      }
+      return stageMove.apply(this, args);
+    });
+    let first;
+    try {
+      first = await runTierMigration({
+        planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+        selector: 'source:rehearsal.library',
+      });
+    } finally {
+      crash.mockRestore();
+    }
+    // Its newer decision wins: skipped before adoption, still legacy.
+    expect(crashes).toBe(0);
+    expect(first).toMatchObject({ state: 'done', skipped: 1 });
+    expect(ledger.getCurrent(journal)).toMatchObject({ routed: false, generation: 1 });
+    expect(ledger.copies(journal)).toEqual([]);
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'journal').content).toEqual([LIBRARY_CORPORA.internal]);
+    // The next plan judges it again.
+    const read = lanes(context, 'read');
+    const replanned = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    expect(read.lanes[1]!.set.ledger.migrationProposals(replanned.planId).map((proposal) => proposal.identity.providerItemId)).toContain('journal');
+  });
+
+  test('rollbackMove itself refuses to re-expose a Secrets row', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const run = await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.files', secretsDisposition: 'hide_until_purge',
+    });
+    expect(run.secrets).toBe(1);
+    const ledger = write.lanes[0]!.set.ledger;
+    const keys = identityOf('rehearsal-files', 'keys');
+    const record = ledger.getCurrent(keys)!;
+    expect(record.contentTier).toBe('secrets');
+    expect(() => ledger.rollbackMove(keys, { expectedGeneration: record.generation })).toThrow(/Secrets/u);
+    expect(ledger.getCurrent(keys)).toMatchObject({ contentTier: 'secrets', generation: record.generation });
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
   });
 });
 

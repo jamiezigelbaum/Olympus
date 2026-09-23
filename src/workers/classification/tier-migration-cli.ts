@@ -37,6 +37,7 @@ import {
   resolveTierMigrationPaths,
   rollbackTierMigrationBatch,
   runTierMigration,
+  TIER_MIGRATION_REPLAN_STOP_REASONS,
   tierMigrationPlanFreshness,
   tierMigrationStatusSummary,
   type TierMigrationDomainIdentity,
@@ -151,7 +152,16 @@ export async function runTierMigrateCommand(
           itemDelayMs: context.itemDelayMs ?? 2,
           ...(context.now ? { now: context.now } : {}),
         });
-        return { kind: 'olympus_tier_migration_run', ...snake(result) };
+        return {
+          kind: 'olympus_tier_migration_run',
+          ...snake(result),
+          ...(result.stopReason && TIER_MIGRATION_REPLAN_STOP_REASONS.has(result.stopReason)
+            ? {
+              next: 'The approval does not cover the embeds the next move needs. Run olympus tier migrate plan, '
+                + 'review the new costs, and approve the new plan.',
+            }
+            : {}),
+        };
       });
     }
     case 'rollback': {

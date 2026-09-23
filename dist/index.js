@@ -14235,7 +14235,7 @@ async function sourceIndexStatusCheck(deps) {
   const summaries = [];
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
-  const migration = approvedTierMigrationInProgress(status.tier_migration);
+  const migration = approvedTierMigrationInProgress(status.tier_migration, deps.now?.() ?? new Date, tierMigrationStoppedGraceDays(deps.env ?? process.env));
   for (const entry of corpora) {
     const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
@@ -14270,7 +14270,8 @@ async function sourceIndexStatusCheck(deps) {
       } else if (approvedLag > 0) {
         problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10% beyond the ${approvedLag} ` + `the migration approved, ledger entry ${migration.approvalEntryId})`);
       } else {
-        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+        const expired = migration?.expired && migration.expired.corpora.has(corpusId) ? `; ${migration.expired.note}` : "";
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%${expired})`);
       }
     }
   }
@@ -14293,7 +14294,17 @@ async function sourceIndexStatusCheck(deps) {
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? "" : "s"}.${summary}${info}`
   };
 }
-function approvedTierMigrationInProgress(value) {
+var TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS";
+var DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7;
+function tierMigrationStoppedGraceDays(env) {
+  const raw = env[TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
+}
+var DAY_MS = 24 * 60 * 60 * 1000;
+function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord15(value);
   if (migration.in_progress !== true)
     return;
@@ -14308,6 +14319,22 @@ function approvedTierMigrationInProgress(value) {
     const destination = asRecord15(entry);
     if (typeof destination.corpus_id === "string")
       destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+  }
+  if (state === "stopped") {
+    const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
+    const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
+    if (ageMs > graceDays * DAY_MS) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS)} days ago` : "migration stopped at an unknown time";
+      return {
+        state,
+        approvalEntryId,
+        destinations: new Map,
+        expired: {
+          corpora: new Set(destinations.keys()),
+          note: `${when}, past its ${graceDays}-day lag exception (ledger entry ${approvalEntryId})`
+        }
+      };
+    }
   }
   return { state, approvalEntryId, destinations };
 }
