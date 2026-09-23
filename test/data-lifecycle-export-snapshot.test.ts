@@ -131,7 +131,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     try {
       const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'whatsapp.personal.messages');
       expect(spec).toBeDefined();
-      expect(spec!.connectorStorePaths!({ homeDir })).toEqual([whatsappStorePath(homeDir)]);
+      expect(spec!.connectorStorePaths!({ homeDir })[0]).toBe(whatsappStorePath(homeDir));
 
       seedWalStore(whatsappStorePath(homeDir), 'whatsapp-chat-history');
 

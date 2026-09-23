@@ -5,8 +5,17 @@
 
 import {
   syncAndEmbedFromConnector,
+  type ConnectorStoreSyncAndEmbedSummary,
+  type ConnectorStoreSyncOptions,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
+import type { SourceConnector } from '../../core/contracts.ts';
+import {
+  mergedTieredLaneRun,
+  tieredLaneReceiptCounts,
+  type TieredLaneReceiptCounts,
+  type TieredStoreSet,
+} from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { CredentialBroker } from '../credential-broker/index.ts';
 import type { XApiClientOptions } from './api.ts';
@@ -152,7 +161,14 @@ export interface XBookmarksConnectorStoreSyncHandlerOptions {
   config?: XBookmarksLiveSyncConfig;
   env?: Record<string, string | undefined>;
   now?: () => Date;
+  /**
+   * The lane's per-tier stores (tier-set.ts), whose internal leg is `store`.
+   * Absent: the single-store lane exactly as before per-item routing.
+   */
+  tierSet?: TieredStoreSet;
 }
+
+type XBookmarksLaneRun = ConnectorStoreSyncAndEmbedSummary & { tiered?: TieredLaneReceiptCounts };
 
 export function createXBookmarksConnectorStoreSyncHandler(
   options: XBookmarksConnectorStoreSyncHandlerOptions,
@@ -191,6 +207,42 @@ export function createXBookmarksConnectorStoreSyncHandler(
     env,
   };
 
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec('internal')?.store !== options.store) {
+    throw new Error('The X tier set\'s internal leg must be the lane\'s own store.');
+  }
+  // One traversal feeds every tier store. Existing bookmarks keep the lane's
+  // placement in its own store; a NEW bookmark is routed by its recorded tiers
+  // (raised to Private, or Secrets, by what its text says). Every tier store
+  // applies the same reconcile authority to the rows it holds.
+  const runLane = async (
+    connector: SourceConnector,
+    sync: ConnectorStoreSyncOptions,
+    commitCursor = true,
+  ): Promise<XBookmarksLaneRun> => {
+    if (!tierSet) {
+      return syncAndEmbedFromConnector({ store: options.store, connector, embeddingProvider: options.embeddingProvider, sync });
+    }
+    const run = await tierSet.sync(connector, sync, { commitCursor });
+    const merged = mergedTieredLaneRun(run, 'internal');
+    return {
+      sync: merged.sync,
+      embed: merged.embed ?? {
+        corpusId: options.store.corpusId,
+        modelId: options.embeddingProvider.modelId,
+        embeddingProvider: options.embeddingProvider.provider,
+        embeddingBackend: options.embeddingProvider.backend,
+        embeddingDimension: options.embeddingProvider.dimension,
+        embeddingEpoch: options.embeddingProvider.epochId,
+        chunksSeen: 0,
+        chunksEmbedded: 0,
+        chunksSkipped: 0,
+        policy: { rawSourceExposed: false, sourceTextReturned: false, trustDomain: options.store.trustDomain, storage: 'local_sqlite' },
+      },
+      tiered: tieredLaneReceiptCounts({ routing: run.routing }),
+    };
+  };
+
   return {
     async syncHead(request: XBookmarksHeadSyncRequest = {}): Promise<XBookmarksLiveSyncResult> {
       const attemptedAt = validAttemptedAt(request.attempted_at, now);
@@ -224,15 +276,10 @@ export function createXBookmarksConnectorStoreSyncHandler(
           ...(probed.warnings.length > 0 ? { warnings: probed.warnings } : {}),
         }, connector.apiUsageStatus(), config);
       }
-      const run = await syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync: {
-          placement: X_BOOKMARKS_STORE_PLACEMENT,
-          fetchContent: true,
-          ...(request.checkpoint?.trim() ? { cursor: request.checkpoint.trim() } : {}),
-        },
+      const run = await runLane(connector, {
+        placement: X_BOOKMARKS_STORE_PLACEMENT,
+        fetchContent: true,
+        ...(request.checkpoint?.trim() ? { cursor: request.checkpoint.trim() } : {}),
       });
       const status = connector.status();
       // A truncation deferral deliberately returns the already-stored
@@ -265,6 +312,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
           chunks_indexed: run.sync.chunksIndexed,
           chunks_embedded: run.embed.chunksEmbedded,
           ...headReceiptCounts(status.counts),
+          ...(run.tiered ?? {}),
         },
         ...(status.warnings.length > 0 ? { warnings: status.warnings } : {}),
       }, connector.apiUsageStatus(), config);
@@ -303,37 +351,32 @@ export function createXBookmarksConnectorStoreSyncHandler(
         removalAuthoritative && coverageScope === 'recency_window'
           ? (probed.inWindowRemovedLocalItemIds ?? [])
           : [];
-      const run = await syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync: {
-          placement: X_BOOKMARKS_STORE_PLACEMENT,
-          fetchContent: true,
-          reconcileFullSnapshot: true,
-          reconcileFullSnapshotScope: { provider: X_BOOKMARKS_PROVIDER, accountScope: account },
-          // The connector exposes nothing until its durable traversal has
-          // exhausted every global/folder token. Only that promoted snapshot
-          // may own current X bookmark membership across replay/live owners.
-          reconcileAbsenceAuthority: removalAuthoritative ? 'complete_snapshot' : 'partial_window',
-          ...(removalAuthoritative
-            ? {
-                reconcileCurrentMembershipAuthority: coverageScope === 'recency_window'
-                  ? 'provider_window_snapshot' as const
-                  : 'provider_account_snapshot' as const,
-                reconcileSnapshotObservedAt: probed.snapshotObservedAt,
-                reconcileSnapshotCompletedAt: probed.snapshotCompletedAt,
-                ...(coverageScope === 'recency_window'
-                  ? {
-                      reconcileWindowBoundarySha256: probed.traversalDigestSha256,
-                      reconcileWindowRemovedLocalItemIds:
-                        presentedWindowRemovalLocalItemIds,
-                    }
-                  : {}),
-              }
-            : {}),
-        },
-      });
+      const run = await runLane(connector, {
+        placement: X_BOOKMARKS_STORE_PLACEMENT,
+        fetchContent: true,
+        reconcileFullSnapshot: true,
+        reconcileFullSnapshotScope: { provider: X_BOOKMARKS_PROVIDER, accountScope: account },
+        // The connector exposes nothing until its durable traversal has
+        // exhausted every global/folder token. Only that promoted snapshot
+        // may own current X bookmark membership across replay/live owners.
+        reconcileAbsenceAuthority: removalAuthoritative ? 'complete_snapshot' : 'partial_window',
+        ...(removalAuthoritative
+          ? {
+              reconcileCurrentMembershipAuthority: coverageScope === 'recency_window'
+                ? 'provider_window_snapshot' as const
+                : 'provider_account_snapshot' as const,
+              reconcileSnapshotObservedAt: probed.snapshotObservedAt,
+              reconcileSnapshotCompletedAt: probed.snapshotCompletedAt,
+              ...(coverageScope === 'recency_window'
+                ? {
+                    reconcileWindowBoundarySha256: probed.traversalDigestSha256,
+                    reconcileWindowRemovedLocalItemIds:
+                      presentedWindowRemovalLocalItemIds,
+                  }
+                : {}),
+            }
+          : {}),
+      }, false);
       const status = connector.status();
       if (!status.complete) {
         const completedAt = validAttemptedAt(undefined, now);
@@ -409,6 +452,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         }),
         chunks_indexed: run.sync.chunksIndexed,
         chunks_embedded: run.embed.chunksEmbedded,
+        ...(run.tiered ?? {}),
       };
       if (!xBookmarksReconcileTombstonesAccounted(counts)) {
         throw new XBookmarksLiveSyncError({

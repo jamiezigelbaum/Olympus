@@ -52,7 +52,10 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   createDropboxConnectorStore,
+  createDropboxTierConnectorStore,
   defaultDropboxConnectorStoreDbPath,
+  defaultDropboxInternalConnectorStoreDbPath,
+  defaultDropboxPublicConnectorStoreDbPath,
 } from '../src/workers/dropbox-files/index.ts';
 import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -209,6 +212,18 @@ function purgeTargets(env: Record<string, string | undefined>): Array<{
       label: 'Dropbox files',
       dbPath: defaultDropboxConnectorStoreDbPath(env),
       open: () => createDropboxConnectorStore(env),
+    },
+    // The lane's per-tier stores (created when a new file is first routed to
+    // them) carry the same gate: an exclusion covers a file wherever it rests.
+    {
+      label: 'Dropbox files (internal)',
+      dbPath: defaultDropboxInternalConnectorStoreDbPath(env),
+      open: () => createDropboxTierConnectorStore('internal', env),
+    },
+    {
+      label: 'Dropbox files (public_safe)',
+      dbPath: defaultDropboxPublicConnectorStoreDbPath(env),
+      open: () => createDropboxTierConnectorStore('public_safe', env),
     },
     {
       label: 'Drive docs (internal)',

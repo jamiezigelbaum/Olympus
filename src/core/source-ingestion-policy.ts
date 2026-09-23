@@ -121,15 +121,31 @@ export function defaultDropboxIngestionPolicy(): SourceIngestionPolicy {
   };
 }
 
+/**
+ * The Dropbox lane's corpora, one per tier (design
+ * per-item-four-tier-classification.md, section 3.2). The first is the lane's
+ * original store: where every file stored before per-item routing stays, and
+ * the corpus the scheduler and the extraction queue key the lane's work by.
+ */
+export const DROPBOX_LANE_CORPUS_IDS = [
+  'secure_local.dropbox.files',
+  'internal.dropbox.files',
+  'public_safe.dropbox.files',
+] as const;
+
 export function loadDropboxIngestionPolicy(options: SourceIngestionPolicyLoadOptions = {}): SourceIngestionPolicy {
   const validateDropboxPolicy = (policy: SourceIngestionPolicy, label: string): SourceIngestionPolicy => {
     if (policy.source !== 'dropbox.personal') {
       throw new OperationError('config_error', `${label}.source must be dropbox.personal for this Dropbox policy loader.`);
     }
-    if (policy.corpusId !== 'secure_local.dropbox.files') {
-      throw new OperationError('config_error', `${label}.corpusId must be secure_local.dropbox.files.`);
+    // The policy decides what is read (roots, metadata-only rules, cadence),
+    // never where a file rests: each new file is routed to its own tier's
+    // store by per-item classification. `corpusId` only names the lane, by
+    // any of its corpora, and resolves to the lane's original store.
+    if (!(DROPBOX_LANE_CORPUS_IDS as readonly string[]).includes(policy.corpusId)) {
+      throw new OperationError('config_error', `${label}.corpusId must name the Dropbox lane (${DROPBOX_LANE_CORPUS_IDS.join(', ')}).`);
     }
-    return policy;
+    return { ...policy, corpusId: DROPBOX_LANE_CORPUS_IDS[0] };
   };
   if (options.inlinePolicy !== undefined) {
     return validateDropboxPolicy(

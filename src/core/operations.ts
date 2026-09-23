@@ -101,7 +101,7 @@ const SOURCE_INDEX_SEARCH_PARAMS = {
   attachment_type: { type: 'string', enum: ['image', 'video', 'audio', 'file', 'link', 'other'], description: 'Optional Telegram attachment type filter.' },
   max_results: { type: 'number', description: 'Max hits; worker-capped.' },
   include_locators: { type: 'boolean', description: 'Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes.' },
-  all_tiers: { type: 'boolean', description: 'Default true: also search the source\'s other tier corpora. false searches only corpus_id.' },
+  all_tiers: { type: 'boolean', description: 'Default true: also search the source\'s other tier corpora. false searches only corpus_id and returns no Secret locations.' },
 } satisfies Record<string, ParamDef>;
 
 const SOURCE_ANSWER_PARAMS = {

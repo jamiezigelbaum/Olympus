@@ -70,6 +70,8 @@ import {
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+  EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
 } from './store-sink.ts';
 import type {
   ExtractionEgress,
@@ -133,6 +135,10 @@ const SINK_SKIP_SETTLEMENTS: Readonly<Record<string, ExtractionTerminalStatus>> 
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: 'failed_terminal',
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: 'blocked_policy',
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: 'blocked_policy',
+  // Decided by the item's tiers, not failures: a queued tier move waits for
+  // the move primitive, and a Secret is stored nowhere by design.
+  [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: 'blocked_policy',
+  [EXTRACTION_SINK_SKIPPED_SECRETS]: 'blocked_policy',
   [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: 'metadata_only',
   // Settled as metadata-only rather than blocked: the item IS indexed and the
   // absence of content is the configured, correct end state, not a policy

@@ -74,6 +74,18 @@ export const EXTRACTION_SINK_SKIPPED_METADATA_ONLY = 'store_item_metadata_only';
  * which is why this token is deliberately absent from the runner's skip table.
  */
 export const EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = 'extraction_claim_superseded';
+/**
+ * A tiered store set (tiered-store-sink.ts): the item's content decision
+ * needs different stores than it has, so the move is queued (hidden first on
+ * a raise) and this text is not written. Distinct from a policy refusal so a
+ * receipt can tell a queued move from an item that may never hold text.
+ */
+export const EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = 'store_item_tier_move_queued';
+/**
+ * A tiered store set: the item's text carries a secret, so the item is
+ * stored nowhere and only its location is kept.
+ */
+export const EXTRACTION_SINK_SKIPPED_SECRETS = 'store_item_secrets';
 
 /**
  * Maps the two store refusals a healthy sink can race into onto skip tokens,
@@ -133,6 +145,13 @@ export interface ConnectorStoreExtractionSinkOptions {
    * Map and sniffer for the recorded content decision. Optional.
    */
   tierClassification?: ConnectorStoreTierClassification;
+  /**
+   * Whether this sink records the content half of the item's tier decision
+   * itself (the phase P1a record). Default true. A tiered store set's sink
+   * records it through the set instead, in the same step that places the
+   * content copy, so it turns this off.
+   */
+  recordContentTier?: boolean;
 }
 
 /**
@@ -402,7 +421,7 @@ export function createConnectorStoreExtractionSink(
       const coverage = store.itemRepresentationCoverage(plan.expectation);
       // The text was read at last: record the content half of the item's
       // four-tier decision. Best-effort and storage-neutral (phase P1a).
-      if (plan.item.content.kind === 'text') {
+      if (options.recordContentTier !== false && plan.item.content.kind === 'text') {
         store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
       }
       return {

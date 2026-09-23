@@ -1,10 +1,19 @@
-// Placement of the Dropbox connector store on the shared spine.
+// Placement of the Dropbox connector stores on the shared spine.
 //
-// One store, one corpus: `secure_local.dropbox.files`, family `file`, trust
-// domain `secure_local`. Unlike Drive there is no internal twin: the Dropbox
-// corpus has never had an internal band.
+// Per-tier stores (design docs/design/per-item-four-tier-classification.md,
+// section 3.2), family `file`:
+// - `secure_local.dropbox.files`: the lane's original store. Everything stored
+//   before per-item routing stays here, unchanged, and Private items land here.
+// - `internal.dropbox.files` and `public_safe.dropbox.files`: created only when
+//   a NEW file is first routed to them (Personal by default for its names;
+//   its content wherever the text the extraction factory read puts it).
+// All three carry the same exclusion gate and the same approved-scope read
+// filter; the secure store's co-located tier ledger governs visibility for
+// all three.
 
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -27,6 +36,22 @@ import { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CORPUS_ID } from './corpus-adapter.ts';
 
 export const DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID = DROPBOX_FILES_CORPUS_ID;
+
+/** The Personal and Public Dropbox stores, created when a new file is first routed there. */
+export const DROPBOX_INTERNAL_FILES_CORPUS_ID = 'internal.dropbox.files';
+export const DROPBOX_PUBLIC_FILES_CORPUS_ID = 'public_safe.dropbox.files';
+
+export const DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV =
+  'OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH';
+export const DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV =
+  'OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH';
+
+/** Every Dropbox tier store's corpus, by trust domain. */
+export const DROPBOX_TIER_CORPUS_IDS: Readonly<Record<SourceTrustDomain, string>> = Object.freeze({
+  public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
+  internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
+  secure_local: DROPBOX_FILES_CORPUS_ID,
+});
 
 /**
  * The source key this connector's exclusion rules are written against. It is
@@ -55,9 +80,10 @@ export const DROPBOX_CONNECTOR_STORE_DB_PATH_ENV =
   'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH';
 
 /**
- * Where Dropbox files rest in the existing (secure-only) store: S4/secure_local,
- * raised to S5 — tombstoned, location only — when the textual body carries a
- * secret. Exactly the rule the retired connector classify() applied.
+ * Where an EXISTING Dropbox file (one stored before per-item routing) rests:
+ * S4/secure_local, raised to S5 — tombstoned, location only — when the
+ * textual body carries a secret. Exactly the rule the retired connector
+ * classify() applied. New files are routed per item by the lane's tier set.
  */
 export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
   trustTier: 'S4',
@@ -72,6 +98,35 @@ export function defaultDropboxConnectorStoreDbPath(
   if (configured) return configured;
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
   return join(dataHome, 'openclaw', 'olympus', 'dropbox-files-connector-store.sqlite');
+}
+
+export function defaultDropboxInternalConnectorStoreDbPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const configured = env[DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
+  if (configured) return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', 'dropbox-files-internal-connector-store.sqlite');
+}
+
+export function defaultDropboxPublicConnectorStoreDbPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const configured = env[DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
+  if (configured) return configured;
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', 'dropbox-files-public-connector-store.sqlite');
+}
+
+/** Every Dropbox tier store's path: the lifecycle deletes all of them with the source. */
+export function dropboxTierConnectorStoreDbPaths(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return [
+    defaultDropboxConnectorStoreDbPath(env),
+    defaultDropboxInternalConnectorStoreDbPath(env),
+    defaultDropboxPublicConnectorStoreDbPath(env),
+  ];
 }
 
 /**
@@ -149,6 +204,30 @@ export function createDropboxConnectorStore(
     trustDomain: 'secure_local',
     exclusions: dropboxCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
+  });
+}
+
+/**
+ * A Personal or Public Dropbox store: the same family, exclusion gate and
+ * policy as the lane's original store, bound to the lane's set ledger so it
+ * never serves a copy the ledger hides — even when opened on its own.
+ */
+export function createDropboxTierConnectorStore(
+  trustDomain: 'internal' | 'public_safe',
+  env: Record<string, string | undefined> = process.env,
+  options: { readOnly?: boolean; policy?: SourceIngestionPolicy; tierLedger?: TierLedger } = {},
+): LocalConnectorStore {
+  const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
+  return new LocalConnectorStore({
+    dbPath: trustDomain === 'internal'
+      ? defaultDropboxInternalConnectorStoreDbPath(env)
+      : defaultDropboxPublicConnectorStoreDbPath(env),
+    corpusId: DROPBOX_TIER_CORPUS_IDS[trustDomain],
+    family: 'file',
+    trustDomain,
+    exclusions: dropboxCanonicalIngestionMatcher(policy, env),
+    ...(options.readOnly === true ? { readOnly: true } : {}),
+    ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
   });
 }
 

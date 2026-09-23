@@ -554,6 +554,58 @@ export class TierLedger {
     return undefined;
   }
 
+  /**
+   * Per-item overrides of one provider still keyed without a conversation:
+   * written before the ledger keyed items by conversation (schema 1). For a
+   * chat source, where message ids repeat across conversations, such a row
+   * matches no message any more. Content-free: identities only.
+   */
+  conversationlessOverrides(provider: string): TierLedgerIdentity[] {
+    return (this.db.query(`
+      SELECT provider, account_scope, provider_item_id FROM tier_overrides
+      WHERE provider = ? AND conversation_key = ''
+      ORDER BY account_scope, provider_item_id
+    `).all(provider) as Array<{ provider: string; account_scope: string; provider_item_id: string }>)
+      .map((row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id }));
+  }
+
+  /**
+   * Re-home a chat source's conversation-less overrides (see above) under the
+   * conversation their message belongs to, when that is derivable: the
+   * lane's stores hold the message in exactly ONE conversation. An override
+   * already set under that conversation wins and the old row is dropped. Every
+   * other row is kept as it is (it applies to nothing) and returned as
+   * ORPHANED, so an explain surface can show it instead of losing it silently.
+   */
+  rehomeConversationlessOverrides(options: {
+    provider: string;
+    conversationsFor: (identity: TierLedgerIdentity) => readonly string[];
+  }): { rehomed: number; orphaned: TierLedgerIdentity[] } {
+    const orphaned: TierLedgerIdentity[] = [];
+    let rehomed = 0;
+    for (const identity of this.conversationlessOverrides(options.provider)) {
+      const conversations = [...new Set(options.conversationsFor(identity).filter((key) => key.trim().length > 0))];
+      if (conversations.length !== 1) {
+        orphaned.push(identity);
+        continue;
+      }
+      this.db.transaction(() => {
+        this.db.query(`
+          INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+          SELECT provider, account_scope, ?, provider_item_id, override_json, set_at FROM tier_overrides
+          WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
+          ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO NOTHING
+        `).run(conversations[0]!, identity.provider, identity.accountScope, identity.providerItemId);
+        this.db.query(`
+          DELETE FROM tier_overrides
+          WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
+        `).run(identity.provider, identity.accountScope, identity.providerItemId);
+      })();
+      rehomed += 1;
+    }
+    return { rehomed, orphaned };
+  }
+
   clearOverride(identity: TierLedgerIdentity): boolean {
     return this.db.query(`
       DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -637,6 +689,13 @@ export class TierLedger {
        * a fresh placement, not a move.
        */
       staleCopiesGone?: boolean;
+      /**
+       * A lane whose text arrives later may hold a STAGED copy from a landing
+       * that has not completed (`stageLandingCopy`). While the item's text has
+       * not landed, that copy is the landing's, not a move's: it does not turn
+       * an unchanged placement into a queued move.
+       */
+      stagedLandingAllowed?: boolean;
     } = {},
   ): { outcome: TierRoutedOutcome; record: TierLedgerRecord; previousCopies: TierCopy[]; raise: boolean } {
     const decidedAt = this.now().toISOString();
@@ -711,7 +770,8 @@ export class TierLedger {
       const tiersChanged = existing.metadataTier !== decision.metadataTier
         || existing.contentTier !== decision.contentTier;
       const current = previousCopies.filter((copy) => copy.state === 'current');
-      const staged = previousCopies.some((copy) => copy.state === 'staged');
+      const staged = previousCopies.some((copy) => copy.state === 'staged')
+        && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || (samePlan(current, plan.copies) && !staged)) {
         const generation = tiersChanged ? existing.generation + 1 : existing.generation;
@@ -798,6 +858,135 @@ export class TierLedger {
       outcome = 'queued_move';
     })();
     return { outcome, record: this.getCurrent(identity)!, previousCopies, raise };
+  }
+
+  /**
+   * Before the first landing writes the content tier's row into a store that
+   * holds no copy of the item yet, name that copy STAGED: a staged copy is
+   * never searched, served, counted or embedded, so the row is hidden from
+   * the moment it exists until `landExtractedContent` makes it current.
+   * Nothing is staged over a current copy.
+   */
+  stageLandingCopy(
+    identity: TierLedgerIdentity,
+    copy: TierCopyPlan,
+    options: { expectedGeneration: number; embedHold?: boolean },
+  ): void {
+    assertCopyPlan(copy);
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving') {
+        throw new TierLedgerGenerationConflictError();
+      }
+      if (!existing.routed || existing.contentRead) {
+        throw new Error('Only a routed item whose text has not landed stages a landing copy.');
+      }
+      const rows = this.copies(identity).filter((row) => row.corpusId === copy.corpusId);
+      if (rows.some((row) => row.state === 'current')) return;
+      this.db.query(`
+        DELETE FROM tier_copies
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+      `).run(...idParams(identity), copy.corpusId);
+      this.insertCopies(identity, { copies: [copy], embedHold: options.embedHold === true }, 'staged', existing.generation, now);
+    })();
+  }
+
+  /**
+   * The FIRST landing of a routed item's text, in a lane whose text arrives
+   * after listing (the shared extraction factory). Until now the item had
+   * only its metadata copy (or a whole Private copy while its names were
+   * pending), so no store served its content: placing the content copy is a
+   * first placement, not a move. In ONE transaction, compare-and-swap on the
+   * generation:
+   *
+   * - the content half of the decision is recorded (text read, tier, reasons);
+   * - every current copy keeps its store; the plan may widen a copy's layers
+   *   (`metadata` -> `both`) or add the content tier's copy in another store,
+   *   written by the caller BEFORE this call (and hidden until it: no copy row
+   *   served it).
+   *
+   * Refused once text has landed (a re-judgment of landed content is a move:
+   * `recordRoutedPlacement` queues it), mid-move, or when the plan would drop
+   * or re-home a copy that serves the names.
+   */
+  landExtractedContent(
+    identity: TierLedgerIdentity,
+    decision: TierDecision,
+    plan: TierPlacementPlan,
+    options: { expectedGeneration: number },
+  ): TierLedgerRecord {
+    for (const copy of plan.copies) assertCopyPlan(copy);
+    if (!decision.contentRead) throw new Error('Landing extracted content needs a decision made from that text.');
+    if (plan.copies.length === 0) throw new Error('Landing extracted content needs at least one copy.');
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving') {
+        throw new TierLedgerGenerationConflictError();
+      }
+      if (!existing.routed) throw new Error('Only a routed item lands content through the tier set.');
+      if (existing.contentRead) {
+        throw new Error('This item\'s text already landed; a new content decision is a re-judgment, not a first landing.');
+      }
+      const current = this.copies(identity).filter((copy) => copy.state === 'current');
+      for (const copy of current) {
+        const planned = plan.copies.find((candidate) => candidate.corpusId === copy.corpusId);
+        const servesNames = copy.layers === 'metadata' || copy.layers === 'both';
+        if (!planned || (servesNames && planned.layers === 'content')) {
+          throw new Error('Landing extracted content never moves or drops the copy that serves the names.');
+        }
+      }
+      const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
+      const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+      const reasonsJson = JSON.stringify(decision.reasons);
+      this.db.query(`
+        UPDATE tier_items SET
+          metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+          engine_version = ?, map_revision = ?,
+          previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+          stored_trust_domain = COALESCE(?, stored_trust_domain),
+          stored_trust_tier = COALESCE(?, stored_trust_tier),
+          content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+          decided_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(
+        decision.metadataTier,
+        decision.contentTier,
+        generation,
+        decision.decidedBy,
+        reasonsJson,
+        decision.engineVersion,
+        decision.mapRevision,
+        tiersChanged ? existing.metadataTier : existing.previousMetadataTier,
+        tiersChanged ? existing.contentTier : existing.previousContentTier,
+        decision.state,
+        plan.stored?.trustDomain ?? null,
+        plan.stored?.trustTier ?? null,
+        ...decisionFlags(decision),
+        now,
+        ...idParams(identity),
+      );
+      this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, now);
+      for (const planned of plan.copies) {
+        const row = current.find((copy) => copy.corpusId === planned.corpusId);
+        if (row) {
+          this.db.query(`
+            UPDATE tier_copies SET layers = ?, embed_hold = ?, generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, plan.embedHold ? 1 : 0, generation, now, ...idParams(identity), planned.corpusId);
+          continue;
+        }
+        // A stale (superseded or staged) row for that store is replaced: the
+        // caller just wrote the store's row for this landing.
+        this.db.query(`
+          DELETE FROM tier_copies
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(...idParams(identity), planned.corpusId);
+        this.insertCopies(identity, { copies: [planned], embedHold: plan.embedHold }, 'current', generation, now);
+      }
+    })();
+    return this.getCurrent(identity)!;
   }
 
   /**

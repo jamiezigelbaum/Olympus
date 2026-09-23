@@ -175,9 +175,23 @@ export interface TierDecision {
   metadataForced: boolean;
   /** Pass 1 flagged the names as possibly private (the content pass asks the sniffer too). */
   metadataFlagged: boolean;
+  /**
+   * The owner rule that set the names' resting (prior) or fixed (force) tier,
+   * when one matched. A lane that never lets items rest below a floor unless
+   * the OWNER said so reads this (tiered-store-set.ts, `laneFloor`). Absent
+   * when no owner rule matched.
+   */
+  metadataOwnerRule?: TierOwnerRuleMatch;
   engineVersion: string;
   mapRevision: string;
   snifferId: string;
+}
+
+/** Which owner rule decided the names' tier: its match kind, tier and strength. No rule id, no value. */
+export interface TierOwnerRuleMatch {
+  kind: OwnerTierRule['match']['kind'];
+  tier: TierKey;
+  strength: OwnerTierRule['strength'];
 }
 
 export type TierDecidedBy =
@@ -259,6 +273,7 @@ export function classifyItemTiers(
     contentPending,
     metadataForced: metadata.forced,
     metadataFlagged: metadata.flags.length > 0,
+    ...(metadata.ownerRule ? { metadataOwnerRule: metadata.ownerRule } : {}),
   };
 }
 
@@ -274,6 +289,14 @@ export interface ContentTierInput {
   metadataTier: TierKey;
   metadataForced: boolean;
   metadataFlagged: boolean;
+  /**
+   * The item's names, when the caller has them: they travel with the text so
+   * a detector's origin hint and a title's vocabulary still count, exactly
+   * as they do when the text arrives with the listing.
+   */
+  title?: string;
+  path?: string;
+  sender?: string;
 }
 
 export interface ContentTierDecision {
@@ -303,7 +326,11 @@ export function classifyContentTier(
   const content = contentPass({
     signals: {},
     text,
-    matchInput: {},
+    matchInput: mapMatchInput({
+      ...(input.title?.trim() ? { title: input.title } : {}),
+      ...(input.path?.trim() ? { path: input.path } : {}),
+      ...(input.sender?.trim() ? { sender: input.sender } : {}),
+    }),
     metadata: {
       tier: input.metadataTier,
       decidedBy: 'default',
@@ -334,6 +361,8 @@ interface PassResult {
   forced: boolean;
   /** Pass-1 sniffer flags, handed to pass 2. */
   flags: string[];
+  /** The owner rule that set (prior) or fixed (force) the tier, if any. */
+  ownerRule?: TierOwnerRuleMatch;
 }
 
 function metadataPass(args: {
@@ -373,7 +402,7 @@ function metadataPass(args: {
   // rule or force prior, so neither can lower an item below it (a Telegram
   // Secret Chat stays Private under a force-Public rule).
   const floorReason = signals.floor ? `metadata:floor:${slug(signals.floor.basis)}` : undefined;
-  const forced = (tier: TierKey, decidedBy: TierDecidedBy, reason: string): PassResult => {
+  const forced = (tier: TierKey, decidedBy: TierDecidedBy, reason: string, ownerRule?: TierOwnerRuleMatch): PassResult => {
     const floor = signals.floor;
     const flooredTier = floor && tierRank(floor.tier) > tierRank(tier) ? floor.tier : tier;
     return {
@@ -383,11 +412,17 @@ function metadataPass(args: {
       pending: false,
       forced: true,
       flags: [],
+      ...(ownerRule ? { ownerRule } : {}),
     };
   };
   const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === 'force'));
   if (forceRule) {
-    return forced(forceRule.tier, 'owner_rule', `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`);
+    return forced(
+      forceRule.tier,
+      'owner_rule',
+      `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`,
+      { kind: forceRule.match.kind, tier: forceRule.tier, strength: 'force' },
+    );
   }
   const priorRule = mostSensitive(matchedRules.filter((rule) => rule.strength === 'prior'));
 
@@ -465,7 +500,15 @@ function metadataPass(args: {
   ])];
 
   // [8] The default is already the resting verdict when nothing else applied.
-  return { tier: decided.tier, decidedBy: decided.decidedBy, reasons, pending, forced: false, flags };
+  return {
+    tier: decided.tier,
+    decidedBy: decided.decidedBy,
+    reasons,
+    pending,
+    forced: false,
+    flags,
+    ...(priorRule ? { ownerRule: { kind: priorRule.match.kind, tier: priorRule.tier, strength: 'prior' as const } } : {}),
+  };
 }
 
 function contentPass(args: {

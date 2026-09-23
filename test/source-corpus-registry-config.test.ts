@@ -73,6 +73,8 @@ describe('config-driven source corpus registry', () => {
     expect(registry.require('public_safe.readwise.library', 'sync')).toBe('internal.readwise.library');
     expect(registry.ids('answer').filter((corpusId) => corpusId.includes('readwise'))).toEqual([
       'internal.readwise.library',
+      // The lane's Private store (P1c), created on demand; not the alias.
+      'secure_local.readwise.library',
     ]);
     expect(registry.ids('search')).not.toContain('internal.readwise.library');
     expect(registryFromLegacyConfig.ids('answer')).toContain('internal.readwise.library');
@@ -452,10 +454,15 @@ describe('config-driven source corpus registry', () => {
       'public_safe.drive.docs',
       'internal.telegram.messages',
       'internal.readwise.library',
+      'secure_local.readwise.library',
       'internal.x.bookmarks',
+      'secure_local.x.bookmarks',
       'secure_local.dropbox.files',
+      'internal.dropbox.files',
+      'public_safe.dropbox.files',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
+      'internal.whatsapp.messages',
     ]);
     expect(registry.ids('status')).toEqual([
       'secure_local.email.private',
@@ -466,10 +473,15 @@ describe('config-driven source corpus registry', () => {
       'public_safe.drive.docs',
       'internal.telegram.messages',
       'internal.readwise.library',
+      'secure_local.readwise.library',
       'internal.x.bookmarks',
+      'secure_local.x.bookmarks',
       'secure_local.dropbox.files',
+      'internal.dropbox.files',
+      'public_safe.dropbox.files',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
+      'internal.whatsapp.messages',
     ]);
     expect(registry.ids('sync')).toEqual([
       'internal.email',
@@ -491,10 +503,14 @@ describe('config-driven source corpus registry', () => {
       'secure_local.drive.docs',
       'public_safe.drive.docs',
       'secure_local.dropbox.files',
+      'internal.dropbox.files',
+      'public_safe.dropbox.files',
       'internal.x.bookmarks',
+      'secure_local.x.bookmarks',
       'internal.telegram.messages',
       'secure_local.telegram.protected.messages',
       'secure_local.whatsapp.messages',
+      'internal.whatsapp.messages',
     ]);
 
     const generatedPolicy = loadDropboxIngestionPolicy({

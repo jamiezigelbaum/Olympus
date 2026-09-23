@@ -572,6 +572,17 @@ var init_source_corpus_registry = __esm(() => {
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
     {
+      corpusId: "secure_local.readwise.library",
+      sourceId: "readwise.library",
+      provider: "readwise",
+      family: "readwise",
+      trustDomain: "secure_local",
+      activationMode: "lexical_only",
+      capabilities: ["answer", "status"],
+      createdOnDemand: true,
+      description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
+    },
+    {
       corpusId: "internal.x.bookmarks",
       sourceId: "x.bookmarks",
       provider: "x",
@@ -581,6 +592,17 @@ var init_source_corpus_registry = __esm(() => {
       capabilities: ["answer", "status", "sync", "search"]
     },
     {
+      corpusId: "secure_local.x.bookmarks",
+      sourceId: "x.bookmarks",
+      provider: "x",
+      family: "x",
+      trustDomain: "secure_local",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "X bookmarks raised to Private by per-item four-tier classification."
+    },
+    {
       corpusId: "secure_local.dropbox.files",
       sourceId: "dropbox.files",
       provider: "dropbox",
@@ -588,6 +610,28 @@ var init_source_corpus_registry = __esm(() => {
       trustDomain: "secure_local",
       activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search", "promotion_candidates"]
+    },
+    {
+      corpusId: "internal.dropbox.files",
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      family: "file",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Personal Dropbox files (reference material and Personal names), routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.dropbox.files",
+      sourceId: "dropbox.files",
+      provider: "dropbox",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Dropbox files, routed here by per-item four-tier classification on positive public evidence."
     },
     {
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -607,6 +651,17 @@ var init_source_corpus_registry = __esm(() => {
       activationMode: "hybrid_shadow",
       capabilities: ["status", "sync", "search", "answer"],
       description: "WhatsApp live capture (thin whatsmeow bridge -> shared scheduler -> connector store), including locally transcribed voice notes."
+    },
+    {
+      corpusId: "internal.whatsapp.messages",
+      sourceId: "whatsapp.personal.messages",
+      provider: "whatsapp",
+      family: "chat",
+      trustDomain: "internal",
+      activationMode: "hybrid_shadow",
+      capabilities: ["status", "search", "answer"],
+      createdOnDemand: true,
+      description: "WhatsApp messages of chats the owner set to Personal, routed here per message. The default for every chat stays Private."
     }
   ];
   DEFAULT_CAPABILITY_ORDER = {
@@ -619,10 +674,15 @@ var init_source_corpus_registry = __esm(() => {
       "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
+      "secure_local.readwise.library",
       "internal.x.bookmarks",
+      "secure_local.x.bookmarks",
       "secure_local.dropbox.files",
+      "internal.dropbox.files",
+      "public_safe.dropbox.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      "secure_local.whatsapp.messages"
+      "secure_local.whatsapp.messages",
+      "internal.whatsapp.messages"
     ],
     status: [
       "secure_local.email.private",
@@ -633,10 +693,15 @@ var init_source_corpus_registry = __esm(() => {
       "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
+      "secure_local.readwise.library",
       "internal.x.bookmarks",
+      "secure_local.x.bookmarks",
       "secure_local.dropbox.files",
+      "internal.dropbox.files",
+      "public_safe.dropbox.files",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      "secure_local.whatsapp.messages"
+      "secure_local.whatsapp.messages",
+      "internal.whatsapp.messages"
     ],
     sync: [
       "internal.email",
@@ -657,7 +722,10 @@ var init_source_corpus_registry = __esm(() => {
       "secure_local.drive.docs",
       "public_safe.drive.docs",
       "secure_local.dropbox.files",
+      "internal.dropbox.files",
+      "public_safe.dropbox.files",
       "internal.x.bookmarks",
+      "secure_local.x.bookmarks",
       "internal.telegram.messages",
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID
     ],
@@ -8085,9 +8153,20 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
+// src/workers/connector-store/tiered-store-set.ts
+var init_tiered_store_set = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_local_index();
+  init_tier_placement();
+});
+
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_api();
   init_connector();
   init_live_control();
@@ -8577,6 +8656,7 @@ var init_window_diagnostic = __esm(() => {
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_api_connector();
   init_live_control2();
   init_reconcile_state();
@@ -8620,17 +8700,23 @@ var init_connector3 = __esm(() => {
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
+var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files";
 var init_corpus_adapter3 = __esm(() => {
   init_corpus();
 });
 
 // src/workers/dropbox-files/connector-store.ts
-var DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
+var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
   init_connector_store();
   init_corpus_adapter3();
+  DROPBOX_TIER_CORPUS_IDS = Object.freeze({
+    public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
+    internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
+    secure_local: DROPBOX_FILES_CORPUS_ID
+  });
   DROPBOX_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local",
@@ -8646,6 +8732,7 @@ var init_connector_store2 = __esm(() => {
 // src/workers/dropbox-files/provider-store-sync.ts
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
+  init_tiered_store_set();
   init_connector_store2();
   init_connector3();
   init_provider_client();
@@ -8881,6 +8968,14 @@ var init_qualification2 = __esm(() => {
   init_corpus_adapter3();
 });
 
+// src/workers/dropbox-files/tier-set.ts
+var init_tier_set = __esm(() => {
+  init_tier_ledger();
+  init_tiered_store_set();
+  init_connector_store2();
+  init_corpus_adapter3();
+});
+
 // src/workers/dropbox-files/index.ts
 var init_dropbox_files = __esm(() => {
   init_connector3();
@@ -8894,6 +8989,7 @@ var init_dropbox_files = __esm(() => {
   init_dropbox2();
   init_corpus_adapter3();
   init_qualification2();
+  init_tier_set();
   init_connector_store2();
 });
 
@@ -8912,16 +9008,6 @@ var init_capture_spool_connector = __esm(() => {
   };
   TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
-});
-
-// src/workers/connector-store/tiered-store-set.ts
-var init_tiered_store_set = __esm(() => {
-  init_types();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_local_index();
-  init_tier_placement();
 });
 
 // src/workers/telegram-messages/store-sync.ts
@@ -9184,6 +9270,42 @@ var init_google_connectors = __esm(() => {
   init_drive_live_sync();
   init_request_budget();
   init_corpora();
+});
+
+// src/workers/readwise/tier-set.ts
+var init_tier_set2 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_connector();
+});
+
+// src/workers/x-bookmarks/tier-set.ts
+var init_tier_set3 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_connector2();
+});
+
+// src/workers/whatsapp/reaction-index.ts
+var init_reaction_index = __esm(() => {
+  init_reactions();
+});
+
+// src/workers/whatsapp/live-connector.ts
+var init_live_connector = __esm(() => {
+  init_reaction_index();
+});
+
+// src/workers/whatsapp/store-sync.ts
+var WHATSAPP_STORE_PLACEMENT;
+var init_store_sync2 = __esm(() => {
+  init_connector_store();
+  init_tiered_store_set();
+  init_live_connector();
+  WHATSAPP_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local"
+  });
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -9699,7 +9821,10 @@ var init_source_ingestion_ledger = __esm(() => {
   init_google_connectors();
   init_connector_store();
   init_readwise();
+  init_tier_set2();
   init_x_bookmarks();
+  init_tier_set3();
+  init_store_sync2();
   init_dropbox_files();
   init_telegram_messages();
   SOURCE_DEFINITIONS = {
@@ -14856,7 +14981,7 @@ var SOURCE_INDEX_SEARCH_PARAMS = {
   attachment_type: { type: "string", enum: ["image", "video", "audio", "file", "link", "other"], description: "Optional Telegram attachment type filter." },
   max_results: { type: "number", description: "Max hits; worker-capped." },
   include_locators: { type: "boolean", description: "Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes." },
-  all_tiers: { type: "boolean", description: "Default true: also search the source's other tier corpora. false searches only corpus_id." }
+  all_tiers: { type: "boolean", description: "Default true: also search the source's other tier corpora. false searches only corpus_id and returns no Secret locations." }
 };
 var SOURCE_ANSWER_PARAMS = {
   question: { type: "string", required: true, description: "Question or search intent to route across approved source corpora." },

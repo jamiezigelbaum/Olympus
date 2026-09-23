@@ -9,6 +9,17 @@ import {
   LocalConnectorStore,
   type ConnectorStoreSyncSummary,
 } from '../connector-store/index.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import {
+  createExistingStoreTierLane,
+  mergedTieredLaneRun,
+  tieredLaneReceiptCounts,
+  type ExistingStoreTierLane,
+  type TieredLaneReceiptCounts,
+  type TieredStoreSet,
+} from '../connector-store/tiered-store-set.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
@@ -18,6 +29,11 @@ import {
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
 export const WHATSAPP_LIVE_CORPUS_ID = 'secure_local.whatsapp.messages';
 export const WHATSAPP_PERSONAL_ACCOUNT_SCOPE = 'personal';
+/**
+ * Messages of a chat the OWNER set to Personal (an owner chat rule), routed
+ * here one by one. Created on first need; with no such rule it never exists.
+ */
+export const WHATSAPP_INTERNAL_CORPUS_ID = 'internal.whatsapp.messages';
 export const WHATSAPP_PRODUCT_CONNECTOR_ID = 'whatsapp_product_spool';
 
 /**
@@ -53,7 +69,7 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     capture_unavailable: number;
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
-  };
+  } & TieredLaneReceiptCounts;
   capture: {
     status: 'fresh' | 'stale' | 'unavailable';
     threshold_seconds: number;
@@ -117,6 +133,68 @@ export function sanitizeWhatsAppLiveCursor(cursor: string | undefined): string |
   return file && /^\d+$/.test(line) ? cursor : undefined;
 }
 
+export function defaultWhatsAppInternalConnectorStoreDbPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH?.trim()
+    || join(defaultWhatsAppStateDir(env), 'connector-store-internal.db');
+}
+
+/**
+ * The WhatsApp lane's per-tier stores (design
+ * docs/design/per-item-four-tier-classification.md, sections 2.1 and 3.2).
+ *
+ * Fail closed. The lane's store stays `secure_local.whatsapp.messages`: every
+ * message stored before per-item routing keeps its place there, and every new
+ * message rests there too, at Private, by default. A chat is a chat-level
+ * prior that a message is never lowered below. Only an explicit OWNER chat
+ * rule that sets a chat to Personal lifts that floor, and then only a message
+ * judged Personal from its own text goes to `internal.whatsapp.messages`; any
+ * message the detectors raise, or whose question is still open, stays
+ * Private. A per-item owner override also lifts it, and is final by design:
+ * it sets that one message's tier whatever its text says. A message is kept whole (names and
+ * text in one store), and one carrying a secret is stored nowhere.
+ */
+export function createWhatsAppTierLane(options: {
+  store: LocalConnectorStore;
+  env?: Record<string, string | undefined>;
+  /** The cloud identity for the Personal store. */
+  internalEmbeddingProvider?: SourceEmbeddingProvider;
+  /** Owner chat rules arrive here (tier-rules loading is phase P2). */
+  tierClassification?: ConnectorStoreTierClassification;
+  secretLocations?: SecretLocationsIndex;
+  onStoreOpened?: (store: LocalConnectorStore) => void;
+}): ExistingStoreTierLane {
+  if (options.store.trustDomain !== 'secure_local') {
+    throw new Error('The WhatsApp lane\'s own store is secure_local.');
+  }
+  const env = options.env ?? process.env;
+  const internalDbPath = defaultWhatsAppInternalConnectorStoreDbPath(env);
+  return createExistingStoreTierLane({
+    setId: WHATSAPP_PERSONAL_SOURCE_ID,
+    store: options.store,
+    splitLayers: false,
+    laneFloor: { trustDomain: 'secure_local', liftedByOwnerRule: ['chat'] },
+    newLegs: {
+      internal: {
+        corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
+        dbPath: internalDbPath,
+        create: (ledger) => new LocalConnectorStore({
+          dbPath: internalDbPath,
+          corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
+          family: 'chat',
+          trustDomain: 'internal',
+          tierLedger: ledger,
+        }),
+        ...(options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}),
+      },
+    },
+    ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+    ...(options.onStoreOpened ? { onStoreOpened: options.onStoreOpened } : {}),
+  });
+}
+
 export function createWhatsAppConnectorStore(
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
@@ -136,6 +214,11 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   spoolStaleThresholdSeconds?: number;
   now?: () => Date;
   env?: Record<string, string | undefined>;
+  /**
+   * The lane's per-tier stores (createWhatsAppTierLane), whose secure leg is
+   * `store`. Absent: the single-store lane exactly as before.
+   */
+  tierSet?: TieredStoreSet;
 }): WhatsAppConnectorStoreSyncHandler {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
@@ -152,14 +235,22 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
     env,
   );
   const now = options.now ?? (() => new Date());
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
+    throw new Error('The WhatsApp tier set\'s secure leg must be the lane\'s own store.');
+  }
 
   return {
     async pull(request = {}): Promise<WhatsAppConnectorStoreSyncReceipt> {
+      // The tier set's committed resume point comes first: it is written only
+      // after every tier store committed.
       const cursor = sanitizeWhatsAppLiveCursor(
-        options.store.lastCompletedSyncRun(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor,
+        tierSet?.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor
+          ?? options.store.lastCompletedSyncRun(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor
+          ?? undefined,
       );
       const maxItems = request.max_items ?? options.maxItems;
-      const run = await options.store.syncFromConnector(connector, {
+      const sync = {
         placement: WHATSAPP_STORE_PLACEMENT,
         ...(cursor ? { cursor } : {}),
         ...(maxItems !== undefined ? { maxItems } : {}),
@@ -168,12 +259,22 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         // are owned by the shared extraction factory, so a later metadata
         // observation must preserve the transcript that factory wrote.
         deferMetadataOnlyContent: true,
-      });
+      };
+      let run: ConnectorStoreSyncSummary;
+      let tiered: TieredLaneReceiptCounts = {};
+      if (tierSet) {
+        const setRun = await tierSet.sync(connector, sync);
+        run = mergedTieredLaneRun(setRun, 'secure_local').sync;
+        tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
+      } else {
+        run = await options.store.syncFromConnector(connector, sync);
+      }
       return whatsappSyncReceipt(
         run,
         readWhatsAppLiveSpoolStatus(spoolDir),
         now().getTime(),
         staleThresholdSeconds,
+        tiered,
       );
     },
 
@@ -188,6 +289,7 @@ function whatsappSyncReceipt(
   spool: ReturnType<typeof readWhatsAppLiveSpoolStatus>,
   nowMs: number,
   staleThresholdSeconds: number,
+  tiered: TieredLaneReceiptCounts = {},
 ): WhatsAppConnectorStoreSyncReceipt {
   const capture = whatsappCaptureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
   const warnings = [
@@ -214,6 +316,7 @@ function whatsappSyncReceipt(
       capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
       capture_stale_threshold_seconds: capture.threshold_seconds,
       ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
+      ...tiered,
     },
     capture,
     ...(warnings.length > 0 ? { warnings } : {}),

@@ -603,10 +603,15 @@
               "secure_local.drive.docs",
               "internal.telegram.messages",
               "internal.readwise.library",
+              "secure_local.readwise.library",
               "internal.x.bookmarks",
+              "secure_local.x.bookmarks",
               "secure_local.dropbox.files",
+              "internal.dropbox.files",
+              "public_safe.dropbox.files",
               "secure_local.telegram.protected.messages",
-              "secure_local.whatsapp.messages"
+              "secure_local.whatsapp.messages",
+              "internal.whatsapp.messages"
             ]
           },
           "sourceId": {
@@ -920,6 +925,33 @@
           {
             "properties": {
               "corpusId": {
+                "const": "secure_local.readwise.library"
+              },
+              "sourceId": {
+                "const": "readwise.library"
+              },
+              "provider": {
+                "const": "readwise"
+              },
+              "family": {
+                "const": "readwise"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
                 "const": "internal.x.bookmarks"
               },
               "sourceId": {
@@ -940,6 +972,34 @@
                     "answer",
                     "status",
                     "sync",
+                    "search"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "secure_local.x.bookmarks"
+              },
+              "sourceId": {
+                "const": "x.bookmarks"
+              },
+              "provider": {
+                "const": "x"
+              },
+              "family": {
+                "const": "x"
+              },
+              "trustDomain": {
+                "const": "secure_local"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
                     "search"
                   ]
                 }
@@ -971,6 +1031,62 @@
                     "sync",
                     "search",
                     "promotion_candidates"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "internal.dropbox.files"
+              },
+              "sourceId": {
+                "const": "dropbox.files"
+              },
+              "provider": {
+                "const": "dropbox"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "search"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "public_safe.dropbox.files"
+              },
+              "sourceId": {
+                "const": "dropbox.files"
+              },
+              "provider": {
+                "const": "dropbox"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "public_safe"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "search"
                   ]
                 }
               }
@@ -1027,6 +1143,34 @@
                   "enum": [
                     "status",
                     "sync",
+                    "search",
+                    "answer"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "internal.whatsapp.messages"
+              },
+              "sourceId": {
+                "const": "whatsapp.personal.messages"
+              },
+              "provider": {
+                "const": "whatsapp"
+              },
+              "family": {
+                "const": "chat"
+              },
+              "trustDomain": {
+                "const": "internal"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "status",
                     "search",
                     "answer"
                   ]

@@ -158,6 +158,9 @@ import {
   dropboxIngestionExclusionMatcher,
 } from '../dropbox-files/index.ts';
 import { createDropboxProviderStoreSyncHandler } from '../dropbox-files/provider-store-sync.ts';
+import { createDropboxTierLane } from '../dropbox-files/tier-set.ts';
+import { loadOwnerSensitivityMap } from '../../core/sensitivity-map.ts';
+import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionDescendantPrefixes,
@@ -189,7 +192,23 @@ import {
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import { onDemandTierStore, type OnDemandTierStore } from '../connector-store/tiered-store-set.ts';
+import {
+  onDemandTierStore,
+  rehomeChatLaneOverrides,
+  type ExistingStoreTierLane,
+  type OnDemandTierStore,
+  type TieredStoreSet,
+} from '../connector-store/tiered-store-set.ts';
+import {
+  READWISE_SECURE_LIBRARY_CORPUS_ID,
+  createReadwiseTierLane,
+  defaultReadwiseSecureConnectorStoreDbPath,
+} from '../readwise/tier-set.ts';
+import {
+  X_BOOKMARKS_SECURE_CORPUS_ID,
+  createXBookmarksTierLane,
+  defaultXBookmarksSecureConnectorStoreDbPath,
+} from '../x-bookmarks/tier-set.ts';
 import { createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
@@ -250,6 +269,7 @@ import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
   createWhatsAppConnectorStore,
+  createWhatsAppTierLane,
   createWhatsAppConnectorStoreSyncHandler,
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
@@ -347,6 +367,19 @@ export function createWorkerMessagingCaptureOwnership(options: {
       revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
     },
   };
+}
+
+/**
+ * Per-item tier overrides of a chat lane written before identities carried
+ * their conversation: re-homed at boot where the conversation is derivable,
+ * otherwise kept (applying to nothing) and reported as orphaned. Counts only.
+ */
+function reportRehomedChatOverrides(lane: string, result: { rehomed: number; orphaned: number }): void {
+  if (result.rehomed === 0 && result.orphaned === 0) return;
+  console.warn(
+    `[tier] ${lane}: ${result.rehomed} per-item override(s) re-homed under their conversation; `
+    + `${result.orphaned} orphaned (conversation not derivable; kept, applying to nothing, until reset).`,
+  );
 }
 
 export function registerConnectorStoreEmbeddingLane(options: {
@@ -1740,9 +1773,44 @@ export async function main(): Promise<void> {
     corpusIds: Set<string>;
     secrets?: SecretLocationsIndex;
     publicStore?: OnDemandTierStore;
+    /** Every store of the lane created on first need (Public, and P1c's new stores). */
+    onDemand: OnDemandTierStore[];
   }> = [];
-  let registerTierLegStore: (store: LocalConnectorStore, siblingCorpusId: string) => void = () => {
+  // `embeddingProvider`: the store's own canonical identity. Omitted, the
+  // sibling's (a Public store shares its Personal sibling's cloud identity);
+  // null, no embedding lane (the store is served by keyword only).
+  let registerTierLegStore: (
+    store: LocalConnectorStore,
+    siblingCorpusId: string,
+    embeddingProvider?: SourceEmbeddingProvider | null,
+  ) => void = () => {
     throw new Error('A tier store opened before the source runtime finished wiring its stores.');
+  };
+  const openTierSecretLocations = (secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
+    try {
+      return new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secureDbPath) });
+    } catch (error) {
+      console.warn(`[tier] secret-locations index unavailable for ${label}: ${error instanceof Error ? error.name : 'error'}`);
+      return undefined;
+    }
+  };
+  // P1c: a lane whose tier set its own module builds (Dropbox, Readwise, X,
+  // WhatsApp) registers its ledger and its on-demand stores here.
+  const adoptTierLane = (input: {
+    ledger: TierLedger;
+    /** The lane's Private corpus: its Secrets are located only when it was searched. */
+    secureCorpusId: string;
+    corpusIds: readonly string[];
+    onDemand: readonly OnDemandTierStore[];
+    secrets?: SecretLocationsIndex;
+  }): void => {
+    tierLanes.push({
+      ledger: input.ledger,
+      secureCorpusId: input.secureCorpusId,
+      corpusIds: new Set(input.corpusIds),
+      onDemand: [...input.onDemand],
+      ...(input.secrets ? { secrets: input.secrets } : {}),
+    });
   };
   const tierLane = (input: {
     internal: LocalConnectorStore;
@@ -1768,6 +1836,7 @@ export async function main(): Promise<void> {
       ]),
       ...(secrets ? { secrets } : {}),
       ...(input.publicStore ? { publicStore: input.publicStore } : {}),
+      onDemand: input.publicStore ? [input.publicStore] : [],
     };
     tierLanes.push(lane);
     return lane;
@@ -1776,6 +1845,9 @@ export async function main(): Promise<void> {
   // was actually searched — which is what include_secure_local, corpus
   // selection and a file source's scope approval decide — and only within the
   // account and filters that search ran under.
+  // The owner's sensitivity map, loaded once for every lane's tier set.
+  const ownerSensitivityMap = loadOwnerSensitivityMap(process.env);
+  const ownerTierClassification = ownerSensitivityMap ? { sensitivityMap: ownerSensitivityMap } : undefined;
   const tierSecretLocations = (
     query: string,
     searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
@@ -1796,8 +1868,10 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
   })));
   const onDemandCorpusAbsent = (corpusId: string): boolean => {
-    const lane = tierLanes.find((candidate) => candidate.publicStore?.corpusId === corpusId);
-    if (lane) return lane.publicStore!.current() === undefined;
+    for (const lane of tierLanes) {
+      const store = lane.onDemand.find((candidate) => candidate.corpusId === corpusId);
+      if (store) return store.current() === undefined;
+    }
     return sourceCorpusRegistry.list().some((corpus) => corpus.corpusId === corpusId && corpus.createdOnDemand === true);
   };
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
@@ -1807,11 +1881,48 @@ export async function main(): Promise<void> {
     'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
   );
+  // A Private store for a lane whose own store is not Private embeds with the
+  // approved private identity, or not at all (keyword only).
+  const tierSecureEmbeddingProvider = secureLocalPolicyEmbeddingProvider
+    && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider)
+    ? secureLocalPolicyEmbeddingProvider
+    : undefined;
+  // Per-tier stores (P1c) of a lane that has had one store: that store keeps
+  // every existing item, and each new store is created on first need.
+  const existingStoreTierSet = (
+    lane: ExistingStoreTierLane,
+    input: { store: LocalConnectorStore; secrets?: SecretLocationsIndex },
+  ): TieredStoreSet => {
+    const newStores = Object.values(lane.newStores).filter((store): store is OnDemandTierStore => store !== undefined);
+    adoptTierLane({
+      ledger: lane.ledger,
+      secureCorpusId: lane.set.legSpec('secure_local')!.corpusId,
+      corpusIds: [input.store.corpusId, ...newStores.map((store) => store.corpusId)],
+      onDemand: newStores,
+      ...(input.secrets ? { secrets: input.secrets } : {}),
+    });
+    return lane.set;
+  };
   const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
     enabled: readwiseConnectorStoreLane.enabled,
     ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
+    tierSetFor: (store) => {
+      const secrets = openTierSecretLocations(
+        defaultReadwiseSecureConnectorStoreDbPath(process.env),
+        READWISE_SECURE_LIBRARY_CORPUS_ID,
+      );
+      return existingStoreTierSet(createReadwiseTierLane({
+        store,
+        env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
+        ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
+        ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
+        ...(secrets ? { secretLocations: secrets } : {}),
+        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
+      }), { store, ...(secrets ? { secrets } : {}) });
+    },
   });
   const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
   const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(
@@ -1824,6 +1935,21 @@ export async function main(): Promise<void> {
     ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
+    tierSetFor: (store) => {
+      const secrets = openTierSecretLocations(
+        defaultXBookmarksSecureConnectorStoreDbPath(process.env),
+        X_BOOKMARKS_SECURE_CORPUS_ID,
+      );
+      return existingStoreTierSet(createXBookmarksTierLane({
+        store,
+        env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
+        ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
+        ...(tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {}),
+        ...(secrets ? { secretLocations: secrets } : {}),
+        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
+      }), { store, ...(secrets ? { secrets } : {}) });
+    },
   });
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
   const gmailConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
@@ -1922,9 +2048,9 @@ export async function main(): Promise<void> {
         }),
       })
     : undefined;
-  // Dropbox product state. One corpus, secure_local only: Dropbox has never
-  // had an internal band. Provider sync, generic extraction, local embeddings,
-  // and reads all use this store.
+  // Dropbox product state: the lane's original store, secure_local. Every
+  // file stored before per-item routing stays here; the lane's tier set
+  // (below) adds Personal and Public stores on first need.
   const dropboxConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
   const dropboxConnectorStore = dropboxConnectorStoreLane.enabled
     ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
@@ -1932,11 +2058,48 @@ export async function main(): Promise<void> {
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim()
     || dropboxFilesAccount
     || 'personal';
+  // Per-tier stores (P1c, design per-item-four-tier-classification.md): the
+  // lane's original secure store keeps every existing file where it is; a new
+  // file's names go to the Personal store (by default) when it is listed, and
+  // its text to the store its content tier decides once extraction reads it.
+  // The Personal and Public stores are created on first need.
+  const dropboxSecretLocations = dropboxConnectorStore
+    ? openTierSecretLocations(dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+    : undefined;
+  const dropboxTierLane = dropboxConnectorStore
+    ? createDropboxTierLane({
+        secureStore: dropboxConnectorStore,
+        env: process.env,
+        policy: dropboxIngestionPolicy,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
+        ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
+        onStoreOpened: (store) => registerTierLegStore(
+          store,
+          DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+          sourceIndexEmbeddingProvider ?? null,
+        ),
+      })
+    : undefined;
+  if (dropboxTierLane && dropboxConnectorStore) {
+    adoptTierLane({
+      ledger: dropboxTierLane.ledger,
+      secureCorpusId: dropboxConnectorStore.corpusId,
+      corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
+      onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
+      ...(dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}),
+    });
+  }
+  const dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+  /** Whether a store is one of the Dropbox lane's tier stores. */
+  const isDropboxTierStore = (store: LocalConnectorStore): boolean => store === dropboxConnectorStore
+    || (dropboxTierLane !== undefined
+      && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current()));
   const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority
     ? fileSourceScopeAuthority.policyRef('dropbox.files')
     : undefined;
   const dropboxProviderStoreSync = dropboxConnectorStore && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
     ? createDropboxProviderStoreSyncHandler({
+        ...(dropboxTierLane ? { tierSet: dropboxTierLane.set } : {}),
         store: dropboxConnectorStore,
         account: dropboxProviderAccount,
         credentialHandle: dropboxHandle.handle,
@@ -1957,8 +2120,32 @@ export async function main(): Promise<void> {
   const whatsappConnectorStore = whatsappConnectorStoreLane.enabled
     ? createWhatsAppConnectorStore(process.env)
     : undefined;
+  // Per-tier stores (P1c), failing closed: every message rests Private in the
+  // lane's own store unless an OWNER chat rule set its chat to Personal (rule
+  // loading is phase P2, so none does yet), and then only a message its own
+  // text keeps Personal goes to the Personal store.
+  const whatsappSecretLocations = whatsappConnectorStore
+    ? openTierSecretLocations(whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
+    : undefined;
+  const whatsappTierSet = whatsappConnectorStore
+    ? existingStoreTierSet(createWhatsAppTierLane({
+        store: whatsappConnectorStore,
+        env: process.env,
+        ...(ownerTierClassification ? { tierClassification: ownerTierClassification } : {}),
+        ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
+        ...(whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {}),
+        onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
+      }), {
+        store: whatsappConnectorStore,
+        ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
+      })
+    : undefined;
+  if (whatsappTierSet && whatsappConnectorStore) {
+    reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
+  }
   const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore
     ? createWhatsAppConnectorStoreSyncHandler({
+        ...(whatsappTierSet ? { tierSet: whatsappTierSet } : {}),
         store: whatsappConnectorStore,
         account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
         env: process.env,
@@ -1982,6 +2169,13 @@ export async function main(): Promise<void> {
   const telegramTierLane = telegramConnectorStores
     ? tierLane({ internal: telegramConnectorStores.internal, secure: telegramConnectorStores.secureLocal })
     : undefined;
+  if (telegramTierLane && telegramConnectorStores) {
+    reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
+      telegramTierLane.ledger,
+      'telegram',
+      [telegramConnectorStores.internal, telegramConnectorStores.secureLocal],
+    ));
+  }
   const telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined = telegramConnectorStores
     ? createTelegramConnectorStoreSyncHandler({
         stores: telegramConnectorStores,
@@ -2086,6 +2280,10 @@ export async function main(): Promise<void> {
     enabled: fileExtractionCorpora.length > 0,
     connectorStores,
     corpora: fileExtractionCorpora,
+    // The Dropbox lane reads and lands text across its tier stores.
+    ...(dropboxTierLane
+      ? { tierSets: new Map([[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]]) }
+      : {}),
     scopeGuard: {
       assertAuthorized({ config }) {
         const sourceId = config.provider === 'dropbox'
@@ -2110,7 +2308,11 @@ export async function main(): Promise<void> {
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
         if (!approval) return false;
         const scope = fileSourceScopeContentFilters(approval);
-        return scope.allowed && store.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
+        // A Dropbox file's row may sit in any of the lane's tier stores.
+        const reader = sourceId === 'dropbox.files' && store === dropboxConnectorStore && dropboxExtractionView
+          ? dropboxExtractionView
+          : store;
+        return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       },
     },
     extractors: {
@@ -2243,7 +2445,7 @@ export async function main(): Promise<void> {
       contentAllowed: boolean;
       contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
     } => {
-    const sourceId = store === dropboxConnectorStore
+    const sourceId = isDropboxTierStore(store)
       ? 'dropbox.files' as const
       : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
         || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
@@ -2325,16 +2527,20 @@ export async function main(): Promise<void> {
     fullyDefinedCorpusIds.add(store.corpusId);
   }
   const retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability> = {};
-  // A Public store the tier set opens (at boot when its file exists, or when
-  // its first item is routed there) is served exactly like its internal
-  // sibling: same account scope, principal and cloud embedding identity.
-  registerTierLegStore = (store, siblingCorpusId) => {
+  // A tier store its set opens (at boot when its file exists, or when its
+  // first item is routed there) is served like its sibling: same account
+  // scope and principal. Its embedding identity is its own trust domain's: a
+  // Public store shares its Personal sibling's cloud identity; a lane's new
+  // Private or Personal store is handed the identity for its domain.
+  registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store)) connectorStores.push(store);
     const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
     if (accountScope) connectorStoreAccountScopes.set(store.corpusId, accountScope);
     const principal = connectorStorePrincipals.get(siblingCorpusId);
     if (principal) connectorStorePrincipals.set(store.corpusId, principal);
-    const provider = connectorStoreEmbeddingProviders.get(siblingCorpusId) ?? sourceIndexEmbeddingProvider;
+    const provider = embeddingProvider === null
+      ? undefined
+      : embeddingProvider ?? connectorStoreEmbeddingProviders.get(siblingCorpusId) ?? sourceIndexEmbeddingProvider;
     if (provider && !connectorStoreEmbeddingProviders.has(store.corpusId)) {
       registerConnectorStoreEmbeddingLane({
         store,
@@ -2389,7 +2595,9 @@ export async function main(): Promise<void> {
   // A Public store that already exists from an earlier run is served from
   // boot; one that does not is created by its tier set on first need.
   for (const lane of tierLanes) {
-    if (lane.publicStore?.exists()) lane.publicStore.open();
+    for (const store of lane.onDemand) {
+      if (store.exists()) store.open();
+    }
   }
   // No handle, no handler. The stores and the budget exist at boot whatever the
   // registry says, so without this guard an enabled lane would build a sync
@@ -2775,7 +2983,9 @@ export async function main(): Promise<void> {
     : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
-      corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
+      // Read per request: a per-tier store its tier set creates while the
+      // runtime is up is reported from that moment, with no restart.
+      corpusDefinitions: () => sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
@@ -2794,7 +3004,7 @@ export async function main(): Promise<void> {
                 const readScope = connectorStoreReadScope(dropboxConnectorStore);
                 return readScope.allowed
                   && readScope.contentAllowed
-                  && dropboxConnectorStore.itemMatchesExtractionRef(ref, readScope.contentFilters);
+                  && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
               },
               lanesForCorpus(corpusId) {
                 if (corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) return undefined;
@@ -2969,6 +3179,7 @@ export async function main(): Promise<void> {
         && dropboxProviderStoreSync
         ? dropboxProviderStoreSync
         : createDropboxProviderStoreSyncHandler({
+            ...(dropboxTierLane ? { tierSet: dropboxTierLane.set } : {}),
             store: dropboxConnectorStore,
             account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
             credentialHandle: currentDropboxHandle.handle,
@@ -3058,6 +3269,17 @@ export async function main(): Promise<void> {
           ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
             && currentDropboxScopeRef && fileSourceScopeAuthority
             ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, currentDropboxScopeRef) }
+            : {}),
+          // The Personal and Public stores embed with their own (cloud)
+          // identity once they exist; the secure store keeps its own above.
+          ...(dropboxTierLane && sourceIndexEmbeddingProvider && currentDropboxScopeRef && fileSourceScopeAuthority
+            ? {
+                tierEmbeddings: [dropboxTierLane.internal, dropboxTierLane.public].map((leg) => ({
+                  corpusId: leg.corpusId,
+                  store: () => leg.current(),
+                  provider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority!, currentDropboxScopeRef!),
+                })),
+              }
             : {}),
           });
           return source && currentDropboxScopeRef && fileSourceScopeAuthority
@@ -3892,6 +4114,8 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
   requestBudget?: ReadwiseDailyRequestBudget;
   requestBudgetStatePath?: string;
   env?: Record<string, string | undefined>;
+  /** The lane's per-tier stores over its store, built once (P1c). */
+  tierSetFor?: (store: LocalConnectorStore) => TieredStoreSet | undefined;
 }): RefreshableReadwiseConnectorStoreRuntime | undefined {
   const embeddingProvider = options.embeddingProvider;
   if (!options.enabled || !embeddingProvider) return undefined;
@@ -3907,10 +4131,12 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
   const store = createReadwiseConnectorStore(
     options.dbPath ?? defaultReadwiseConnectorStoreDbPath(env),
   );
+  const tierSet = options.tierSetFor?.(store);
   const buildSync = (handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler =>
     createReadwiseConnectorStoreSyncHandler({
       store,
       embeddingProvider,
+      ...(tierSet ? { tierSet } : {}),
       account: options.account?.trim() || handle?.accountRole?.trim() || 'personal',
       requestBudget,
       ...(env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim()
@@ -3981,6 +4207,8 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
   usageStore?: LocalXBookmarksApiUsageStore;
   reconcileStateStore?: LocalXBookmarksReconcileStateStore;
   env?: Record<string, string | undefined>;
+  /** The lane's per-tier stores over its store, built once (P1c). */
+  tierSetFor?: (store: LocalConnectorStore) => TieredStoreSet | undefined;
 }): RefreshableXBookmarksConnectorStoreRuntime | undefined {
   const embeddingProvider = options.embeddingProvider;
   if (!options.enabled || !embeddingProvider) return undefined;
@@ -3988,6 +4216,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
   const store = createXBookmarksConnectorStore(
     options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env),
   );
+  const tierSet = options.tierSetFor?.(store);
   let usageStore = options.usageStore;
   let reconcileStateStore = options.reconcileStateStore;
   let cachedKey: string | undefined;
@@ -4019,6 +4248,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
         usageStore,
         reconcileStateStore,
         env,
+        ...(tierSet ? { tierSet } : {}),
       });
       cachedKey = key;
       return cachedRuntime;
@@ -4068,6 +4298,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   usageStore: LocalXBookmarksApiUsageStore;
   reconcileStateStore: LocalXBookmarksReconcileStateStore;
   env: Record<string, string | undefined>;
+  tierSet?: TieredStoreSet;
 }): XBookmarksConnectorStoreRuntime {
   const env = options.env;
   // One broker instance owns both scheduled acquisition and operator recovery.
@@ -4078,6 +4309,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   const sync = createXBookmarksConnectorStoreSyncHandler({
     store: options.store,
     embeddingProvider: options.embeddingProvider,
+    ...(options.tierSet ? { tierSet: options.tierSet } : {}),
     credentialHandle: options.handle.handle,
     account: options.principalAccount,
     userId: options.providerUserId,
@@ -4091,6 +4323,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
+    ...(options.tierSet ? { tierLedger: options.tierSet.ledger } : {}),
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
