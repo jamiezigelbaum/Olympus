@@ -1158,14 +1158,7 @@ function mountDispositionsController(options) {
     };
     put("content_messages", `~${mailCount(estimate.content_messages)}`);
     put("metadata_messages", `~${mailCount(estimate.metadata_messages)}`);
-    const days = typeof estimate.sync_days === "number" ? estimate.sync_days : undefined;
-    put("sync_days", days === undefined ? "—" : days < 1 ? "under a day" : `~${days.toLocaleString("en-US")} ${days === 1 ? "day" : "days"}`);
-    put("provider_requests", `~${mailCount(estimate.provider_requests)}`);
-    put("embedding_cost_usd", typeof estimate.embedding_cost_usd === "number" ? `~$${estimate.embedding_cost_usd.toFixed(2)}` : "—");
-    const note = form.querySelector("[data-mail-estimate-note]");
-    if (note) {
-      note.textContent = `About ${mailCount(estimate.messages_per_day)} messages a day, limited by the ` + `${estimate.limited_by === "pass_cadence" ? "sync schedule" : "daily Gmail request budget"}.` + " Embedding cost is an upper bound at an assumed price; Private mail embeds locally.";
-    }
+    put("embedding_cost_usd", typeof estimate.embedding_cost_usd === "number" ? `≤ $${estimate.embedding_cost_usd.toFixed(2)}` : "—");
   }
   async function browseMail(form) {
     const state = mailState(form);
