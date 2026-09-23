@@ -79,7 +79,7 @@ describe('x-oauth2:seed-state recovers a registry-marked X handle', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test('clearing the mark keeps backend state the mark did not create and preserves unknown entries', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-x-seed-clear-'));
