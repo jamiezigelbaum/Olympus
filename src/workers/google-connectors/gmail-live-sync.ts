@@ -206,7 +206,26 @@ export function createGmailConnectorStoreSyncHandler(
   }
   const classification = gmailConnectorStoreClassification(
     options.sensitivityMap ?? loadGoogleSensitivityMap(env),
+    options.scope?.alwaysPrivateSenders ?? [],
   );
+  // Under a scope, mail either store already holds is never re-observed: a
+  // re-read could only swap a stored body for a metadata-only row or re-tier
+  // an item whose vectors exist, and both would discard existing chunks and
+  // embeddings (owner rule: nothing throws away existing embeddings).
+  const storedItem = (providerItemId: string) => {
+    const identity = { family: 'email' as const, provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
+    const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)]
+      .filter((copy): copy is NonNullable<typeof copy> => copy !== undefined);
+    if (copies.length === 0) return undefined;
+    const authoredAtMs = copies
+      .map((copy) => (copy.authoredAt ? Date.parse(copy.authoredAt) : Number.NaN))
+      .find((value) => Number.isFinite(value));
+    return {
+      hasContent: copies.some((copy) => copy.chunkCount > 0),
+      ...(authoredAtMs !== undefined ? { authoredAtMs } : {}),
+    };
+  };
+  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
   const buildConnector = (overrides: {
     maxMessages?: number;
     query?: string;
@@ -214,6 +233,7 @@ export function createGmailConnectorStoreSyncHandler(
   } = {}) =>
     new GoogleGmailSourceConnector({
       ...options,
+      ...(scope ? { scope } : {}),
       ...(overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {}),
       ...(overrides.query ? { query: overrides.query } : {}),
       // Stated last and unconditionally, so it is a property of THIS run and

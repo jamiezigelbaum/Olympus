@@ -378,6 +378,10 @@ export function gmailConnectorScopeFromApproval(approval: { mailScope: MailScope
     ...(compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {}),
     ...(compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {}),
     skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
+    ...(compiled.skippedLabelIds.length > 0 ? { skippedLabelIds: compiled.skippedLabelIds } : {}),
+    ...(approval.mailScope.alwaysPrivateSenders.length > 0
+      ? { alwaysPrivateSenders: approval.mailScope.alwaysPrivateSenders }
+      : {}),
   };
 }
 

@@ -13,6 +13,7 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
+import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -52,6 +53,9 @@ export const GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV =
 export const DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5_000;
 const DEFAULT_GMAIL_PAGE_SIZE = 100;
 const MAX_GMAIL_SYNC_MESSAGES = 1_000;
+/** List pages one run may walk: pages of already-held mail spend no gets. */
+const MAX_GMAIL_LIST_PAGES_PER_RUN = 50;
+const STORED_HIGH_WATER_MARGIN_MS = 86_400_000;
 const GMAIL_API_BASE_URL = 'https://gmail.googleapis.com/gmail/v1';
 const GMAIL_CURSOR_PREFIX = 'gm1:';
 const MAX_GMAIL_CURSOR_LENGTH = 4_096;
@@ -106,6 +110,25 @@ export interface GmailConnectorScope {
   contentAfterMs?: number;
   /** Category label ids the scope skips, for the post-fetch ingest filter. */
   skippedCategoryLabelIds?: readonly string[];
+  /** Label ids the scope skips; re-checked on every fetched message. */
+  skippedLabelIds?: readonly string[];
+  /**
+   * Addresses or @domains the owner marked "always Private". Their mail is
+   * raised to S4, so it lands in the secure_local store with private
+   * embeddings and never reaches the internal (cloud-embedded) store.
+   */
+  alwaysPrivateSenders?: readonly string[];
+  /**
+   * Whether Olympus already holds this message (in either Gmail store). Held
+   * mail is never re-observed under a scope; see listItems.
+   */
+  storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
+}
+
+export interface GmailStoredItem {
+  /** True when a stored copy has chunks (a body), false for a metadata-only row. */
+  hasContent: boolean;
+  authoredAtMs?: number;
 }
 
 /**
@@ -144,6 +167,8 @@ export interface GmailSourceConnectorTraversalStatus {
   attachmentsNotIngested: number;
   itemsSkippedOtp: number;
   itemsSkippedCategory: number;
+  /** Listed messages Olympus already holds, left untouched under a scope (no get spent). */
+  itemsSkippedStored: number;
 }
 
 export interface GmailApiClient {
@@ -223,6 +248,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private attachmentsNotIngested = 0;
   private itemsSkippedOtp = 0;
   private itemsSkippedCategory = 0;
+  private itemsSkippedStored = 0;
   private readonly ingestFilterOptions: EmailIngestFilterOptions;
   private readonly itemsByLocalId = new Map<string, RawItem>();
 
@@ -253,6 +279,18 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined
       ? { ...ingestFilterOptions, skipCategories: [...(this.scope.skippedCategoryLabelIds ?? [])] }
       : ingestFilterOptions;
+    // Skipped labels are enforced by id after the fetch too, whatever the
+    // category setting: a rename or an odd character in a label name cannot
+    // make the query miss what the owner skipped.
+    if (this.scope?.skippedLabelIds?.length) {
+      this.ingestFilterOptions = {
+        ...this.ingestFilterOptions,
+        skipCategories: [
+          ...(this.ingestFilterOptions.skipCategories ?? ['CATEGORY_PROMOTIONS']),
+          ...this.scope.skippedLabelIds,
+        ],
+      };
+    }
   }
 
   async authenticate(): Promise<void> {
@@ -276,9 +314,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     let pageToken = staleLeg ? undefined : resume.pageToken;
     const requestedPageTokens = new Set<string>();
-    while (remaining > 0) {
+    let listPages = 0;
+    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken) assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
+      listPages += 1;
       const page = await client.listMessages({
         maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
         ...(pageToken ? { pageToken } : {}),
@@ -287,9 +327,28 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       const listed = page.messages.filter((message) => message.id);
       const items: RawItem[] = [];
       let messagesExamined = 0;
+      let messagesFetched = 0;
       for (const message of listed) {
-        if (messagesExamined >= remaining) break;
+        if (messagesFetched >= remaining) break;
         messagesExamined += 1;
+        // Mail Olympus already holds is never observed again under a scope.
+        // Gmail messages are immutable, so a re-read could only replace a
+        // stored body with a body-less metadata row (the window moved) or
+        // re-classify an item whose vectors already exist; either would throw
+        // away existing chunks and embeddings. The one exception is mail
+        // stored metadata-only that the content leg may now store in full.
+        const stored = this.scope?.storedItem?.(message.id);
+        if (stored && (metadataLeg || stored.hasContent)) {
+          if (!metadataLeg && stored.authoredAtMs !== undefined) {
+            // Date header, not internalDate: a day of margin keeps the next
+            // incremental bound safely behind any message not yet stored.
+            const observed = stored.authoredAtMs - STORED_HIGH_WATER_MARGIN_MS;
+            if (highWaterMs === undefined || observed > highWaterMs) highWaterMs = observed;
+          }
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        messagesFetched += 1;
         this.providerRequests += 1;
         const fetched = await client.getMessage(
           message.id,
@@ -299,8 +358,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
         // The content leg owns everything at or after the cutoff. Gmail's date
         // operators are second-granular, so a boundary message the metadata
-        // leg also lists is left to the leg that reads it in full.
+        // leg also lists is left to the leg that stores its body.
         if (metadataLeg && !beforeCutoff) continue;
+        // Older than the window but already stored in some form: leave it be.
+        if (beforeCutoff && stored) {
+          this.itemsSkippedStored += 1;
+          continue;
+        }
         const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
@@ -314,6 +378,9 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
         const from = metadataString(item.metadata, 'from');
         const body = item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet');
+        // Metadata-only items carry no body and no snippet, so the OTP filter
+        // judges them by subject alone. Skipped labels are checked here by id
+        // as well as in the query, so a renamed label cannot slip past.
         const skip = classifyEmailIngestSkip({
           ...(subject !== undefined ? { subject } : {}),
           ...(from !== undefined ? { from } : {}),
@@ -331,7 +398,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         this.itemsByLocalId.set(item.identity.localItemId, item);
         items.push(item);
       }
-      remaining -= messagesExamined;
+      remaining -= messagesFetched;
       pageToken = page.nextPageToken;
       // The traversal is complete only when the provider has no further page
       // AND the bound did not truncate this one. The shipped connector called
@@ -343,7 +410,10 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       // ending the traversal; the watermark waits until both legs are read.
       const enterMetadataLeg = legDone && splitsAtCutoff;
       const done = legDone && !enterMetadataLeg;
-      const promoted = highWaterMs ?? watermarkMs;
+      // A scoped mailbox with nothing new since the cutoff still completes
+      // with a watermark (the cutoff), so the next pass asks only for new
+      // mail instead of re-listing the whole older mailbox forever.
+      const promoted = highWaterMs ?? watermarkMs ?? (cutoffMs !== undefined ? cutoffMs - 1_000 : undefined);
       const nextCursor = done
         // A completed traversal hands forward only the promoted watermark, so
         // the next run asks Gmail for new mail instead of for the mailbox.
@@ -361,10 +431,12 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         ...(nextCursor ? { nextCursor } : {}),
         done,
       };
-      if (done || !pageToken || items.length === 0) break;
+      // A page of already-stored mail spends no gets, so the walk continues
+      // to the next page (bounded by the list-page cap) instead of ending the
+      // run on an empty page.
+      if (done || !pageToken || (items.length === 0 && messagesFetched > 0) || pageTruncated) break;
     }
   }
-
   /**
    * In-run cache, never a second provider round trip. Listing already fetched
    * the full message for every id it emitted, so asking Gmail again is pure
@@ -392,6 +464,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       attachmentsNotIngested: this.attachmentsNotIngested,
       itemsSkippedOtp: this.itemsSkippedOtp,
       itemsSkippedCategory: this.itemsSkippedCategory,
+      itemsSkippedStored: this.itemsSkippedStored,
     };
   }
 
@@ -465,15 +538,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
    */
   private queryForWatermark(watermarkMs: number | undefined): string | undefined {
     if (this.scope) {
-      const cutoffSeconds = this.scope.contentAfterMs !== undefined
-        ? Math.floor(this.scope.contentAfterMs / 1_000) - 1
-        : undefined;
-      // Never ask for less than the approved window: a watermark older than
-      // the cutoff (a quiet mailbox) is still bounded at the cutoff.
-      const boundSeconds = watermarkMs !== undefined
-        ? Math.max(Math.floor(watermarkMs / 1_000), cutoffSeconds ?? 0)
-        : cutoffSeconds;
-      return this.scopedQuery(boundSeconds !== undefined && boundSeconds > 0 ? `after:${boundSeconds}` : undefined);
+      // The same bound the picker's estimate uses (core/mail-source-scope).
+      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
     }
     if (watermarkMs === undefined) return this.query;
     const after = `after:${Math.floor(watermarkMs / 1_000)}`;
@@ -481,7 +547,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   }
 
   private metadataLegQuery(cutoffMs: number): string | undefined {
-    return this.scopedQuery(`before:${Math.floor(cutoffMs / 1_000)}`);
+    return this.scopedQuery(gmailBeforeBound(cutoffMs));
   }
 
   /**
@@ -499,11 +565,15 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
 export function gmailConnectorStoreClassification(
   sensitivityMap: SensitivityMap | undefined,
+  alwaysPrivateSenders: readonly string[] = [],
 ): ConnectorStoreClassificationOptions {
   return {
     baselineTrustTier: 'S3',
     baselineTrustDomain: 'internal',
     ...(sensitivityMap ? { sensitivityMap } : {}),
+    // The owner's "always Private" senders, through the engine's existing
+    // sensitive-sender raise: S4, secure_local, private embeddings only.
+    ...(alwaysPrivateSenders.length > 0 ? { sensitiveSenderPatterns: [...alwaysPrivateSenders] } : {}),
   };
 }
 

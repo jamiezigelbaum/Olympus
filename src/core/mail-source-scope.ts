@@ -239,7 +239,20 @@ export function approveMailSourceScope(input: {
       throw new OperationError('source_index_policy_violation', 'The mail scope changed. Reload it before saving.');
     }
     const now = input.now ?? new Date();
-    const scope = normalizeMailScope(input.scope, now);
+    // Saving the scope that is already approved changes nothing: same
+    // revision, same cutoff, no fresh traversal. Only a real change mints a
+    // new revision (and, for the same window, keeps the approved cutoff).
+    if (current.status === 'approved' && current.mailScope) {
+      const unchanged = normalizeMailScope(
+        { ...input.scope, ...(current.mailScope.contentAfter ? { contentAfter: current.mailScope.contentAfter } : {}) },
+        now,
+      );
+      if (sameMailScope(unchanged, current.mailScope)) return current;
+    }
+    const keptCutoff = current.status === 'approved' && current.mailScope?.window === input.scope.window
+      ? current.mailScope.contentAfter
+      : undefined;
+    const scope = normalizeMailScope({ ...input.scope, ...(keptCutoff ? { contentAfter: keptCutoff } : {}) }, now);
     const existing = readState(input.statePath);
     const approvals = existing.kind === 'valid'
       ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID)
@@ -310,7 +323,7 @@ export interface CompiledGmailMailScope {
    * filters.
    */
   baseQuery?: string;
-  /** Mail at or after this instant is read in full; older mail is metadata-only. */
+  /** Mail at or after this instant has its body stored; older mail is metadata-only. */
   contentAfterMs?: number;
   /** The full-content traversal's query (base AND after:). */
   contentQuery?: string;
@@ -318,7 +331,22 @@ export interface CompiledGmailMailScope {
   metadataQuery?: string;
   /** Category label ids the scope skips, for the connector's post-fetch filter. */
   skippedCategoryLabelIds: string[];
+  /**
+   * Label ids the scope skips. The query names labels, which a rename or an
+   * unusual character can slip past; the connector re-checks these ids on
+   * every fetched message.
+   */
+  skippedLabelIds: string[];
 }
+
+/**
+ * System labels are searched with `in:`, which is stable across locales and
+ * never collides with a user label of the same name.
+ */
+const GMAIL_SYSTEM_LABEL_SEARCH: Readonly<Record<string, string>> = {
+  SENT: 'in:sent',
+  CHAT: 'in:chats',
+};
 
 /**
  * The approved scope as Gmail search syntax. Terms are space-separated, which
@@ -331,7 +359,9 @@ export function compileGmailMailScope(
 ): CompiledGmailMailScope {
   const terms = [
     ...scope.skippedCategories.map((category) => `-category:${category}`),
-    ...scope.skippedLabels.map((label) => `-label:${gmailSearchValue(label.name)}`),
+    ...scope.skippedLabels.map((label) => GMAIL_SYSTEM_LABEL_SEARCH[label.id]
+      ? `-${GMAIL_SYSTEM_LABEL_SEARCH[label.id]}`
+      : `-label:${gmailSearchValue(label.name)}`),
     // A whole-domain rule is written `@example.com`; Gmail's from: matches a
     // bare domain, so the leading @ is dropped from the search term.
     ...scope.skipSenders.map((sender) => `-from:${gmailSearchValue(sender.startsWith('@') ? sender.slice(1) : sender)}`),
@@ -339,36 +369,66 @@ export function compileGmailMailScope(
   const operator = options.operatorQuery?.trim();
   if (operator) terms.push(`(${operator})`);
   const baseQuery = terms.length > 0 ? terms.join(' ') : undefined;
-  const contentAfterMs = scope.contentAfter ? Date.parse(scope.contentAfter) : undefined;
+  const parsedCutoff = scope.contentAfter ? Date.parse(scope.contentAfter) : undefined;
+  const contentAfterMs = parsedCutoff !== undefined && Number.isFinite(parsedCutoff)
+    ? Math.floor(parsedCutoff / 1_000) * 1_000
+    : undefined;
   const skippedCategoryLabelIds = scope.skippedCategories.map((category) => GMAIL_SCOPE_CATEGORY_LABEL_IDS[category]);
-  if (contentAfterMs === undefined || !Number.isFinite(contentAfterMs)) {
-    return {
-      ...(baseQuery ? { baseQuery, contentQuery: baseQuery } : {}),
-      skippedCategoryLabelIds,
-    };
-  }
-  // Gmail's after:/before: take epoch seconds. after:(s-1) admits every
-  // message stamped in second s or later and before:s every one before it, so
-  // the two traversals partition the mailbox at the cutoff second. The
-  // connector re-checks internalDate on both sides anyway.
-  const cutoffSeconds = Math.floor(contentAfterMs / 1_000);
-  const withBase = (bound: string): string => (baseQuery ? `${bound} ${baseQuery}` : bound);
+  const skippedLabelIds = scope.skippedLabels.map((label) => label.id);
+  const withBase = (bound: string | undefined): string | undefined =>
+    [bound, baseQuery].filter((part): part is string => Boolean(part)).join(' ') || undefined;
+  const contentQuery = withBase(gmailAfterBound({ contentAfterMs }));
+  const metadataQuery = contentAfterMs !== undefined ? withBase(gmailBeforeBound(contentAfterMs)) : undefined;
   return {
     ...(baseQuery ? { baseQuery } : {}),
-    contentAfterMs: cutoffSeconds * 1_000,
-    contentQuery: withBase(`after:${cutoffSeconds - 1}`),
-    metadataQuery: withBase(`before:${cutoffSeconds}`),
+    ...(contentAfterMs !== undefined ? { contentAfterMs } : {}),
+    ...(contentQuery ? { contentQuery } : {}),
+    ...(metadataQuery ? { metadataQuery } : {}),
     skippedCategoryLabelIds,
+    skippedLabelIds,
   };
 }
 
-/** The full-content cutoff for a window, measured back from `now`. */
+/**
+ * The one date bound every Gmail query in a scoped lane uses, for the picker's
+ * estimate and the connector's traversal alike.
+ *
+ * Gmail's after:/before: take epoch seconds. after:(s-1) admits every message
+ * stamped in second s or later and before:s every one before it, so the
+ * full-content and metadata-only legs partition the mailbox at the cutoff
+ * second. A watermark never pulls the bound below the cutoff: a quiet mailbox
+ * whose newest mail is older than the window is still bounded at the window.
+ * Undefined means unbounded (window Everything, no watermark yet).
+ */
+export function gmailAfterBound(input: { contentAfterMs?: number | undefined; watermarkMs?: number | undefined }): string | undefined {
+  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1_000) - 1 : undefined;
+  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1_000) : undefined;
+  const seconds = cutoffSeconds === undefined
+    ? watermarkSeconds
+    : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
+  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
+}
+
+export function gmailBeforeBound(contentAfterMs: number): string {
+  return `before:${Math.floor(contentAfterMs / 1_000)}`;
+}
+
+/**
+ * The full-content cutoff for a window, measured back from `now` in calendar
+ * months at UTC midnight. The day is clamped to the target month's length, so
+ * 31 August minus 6 months is 28 (or 29) February, never 3 March.
+ */
 export function mailScopeContentAfter(window: MailScopeWindow, now: Date): string | undefined {
   if (window === 'all') return undefined;
-  const cutoff = new Date(now.getTime());
-  cutoff.setUTCMonth(cutoff.getUTCMonth() - MAIL_SCOPE_WINDOW_MONTHS[window]);
-  cutoff.setUTCHours(0, 0, 0, 0);
-  return cutoff.toISOString();
+  const monthIndex = now.getUTCFullYear() * 12 + now.getUTCMonth() - MAIL_SCOPE_WINDOW_MONTHS[window];
+  const year = Math.floor(monthIndex / 12);
+  const month = monthIndex - year * 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(now.getUTCDate(), lastDay))).toISOString();
+}
+
+function sameMailScope(left: MailScopeSelection, right: MailScopeSelection): boolean {
+  return JSON.stringify(toPersistedScope(left)) === JSON.stringify(toPersistedScope(right));
 }
 
 function gmailSearchValue(value: string): string {

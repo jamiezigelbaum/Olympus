@@ -704,6 +704,11 @@ export interface ConnectorStoreClassificationOptions {
   baselineTrustTier?: SourceTrustTier;
   baselineTrustDomain?: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
+  /**
+   * Owner-flagged senders (substring match on the sender field) the shared
+   * engine raises to S4 as a detector; clean rules never lower them.
+   */
+  sensitiveSenderPatterns?: readonly string[];
 }
 
 export interface ConnectorStoreFullSnapshotScope {
@@ -2192,6 +2197,30 @@ export class LocalConnectorStore {
         sourceTextReturned: false,
       },
     };
+  }
+
+  /**
+   * Whether an ACTIVE copy of this item is held, how many chunks it has (0
+   * for a metadata-only row) and when it was authored. Lets a connector leave
+   * held material untouched instead of re-observing it in a way that would
+   * replace its body or re-tier it. Undefined when absent or tombstoned.
+   */
+  itemStoredContent(identity: SourceItemIdentity): { chunkCount: number; authoredAt?: string } | undefined {
+    const row = this.db.query(`
+      SELECT authored_at, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { authored_at: string | null; tombstoned: number; chunk_count: number } | null;
+    if (!row || row.tombstoned === 1) return undefined;
+    return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
   itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
@@ -8122,6 +8151,7 @@ interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
+  sensitiveSenderPatterns?: readonly string[];
 }
 
 function normalizeClassificationOptions(
@@ -8132,6 +8162,9 @@ function normalizeClassificationOptions(
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
     ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
+    ...(options.sensitiveSenderPatterns?.length
+      ? { sensitiveSenderPatterns: [...options.sensitiveSenderPatterns] }
+      : {}),
   };
 }
 
@@ -8174,6 +8207,9 @@ function classifyConnectorStoreItem(
   // this changes for a map that was already configured.
   const classified = classifyItemTier(classificationInputFromRawItem(item), {
     ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
+    ...(classification.sensitiveSenderPatterns
+      ? { sensitiveSenderPatterns: classification.sensitiveSenderPatterns }
+      : {}),
   });
   if (classified.decidedBy === 'sensitivity_map') {
     return buildSourceSensitivity({
