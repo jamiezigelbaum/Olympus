@@ -31,6 +31,8 @@ import {
   type SovereigntyAnalystRouteStep,
 } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
+import { createAnalyst } from '../src/core/analyst.ts';
+import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { inspectSovereigntyConfigDrift } from '../scripts/sovereignty-drift-check.ts';
 
@@ -1063,6 +1065,56 @@ describe('openclaw-infer analyst: OpenClaw default model unless one is named', (
     expect((failure as OperationError).message).toContain(`cloud: ${reason}`);
     expect(logged.some((line) => line.includes('[analyst-route] leg failed backend=cloud')
       && line.includes(JSON.stringify(reason)))).toBe(true);
+  });
+
+  test('a real openclaw adapter failure propagates through createAnalyst and the bounded cloud leg', async () => {
+    const config = baseConfig({
+      routes: {
+        secure_local: { analyst: ['local'] },
+        internal: { analyst: ['cloud'] },
+        public_safe: { analyst: ['cloud'] },
+      },
+    });
+    const engine = createSovereigntyEngine(config);
+    const local = scriptedAnalyst('LOCAL must not be used.', 'local claim');
+    const argvSeen: string[][] = [];
+    const cloudAnalyst = createAnalyst(createOpenClawInferAnalystModel({
+      command: 'openclaw',
+      runner: {
+        async run(_command, args) {
+          argvSeen.push(args);
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'upstream said: internal test source text\n',
+          };
+        },
+      },
+    }));
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: local.analyst,
+      lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      sovereigntyAnalystRoute: ({ localOnly, requestedProvider }) => engine.resolveAnalystRoute({
+        trustDomain: localOnly ? 'secure_local' : 'internal',
+        requestedProvider,
+      }).map((profile): SovereigntyAnalystRouteStep => ({ profile, backend: 'cloud', analyst: cloudAnalyst })),
+    });
+    const originalError = console.error;
+    console.error = () => {};
+    let failure: unknown;
+    try {
+      failure = await handler.answer({ question: 'What do my notes say?' }).catch((error) => error);
+    } finally {
+      console.error = originalError;
+    }
+    expect(argvSeen).toHaveLength(1);
+    expect(failure).toBeInstanceOf(OperationError);
+    const message = (failure as OperationError).message;
+    expect(message).toContain(
+      'cloud: OpenClaw inference failed (exit 1, model OpenClaw default model): detail withheld because it echoed request content.',
+    );
+    // the stderr echoed the evidence chunk; none of it reaches the surfaced error
+    expect(message).not.toContain('internal test source text');
   });
 
   test('an unmarked failure still reports only its error class', async () => {

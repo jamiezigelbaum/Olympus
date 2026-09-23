@@ -8,7 +8,7 @@
 // answer. Setup now records the directory it can see, and the worker-side
 // lookup checks the common per-user prefixes as well.
 
-import { existsSync, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 
@@ -60,7 +60,9 @@ export function openClawWellKnownPaths(home: string): string[] {
 
 function isExecutableFile(path: string): boolean {
   try {
-    return existsSync(path) && statSync(path).isFile();
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, fsConstants.X_OK);
+    return true;
   } catch {
     return false;
   }

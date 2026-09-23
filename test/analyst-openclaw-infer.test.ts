@@ -3,7 +3,9 @@ import {
   createOpenClawInferAnalystModel,
   OPENCLAW_DEFAULT_MODEL_LABEL,
   OpenClawInferError,
+  echoesEvidence,
   parseInferOutputText,
+  safeInferDetail,
   type OpenClawCommandResult,
   type OpenClawCommandRunner,
 } from '../src/core/analyst-openclaw-infer.ts';
@@ -96,56 +98,110 @@ describe('openclaw infer analyst model', () => {
     expect(completion.modelId).toBe(OPENCLAW_DEFAULT_MODEL_LABEL);
   });
 
-  test('a non-zero exit surfaces a bounded reason with OpenClaw\'s own error line', async () => {
-    const { runner } = fakeRunner({
-      code: 1,
-      stderr: '\n[infer] Error: No API key found for provider "openai" (model openai/gpt-5.5)\nstack line 2\n',
-    });
-    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw', model: 'openai/gpt-5.5' });
-    const failure = await model.complete({ system: 's', prompt: 'p', localOnly: false }).catch((error) => error);
+  test('known failure classes get fixed messages that carry no OpenClaw text', async () => {
+    const fail = async (result: Partial<OpenClawCommandResult>, explicitModel?: string) => {
+      const { runner } = fakeRunner(result);
+      return createOpenClawInferAnalystModel({ runner, command: 'openclaw', ...(explicitModel ? { model: explicitModel } : {}) })
+        .complete({ system: 's', prompt: 'p', localOnly: false })
+        .catch((error) => error);
+    };
 
-    expect(failure).toBeInstanceOf(OpenClawInferError);
-    expect(failure.message).toBe(
-      'OpenClaw inference failed (exit 1, model openai/gpt-5.5): [infer] Error: No API key found for provider "openai" (model openai/gpt-5.5).',
-    );
-    expect(failure.safeReason).toBe(failure.message);
-    expect(failure.message).not.toContain('stack line 2');
-    expect(failure.suggestion).toContain('remove the explicit analyst model');
-  });
+    const auth = await fail({ code: 1, stderr: '[infer] Error: No API key found for provider "openai"\nstack\n' }, 'openai/gpt-5.5');
+    expect(auth).toBeInstanceOf(OpenClawInferError);
+    expect(auth.message).toBe('OpenClaw inference failed (exit 1, model openai/gpt-5.5): no usable auth for model openai/gpt-5.5.');
+    expect(auth.safeReason).toBe(auth.message);
+    expect(auth.suggestion).toContain('remove the explicit analyst model');
 
-  test('the --json failure envelope code and message are preferred over stderr', async () => {
-    const { runner } = fakeRunner({
+    const envelope = await fail({
       code: 1,
       stdout: JSON.stringify({ ok: false, error: { code: 'auth_missing', message: 'model has no configured auth' } }),
-      stderr: 'noise',
     });
-    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw' });
-    await expect(model.complete({ system: 's', prompt: 'p', localOnly: false })).rejects.toThrow(
-      'OpenClaw inference failed (exit 1, model OpenClaw default model): auth_missing: model has no configured auth.',
+    expect(envelope.message).toBe(
+      'OpenClaw inference failed (exit 1, model OpenClaw default model): no usable auth for model OpenClaw default model.',
     );
+
+    const unknownModel = await fail({ code: 1, stderr: 'Unknown model: openai/gpt-9' }, 'openai/gpt-9');
+    expect(unknownModel.message).toContain(': OpenClaw does not recognize model openai/gpt-9.');
+
+    const killed = await fail({ code: 143, stderr: '' });
+    expect(killed.message).toContain('(exit 143, model OpenClaw default model): the run was terminated');
+
+    const codeOnly = await fail({ code: 2, stdout: JSON.stringify({ ok: false, error: { code: 'gateway_unavailable', message: 'x' } }) });
+    expect(codeOnly.message).toBe('OpenClaw inference failed (exit 2, model OpenClaw default model): OpenClaw error gateway_unavailable.');
   });
 
-  test('failure detail redacts secrets, truncates, and never echoes prompt or evidence', async () => {
-    const evidence = 'PRIVATE-EVIDENCE: the quarterly numbers for the acquisition target were 42';
-    const echo = fakeRunner({ code: 2, stderr: `bad request: ${evidence}` });
-    const echoed = await createOpenClawInferAnalystModel({ runner: echo.runner, command: 'openclaw' })
-      .complete({ system: 's', prompt: evidence, localOnly: false })
-      .catch((error) => error);
-    expect(echoed.message).not.toContain('PRIVATE-EVIDENCE');
-    expect(echoed.message).toContain('detail withheld');
-
-    const secret = fakeRunner({
+  test('unclassified free text is redacted and bounded', async () => {
+    const { runner } = fakeRunner({
       code: 1,
-      stderr: `auth failed api_key=sk-live-abcdefghijklmnop1234 Bearer abc.def.ghi token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc ${'x'.repeat(400)}`,
+      stderr: `upstream refused: Bearer abc.def.ghi token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc sk-live-abcdefghijklmnop1234 ${'x'.repeat(400)}`,
     });
-    const redacted = await createOpenClawInferAnalystModel({ runner: secret.runner, command: 'openclaw' })
-      .complete({ system: 's', prompt: 'p', localOnly: false })
+    const failure = await createOpenClawInferAnalystModel({ runner, command: 'openclaw' })
+      .complete({ system: 's', prompt: 'the notes mention a garden party', localOnly: false })
       .catch((error) => error);
-    expect(redacted.message).not.toContain('sk-live');
-    expect(redacted.message).not.toContain('abc.def.ghi');
-    expect(redacted.message).not.toContain('9f8e7d6c5b4a');
-    expect(redacted.message).toContain('<redacted>');
-    expect(redacted.message.length).toBeLessThan(300);
+    expect(failure.message).toStartWith('OpenClaw inference failed (exit 1, model OpenClaw default model): upstream refused:');
+    expect(failure.message).not.toContain('abc.def.ghi');
+    expect(failure.message).not.toContain('9f8e7d6c5b4a');
+    expect(failure.message).not.toContain('sk-live');
+    expect(failure.message).toContain('<redacted>');
+    expect(failure.message.length).toBeLessThan(300);
+  });
+
+  describe('free text that echoes the request is withheld', () => {
+    const evidence = [
+      'Question: what did my notes say?',
+      'Evidence [1]: Patient\tSSN 123-45-6789\tflagged for review;  quarterly  numbers  were  42 million.',
+    ].join('\n');
+    const leakCases: Array<[string, string]> = [
+      ['tab-separated echo', 'bad request: Patient\tSSN 123-45-6789\tflagged'],
+      ['double-spaced echo', 'bad request near "quarterly  numbers  were  42"'],
+      ['short quoted echo', "flagged 'SSN 123-45-6789' in input"],
+      ['JSON-escaped stderr echo', String.raw`{"level":"error","msg":"invalid input: Patient\tSSN 123-45-6789\tflagged"}`],
+      ['JSON-escaped double-spaced echo', String.raw`error: \"quarterly  numbers  were  42 million\"`],
+      ['case and punctuation changes', 'ERROR: QUARTERLY-NUMBERS-WERE-42'],
+    ];
+    for (const [name, stderr] of leakCases) {
+      test(name, async () => {
+        const { runner } = fakeRunner({ code: 1, stderr });
+        const failure = await createOpenClawInferAnalystModel({ runner, command: 'openclaw' })
+          .complete({ system: 'SYSTEM RULES', prompt: evidence, localOnly: false })
+          .catch((error) => error);
+        expect(failure).toBeInstanceOf(OpenClawInferError);
+        expect(failure.message).toContain('detail withheld because it echoed request content');
+        for (const fragment of ['123-45-6789', '6789', 'quarterly', 'Patient', 'SSN']) {
+          expect(failure.message).not.toContain(fragment);
+        }
+      });
+    }
+
+    test('an envelope error code that echoes evidence is not surfaced as a code', async () => {
+      const { runner } = fakeRunner({ code: 1, stdout: JSON.stringify({ ok: false, error: { code: 'Patient-SSN-123' } }) });
+      const failure = await createOpenClawInferAnalystModel({ runner, command: 'openclaw' })
+        .complete({ system: 's', prompt: evidence, localOnly: false })
+        .catch((error) => error);
+      expect(failure.message).not.toContain('Patient');
+    });
+  });
+
+  test('echo detection normalizes whitespace, case, punctuation, and JSON escapes', () => {
+    expect(echoesEvidence('SSN\t123-45-6789', 'the ssn 123 45 6789 is private')).toBe(true);
+    expect(echoesEvidence(String.raw`a\tb\nc`, 'A B C')).toBe(true);
+    expect(echoesEvidence('connection reset by gateway', 'the notes mention a garden party')).toBe(false);
+    expect(safeInferDetail('connection reset by gateway\nsecond line', 'the notes mention a garden party'))
+      .toBe('connection reset by gateway');
+  });
+
+  test('only a spawn ENOENT code counts as not found; other spawn errors surface only their code', async () => {
+    const runner: OpenClawCommandRunner = {
+      async run() {
+        const error = new Error('spawn failed: no such file or directory while passing argv PRIVATE-EVIDENCE') as Error & { code: string };
+        error.code = 'E2BIG';
+        throw error;
+      },
+    };
+    const failure = await createOpenClawInferAnalystModel({ runner, command: 'openclaw' })
+      .complete({ system: 's', prompt: 'PRIVATE-EVIDENCE', localOnly: false })
+      .catch((error) => error);
+    expect(failure.message).toBe('OpenClaw inference could not start (model OpenClaw default model): E2BIG.');
   });
 
   test('a missing openclaw executable reads as "not found on the worker PATH"', async () => {

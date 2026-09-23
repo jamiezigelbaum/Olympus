@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
-import { homedir, platform as osPlatform } from 'node:os';
+import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -865,8 +865,10 @@ function defaultOlympusCliJs(options: WorkerServiceInstallOptions): string {
 function defaultWorkerPath(bunBin: string, existingPath?: string, toolDirectories: string[] = []): string {
   const entries = [
     dirname(bunBin),
-    ...toolDirectories,
+    // An operator's existing PATH keeps its order; tool directories only
+    // append after it.
     ...(existingPath ? existingPath.split(':') : []),
+    ...toolDirectories,
     '/opt/homebrew/bin',
     '/usr/local/bin',
     '/usr/bin',
@@ -887,13 +889,29 @@ function workerToolDirectories(options: WorkerServiceInstallOptions, bunBin: str
   const directories: string[] = [];
   if (basename(bunBin).toLowerCase() !== 'bun') {
     const bunShim = typeof Bun !== 'undefined' ? Bun.which('bun') : null;
-    if (bunShim && isAbsolute(bunShim) && !/[:\r\n]/.test(bunShim)) directories.push(dirname(bunShim));
+    if (bunShim && isDurableToolPath(bunShim)) directories.push(dirname(bunShim));
   }
-  const openclawBin = options.openclawBin
-    ? validatedAbsolutePath(options.openclawBin, 'OpenClaw executable')
-    : resolveOpenClawExecutable(options.homeDir ? { homeDir: options.homeDir } : {});
-  if (openclawBin && !/[:\r\n]/.test(openclawBin)) directories.push(dirname(openclawBin));
+  if (options.openclawBin) {
+    const explicit = validatedAbsolutePath(options.openclawBin, 'OpenClaw executable');
+    if (!/[:\r\n]/.test(explicit)) directories.push(dirname(explicit));
+  } else {
+    const resolved = resolveOpenClawExecutable(options.homeDir ? { homeDir: options.homeDir } : {});
+    if (resolved && isDurableToolPath(resolved)) directories.push(dirname(resolved));
+  }
   return directories;
+}
+
+// A setup shell can see tools through a temporary npx/npm-exec prefix or a
+// project's node_modules/.bin. Those vanish or belong to one checkout, so they
+// are never pinned into the long-lived worker PATH.
+export function isDurableToolPath(path: string): boolean {
+  if (!isAbsolute(path) || /[:\r\n]/.test(path)) return false;
+  const normalized = path.replace(/\\/g, '/');
+  if (/\/node_modules\/|\/_npx\/|\/\.npm\/|\/npm-cache\//.test(normalized)) return false;
+  const temporaryRoots = [tmpdir(), '/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
+    .map((root) => root.replace(/\\/g, '/').replace(/\/+$/, ''))
+    .filter(Boolean);
+  return !temporaryRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
 }
 
 function systemdExecArg(value: string): string {

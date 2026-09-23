@@ -129,22 +129,24 @@ export function createOpenClawInferAnalystModel(
       try {
         result = await runner.run(command, args, { timeoutMs });
       } catch (error) {
-        if (isCommandNotFound(error)) {
+        const code = spawnErrorCode(error);
+        if (code === 'ENOENT') {
           throw new OpenClawInferError(
             `OpenClaw CLI not found on the worker PATH (${commandLabel(command)}).`,
             'Re-run olympus setup so the worker environment records the openclaw directory, or set OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND to the absolute openclaw path.',
           );
         }
-        const detail = safeInferDetail(error instanceof Error ? error.message : String(error), prompt);
+        // Spawn errors can quote argv, which carries the prompt: only the
+        // categorical error code is ever surfaced.
         throw new OpenClawInferError(
-          `OpenClaw inference could not start (model ${modelLabel})${detail ? `: ${detail}` : ''}.`,
+          `OpenClaw inference could not start (model ${modelLabel})${code ? `: ${code}` : ''}.`,
           'Check the openclaw CLI on the worker host.',
         );
       }
       if (result.code !== 0) {
-        const detail = inferFailureDetail(result, prompt);
+        const reason = describeInferFailure(result, request.prompt, modelLabel);
         throw new OpenClawInferError(
-          `OpenClaw inference failed (exit ${result.code}, model ${modelLabel})${detail ? `: ${detail}` : ''}.`,
+          `OpenClaw inference failed (exit ${result.code}, model ${modelLabel})${reason ? `: ${reason}` : ''}.`,
           model
             ? `Check that OpenClaw has auth for ${model}, or remove the explicit analyst model to use OpenClaw's configured default.`
             : 'Check OpenClaw\'s configured default model and its auth (openclaw models status).',
@@ -155,9 +157,9 @@ export function createOpenClawInferAnalystModel(
         text = parseInferOutputText(result.stdout);
       } catch (error) {
         if (!(error instanceof OperationError)) throw error;
-        const detail = inferFailureDetail(result, prompt);
+        const reason = describeInferFailure(result, request.prompt, modelLabel);
         throw new OpenClawInferError(
-          `OpenClaw inference failed (exit 0, model ${modelLabel}): ${detail || error.message}`,
+          `OpenClaw inference failed (exit 0, model ${modelLabel}): ${reason || error.message}`,
           error.suggestion,
         );
       }
@@ -212,10 +214,9 @@ export class OpenClawInferError extends OperationError {
   }
 }
 
-function isCommandNotFound(error: unknown): boolean {
-  const record = error as { code?: unknown; message?: unknown } | null | undefined;
-  return record?.code === 'ENOENT'
-    || /executable not found|ENOENT|no such file or directory/i.test(String(record?.message ?? ''));
+function spawnErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/.test(code) ? code : undefined;
 }
 
 // The command is an operator-configured path, never request content; show only
@@ -226,7 +227,9 @@ function commandLabel(command: string): string {
 }
 
 const MAX_DETAIL_CHARS = 160;
-const PROMPT_ECHO_WINDOW = 24;
+// Echo detection compares letters and digits only, so whitespace, quoting,
+// punctuation, case, and JSON escaping cannot disguise an echoed stretch.
+const PROMPT_ECHO_WINDOW = 10;
 
 function readInferJson(stdout: string): Record<string, unknown> | undefined {
   const start = stdout.indexOf('{');
@@ -251,32 +254,52 @@ function resolvedModelId(stdout: string): string | undefined {
   return /^[A-Za-z0-9._:/@+-]{1,120}$/.test(id) ? id : undefined;
 }
 
-// OpenClaw's `--json` failure envelope carries `error` (a string or an object
-// with code/message); otherwise fall back to the first non-blank stderr line.
-function inferFailureDetail(result: OpenClawCommandResult, prompt: string): string {
-  const error = readInferJson(result.stdout)?.error;
-  let raw = '';
-  if (typeof error === 'string') {
-    raw = error;
-  } else if (error && typeof error === 'object') {
-    const record = error as { code?: unknown; message?: unknown };
-    const code = typeof record.code === 'string' ? record.code : '';
-    const message = typeof record.message === 'string' ? record.message : '';
-    raw = code && message ? `${code}: ${message}` : code || message;
+// Failure reason, most specific first. Known classes get a fixed message that
+// carries no OpenClaw text at all; free text from OpenClaw's `--json` error or
+// first stderr line is surfaced only when redacted, bounded, and proven not to
+// echo the request (question + evidence).
+function describeInferFailure(result: OpenClawCommandResult, evidence: string, modelLabel: string): string {
+  const envelope = readInferJson(result.stdout)?.error;
+  let errorCode = '';
+  let errorText = '';
+  if (typeof envelope === 'string') {
+    errorText = envelope;
+  } else if (envelope && typeof envelope === 'object') {
+    const record = envelope as { code?: unknown; message?: unknown };
+    if (typeof record.code === 'string') errorCode = record.code.trim();
+    if (typeof record.message === 'string') errorText = record.message;
   }
-  if (!raw) raw = result.stderr.split(/\r?\n/).find((line) => line.trim()) ?? '';
-  return safeInferDetail(raw, prompt);
+  const haystack = `${errorCode}\n${errorText}\n${result.stderr}`.toLowerCase();
+
+  if (result.code === 124 || result.code === 137 || result.code === 143) {
+    return 'the run was terminated, likely by the analyst time budget';
+  }
+  if (/no api key|api key (?:is )?(?:missing|not found|not configured)|missing (?:api key|credentials?|auth)|no (?:configured |usable )?(?:auth|credentials?)|not authenticated|unauthori[sz]ed|\b401\b|invalid api key|auth(?:entication)? (?:failed|error|required)/.test(haystack)) {
+    return `no usable auth for model ${modelLabel}`;
+  }
+  if (/unknown model|model not found|no such model|unsupported model|model .{0,40}not (?:found|available)/.test(haystack)) {
+    return `OpenClaw does not recognize model ${modelLabel}`;
+  }
+  if (/\b429\b|rate[ -]?limit/.test(haystack)) {
+    return 'the provider rate-limited the request';
+  }
+  if (errorCode && /^[A-Za-z][A-Za-z0-9_.-]{1,47}$/.test(errorCode) && !echoesEvidence(errorCode, evidence)) {
+    return `OpenClaw error ${errorCode}`;
+  }
+  const line = errorText || (result.stderr.split(/\r?\n/).find((candidate) => candidate.trim()) ?? '');
+  return safeInferDetail(line, evidence);
 }
 
-// Bounded, single-line, secret-redacted, and withheld entirely if it echoes
-// any stretch of the prompt (which carries the evidence).
-export function safeInferDetail(raw: string, prompt: string): string {
+// Bounded, single-line, secret-redacted free text, withheld entirely if it
+// echoes any stretch of the evidence.
+export function safeInferDetail(raw: string, evidence: string): string {
   const firstLine = raw.split(/\r?\n/).find((line) => line.trim()) ?? '';
   let detail = firstLine
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!detail) return '';
+  if (echoesEvidence(detail, evidence)) return 'detail withheld because it echoed request content';
   detail = detail
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/gi, '<redacted>')
     .replace(/\b(bearer)\s+[^\s,;]+/gi, '$1 <redacted>')
@@ -288,14 +311,28 @@ export function safeInferDetail(raw: string, prompt: string): string {
     .replace(/\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{8,}/g, '<redacted>')
     .replace(/\bxox[abp]-[A-Za-z0-9-]{8,}/g, '<redacted>')
     .replace(/[A-Za-z0-9._~+/=-]{32,}/g, (token) => (/\d/.test(token) ? '<redacted>' : token));
-  if (echoesPrompt(detail, prompt)) return 'detail withheld because it echoed request content';
   return detail.length > MAX_DETAIL_CHARS ? `${detail.slice(0, MAX_DETAIL_CHARS)}…` : detail;
 }
 
-function echoesPrompt(detail: string, prompt: string): boolean {
-  if (!prompt || detail.length < PROMPT_ECHO_WINDOW) return false;
-  for (let index = 0; index + PROMPT_ECHO_WINDOW <= detail.length; index += 1) {
-    if (prompt.includes(detail.slice(index, index + PROMPT_ECHO_WINDOW))) return true;
+// Letters and digits only, lower-cased, after undoing JSON string escapes, so
+// "SSN\t123-45-6789", "SSN  123 45 6789" and "ssn123456789" compare equal.
+function echoKey(value: string): string {
+  return value
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\[nrtbf]/g, ' ')
+    .replace(/\\(.)/g, '$1')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+export function echoesEvidence(detail: string, evidence: string): boolean {
+  const detailKey = echoKey(detail);
+  const evidenceKey = echoKey(evidence);
+  if (!detailKey || !evidenceKey) return false;
+  if (detailKey.length < PROMPT_ECHO_WINDOW) return evidenceKey.includes(detailKey);
+  for (let index = 0; index + PROMPT_ECHO_WINDOW <= detailKey.length; index += 1) {
+    if (evidenceKey.includes(detailKey.slice(index, index + PROMPT_ECHO_WINDOW))) return true;
   }
   return false;
 }
