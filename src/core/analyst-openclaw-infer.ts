@@ -1,20 +1,23 @@
 // OpenClaw-native cloud analyst transport.
 //
-// The frontier cloud analyst reaches GPT-5.5 (and any other configured cloud
-// provider) through `openclaw infer model run` — the host's own inference
-// surface — rather than a direct OpenAI API call. This uses the OAuth provider
-// openclaw already manages (the user's subscription), so there is NO metered
-// API key and no separate credential to provision: the same auth Castor uses.
-// It mirrors the existing CLI-bridge pattern (gog for email, whisper for
-// transcription).
+// The cloud analyst reaches a frontier model through `openclaw infer model
+// run` — the host's own inference surface — rather than a direct provider API
+// call. This uses the model and auth OpenClaw already manages (the user's
+// subscription or setup token), so there is NO metered API key and no separate
+// credential to provision. It mirrors the existing CLI-bridge pattern (gog for
+// email, whisper for transcription).
 //
 // Invocation:
-//   openclaw infer model run --model openai/gpt-5.5 --thinking high --json \
-//     --prompt "<system>\n\n<prompt>"
-// stdout is a JSON object: { ok, provider, model, outputs: [{ text }] }.
+//   openclaw infer model run [--model <provider/model>] --thinking <level> \
+//     --json --prompt "<system>\n\n<prompt>"
+// With no configured model, --model is omitted and OpenClaw resolves the
+// configured agent model and its auth (native default, 2026-09-23: a hard-coded
+// openai/gpt-5.5 failed every cited answer on hosts without OpenAI auth).
+// stdout is a JSON object: { ok, provider, model, outputs: [{ text }] }, or
+// { ok: false, error } on failure.
 
 import { OperationError } from './operation-error.ts';
-import { existsSync } from 'node:fs';
+import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
 
 export interface OpenClawCommandResult {
@@ -29,14 +32,18 @@ export interface OpenClawCommandRunner {
 
 export interface OpenClawInferAnalystModelOptions {
   command?: string; // default 'openclaw'
-  model?: string; // provider/model, default 'openai/gpt-5.5'
+  // provider/model passed verbatim as --model. Absent or blank = OpenClaw's
+  // configured default model (no --model flag).
+  model?: string | undefined;
   thinking?: string; // reasoning level, default 'high'
   timeoutMs?: number; // default 120000
   runner?: OpenClawCommandRunner;
 }
 
 const DEFAULT_COMMAND = 'openclaw';
-const DEFAULT_MODEL = 'openai/gpt-5.5';
+// Trace/audit label for a run that uses OpenClaw's configured default model.
+// Never passed to the CLI.
+export const OPENCLAW_DEFAULT_MODEL_LABEL = 'openclaw-default';
 const DEFAULT_THINKING = 'high';
 const DEFAULT_TIMEOUT_MS = 120_000;
 // Linux caps one argv element at MAX_ARG_STRLEN (128 KiB). A large evidence
@@ -46,14 +53,10 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_PROMPT_BYTES = 100_000;
 
 // Resolve the openclaw binary even under a minimal service PATH (launchd
-// defaults omit /opt/homebrew/bin and /usr/local/bin).
+// defaults omit /opt/homebrew/bin and /usr/local/bin; per-user npm installs
+// live under ~/.local/bin).
 function resolveOpenClawCommand(): string {
-  const found = Bun.which(DEFAULT_COMMAND);
-  if (found) return found;
-  for (const candidate of ['/opt/homebrew/bin/openclaw', '/usr/local/bin/openclaw', `${process.env.HOME ?? ''}/.openclaw/bin/openclaw`]) {
-    if (candidate && existsSync(candidate)) return candidate;
-  }
-  return DEFAULT_COMMAND;
+  return resolveOpenClawExecutable() ?? DEFAULT_COMMAND;
 }
 
 class SpawnOpenClawRunner implements OpenClawCommandRunner {
@@ -83,7 +86,8 @@ export function createOpenClawInferAnalystModel(
   options: OpenClawInferAnalystModelOptions = {},
 ): AnalystModel {
   const command = options.command ?? resolveOpenClawCommand();
-  const model = options.model ?? DEFAULT_MODEL;
+  const model = options.model?.trim() || undefined;
+  const modelLabel = model ?? 'OpenClaw default model';
   const thinking = options.thinking ?? DEFAULT_THINKING;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const runner = options.runner ?? new SpawnOpenClawRunner();
@@ -114,8 +118,7 @@ export function createOpenClawInferAnalystModel(
         'infer',
         'model',
         'run',
-        '--model',
-        model,
+        ...(model ? ['--model', model] : []),
         '--thinking',
         thinking,
         '--json',
@@ -126,20 +129,39 @@ export function createOpenClawInferAnalystModel(
       try {
         result = await runner.run(command, args, { timeoutMs });
       } catch (error) {
-        throw new OperationError(
-          'source_index_error',
-          'openclaw infer could not be spawned for the cloud analyst.',
-          error instanceof Error ? error.message : 'Check the openclaw CLI on the worker host.',
+        if (isCommandNotFound(error)) {
+          throw new OpenClawInferError(
+            `OpenClaw CLI not found on the worker PATH (${commandLabel(command)}).`,
+            'Re-run olympus setup so the worker environment records the openclaw directory, or set OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND to the absolute openclaw path.',
+          );
+        }
+        const detail = safeInferDetail(error instanceof Error ? error.message : String(error), prompt);
+        throw new OpenClawInferError(
+          `OpenClaw inference could not start (model ${modelLabel})${detail ? `: ${detail}` : ''}.`,
+          'Check the openclaw CLI on the worker host.',
         );
       }
       if (result.code !== 0) {
-        throw new OperationError(
-          'source_index_error',
-          `openclaw infer exited with code ${result.code}.`,
-          truncate(result.stderr) || 'No stderr.',
+        const detail = inferFailureDetail(result, prompt);
+        throw new OpenClawInferError(
+          `OpenClaw inference failed (exit ${result.code}, model ${modelLabel})${detail ? `: ${detail}` : ''}.`,
+          model
+            ? `Check that OpenClaw has auth for ${model}, or remove the explicit analyst model to use OpenClaw's configured default.`
+            : 'Check OpenClaw\'s configured default model and its auth (openclaw models status).',
         );
       }
-      return { text: parseInferOutputText(result.stdout), modelId: model };
+      let text: string;
+      try {
+        text = parseInferOutputText(result.stdout);
+      } catch (error) {
+        if (!(error instanceof OperationError)) throw error;
+        const detail = inferFailureDetail(result, prompt);
+        throw new OpenClawInferError(
+          `OpenClaw inference failed (exit 0, model ${modelLabel}): ${detail || error.message}`,
+          error.suggestion,
+        );
+      }
+      return { text, modelId: model ?? resolvedModelId(result.stdout) ?? OPENCLAW_DEFAULT_MODEL_LABEL };
     },
   };
 }
@@ -176,7 +198,104 @@ export function parseInferOutputText(stdout: string): string {
   return first.text;
 }
 
-function truncate(value: string): string {
-  const trimmed = value.trim();
-  return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+// A cloud-analyst failure whose message is bounded and secret-free: exit code,
+// model label, and OpenClaw's own error code or first line after redaction.
+// `safeReason` is the field the analyst route may log and surface; it never
+// carries prompt text, evidence, or credentials.
+export class OpenClawInferError extends OperationError {
+  readonly safeReason: string;
+
+  constructor(message: string, suggestion?: string) {
+    super('source_index_error', message, suggestion);
+    this.name = 'OpenClawInferError';
+    this.safeReason = message;
+  }
+}
+
+function isCommandNotFound(error: unknown): boolean {
+  const record = error as { code?: unknown; message?: unknown } | null | undefined;
+  return record?.code === 'ENOENT'
+    || /executable not found|ENOENT|no such file or directory/i.test(String(record?.message ?? ''));
+}
+
+// The command is an operator-configured path, never request content; show only
+// its basename so a home-directory path does not ride into answers.
+function commandLabel(command: string): string {
+  const base = command.split(/[\\/]/).pop() || command;
+  return /^[A-Za-z0-9._-]{1,64}$/.test(base) ? base : 'openclaw';
+}
+
+const MAX_DETAIL_CHARS = 160;
+const PROMPT_ECHO_WINDOW = 24;
+
+function readInferJson(stdout: string): Record<string, unknown> | undefined {
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start < 0 || end <= start) return undefined;
+  try {
+    const parsed = JSON.parse(stdout.slice(start, end + 1)) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolvedModelId(stdout: string): string | undefined {
+  const record = readInferJson(stdout);
+  const provider = typeof record?.provider === 'string' ? record.provider.trim() : '';
+  const model = typeof record?.model === 'string' ? record.model.trim() : '';
+  if (!model) return undefined;
+  const id = provider && !model.startsWith(`${provider}/`) ? `${provider}/${model}` : model;
+  return /^[A-Za-z0-9._:/@+-]{1,120}$/.test(id) ? id : undefined;
+}
+
+// OpenClaw's `--json` failure envelope carries `error` (a string or an object
+// with code/message); otherwise fall back to the first non-blank stderr line.
+function inferFailureDetail(result: OpenClawCommandResult, prompt: string): string {
+  const error = readInferJson(result.stdout)?.error;
+  let raw = '';
+  if (typeof error === 'string') {
+    raw = error;
+  } else if (error && typeof error === 'object') {
+    const record = error as { code?: unknown; message?: unknown };
+    const code = typeof record.code === 'string' ? record.code : '';
+    const message = typeof record.message === 'string' ? record.message : '';
+    raw = code && message ? `${code}: ${message}` : code || message;
+  }
+  if (!raw) raw = result.stderr.split(/\r?\n/).find((line) => line.trim()) ?? '';
+  return safeInferDetail(raw, prompt);
+}
+
+// Bounded, single-line, secret-redacted, and withheld entirely if it echoes
+// any stretch of the prompt (which carries the evidence).
+export function safeInferDetail(raw: string, prompt: string): string {
+  const firstLine = raw.split(/\r?\n/).find((line) => line.trim()) ?? '';
+  let detail = firstLine
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!detail) return '';
+  detail = detail
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/gi, '<redacted>')
+    .replace(/\b(bearer)\s+[^\s,;]+/gi, '$1 <redacted>')
+    .replace(
+      /\b((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|secret|client[_ -]?secret|password|authorization)\s*[:=]\s*)["']?[^\s"',;]+/gi,
+      '$1<redacted>',
+    )
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, '<redacted>')
+    .replace(/\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{8,}/g, '<redacted>')
+    .replace(/\bxox[abp]-[A-Za-z0-9-]{8,}/g, '<redacted>')
+    .replace(/[A-Za-z0-9._~+/=-]{32,}/g, (token) => (/\d/.test(token) ? '<redacted>' : token));
+  if (echoesPrompt(detail, prompt)) return 'detail withheld because it echoed request content';
+  return detail.length > MAX_DETAIL_CHARS ? `${detail.slice(0, MAX_DETAIL_CHARS)}…` : detail;
+}
+
+function echoesPrompt(detail: string, prompt: string): boolean {
+  if (!prompt || detail.length < PROMPT_ECHO_WINDOW) return false;
+  for (let index = 0; index + PROMPT_ECHO_WINDOW <= detail.length; index += 1) {
+    if (prompt.includes(detail.slice(index, index + PROMPT_ECHO_WINDOW))) return true;
+  }
+  return false;
 }

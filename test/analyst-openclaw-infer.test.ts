@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createOpenClawInferAnalystModel,
+  OPENCLAW_DEFAULT_MODEL_LABEL,
+  OpenClawInferError,
   parseInferOutputText,
   type OpenClawCommandResult,
   type OpenClawCommandRunner,
@@ -69,10 +71,103 @@ describe('openclaw infer analyst model', () => {
     expect(parseInferOutputText(noisy)).toBe('HELLO');
   });
 
-  test('throws when the CLI exits non-zero (handler then falls back to local)', async () => {
-    const { runner } = fakeRunner({ code: 1, stderr: 'auth failed' });
-    const model = createOpenClawInferAnalystModel({ runner });
-    await expect(model.complete({ system: 's', prompt: 'p', localOnly: false })).rejects.toThrow(/exited with code 1/);
+  test('omits --model when no model is configured so OpenClaw uses its default model', async () => {
+    const { runner, calls } = fakeRunner({
+      stdout: JSON.stringify({ ok: true, provider: 'anthropic', model: 'claude-sonnet-5', outputs: [{ text: 'ANSWER' }] }),
+    });
+    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw', thinking: 'low' });
+
+    const completion = await model.complete({ system: 'SYS', prompt: 'P', localOnly: false });
+
+    const { args } = calls[0]!;
+    expect(args).not.toContain('--model');
+    expect(args.slice(0, 3)).toEqual(['infer', 'model', 'run']);
+    expect(args).toContain('--thinking');
+    expect(args).toContain('--json');
+    // the trace names the model OpenClaw actually resolved
+    expect(completion.modelId).toBe('anthropic/claude-sonnet-5');
+  });
+
+  test('a blank model is treated as unset, and an unreported default gets a stable label', async () => {
+    const { runner, calls } = fakeRunner({ stdout: JSON.stringify({ ok: true, outputs: [{ text: 'A' }] }) });
+    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw', model: '   ' });
+    const completion = await model.complete({ system: 's', prompt: 'p', localOnly: false });
+    expect(calls[0]!.args).not.toContain('--model');
+    expect(completion.modelId).toBe(OPENCLAW_DEFAULT_MODEL_LABEL);
+  });
+
+  test('a non-zero exit surfaces a bounded reason with OpenClaw\'s own error line', async () => {
+    const { runner } = fakeRunner({
+      code: 1,
+      stderr: '\n[infer] Error: No API key found for provider "openai" (model openai/gpt-5.5)\nstack line 2\n',
+    });
+    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw', model: 'openai/gpt-5.5' });
+    const failure = await model.complete({ system: 's', prompt: 'p', localOnly: false }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(OpenClawInferError);
+    expect(failure.message).toBe(
+      'OpenClaw inference failed (exit 1, model openai/gpt-5.5): [infer] Error: No API key found for provider "openai" (model openai/gpt-5.5).',
+    );
+    expect(failure.safeReason).toBe(failure.message);
+    expect(failure.message).not.toContain('stack line 2');
+    expect(failure.suggestion).toContain('remove the explicit analyst model');
+  });
+
+  test('the --json failure envelope code and message are preferred over stderr', async () => {
+    const { runner } = fakeRunner({
+      code: 1,
+      stdout: JSON.stringify({ ok: false, error: { code: 'auth_missing', message: 'model has no configured auth' } }),
+      stderr: 'noise',
+    });
+    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw' });
+    await expect(model.complete({ system: 's', prompt: 'p', localOnly: false })).rejects.toThrow(
+      'OpenClaw inference failed (exit 1, model OpenClaw default model): auth_missing: model has no configured auth.',
+    );
+  });
+
+  test('failure detail redacts secrets, truncates, and never echoes prompt or evidence', async () => {
+    const evidence = 'PRIVATE-EVIDENCE: the quarterly numbers for the acquisition target were 42';
+    const echo = fakeRunner({ code: 2, stderr: `bad request: ${evidence}` });
+    const echoed = await createOpenClawInferAnalystModel({ runner: echo.runner, command: 'openclaw' })
+      .complete({ system: 's', prompt: evidence, localOnly: false })
+      .catch((error) => error);
+    expect(echoed.message).not.toContain('PRIVATE-EVIDENCE');
+    expect(echoed.message).toContain('detail withheld');
+
+    const secret = fakeRunner({
+      code: 1,
+      stderr: `auth failed api_key=sk-live-abcdefghijklmnop1234 Bearer abc.def.ghi token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc ${'x'.repeat(400)}`,
+    });
+    const redacted = await createOpenClawInferAnalystModel({ runner: secret.runner, command: 'openclaw' })
+      .complete({ system: 's', prompt: 'p', localOnly: false })
+      .catch((error) => error);
+    expect(redacted.message).not.toContain('sk-live');
+    expect(redacted.message).not.toContain('abc.def.ghi');
+    expect(redacted.message).not.toContain('9f8e7d6c5b4a');
+    expect(redacted.message).toContain('<redacted>');
+    expect(redacted.message.length).toBeLessThan(300);
+  });
+
+  test('a missing openclaw executable reads as "not found on the worker PATH"', async () => {
+    const runner: OpenClawCommandRunner = {
+      async run() {
+        const error = new Error('Executable not found in $PATH: "openclaw"') as Error & { code: string };
+        error.code = 'ENOENT';
+        throw error;
+      },
+    };
+    const model = createOpenClawInferAnalystModel({ runner, command: 'openclaw' });
+    const failure = await model.complete({ system: 's', prompt: 'p', localOnly: false }).catch((error) => error);
+    expect(failure).toBeInstanceOf(OpenClawInferError);
+    expect(failure.message).toBe('OpenClaw CLI not found on the worker PATH (openclaw).');
+    expect(failure.suggestion).toContain('OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND');
+  });
+
+  test('the real spawn runner maps an absent absolute command to the same reason', async () => {
+    const model = createOpenClawInferAnalystModel({ command: '/nonexistent/olympus-test/openclaw' });
+    await expect(model.complete({ system: 's', prompt: 'p', localOnly: false })).rejects.toThrow(
+      'OpenClaw CLI not found on the worker PATH (openclaw).',
+    );
   });
 
   test('throws on ok=false', () => {

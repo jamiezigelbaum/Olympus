@@ -9,6 +9,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
+import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
 import { isWorkerAuthTokenPlaceholder } from './worker-auth.ts';
 
@@ -29,6 +30,10 @@ export interface WorkerServiceInstallOptions {
   homeDir?: string;
   olympusBin?: string;
   bunBin?: string;
+  // Absolute openclaw executable whose directory the worker PATH must carry
+  // (the cloud analyst spawns `openclaw infer`). Resolved from OPENCLAW_BIN,
+  // PATH, and per-user install locations when omitted.
+  openclawBin?: string;
   workingDirectory?: string;
   envPath?: string;
   authToken?: string;
@@ -610,7 +615,7 @@ function defaultWorkerEnv(options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
   return [
     '# Olympus source worker environment.',
-    `PATH=${defaultWorkerPath(bunBin)}`,
+    `PATH=${defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))}`,
     `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
     `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? 'true' : 'false'}`,
     'OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true',
@@ -648,7 +653,11 @@ function nextWorkerEnvAuthToken(text: string, authToken: string | undefined): st
 
 function nextWorkerEnvPath(text: string, options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
-  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1]);
+  const desiredPath = defaultWorkerPath(
+    bunBin,
+    text.match(/^PATH=(.*)$/m)?.[1],
+    workerToolDirectories(options, bunBin),
+  );
   return /^PATH=.*$/m.test(text)
     ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`)
     : `${text.replace(/\n?$/, '\n')}PATH=${desiredPath}\n`;
@@ -853,9 +862,10 @@ function defaultOlympusCliJs(options: WorkerServiceInstallOptions): string {
   return join(process.cwd(), 'dist', 'cli.js');
 }
 
-function defaultWorkerPath(bunBin: string, existingPath?: string): string {
+function defaultWorkerPath(bunBin: string, existingPath?: string, toolDirectories: string[] = []): string {
   const entries = [
     dirname(bunBin),
+    ...toolDirectories,
     ...(existingPath ? existingPath.split(':') : []),
     '/opt/homebrew/bin',
     '/usr/local/bin',
@@ -865,6 +875,25 @@ function defaultWorkerPath(bunBin: string, existingPath?: string): string {
     '/sbin',
   ].map((entry) => entry.trim()).filter(Boolean);
   return Array.from(new Set(entries)).join(':');
+}
+
+// Directories the worker's own child processes need by bare name:
+// - openclaw: the cloud analyst and source-watch runtime spawn it. A per-user
+//   install (npm prefix ~/.local) is invisible to the fixed service PATH.
+// - bun: an npm-installed Bun runs as .../node_modules/bun/bin/bun.exe, so the
+//   runtime directory has no `bun` entry; the setup shell's `bun` shim
+//   directory is recorded too.
+function workerToolDirectories(options: WorkerServiceInstallOptions, bunBin: string): string[] {
+  const directories: string[] = [];
+  if (basename(bunBin).toLowerCase() !== 'bun') {
+    const bunShim = typeof Bun !== 'undefined' ? Bun.which('bun') : null;
+    if (bunShim && isAbsolute(bunShim) && !/[:\r\n]/.test(bunShim)) directories.push(dirname(bunShim));
+  }
+  const openclawBin = options.openclawBin
+    ? validatedAbsolutePath(options.openclawBin, 'OpenClaw executable')
+    : resolveOpenClawExecutable(options.homeDir ? { homeDir: options.homeDir } : {});
+  if (openclawBin && !/[:\r\n]/.test(openclawBin)) directories.push(dirname(openclawBin));
+  return directories;
 }
 
 function systemdExecArg(value: string): string {

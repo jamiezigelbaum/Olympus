@@ -34,7 +34,7 @@ export interface ModelSetupServiceOptions {
 
 type RequiredProfile = { id: string; profile: SovereigntyModelProfile };
 type LocalUsage = RequiredProfile & { analyst: boolean; embedding: boolean };
-type LocalTarget = LocalUsage & { apiKey?: string; baseUrl: URL; expectedEmbeddingDimension?: number };
+type LocalTarget = LocalUsage & { apiKey?: string; baseUrl: URL; model: string; expectedEmbeddingDimension?: number };
 type LocalCheckState = Extract<ModelSetupCard['state'], 'not_configured' | 'applying' | 'needs_attention' | 'ready'>;
 
 const DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;
@@ -259,6 +259,8 @@ export class ModelSetupService {
     for (const usage of usages) {
       const baseUrl = safeLocalBaseUrl(usage.profile.baseUrl);
       if (!baseUrl) return undefined;
+      const model = usage.profile.model?.trim();
+      if (!model) return undefined;
       let apiKey: string | undefined;
       if (usage.profile.secretRef) {
         try { apiKey = this.localApiKey?.(usage.id); } catch { return undefined; }
@@ -279,13 +281,14 @@ export class ModelSetupService {
             return undefined;
           }
         } else {
-          expectedEmbeddingDimension = canonicalEmbeddingDimension(usage.profile.model);
+          expectedEmbeddingDimension = canonicalEmbeddingDimension(model);
         }
       }
       targets.push({
         ...usage,
         ...(apiKey ? { apiKey } : {}),
         baseUrl,
+        model,
         ...(expectedEmbeddingDimension !== undefined ? { expectedEmbeddingDimension } : {}),
       });
     }
@@ -294,11 +297,11 @@ export class ModelSetupService {
 
   private async runLocalChecks(targets: LocalTarget[]): Promise<boolean> {
     for (const target of targets) {
-      if (!await this.modelIsListed(target.baseUrl, target.profile.model, target.apiKey)) return false;
-      if (target.analyst && !await this.chatCompletes(target.baseUrl, target.profile.model, target.apiKey)) return false;
+      if (!await this.modelIsListed(target.baseUrl, target.model, target.apiKey)) return false;
+      if (target.analyst && !await this.chatCompletes(target.baseUrl, target.model, target.apiKey)) return false;
       if (target.embedding && !await this.embeddingCompletes(
         target.baseUrl,
-        target.profile.model,
+        target.model,
         target.expectedEmbeddingDimension,
         target.apiKey,
       )) return false;

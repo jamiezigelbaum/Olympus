@@ -1007,7 +1007,7 @@ export async function validateSecureVeniceAnalystProfileAtConstruction(input: {
     input.profile.baseUrl ?? 'https://api.venice.ai/api/v1',
   );
   await assertVeniceAnalystModelAllowed(
-    input.profile.model,
+    input.profile.model ?? '',
     true,
     createVenicePrivacyCategoryResolver({
       apiKey: input.apiKey,
@@ -1052,7 +1052,7 @@ export function createAnalystForSovereigntyProfile(input: {
   bootSecretResolver?: WorkerBootSecretResolver;
 }): Analyst | undefined {
   const { profile } = input;
-  const profileId = input.profileId ?? profile.model;
+  const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === 'local-openai-compatible') {
     if (!profile.baseUrl?.trim()) {
       throw new Error('Local sovereignty analyst profiles require baseUrl.');
