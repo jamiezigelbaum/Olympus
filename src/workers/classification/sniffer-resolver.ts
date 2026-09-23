@@ -44,7 +44,8 @@ import type {
   StoredSnifferVerdict,
   TierSnifferStore,
 } from './sniffer-store.ts';
-import type { TierLedger, TierLedgerRecord } from './tier-ledger.ts';
+import type { TierDecision } from './tier-classifier.ts';
+import type { TierLedger, TierLedgerRecord, TierPlacementPlan } from './tier-ledger.ts';
 
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2_000;
@@ -55,6 +56,12 @@ const OUTPUT_CHARS_PER_ITEM = 110;
 export interface SnifferTarget {
   ledger: TierLedger;
   sniffer: TierSnifferStore;
+  /**
+   * The tiered store set's placement planner, for a set ledger. A routed item
+   * (P1b) is settled through it, so a verdict that needs other stores queues
+   * a move instead of rewriting placement; without it routed items wait.
+   */
+  placementFor?: (decision: TierDecision) => TierPlacementPlan;
 }
 
 /** A per-UTC-day call cap shared by every pass in the process. */
@@ -122,6 +129,10 @@ export interface SnifferPassReport {
   /** Answered from the cache: another item had already asked the same question. */
   cacheHits: number;
   secretRefused: number;
+  /** Routed items whose set planner was not available: verdict cached, question kept. */
+  awaitingPlacement: number;
+  /** Routed items the verdict moved to other stores: queued for the move primitive (P1b). */
+  movesQueued: number;
   /** Queued material dropped because its question was no longer open. */
   staleDropped: number;
   /** Pending on a names question with no queued material: the next sync re-asks. */
@@ -154,6 +165,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     cacheHits: 0,
     secretRefused: 0,
     staleDropped: 0,
+    awaitingPlacement: 0,
+    movesQueued: 0,
     awaitingResync: 0,
     promptChars: 0,
     responseChars: 0,
@@ -168,12 +181,19 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   });
   const apply = (item: WorkItem, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>): void => {
     const tier = snifferTierKey(verdict);
-    item.target.ledger.applySnifferVerdict(item.question, {
+    const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
       modelId: options.lane.modelId,
-    });
+    }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
+    if (applied?.outcome === 'needs_placement') {
+      // A routed item whose set is not open here: the verdict is cached, the
+      // question stays, and the next pass (or sync) with the set applies it.
+      report.awaitingPlacement += 1;
+      return;
+    }
+    if (applied?.outcome === 'queued_move') report.movesQueued += 1;
     item.target.sniffer.deleteQuestion(item.question, item.question.pass);
     report.verdictsApplied += 1;
     if (verdict.failSafe) report.failSafePrivate += 1;

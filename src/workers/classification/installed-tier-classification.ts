@@ -24,17 +24,17 @@ import {
 } from '../../core/sensitivity-map.ts';
 import { CachedTierSniffer, type SnifferLaneIdentity } from './sniffer.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
-import { tierSnifferPathForStore } from './tier-ledger-path.ts';
+import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import {
+  registerInstalledTierClassification,
+  type InstalledStoreTierClassification,
+  type InstalledTierClassificationProvider,
+} from './installed-tier-classification-registry.ts';
+
+export type { InstalledStoreTierClassification };
 import type { OwnerTierRule, TierSniffer } from './tier-classifier.ts';
 import { loadOwnerTierRules, tierRulesFileStamp } from './tier-rules.ts';
 
-export interface InstalledStoreTierClassification {
-  sensitivityMap?: SensitivityMap;
-  rules?: readonly OwnerTierRule[];
-  sniffer?: TierSniffer;
-  /** Set when the inputs cannot be trusted (an invalid rules file): record nothing. */
-  unavailableReason?: string;
-}
 
 export interface InstalledTierClassificationOptions {
   env?: Record<string, string | undefined>;
@@ -43,7 +43,7 @@ export interface InstalledTierClassificationOptions {
   now?: () => Date;
 }
 
-export class InstalledTierClassification {
+export class InstalledTierClassification implements InstalledTierClassificationProvider {
   readonly lane: SnifferLaneIdentity | undefined;
   private readonly env: Record<string, string | undefined>;
   private readonly now: (() => Date) | undefined;
@@ -60,15 +60,19 @@ export class InstalledTierClassification {
     this.now = options.now;
   }
 
-  /** Classification inputs for one connector store. Never throws. */
-  forStore(storeDbPath: string, laneMap?: SensitivityMap): InstalledStoreTierClassification {
+  /**
+   * Classification inputs for decisions recorded in one tier ledger (a
+   * store's own, or a tiered store set's). The sniffer's cache and queue sit
+   * beside that ledger. Never throws.
+   */
+  forLedger(ledgerPath: string, laneMap?: SensitivityMap): InstalledStoreTierClassification {
     const rules = this.currentRules();
     if (rules === undefined) return { unavailableReason: 'tier_rules_invalid' };
     const sensitivityMap = laneMap ?? this.currentMap();
     let sniffer: TierSniffer | undefined;
-    if (this.lane && storeDbPath !== ':memory:') {
+    if (this.lane && ledgerPath !== ':memory:') {
       try {
-        sniffer = new CachedTierSniffer(this.snifferStore(storeDbPath), this.lane);
+        sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane);
       } catch {
         // No sniffer store: flagged items stay pending (held Private).
       }
@@ -80,9 +84,9 @@ export class InstalledTierClassification {
     };
   }
 
-  /** The store's sniffer cache and queue (opened once per process). */
-  snifferStore(storeDbPath: string): TierSnifferStore {
-    const path = tierSnifferPathForStore(storeDbPath);
+  /** The sniffer cache and queue beside a tier ledger (opened once per process). */
+  snifferStoreForLedger(ledgerPath: string): TierSnifferStore {
+    const path = tierSnifferPathForLedger(ledgerPath);
     let store = this.snifferStores.get(path);
     if (!store) {
       store = new TierSnifferStore({ dbPath: path, ...(this.now ? { now: this.now } : {}) });
@@ -134,6 +138,7 @@ let installed: InstalledTierClassification | undefined;
 export function configureInstalledTierClassification(options: InstalledTierClassificationOptions = {}): InstalledTierClassification {
   installed?.close();
   installed = new InstalledTierClassification(options);
+  registerInstalledTierClassification(installed);
   return installed;
 }
 
@@ -142,6 +147,7 @@ export function installedTierClassification(): InstalledTierClassification | und
 }
 
 export function clearInstalledTierClassification(): void {
+  registerInstalledTierClassification(undefined);
   installed?.close();
   installed = undefined;
 }

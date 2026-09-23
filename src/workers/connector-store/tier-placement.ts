@@ -29,7 +29,7 @@ import {
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
-import { installedTierClassification } from '../classification/installed-tier-classification.ts';
+import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
  * How a lane places items into the store(s) it has TODAY. This replaces the
@@ -85,11 +85,11 @@ export interface ConnectorStoreTierClassification {
  */
 export function resolveStoreTierClassification(
   explicit: ConnectorStoreTierClassification | undefined,
-  storeDbPath: string,
+  ledgerPath: string,
   laneMap: SensitivityMap | undefined,
 ): ConnectorStoreTierClassification | undefined {
   const map = explicit?.sensitivityMap ?? laneMap;
-  const installed = installedTierClassification()?.forStore(storeDbPath, map);
+  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath, map);
   if (!installed) return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
   if (installed.unavailableReason || !explicit) return installed;
   if (explicit.unavailableReason) return explicit;

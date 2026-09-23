@@ -430,14 +430,14 @@ describe('bounds and the owner-approval gate', () => {
     const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
     try {
       const dbPath = join(dir, 'store.sqlite');
-      recordFlagged(ledger, installed.snifferStore(dbPath), 1, 'therapy');
+      recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 1, 'therapy');
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.9 }));
       const ledgerPath = join(dir, 'classification-ledger.jsonl');
       const service = new TierSnifferService({
         installed,
         lane: LOCAL_LANE,
         model,
-        stores: () => [{ dbPath, tierLedger: () => ledger }],
+        stores: () => [{ dbPath }],
         classificationLedgerPath: ledgerPath,
       });
       const waiting = await service.runOnce();
@@ -464,6 +464,7 @@ describe('bounds and the owner-approval gate', () => {
       expect(model.requests).toHaveLength(1);
       expect(ledger.getCurrent(subject(1))?.metadataTier).toBe('secure');
       expect(readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
+      service.stop();
     } finally {
       installed.close();
       ledger.close();

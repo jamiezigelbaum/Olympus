@@ -42,6 +42,13 @@ export function secretLocationsPathForStore(storeDbPath: string): string {
 export const TIER_SNIFFER_SQLITE_STORE_ID = 'olympus_tier_sniffer';
 export const TIER_SNIFFER_FILE_SUFFIX = '.tier-sniffer.sqlite';
 
+/** The sniffer file beside a tier ledger: the same base, the sniffer suffix. */
+export function tierSnifferPathForLedger(ledgerPath: string): string {
+  if (ledgerPath === ':memory:') return ':memory:';
+  const base = ledgerPath.endsWith(TIER_LEDGER_FILE_SUFFIX) ? ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length) : ledgerPath;
+  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}
+
 export function tierSnifferPathForStore(storeDbPath: string): string {
   if (storeDbPath === ':memory:') return ':memory:';
   const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;

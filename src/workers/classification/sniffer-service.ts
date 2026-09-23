@@ -21,13 +21,20 @@ import {
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
-import type { TierLedger } from './tier-ledger.ts';
+import { existsSync } from 'node:fs';
+import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
+import { TierLedger, tierLedgerPathForStore } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60_000;
 
+/**
+ * A connector store, by what the sniffer needs: its path, and the tiered
+ * store set ledger it is bound to, if any. The pass reads every ledger that
+ * EXISTS (a store's own, a set's), each once, and never creates one.
+ */
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
-  tierLedger(): TierLedger | undefined;
+  tierSetBinding?(): { ledgerPath: string } | undefined;
 }
 
 export interface TierSnifferServiceOptions {
@@ -58,6 +65,7 @@ export class TierSnifferService {
   private running = false;
   private abort: AbortController | undefined;
   private lastTick: TierSnifferTick | undefined;
+  private readonly ledgers = new Map<string, TierLedger>();
 
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
@@ -77,6 +85,7 @@ export class TierSnifferService {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
+    if (!this.running) this.closeLedgers();
   }
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick } {
@@ -107,6 +116,43 @@ export class TierSnifferService {
     }
   }
 
+  /** Every existing ledger behind the stores, each once: bound set ledgers and stores' own. */
+  private ledgerPaths(): string[] {
+    const paths = new Set<string>();
+    for (const store of this.options.stores()) {
+      if (store.dbPath === ':memory:') continue;
+      try {
+        const bound = store.tierSetBinding?.();
+        if (bound && bound.ledgerPath !== ':memory:' && existsSync(bound.ledgerPath)) paths.add(bound.ledgerPath);
+      } catch {
+        // An unreadable binding fails closed elsewhere; the sniffer skips it.
+      }
+      const own = tierLedgerPathForStore(store.dbPath);
+      if (existsSync(own)) paths.add(own);
+    }
+    return [...paths];
+  }
+
+  private ledgerAt(path: string): TierLedger {
+    let ledger = this.ledgers.get(path);
+    if (!ledger) {
+      ledger = new TierLedger({ dbPath: path, ...(this.options.now ? { now: this.options.now } : {}) });
+      this.ledgers.set(path, ledger);
+    }
+    return ledger;
+  }
+
+  private closeLedgers(): void {
+    for (const ledger of this.ledgers.values()) {
+      try {
+        ledger.close();
+      } catch {
+        // Best effort at shutdown.
+      }
+    }
+    this.ledgers.clear();
+  }
+
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
@@ -127,11 +173,14 @@ export class TierSnifferService {
       return { state: 'awaiting_owner_approval', ...pair };
     }
     const targets: SnifferTarget[] = [];
-    for (const store of this.options.stores()) {
-      if (store.dbPath === ':memory:') continue;
-      const tierLedger = store.tierLedger();
-      if (!tierLedger) continue;
-      targets.push({ ledger: tierLedger, sniffer: this.options.installed.snifferStore(store.dbPath) });
+    for (const ledgerPath of this.ledgerPaths()) {
+      const ledger = this.ledgerAt(ledgerPath);
+      const planner = tierSetPlannerForLedger(ledgerPath);
+      targets.push({
+        ledger,
+        sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+        ...(planner ? { placementFor: planner } : {}),
+      });
     }
     const report = await runSnifferPass({
       targets,

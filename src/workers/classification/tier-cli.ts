@@ -34,8 +34,9 @@ import { SNIFFER_PROMPT_VERSION } from './sniffer.ts';
 import { SnifferLaneRefusedError, resolveSnifferLane } from './sniffer-lane.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
-import { TierLedger, type TierLedgerIdentity } from './tier-ledger.ts';
-import { tierLedgerPathForStore, tierSnifferPathForStore } from './tier-ledger-path.ts';
+import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
+import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
 import {
   OWNER_TIER_RULE_MATCH_KINDS,
   addOwnerTierRule,
@@ -80,7 +81,8 @@ export async function runTierCommand(args: readonly string[], context: TierCliCo
 // --- Locators --------------------------------------------------------------------
 
 interface LocatedItem {
-  dbPath: string;
+  /** The tier ledger that holds (or will hold) this item's decision. */
+  ledgerPath: string;
   identity: TierLedgerIdentity & { family: SourceFamily };
 }
 
@@ -90,52 +92,112 @@ function knownStorePaths(context: TierCliContext): string[] {
   return [...new Set(paths)].filter((path) => path !== ':memory:' && existsSync(path));
 }
 
+interface StoreMatch {
+  identity: TierLedgerIdentity & { family: SourceFamily };
+  /** The set ledger this store is bound to, when a tiered store set routed into it. */
+  boundLedgerPath?: string;
+  ownLedgerPath: string;
+}
+
+function matchStore(dbPath: string, needle: string): StoreMatch[] {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const rows = db.query(`
+      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id FROM items
+      WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
+      LIMIT 5
+    `).all(needle, needle) as Array<{
+      provider: string;
+      family: SourceFamily;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    }>;
+    if (rows.length === 0) return [];
+    let boundLedgerPath: string | undefined;
+    try {
+      const binding = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
+      const parsed = binding?.cursor ? JSON.parse(binding.cursor) as { ledgerPath?: unknown } : undefined;
+      if (typeof parsed?.ledgerPath === 'string') boundLedgerPath = parsed.ledgerPath;
+    } catch {
+      // No readable binding: the store's own ledger is the candidate.
+    }
+    return rows.map((row) => ({
+      identity: {
+        provider: row.provider,
+        family: row.family,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      },
+      ...(boundLedgerPath ? { boundLedgerPath } : {}),
+      ownLedgerPath: tierLedgerPathForStore(dbPath),
+    }));
+  } catch {
+    // A store without the items table (or unreadable) holds nothing to find.
+    return [];
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/**
+ * Find the item and the ledger(s) that decide it. The identity includes the
+ * conversation (chat items). A tiered store set keeps ONE ledger for all its
+ * stores, beside its secure_local store, so the item's decision may live in a
+ * ledger other than its own store's: every existing ledger behind the known
+ * stores is checked for a row, and the store's bound (else own) ledger is used
+ * when none has one yet.
+ */
 export function locateTierItem(locator: string, context: TierCliContext = {}): LocatedItem[] {
   const needle = locator.trim();
   if (!needle) throw new OperationError('invalid_params', 'A locator is required.');
-  const found: LocatedItem[] = [];
-  for (const dbPath of knownStorePaths(context)) {
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      db.exec('PRAGMA busy_timeout = 10000;');
-      const rows = db.query(`
-        SELECT provider, family, account_scope, provider_item_id FROM items
-        WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
-        LIMIT 5
-      `).all(needle, needle) as Array<{ provider: string; family: SourceFamily; account_scope: string; provider_item_id: string }>;
-      for (const row of rows) {
-        found.push({
-          dbPath,
-          identity: { provider: row.provider, family: row.family, accountScope: row.account_scope, providerItemId: row.provider_item_id },
-        });
-      }
-    } catch {
-      // A store without the items table (or unreadable) holds nothing to find.
-    } finally {
-      closeSqliteStore(db, { checkpoint: false });
-    }
-  }
-  const identities = new Set(found.map((item) => identityKey(item.identity)));
+  const stores = knownStorePaths(context);
+  const matches = stores.flatMap((dbPath) => matchStore(dbPath, needle));
+  const identities = new Map(matches.map((match) => [identityKey(match.identity), match.identity]));
   if (identities.size === 0) {
     throw new OperationError('invalid_params', 'No stored item matches that locator.', 'Use the locator an answer cited, or the provider item id.');
   }
   if (identities.size > 1) {
     throw new OperationError('invalid_params', `That locator matches ${identities.size} different items.`, 'Use the full locator URI an answer cited.');
   }
-  return found;
+  const identity = [...identities.values()][0]!;
+  const ledgerPaths = new Set<string>();
+  for (const dbPath of stores) {
+    const path = tierLedgerPathForStore(dbPath);
+    if (existsSync(path)) ledgerPaths.add(path);
+  }
+  for (const match of matches) if (match.boundLedgerPath && existsSync(match.boundLedgerPath)) ledgerPaths.add(match.boundLedgerPath);
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined));
+  if (deciding.length > 0) return deciding.map((ledgerPath) => ({ ledgerPath, identity }));
+  const fallback = matches[0]!;
+  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity }];
 }
 
 function identityKey(identity: TierLedgerIdentity): string {
-  return `${identity.provider}\u0000${identity.accountScope}\u0000${identity.providerItemId}`;
+  return tierLedgerIdentityKey(identity);
 }
 
-function withLedger<T>(dbPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T): T {
-  const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(dbPath), ...(now ? { now } : {}) });
+function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T): T {
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}) });
   try {
     return run(ledger);
   } finally {
     ledger.close();
   }
+}
+
+/**
+ * An override recorded before the ledger keyed items by conversation (schema
+ * 1) sits under the conversation-less identity. For a chat item it no longer
+ * applies; `tier explain` shows it so the owner can set it again.
+ */
+function orphanedOverride(ledger: TierLedger, identity: TierLedgerIdentity): ItemTierOverride | undefined {
+  if (!identity.providerConversationId) return undefined;
+  const { providerConversationId: _conversation, ...withoutConversation } = identity;
+  return ledger.getOverride(withoutConversation);
 }
 
 // --- set / explain -----------------------------------------------------------------
@@ -157,7 +219,7 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     override = { kind: 'tier', tier };
   }
   const items = locateTierItem(locator, context);
-  const results = items.map((item) => withLedger(item.dbPath, context.now, (ledger) => {
+  const results = items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
     if (override === 'clear') {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: 'The next sync re-decides this item without the override.' };
@@ -165,6 +227,11 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     ledger.setOverride(item.identity, override);
     if (override.kind === 'not_secret') {
       return { override: 'not_secret', note: 'The next sync sends this item back through normal classification.' };
+    }
+    if (ledger.getCurrent(item.identity)?.routed) {
+      // A routed item's placement belongs to its tiered store set: the next
+      // sync applies the override and queues the move (hidden first on a raise).
+      return { override: tierDisplayName(override.tier), outcome: 'set_applies_next_sync' };
     }
     // A tier override is final for both layers: record it now, so the ledger
     // (and a retrieval that reads it) reflects the owner's decision at once.
@@ -191,12 +258,14 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
   if (!locator || args.length > 1) throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier explain']}`);
   const items = locateTierItem(locator, context);
   const records = items.map((item) => {
-    const recorded = withLedger(item.dbPath, context.now, (ledger) => ({
+    const recorded = withLedgerAt(item.ledgerPath, context.now, (ledger) => ({
       record: ledger.getCurrent(item.identity),
       override: ledger.getOverride(item.identity),
+      orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
+      copies: ledger.copies(item.identity),
     }));
-    const snifferPath = tierSnifferPathForStore(item.dbPath);
+    const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn: string[] = [];
     if (existsSync(snifferPath)) {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -207,7 +276,13 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       }
     }
     const { record } = recorded;
-    if (!record) return { recorded: false, note: 'No decision is recorded for this item yet; the next sync records one.' };
+    const orphanedNote = recorded.orphaned
+      ? {
+          orphanedOverride: recorded.orphaned.kind === 'tier' ? tierDisplayName(recorded.orphaned.tier) : 'not_secret',
+          orphanedOverrideNote: 'Set before the ledger keyed chat items by conversation; it no longer applies. Set it again with olympus tier set.',
+        }
+      : {};
+    if (!record) return { recorded: false, ...orphanedNote, note: 'No decision is recorded for this item yet; the next sync records one.' };
     return {
       recorded: true,
       metadataTier: tierDisplayName(record.metadataTier),
@@ -226,6 +301,9 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       mapRevision: record.mapRevision,
       snifferModel: record.modelId,
       waitingOnSniffer: waitingOn,
+      routed: record.routed,
+      copies: recorded.copies.map((copy) => ({ corpusId: copy.corpusId, layers: copy.layers, state: copy.state, embedHold: copy.embedHold })),
+      ...orphanedNote,
       decidedAt: record.decidedAt,
       history: recorded.history.map((entry) => ({
         generation: entry.generation,

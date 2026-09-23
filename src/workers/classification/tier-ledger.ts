@@ -302,13 +302,21 @@ export class TierLedger {
    * tier. The open-question reasons are replaced by the verdict's reason code,
    * and the model id is recorded. An override, a row mid-move, or a question
    * that is no longer open is left alone.
+   *
+   * A ROUTED item (P1b) never has its placement rewritten here: the settled
+   * decision goes through `recordRoutedPlacement` with the plan the item's
+   * tiered store set computes (`placementFor`), so a verdict that needs other
+   * stores queues a move (hidden first on a raise) and one that keeps the
+   * item where it is releases its embedding hold. Without a planner a routed
+   * item is left pending (`needs_placement`): the question stays open.
    */
   applySnifferVerdict(
     identity: TierLedgerIdentity,
     verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string },
-  ): { outcome: TierLedgerRecordOutcome; record: TierLedgerRecord } | undefined {
+    options: { placementFor?: (decision: TierDecision) => TierPlacementPlan } = {},
+  ): { outcome: SnifferVerdictOutcome; record: TierLedgerRecord } | undefined {
     assertTier(verdict.tier);
-    let outcome: TierLedgerRecordOutcome | undefined;
+    let outcome: SnifferVerdictOutcome | undefined;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing) return;
@@ -364,11 +372,20 @@ export class TierLedger {
           contentPending: false,
         };
       }
-      outcome = this.writeRow(identity, next, undefined, existing);
+      if (existing.routed) {
+        if (!options.placementFor) {
+          outcome = 'needs_placement';
+          return;
+        }
+        const decision = decisionOfRow(next);
+        outcome = this.recordRoutedPlacement(identity, decision, options.placementFor(decision)).outcome;
+      } else {
+        outcome = this.writeRow(identity, next, undefined, existing);
+      }
       this.db.query(`
         UPDATE tier_items SET model_id = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(verdict.modelId, identity.provider, identity.accountScope, identity.providerItemId);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(verdict.modelId, ...idParams(identity));
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
   }
@@ -1683,6 +1700,29 @@ interface EffectiveRow {
   contentPending: boolean;
   metadataForced: boolean;
   metadataFlagged: boolean;
+}
+
+/** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
+export type SnifferVerdictOutcome = TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement';
+
+/** A settled row as the classifier decision the P1b router takes. */
+function decisionOfRow(row: EffectiveRow): TierDecision {
+  const pending = row.metadataPending || row.contentPending;
+  return {
+    metadataTier: row.metadataTier,
+    contentTier: row.contentTier,
+    decidedBy: row.decidedBy as TierDecidedBy,
+    reasons: row.reasons,
+    state: pending ? 'pending' : 'current',
+    contentRead: row.contentRead,
+    metadataPending: row.metadataPending,
+    contentPending: row.contentPending,
+    metadataForced: row.metadataForced,
+    metadataFlagged: row.metadataFlagged,
+    engineVersion: row.engineVersion,
+    mapRevision: row.mapRevision,
+    snifferId: 'sniffer',
+  };
 }
 
 function rowOf(record: TierLedgerRecord): EffectiveRow {

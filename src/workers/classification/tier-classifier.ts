@@ -108,6 +108,8 @@ export interface TierSnifferSubject {
   provider: string;
   accountScope: string;
   providerItemId: string;
+  /** The conversation, for chat items: part of the ledger identity. */
+  providerConversationId?: string;
 }
 
 export interface TierSnifferRequest {

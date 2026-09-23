@@ -45,6 +45,8 @@ export interface SnifferQuestion {
   provider: string;
   accountScope: string;
   providerItemId: string;
+  /** Present when the item belongs to a conversation: part of its ledger identity. */
+  providerConversationId?: string;
   pass: SnifferPass;
   materialHash: string;
   mapRevision: string;
@@ -148,9 +150,9 @@ export class TierSnifferStore {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-      ON CONFLICT (provider, account_scope, provider_item_id, pass) DO UPDATE SET
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
@@ -159,9 +161,7 @@ export class TierSnifferStore {
         material = excluded.material,
         flags_json = excluded.flags_json
     `).run(
-      question.subject.provider,
-      question.subject.accountScope,
-      question.subject.providerItemId,
+      ...subjectParams(question.subject),
       question.pass,
       materialHash,
       question.mapRevision,
@@ -174,8 +174,8 @@ export class TierSnifferStore {
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND pass = ?
-    `).get(subject.provider, subject.accountScope, subject.providerItemId, pass) as QuestionRow | null;
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass) as QuestionRow | null;
     return row ? questionFromRow(row) : undefined;
   }
 
@@ -191,16 +191,16 @@ export class TierSnifferStore {
   deleteQuestion(subject: TierSnifferSubject, pass: SnifferPass): boolean {
     return this.db.query(`
       DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND pass = ?
-    `).run(subject.provider, subject.accountScope, subject.providerItemId, pass).changes > 0;
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass).changes > 0;
   }
 
   /** Count one failed attempt; returns the new attempt count. */
   recordAttemptFailure(subject: TierSnifferSubject, pass: SnifferPass): number {
     this.db.query(`
       UPDATE sniffer_questions SET attempts = attempts + 1
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND pass = ?
-    `).run(subject.provider, subject.accountScope, subject.providerItemId, pass);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
     return this.questionFor(subject, pass)?.attempts ?? 0;
   }
 
@@ -220,6 +220,7 @@ export class TierSnifferStore {
 interface QuestionRow {
   provider: string;
   account_scope: string;
+  conversation_key: string;
   provider_item_id: string;
   pass: SnifferPass;
   material_hash: string;
@@ -235,6 +236,7 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     provider: row.provider,
     accountScope: row.account_scope,
     providerItemId: row.provider_item_id,
+    ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
     pass: row.pass,
     materialHash: row.material_hash,
     mapRevision: row.map_revision,
@@ -243,6 +245,11 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     attempts: row.attempts,
     queuedAt: row.queued_at,
   };
+}
+
+/** The ledger's identity columns: a conversation is part of an item's identity ('' when none). */
+function subjectParams(subject: TierSnifferSubject): [string, string, string, string] {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? '', subject.providerItemId];
 }
 
 function restrictFiles(dbPath: string): void {
@@ -274,6 +281,7 @@ function snifferMigrations(): SqliteMigration[] {
             question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL,
             account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
             provider_item_id TEXT NOT NULL,
             pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
             material_hash TEXT NOT NULL,
@@ -282,7 +290,7 @@ function snifferMigrations(): SqliteMigration[] {
             flags_json TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             queued_at TEXT NOT NULL,
-            UNIQUE (provider, account_scope, provider_item_id, pass)
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
       },
