@@ -13,7 +13,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { buildEvidencePack } from '../src/core/evidence-pack.ts';
+import { createAnalyst, redactPackForEscalation } from '../src/core/analyst.ts';
+import type { EvidenceCandidate, EvidencePack } from '../src/core/contracts.ts';
+import { buildEvidencePack, utf8ByteLength } from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
 import {
@@ -24,6 +26,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_FILES_CORPUS_ID } from '../src/workers/dropbox-files/index.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createAnalystSourceIndexAnswerHandler, fitPackToEvidenceBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,
@@ -86,7 +89,14 @@ const PDF_B: FixtureItem = {
   text: 'Holons nest within holons; integral theory treats development as transcend and include.',
 };
 
-const CORPUS_ITEMS = [FOLDER, ...TITLE_ONLY, BRIEF_HISTORY, SPIRAL, PDF_A, PDF_B];
+const DRIVE_FOLDER: FixtureItem = {
+  id: 'drive-folder-integral',
+  name: 'Integral Theory Drive Folder',
+  path: '/drive/Integral Theory',
+  mimeType: 'application/vnd.google-apps.folder',
+};
+
+const CORPUS_ITEMS = [FOLDER, DRIVE_FOLDER, ...TITLE_ONLY, BRIEF_HISTORY, SPIRAL, PDF_A, PDF_B];
 
 describe('connector-store ranking: content over titles', () => {
   test('keyword search ranks content PDFs above title-only rows and never returns the folder', async () => {
@@ -94,6 +104,7 @@ describe('connector-store ranking: content over titles', () => {
       const integral = hitIds(await search(store, 'integral theory', { retrievalMode: 'keyword', maxResults: 5 }));
       expect(integral.slice(0, 2).sort()).toEqual(['pdf-a', 'pdf-b']);
       expect(integral).not.toContain('dir-integral');
+      expect(integral).not.toContain('drive-folder-integral');
       expect(integral.length).toBe(5);
 
       // Only PDF A's body names Wilber; it leads, and the title-only rows follow.
@@ -126,9 +137,99 @@ describe('connector-store ranking: content over titles', () => {
   });
 
   test('a title-only lookup still finds the file when no content matches', async () => {
-    await withStores(async ({ store }) => {
+    await withStores(async ({ store, provider }) => {
       const response = await search(store, 'brief history everything', { retrievalMode: 'keyword', maxResults: 5 });
       expect(hitIds(response)[0]).toBe('title-brief-history');
+      // Hybrid too, with one result: a weak vector neighbour (below the
+      // relevance bar) gets no content preference over the exact title.
+      for (const maxResults of [1, 5]) {
+        const hybrid = await search(store, 'brief history everything', { retrievalMode: 'hybrid', maxResults, provider });
+        expect({ maxResults, top: hitIds(hybrid)[0] }).toEqual({ maxResults, top: 'title-brief-history' });
+      }
+    });
+  });
+
+  test('containers from any source are never results', async () => {
+    await withStores(async ({ store, provider }) => {
+      for (const retrievalMode of ['keyword', 'hybrid'] as const) {
+        const ids = hitIds(await search(store, 'integral theory drive folder', { retrievalMode, maxResults: 50, provider }));
+        expect({ retrievalMode, ids: ids.filter((id) => id.includes('folder') || id.startsWith('dir-')) })
+          .toEqual({ retrievalMode, ids: [] });
+      }
+    });
+  });
+
+  test('a multi-concept match count is a lower bound when the raw fetch hit its ceiling', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-count-probe-'));
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'files.sqlite'),
+      corpusId: DROPBOX_FILES_CORPUS_ID,
+      family: 'file',
+      trustDomain: 'secure_local',
+    });
+    try {
+      // 300 noise items say only one concept, loudly; 60 long real matches say both
+      // concepts once. The raw fetch fills with noise, the minimum-signal
+      // filter leaves few rows, and those few are not the whole match set.
+      const noise = Array.from({ length: 300 }, (_, index) => {
+        const term = index % 2 === 0 ? 'integral' : 'theory';
+        return {
+          id: `noise-${index}`,
+          name: `${term} ${term} ${term} ${index}.md`,
+          path: `/noise/${term} ${term} ${term} ${index}.md`,
+          mimeType: 'text/markdown',
+          text: `${term} ${term} ${term} ${term} ${term} ${term}`,
+        };
+      });
+      const matches = Array.from({ length: 60 }, (_, index) => ({
+        id: `match-${index}`,
+        name: `reading ${index}.md`,
+        path: `/reading/${index}.md`,
+        mimeType: 'text/markdown',
+        text: `Reading list entry ${index}: one mention of integral and of theory. ${'Gardens need water and light in spring. '.repeat(30)}`,
+      }));
+      await store.syncFromConnector(fixtureConnector('dropbox', 'secure_local', [...noise, ...matches]), { fetchContent: true });
+      const response = await search(store, 'integral theory', { retrievalMode: 'keyword', maxResults: 10 });
+      expect(response.matchCount?.saturated).toBe(true);
+      // Fewer than the 50-row probe survived the filter, so the old
+      // post-filter test would have reported this count as exact.
+      expect(response.matchCount!.matchedItems).toBeLessThan(50);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('private match counts never reach a pack without private evidence', async () => {
+    await withStores(async ({ notesStore, provider }) => {
+      const registry = buildSourceIndexCorpusRegistry([
+        defineConnectorCorpus({ corpusId: DROPBOX_FILES_CORPUS_ID, family: 'file', trustDomain: 'secure_local' }),
+        defineConnectorCorpus({ corpusId: NOTES_CORPUS_ID, family: 'file', trustDomain: 'internal' }),
+      ]);
+      const pack = await buildEvidencePack({
+        question: 'What does integral theory say?',
+        maxResults: 5,
+        searchContext: { allowedTrustDomains: ['internal', 'secure_local'] },
+        registry,
+        adapters: {
+          // Counts matches but returns no hits: the pack holds no private evidence.
+          [DROPBOX_FILES_CORPUS_ID]: () => ({
+            hits: [],
+            latencyMs: 0,
+            matchCount: { matchedItems: 7, contentMatchedItems: 2, saturated: false },
+            rawExposed: false,
+          }),
+          [NOTES_CORPUS_ID]: createConnectorStoreCorpusAdapter({ store: notesStore, embeddingProvider: provider, retrievalMode: 'hybrid' }),
+        },
+        contentProviders: { [NOTES_CORPUS_ID]: createConnectorStoreContentProvider({ store: notesStore }) },
+      });
+      expect(pack.candidates.every((candidate) => candidate.trustDomain === 'internal')).toBe(true);
+      expect(pack.coverage.matchCounts?.map((count) => count.corpusId)).toEqual([NOTES_CORPUS_ID]);
+      // And an escalation pack carries no match counts at all.
+      expect(redactPackForEscalation({
+        ...pack,
+        coverage: { ...pack.coverage, matchCounts: [{ corpusId: DROPBOX_FILES_CORPUS_ID, family: 'file', matchedItems: 7, contentMatchedItems: 2, atLeast: false, inEvidence: 1 }] },
+      }).coverage.matchCounts).toBeUndefined();
     });
   });
 
@@ -202,7 +303,7 @@ describe('connector-store ranking: content over titles', () => {
           question: 'What do I have in my files about integral theory?',
           searchQuery: 'integral theory',
           maxResults: 24,
-          evidenceCharBudget: 40_000,
+          evidenceByteBudget: 40_000,
           maxCharsPerCandidate: 3_000,
           searchContext: { allowedTrustDomains: ['public_safe', 'internal', 'secure_local'] },
           registry,
@@ -403,7 +504,9 @@ function embeddingProvider(): SourceEmbeddingProvider {
     async embed(inputs: SourceEmbeddingInput[], options): Promise<number[][]> {
       return inputs.map((input) => {
         const text = `${input.title ?? ''}\n${input.text}`.toLowerCase();
-        if (options.taskType === 'RETRIEVAL_QUERY') return [1, 0];
+        // A name lookup sits off the content axis, so every document is only
+        // a weak neighbour of it (PDF B at cosine 0.6, under the 0.62 bar).
+        if (options.taskType === 'RETRIEVAL_QUERY') return text.includes('brief history') ? [0, 1] : [1, 0];
         if (text.includes('four quadrants')) return [1, 0];
         if (text.includes('holons')) return [0.8, 0.6];
         if (text.includes('reading group')) return [0.6, 0.8];
@@ -450,3 +553,145 @@ async function workerSearch(
 function laneTypes(body: Record<string, any>): string[] {
   return (body.audit?.lane_audits ?? []).map((lane: { laneType: string }) => lane.laneType);
 }
+
+describe('evidence byte budget', () => {
+  test('24 CJK candidates with CJK labels stay under the OpenClaw 100,000-byte prompt ceiling', async () => {
+    const cjk = '整合理論は四つの象限で経験を捉える。';
+    const registry = buildSourceIndexCorpusRegistry([
+      defineConnectorCorpus({ corpusId: NOTES_CORPUS_ID, family: 'file', trustDomain: 'internal' }),
+    ]);
+    const ids = Array.from({ length: 24 }, (_, index) => `cjk-${index}`);
+    const pack = await buildEvidencePack({
+      question: '整合理論について何がありますか？',
+      maxResults: 24,
+      evidenceByteBudget: 40_000,
+      maxCharsPerCandidate: 3_000,
+      searchContext: { allowedTrustDomains: ['internal'] },
+      registry,
+      adapters: {
+        [NOTES_CORPUS_ID]: () => ({
+          hits: ids.map((id) => ({
+            sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` },
+            provenance: {
+              sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` },
+              citation: { title: `${cjk}${cjk} ${id}`, uri: `/資料/${cjk}/${id}.pdf`, authorLabel: cjk, authoredAt: '2026-09-01T00:00:00Z' },
+            },
+            score: 1,
+            rawExposed: false as const,
+          })),
+          latencyMs: 0,
+          rawExposed: false,
+        }),
+      },
+      contentProviders: {
+        [NOTES_CORPUS_ID]: {
+          async fetchLocalContent(request) {
+            return {
+              sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+              chunks: [cjk.repeat(Math.ceil((request.maxChars ?? 3_000) / cjk.length)).slice(0, request.maxChars ?? 3_000)],
+            };
+          },
+        },
+      },
+    });
+    const passageBytes = pack.candidates.reduce((sum, candidate) => sum + candidate.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
+    expect(pack.candidates).toHaveLength(24);
+    expect(passageBytes).toBeLessThanOrEqual(40_000);
+    for (const localOnly of [false, true]) {
+      let promptBytes = 0;
+      await createAnalyst({
+        async complete(request) {
+          promptBytes = utf8ByteLength(`${request.system}\n\n${request.prompt}`);
+          return { text: JSON.stringify({ answer: 'x', citations: [{ evidence: 1, claim: 'x' }], unanswered: [], sufficient: true }), modelId: 'm' };
+        },
+      }).analyze(pack, { localOnly });
+      expect({ localOnly, under: promptBytes < 100_000 }).toEqual({ localOnly, under: true });
+    }
+  });
+
+  test('a local leg gets the pack fitted to its byte budget, every corpus still seated', () => {
+    const candidate = (id: string, text: string): EvidenceCandidate => ({
+      provenance: { sourceItem: { family: 'file', provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: id } },
+      trustTier: 'S2',
+      trustDomain: 'internal',
+      chunks: [text],
+    });
+    const mail = Array.from({ length: 20 }, (_, index) => candidate(`mail-${index}`, 'm'.repeat(1_666)));
+    const files = Array.from({ length: 4 }, (_, index) => candidate(`file-${index}`, 'f'.repeat(1_666)));
+    const pack: EvidencePack = {
+      question: 'q',
+      candidates: [...mail, ...files],
+      coverage: {
+        searchedCorpora: ['mail', 'files'],
+        skippedCorpora: [],
+        extractionGaps: [],
+        matchCounts: [
+          { corpusId: 'mail', family: 'email', matchedItems: 50, contentMatchedItems: 50, atLeast: true, inEvidence: 20 },
+          { corpusId: 'files', family: 'file', matchedItems: 4, contentMatchedItems: 4, atLeast: false, inEvidence: 4 },
+        ],
+      },
+      builtAt: '2026-09-23T00:00:00Z',
+    };
+    const corpusOf = new Map<EvidenceCandidate, string>([
+      ...mail.map((c) => [c, 'mail'] as const),
+      ...files.map((c) => [c, 'files'] as const),
+    ]);
+    const fitted = fitPackToEvidenceBytes(pack, 9_000, corpusOf);
+    const bytes = fitted.candidates.reduce((sum, c) => sum + c.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
+    expect(bytes).toBeLessThanOrEqual(9_000);
+    expect(fitted.candidates).toHaveLength(15);
+    expect(fitted.candidates.filter((c) => c.provenance.sourceItem.providerItemId.startsWith('file-'))).toHaveLength(4);
+    expect(fitted.coverage.matchCounts?.map((c) => c.inEvidence)).toEqual([11, 4]);
+    // A pack that already fits is untouched.
+    expect(fitPackToEvidenceBytes(pack, 100_000, corpusOf)).toBe(pack);
+  });
+});
+
+describe('local analyst leg budget', () => {
+  test('the local leg receives the conservative budget unless the host declares more', async () => {
+    const ids = Array.from({ length: 24 }, (_, index) => `doc-${index}`);
+    const lanes = () => ({
+      registry: buildSourceIndexCorpusRegistry([
+        defineConnectorCorpus({ corpusId: NOTES_CORPUS_ID, family: 'file', trustDomain: 'internal' }),
+      ]),
+      adapters: {
+        [NOTES_CORPUS_ID]: () => ({
+          hits: ids.map((id) => ({
+            sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` },
+            score: 1,
+            rawExposed: false as const,
+          })),
+          latencyMs: 0,
+          rawExposed: false as const,
+        }),
+      },
+      contentProviders: {
+        [NOTES_CORPUS_ID]: {
+          async fetchLocalContent(request: { maxChars?: number }) {
+            return {
+              sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+              chunks: ['integral theory '.repeat(400).slice(0, request.maxChars ?? 3_000)],
+            };
+          },
+        },
+      },
+    });
+    for (const [declared, expectedCandidates] of [[undefined, 15], [60_000, 24]] as const) {
+      const received: EvidencePack[] = [];
+      const handler = createAnalystSourceIndexAnswerHandler({
+        analyst: {
+          async analyze(pack) {
+            received.push(pack);
+            return { answer: 'ok', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'ok' }], unanswered: [] };
+          },
+        },
+        lanes,
+        ...(declared !== undefined ? { localAnalystEvidenceByteBudget: declared } : {}),
+      });
+      await handler.answer({ question: 'What about integral theory?' });
+      const bytes = received[0]!.candidates.reduce((sum, c) => sum + c.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
+      expect({ declared, candidates: received[0]!.candidates.length }).toEqual({ declared, candidates: expectedCandidates });
+      expect(bytes).toBeLessThanOrEqual(declared ?? 9_000);
+    }
+  });
+});

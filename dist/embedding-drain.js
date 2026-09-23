@@ -8138,6 +8138,9 @@ function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
 function yieldConnectorStoreVectorScan() {
   return new Promise((resolve3) => setTimeout(resolve3, 0));
 }
+function connectorStoreContentPreference(vettedVectorItemIds) {
+  return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
+}
 function assertConnectorStoreStorageProfile(profile) {
   if (profile.trustDomain !== "secure_local")
     return;
@@ -8578,7 +8581,7 @@ function selectEvidencePassages(chunks, maxChars, focus) {
   if (picked.length === 0)
     return budgetChunks(chunks, maxChars);
   const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-  return { chunks: bounded.chunks, truncated: true };
+  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -9781,13 +9784,13 @@ function errorMessage2(error) {
 function nowIso() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -9800,6 +9803,12 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
+  CONTAINER_MIME_TYPES = Object.freeze([
+    "inode/directory",
+    "application/x-directory",
+    "application/vnd.google-apps.folder"
+  ]);
+  CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -12759,11 +12768,14 @@ var init_local_index = __esm(() => {
       });
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
+      return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
+    }
+    searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
-        return [];
+        return { rows: [], saturated: false };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = sourceIndexFtsTermGroups(query);
       const minimumSignal = groups.length >= 2;
@@ -12787,7 +12799,7 @@ var init_local_index = __esm(() => {
       WHERE connector_store_fts MATCH ?
         AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
         AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) <> 'inode/directory'
+        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
         ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
@@ -12817,11 +12829,14 @@ var init_local_index = __esm(() => {
         selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
       }
       const spanTerms = queryTermsForSpan(query);
-      return selected.slice(0, limit).map((row) => {
-        const base = searchRowFromItemRow(row);
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
-        return chunk ? { ...base, chunk } : base;
-      });
+      return {
+        rows: selected.slice(0, limit).map((row) => {
+          const base = searchRowFromItemRow(row);
+          const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
+          return chunk ? { ...base, chunk } : base;
+        }),
+        saturated: rows.length >= fetchLimit || selected.length > limit
+      };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -13044,6 +13059,7 @@ var init_local_index = __esm(() => {
       return row ? syncRunFromRow(row) : undefined;
     }
   };
+  lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
     "sync_runs",
     "items",
@@ -13573,11 +13589,13 @@ var init_router = __esm(() => {
 });
 
 // src/core/evidence-pack.ts
+var utf8;
 var init_evidence_pack = __esm(() => {
   init_source_model_policy();
   init_router();
   init_types();
   init_answer_latency_trace();
+  utf8 = new TextEncoder;
 });
 
 // src/workers/source-index/analyst-pool.ts

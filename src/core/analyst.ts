@@ -963,9 +963,16 @@ export function redactPackForEscalation(pack: EvidencePack): EvidencePack {
         : {}),
       ...(candidate.score !== undefined ? { score: candidate.score } : {}),
     })),
-    coverage: pack.coverage,
+    // Counts of private matches never travel with an escalation pack.
+    coverage: stripSecureMatchCounts(pack),
     builtAt: pack.builtAt,
   };
+}
+
+function stripSecureMatchCounts(pack: EvidencePack): EvidencePack['coverage'] {
+  if (!pack.coverage.matchCounts) return pack.coverage;
+  const { matchCounts: _matchCounts, ...coverage } = pack.coverage;
+  return coverage;
 }
 
 function clampAnswer(answer: string, maxAnswerChars?: number): string {

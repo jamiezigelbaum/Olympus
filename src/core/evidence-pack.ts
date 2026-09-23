@@ -135,13 +135,15 @@ export interface BuildEvidencePackInput {
   adapters: SourceIndexRouterAdapterMap;
   contentProviders: LocalContentProviderMap;
   maxCharsPerCandidate?: number;
-  // Total character budget for hydrated evidence text across the whole pack.
-  // Each located item gets an equal share (never more than
-  // maxCharsPerCandidate, never less than MIN_CHARS_PER_CANDIDATE), so a
+  // Total UTF-8 byte budget for hydrated evidence text across the whole pack.
+  // Bytes, not characters: model transports and argv ceilings are byte
+  // limits, and the same character count is 1x bytes in ASCII, 2x in
+  // Cyrillic, 3x in CJK. Each located item gets an equal share (never more
+  // than maxCharsPerCandidate, never less than MIN_BYTES_PER_CANDIDATE), so a
   // broad question carries many short passages and a narrow one a few long
   // ones, inside the same prompt size. Omitted, only maxCharsPerCandidate
   // bounds each candidate, as before.
-  evidenceCharBudget?: number;
+  evidenceByteBudget?: number;
   // Per-lane retrieval deadline handed to every routed run this build performs.
   // Omitted, the router falls back to its env-configured default. Present so a
   // caller that knows its own wall-clock budget can set one rather than reach
@@ -207,11 +209,15 @@ export async function buildEvidencePackDetailed(
   let policyDeniedCandidates = 0;
 
   const hydrationStartedAt = Date.now();
-  const maxCharsPerCandidate = evidenceCharsPerCandidate(
+  const maxBytesPerCandidate = evidenceBytesPerCandidate(
     routedHits.length,
     input.maxCharsPerCandidate,
-    input.evidenceCharBudget,
+    input.evidenceByteBudget,
   );
+  // A byte share is also a character ceiling (a character is at least one
+  // byte), so providers can keep their character contract; the returned
+  // chunks are then clipped to the byte share below.
+  const maxCharsPerCandidate = maxBytesPerCandidate;
   const hydrated = await Promise.all(routedHits.map(async (hit) => {
     const provenance = hitProvenance(hit);
     const provider = input.contentProviders[hit.corpusId];
@@ -256,11 +262,14 @@ export async function buildEvidencePackDetailed(
         }
       : provenance;
 
+    const chunks = content?.chunks ?? [];
     const candidate: EvidenceCandidate = {
       provenance: enrichedProvenance,
       trustTier: sensitivity.trustTier,
       trustDomain: sensitivity.trustDomain,
-      chunks: content?.chunks ?? [],
+      chunks: input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined
+        ? clipChunksToUtf8Bytes(chunks, maxBytesPerCandidate)
+        : chunks,
       ...(content?.tables ? { tables: content.tables } : {}),
       ...(content?.facts ? { facts: content.facts } : {}),
       ...(hit.score !== undefined ? { score: hit.score } : {}),
@@ -276,7 +285,11 @@ export async function buildEvidencePackDetailed(
     if (gap) extractionGaps.push(gap);
   }
 
-  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds);
+  const matchCounts = coverageMatchCounts(
+    routed.matchCounts,
+    candidateCorpusIds,
+    candidates.some((candidate) => candidate.trustDomain === 'secure_local'),
+  );
   const coverage: EvidenceCoverage = {
     searchedCorpora: routed.searchedCorpora,
     skippedCorpora: routed.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
@@ -314,28 +327,68 @@ export async function buildEvidencePackDetailed(
 
 // Floor for one candidate's share of the evidence budget: below this a
 // passage stops carrying a usable sentence of context.
-const MIN_CHARS_PER_CANDIDATE = 400;
+const MIN_BYTES_PER_CANDIDATE = 400;
 
-export function evidenceCharsPerCandidate(
+export function evidenceBytesPerCandidate(
   candidateCount: number,
   maxCharsPerCandidate: number | undefined,
-  evidenceCharBudget: number | undefined,
+  evidenceByteBudget: number | undefined,
 ): number | undefined {
-  if (evidenceCharBudget === undefined || !Number.isFinite(evidenceCharBudget) || evidenceCharBudget <= 0) {
+  if (evidenceByteBudget === undefined || !Number.isFinite(evidenceByteBudget) || evidenceByteBudget <= 0) {
     return maxCharsPerCandidate;
   }
   const share = Math.max(
-    MIN_CHARS_PER_CANDIDATE,
-    Math.floor(evidenceCharBudget / Math.max(1, candidateCount)),
+    MIN_BYTES_PER_CANDIDATE,
+    Math.floor(evidenceByteBudget / Math.max(1, candidateCount)),
   );
   return maxCharsPerCandidate === undefined ? share : Math.min(maxCharsPerCandidate, share);
 }
 
+const utf8 = new TextEncoder();
+
+export function utf8ByteLength(text: string): number {
+  return utf8.encode(text).length;
+}
+
+// Keep whole chunks while they fit, then cut the next one at a code-point
+// boundary so the kept text is at most maxBytes of UTF-8.
+export function clipChunksToUtf8Bytes(chunks: readonly string[], maxBytes: number): string[] {
+  const kept: string[] = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks) {
+    if (remaining <= 0) break;
+    const bytes = utf8ByteLength(chunk);
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = '';
+    let used = 0;
+    for (const codePoint of chunk) {
+      const size = utf8ByteLength(codePoint);
+      if (used + size > remaining) break;
+      cut += codePoint;
+      used += size;
+    }
+    if (cut) kept.push(cut);
+    break;
+  }
+  return kept;
+}
+
+// Private corpora's counts ride only on a pack that already holds private
+// evidence, because only such a pack is routed to the private analyst lane.
+// A pack with no secure_local candidate may go to an ordinary cloud analyst,
+// and even a count of private matches must not reach it.
 function coverageMatchCounts(
   counts: readonly SourceIndexRoutedMatchCount[] | undefined,
   candidateCorpusIds: readonly string[],
+  packHasSecureLocal: boolean,
 ): EvidenceCoverageMatchCount[] {
-  return (counts ?? []).map((count) => {
+  return (counts ?? [])
+    .filter((count) => packHasSecureLocal || count.trustDomain !== 'secure_local')
+    .map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
       corpusId: count.corpusId,
@@ -348,28 +401,6 @@ function coverageMatchCounts(
       inEvidence,
     };
   });
-}
-
-// Several routed runs (literal query plus planner expansions) each count the
-// same corpus; the broadest run is the best lower bound on its match set.
-function mergeRoutedMatchCounts(
-  runs: readonly RoutedSearchSlice[],
-): SourceIndexRoutedMatchCount[] {
-  const merged = new Map<string, SourceIndexRoutedMatchCount>();
-  for (const run of runs) {
-    for (const count of run.matchCounts ?? []) {
-      const existing = merged.get(count.corpusId);
-      merged.set(count.corpusId, existing
-        ? {
-            ...existing,
-            matchedItems: Math.max(existing.matchedItems, count.matchedItems),
-            contentMatchedItems: Math.max(existing.contentMatchedItems, count.contentMatchedItems),
-            saturated: existing.saturated || count.saturated,
-          }
-        : count);
-    }
-  }
-  return [...merged.values()];
 }
 
 async function corpusReadabilityGapsFor(
@@ -596,7 +627,9 @@ async function runRoutedSearches(input: BuildEvidencePackInput): Promise<RoutedS
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
-    matchCounts: mergeRoutedMatchCounts(runs),
+    // The literal question's counts, not a merge across planner rephrasings:
+    // the breadth reported is for what the owner asked.
+    ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
   };
 }
 

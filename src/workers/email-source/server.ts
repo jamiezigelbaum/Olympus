@@ -2300,6 +2300,12 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS,
     'OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS',
   );
+  // Passage bytes a local analyst leg may receive. Set it only when the local
+  // model's served context is known to hold more than the conservative default.
+  const sourceIndexLocalAnalystEvidenceBytes = parseOptionalPositiveInteger(
+    process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES,
+    'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES',
+  );
   const sourceIndexAnswerMaxCharsPerCandidate = parseOptionalPositiveInteger(
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE,
     'OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE',
@@ -2449,6 +2455,9 @@ export async function main(): Promise<void> {
         }),
         ...(sourceIndexAnswerMaxResults !== undefined
           ? { defaultMaxResults: sourceIndexAnswerMaxResults }
+          : {}),
+        ...(sourceIndexLocalAnalystEvidenceBytes !== undefined
+          ? { localAnalystEvidenceByteBudget: sourceIndexLocalAnalystEvidenceBytes }
           : {}),
         ...(sourceIndexAnswerMaxCharsPerCandidate !== undefined
           ? { maxCharsPerCandidate: sourceIndexAnswerMaxCharsPerCandidate }

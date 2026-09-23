@@ -13426,7 +13426,7 @@ function createConnectorStoreCorpusAdapter(options) {
         ],
         getId: (row) => row.sourceItem.localItemId,
         limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
-        tieBreaker: compareConnectorStoreSearchCandidates
+        tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference)
       });
       const hits = withPinnedNewestChatHits({
         store,
@@ -13544,6 +13544,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
+  const contentBar = semanticRelevanceBar ?? DEFAULT_SEMANTIC_RELEVANCE_BAR;
+  const contentPreference = connectorStoreContentPreference(new Set(vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId)));
   const fused = fuseRankedCandidateLanes({
     lanes: [
       { name: "keyword", items: keywordRows },
@@ -13552,12 +13554,12 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     ],
     getId: (row) => row.sourceItem.localItemId,
     limit: maxResults,
-    tieBreaker: compareConnectorStoreSearchCandidates
+    tieBreaker: connectorStoreCandidateComparator(contentPreference)
   });
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
+    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -13624,8 +13626,10 @@ function normalizeSemanticRelevanceBar(value) {
   return value;
 }
 function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions = {}) {
-  const rows = store.searchItems(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
-  const contentRows = rows.every(connectorStoreRowHasContent) ? [] : store.searchItems(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+  const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
+  const rows = plain.rows;
+  const content = rows.every(connectorStoreRowHasContent) ? { rows: [], saturated: false } : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+  const contentRows = content.rows;
   const seen = new Set;
   const merged = [];
   for (const row of [
@@ -13643,7 +13647,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
-      saturated: rows.length >= MAX_SEARCH_RESULTS || contentRows.length >= MAX_SEARCH_RESULTS
+      saturated: plain.saturated || content.saturated
     },
     matchedItemIds: seen
   };
@@ -13651,19 +13655,24 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
 function connectorStoreRowHasContent(row) {
   return row.chunk !== undefined;
 }
-function connectorStoreCandidateHasContent(candidate) {
-  return connectorStoreRowHasContent(candidate.item) || candidate.laneRanks.has("vector") || candidate.laneRanks.has("recency");
+function connectorStoreContentPreference(vettedVectorItemIds) {
+  return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-function contentFirstCandidates(candidates) {
+function contentFirstCandidates(candidates, hasContent = lexicalContentPreference) {
   return [
-    ...candidates.filter(connectorStoreCandidateHasContent),
-    ...candidates.filter((candidate) => !connectorStoreCandidateHasContent(candidate))
+    ...candidates.filter(hasContent),
+    ...candidates.filter((candidate) => !hasContent(candidate))
   ];
 }
+function connectorStoreCandidateComparator(hasContent) {
+  return (left, right) => {
+    const leftContent = hasContent(left);
+    if (leftContent !== hasContent(right))
+      return leftContent ? -1 : 1;
+    return compareConnectorStoreSearchCandidates(left, right);
+  };
+}
 function compareConnectorStoreSearchCandidates(left, right) {
-  const leftContent = connectorStoreCandidateHasContent(left);
-  if (leftContent !== connectorStoreCandidateHasContent(right))
-    return leftContent ? -1 : 1;
   const leftKeyword = left.laneRanks.get("keyword") ?? Number.POSITIVE_INFINITY;
   const rightKeyword = right.laneRanks.get("keyword") ?? Number.POSITIVE_INFINITY;
   if (leftKeyword !== rightKeyword)
@@ -13771,7 +13780,7 @@ function connectorStoreCoverageGaps(content, metadataOnlyRuleId) {
 }
 function storedWithoutTextGap(mimeType) {
   const mime = mimeType.trim().toLowerCase();
-  if (mime === "inode/directory") {
+  if (CONTAINER_MIME_TYPES.includes(mime)) {
     return "the item is a container entry and carries no text of its own.";
   }
   if (mime === "application/pdf") {
@@ -14228,7 +14237,7 @@ function selectEvidencePassages(chunks, maxChars, focus) {
   if (picked.length === 0)
     return budgetChunks(chunks, maxChars);
   const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-  return { chunks: bounded.chunks, truncated: true };
+  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -15431,13 +15440,13 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -15450,6 +15459,12 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
+  CONTAINER_MIME_TYPES = Object.freeze([
+    "inode/directory",
+    "application/x-directory",
+    "application/vnd.google-apps.folder"
+  ]);
+  CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -18409,11 +18424,14 @@ var init_local_index = __esm(() => {
       });
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
+      return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
+    }
+    searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions = {}) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const terms = toFtsQuery(query, ftsOptions);
       if (!terms)
-        return [];
+        return { rows: [], saturated: false };
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = sourceIndexFtsTermGroups(query);
       const minimumSignal = groups.length >= 2;
@@ -18437,7 +18455,7 @@ var init_local_index = __esm(() => {
       WHERE connector_store_fts MATCH ?
         AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
         AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) <> 'inode/directory'
+        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
         ${ftsOptions.contentOnly ? "AND connector_store_fts.chunk_pk IS NOT NULL" : ""}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
@@ -18467,11 +18485,14 @@ var init_local_index = __esm(() => {
         selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
       }
       const spanTerms = queryTermsForSpan(query);
-      return selected.slice(0, limit).map((row) => {
-        const base = searchRowFromItemRow(row);
-        const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
-        return chunk ? { ...base, chunk } : base;
-      });
+      return {
+        rows: selected.slice(0, limit).map((row) => {
+          const base = searchRowFromItemRow(row);
+          const chunk = row.chunk_pk === null || row.chunk_pk === undefined ? undefined : this.chunkMatchForChunkPk(row.chunk_pk, "keyword", spanTerms);
+          return chunk ? { ...base, chunk } : base;
+        }),
+        saturated: rows.length >= fetchLimit || selected.length > limit
+      };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -18694,6 +18715,7 @@ var init_local_index = __esm(() => {
       return row ? syncRunFromRow(row) : undefined;
     }
   };
+  lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
     "sync_runs",
     "items",
@@ -19639,9 +19661,15 @@ function redactPackForEscalation(pack) {
       } : {},
       ...candidate.score !== undefined ? { score: candidate.score } : {}
     })),
-    coverage: pack.coverage,
+    coverage: stripSecureMatchCounts(pack),
     builtAt: pack.builtAt
   };
+}
+function stripSecureMatchCounts(pack) {
+  if (!pack.coverage.matchCounts)
+    return pack.coverage;
+  const { matchCounts: _matchCounts, ...coverage } = pack.coverage;
+  return coverage;
 }
 function clampAnswer(answer, maxAnswerChars) {
   if (maxAnswerChars !== undefined && answer.length > maxAnswerChars) {
@@ -20480,6 +20508,7 @@ async function routeSourceIndexSearch(options) {
       matchCounts.push({
         corpusId: corpus.corpusId,
         family: corpus.family,
+        trustDomain: corpus.trustDomain,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated
@@ -20798,7 +20827,8 @@ async function buildEvidencePackDetailed(input) {
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
   const hydrationStartedAt = Date.now();
-  const maxCharsPerCandidate = evidenceCharsPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceCharBudget);
+  const maxBytesPerCandidate = evidenceBytesPerCandidate(routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
+  const maxCharsPerCandidate = maxBytesPerCandidate;
   const hydrated = await Promise.all(routedHits.map(async (hit) => {
     const provenance = hitProvenance(hit);
     const provider = input.contentProviders[hit.corpusId];
@@ -20833,11 +20863,12 @@ async function buildEvidencePackDetailed(input) {
       ...provenance,
       citation: { ...provenance.citation, uri: content.locatorUri }
     } : provenance;
+    const chunks = content?.chunks ?? [];
     const candidate = {
       provenance: enrichedProvenance,
       trustTier: sensitivity.trustTier,
       trustDomain: sensitivity.trustDomain,
-      chunks: content?.chunks ?? [],
+      chunks: input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(chunks, maxBytesPerCandidate) : chunks,
       ...content?.tables ? { tables: content.tables } : {},
       ...content?.facts ? { facts: content.facts } : {},
       ...hit.score !== undefined ? { score: hit.score } : {}
@@ -20849,7 +20880,7 @@ async function buildEvidencePackDetailed(input) {
     if (gap)
       extractionGaps.push(gap);
   }
-  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds);
+  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => candidate.trustDomain === "secure_local"));
   const coverage = {
     searchedCorpora: routed.searchedCorpora,
     skippedCorpora: routed.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
@@ -20869,15 +20900,45 @@ async function buildEvidencePackDetailed(input) {
     corpusReadabilityGaps
   };
 }
-function evidenceCharsPerCandidate(candidateCount, maxCharsPerCandidate, evidenceCharBudget) {
-  if (evidenceCharBudget === undefined || !Number.isFinite(evidenceCharBudget) || evidenceCharBudget <= 0) {
+function evidenceBytesPerCandidate(candidateCount, maxCharsPerCandidate, evidenceByteBudget) {
+  if (evidenceByteBudget === undefined || !Number.isFinite(evidenceByteBudget) || evidenceByteBudget <= 0) {
     return maxCharsPerCandidate;
   }
-  const share = Math.max(MIN_CHARS_PER_CANDIDATE, Math.floor(evidenceCharBudget / Math.max(1, candidateCount)));
+  const share = Math.max(MIN_BYTES_PER_CANDIDATE, Math.floor(evidenceByteBudget / Math.max(1, candidateCount)));
   return maxCharsPerCandidate === undefined ? share : Math.min(maxCharsPerCandidate, share);
 }
-function coverageMatchCounts(counts, candidateCorpusIds) {
-  return (counts ?? []).map((count) => {
+function utf8ByteLength(text) {
+  return utf8.encode(text).length;
+}
+function clipChunksToUtf8Bytes(chunks, maxBytes) {
+  const kept = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks) {
+    if (remaining <= 0)
+      break;
+    const bytes = utf8ByteLength(chunk);
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = "";
+    let used = 0;
+    for (const codePoint of chunk) {
+      const size = utf8ByteLength(codePoint);
+      if (used + size > remaining)
+        break;
+      cut += codePoint;
+      used += size;
+    }
+    if (cut)
+      kept.push(cut);
+    break;
+  }
+  return kept;
+}
+function coverageMatchCounts(counts, candidateCorpusIds, packHasSecureLocal) {
+  return (counts ?? []).filter((count) => packHasSecureLocal || count.trustDomain !== "secure_local").map((count) => {
     const inEvidence = candidateCorpusIds.filter((corpusId) => corpusId === count.corpusId).length;
     return {
       corpusId: count.corpusId,
@@ -20888,21 +20949,6 @@ function coverageMatchCounts(counts, candidateCorpusIds) {
       inEvidence
     };
   });
-}
-function mergeRoutedMatchCounts(runs) {
-  const merged = new Map;
-  for (const run of runs) {
-    for (const count of run.matchCounts ?? []) {
-      const existing = merged.get(count.corpusId);
-      merged.set(count.corpusId, existing ? {
-        ...existing,
-        matchedItems: Math.max(existing.matchedItems, count.matchedItems),
-        contentMatchedItems: Math.max(existing.contentMatchedItems, count.contentMatchedItems),
-        saturated: existing.saturated || count.saturated
-      } : count);
-    }
-  }
-  return [...merged.values()];
 }
 async function corpusReadabilityGapsFor(searchedCorpora, providers) {
   const gaps = await Promise.all([...new Set(searchedCorpora)].map(async (corpusId) => {
@@ -21047,7 +21093,7 @@ async function runRoutedSearches(input) {
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
     degradations: mergeRetrievalDegradations(...runs.map((run) => run.degradations), budgetDegradations),
-    matchCounts: mergeRoutedMatchCounts(runs)
+    ...literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}
   };
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -21150,12 +21196,13 @@ function trustDomainRank(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_CHARS_PER_CANDIDATE = 400, MAX_SEARCH_QUERIES = 3;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3;
 var init_evidence_pack = __esm(() => {
   init_source_model_policy();
   init_router();
   init_types();
   init_answer_latency_trace();
+  utf8 = new TextEncoder;
 });
 
 // src/core/venice-models.ts
@@ -22109,7 +22156,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const maxCharsPerCandidate = options.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE;
       const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
       const maxResults = Math.min(MAX_EVIDENCE_CANDIDATES, request.max_results ?? (hasTemporalIntent(`${question} ${request.query ?? ""}`) ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS) : configuredMaxResults));
-      const evidenceCharBudget = options.evidenceCharBudget ?? DEFAULT_EVIDENCE_CHAR_BUDGET;
+      const evidenceByteBudget = options.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET;
       const evidencePackStartedAt = Date.now();
       const buildDetail = (activeLanes, attempt) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
         question,
@@ -22127,7 +22174,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         adapters: activeLanes.adapters,
         contentProviders: activeLanes.contentProviders,
         maxCharsPerCandidate,
-        evidenceCharBudget,
+        evidenceByteBudget,
         ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}
       }));
       const initialAttempt = request.selected_items?.length ? "selected" : retrievalRequest.retrieval_mode ?? "hybrid";
@@ -22161,6 +22208,16 @@ function createAnalystSourceIndexAnswerHandler(options) {
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       let pack = detail.pack;
+      const localEvidenceBytes = options.localAnalystEvidenceByteBudget ?? DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES;
+      const legFitting = (analysisDetail) => {
+        const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
+          candidate,
+          analysisDetail.candidateCorpusIds[index] ?? ""
+        ]));
+        return {
+          localLeg: (analyst) => localBudgetedAnalyst(analyst, localEvidenceBytes, candidateCorpus)
+        };
+      };
       assertEvidencePackModelEligible(pack);
       const policyDeniedEmptyPack = pack.candidates.length === 0 && (detail.policyDeniedCandidates ?? 0) > 0;
       let localOnly = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
@@ -22172,22 +22229,25 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const veniceAnalyst = policyDeniedEmptyPack ? undefined : createOptionalVeniceAnalyst(options, request).analyst;
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
-      const analyze = (analysisPack, analysisLocalOnly) => routeAnalysis({
-        pack: analysisPack,
-        localOnly: analysisLocalOnly,
-        requestedProvider: requestedAnalystProvider,
-        local: options.analyst,
-        ...options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {},
-        ...veniceAnalyst ? { venice: veniceAnalyst } : {},
-        trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-        localAnalystTimeoutMs,
-        cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-        ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {},
-        secureAnalystPoolState,
-        ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
-        ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
-        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
-      });
+      const analyze = (analysisDetail, analysisLocalOnly) => {
+        const { localLeg } = legFitting(analysisDetail);
+        return routeAnalysis({
+          pack: analysisDetail.pack,
+          localOnly: analysisLocalOnly,
+          requestedProvider: requestedAnalystProvider,
+          local: localLeg(options.analyst),
+          ...options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {},
+          ...veniceAnalyst ? { venice: veniceAnalyst } : {},
+          trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
+          localAnalystTimeoutMs,
+          cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLocalLegBudget(options.sovereigntyAnalystRoute, localLeg) } : {},
+          secureAnalystPoolState,
+          ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
+          ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
+          secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
+        });
+      };
       const analystStartedAt = Date.now();
       let routedAnalysis;
       if (policyDeniedEmptyPack) {
@@ -22195,7 +22255,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } else {
         const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
         try {
-          routedAnalysis = await analyze(pack, localOnly);
+          routedAnalysis = await analyze(detail, localOnly);
         } catch (error) {
           if (!privateDefaulted || !isPrivateRouteUnavailable(error))
             throw error;
@@ -22214,7 +22274,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           localOnly = pack.candidates.some((candidate) => candidate.trustDomain === "secure_local");
           if (localOnly)
             throw error;
-          routedAnalysis = await analyze(pack, false);
+          routedAnalysis = await analyze(detail, false);
         }
       }
       const secureCandidates = pack.candidates.filter((c) => c.trustDomain === "secure_local");
@@ -22365,6 +22425,70 @@ function secureLocalExclusionCoverageNotes(detail) {
     notes.push(`Private sources were not searched for this bulk request (${bulk.join(", ")}); ` + "ask again with include_secure_local set to true to request release approval.");
   }
   return notes;
+}
+function withLocalLegBudget(route, localLeg) {
+  return (input) => {
+    const resolved = route(input);
+    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step);
+    return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
+  };
+}
+function localBudgetedAnalyst(analyst, evidenceBytes, candidateCorpus) {
+  return {
+    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus), analyzeOptions)
+  };
+}
+function fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus) {
+  const total = pack.candidates.reduce((sum, candidate) => sum + candidate.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
+  if (total <= evidenceBytes)
+    return pack;
+  const keepCount = Math.max(1, Math.min(pack.candidates.length, Math.floor(evidenceBytes / MIN_FITTED_BYTES_PER_CANDIDATE)));
+  const byCorpus = new Map;
+  for (const candidate of pack.candidates) {
+    const corpusId = candidateCorpus.get(candidate) ?? "";
+    const bucket = byCorpus.get(corpusId);
+    if (bucket)
+      bucket.push(candidate);
+    else
+      byCorpus.set(corpusId, [candidate]);
+  }
+  const kept = new Set;
+  for (let round = 0;kept.size < keepCount; round += 1) {
+    let seated = false;
+    for (const bucket of byCorpus.values()) {
+      const candidate = bucket[round];
+      if (!candidate)
+        continue;
+      kept.add(candidate);
+      seated = true;
+      if (kept.size >= keepCount)
+        break;
+    }
+    if (!seated)
+      break;
+  }
+  const share = Math.floor(evidenceBytes / kept.size);
+  const candidates = pack.candidates.filter((candidate) => kept.has(candidate)).map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, share) }));
+  const inEvidence = new Map;
+  for (const candidate of pack.candidates) {
+    if (!kept.has(candidate))
+      continue;
+    const corpusId = candidateCorpus.get(candidate) ?? "";
+    inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+  }
+  return {
+    ...pack,
+    candidates,
+    coverage: {
+      ...pack.coverage,
+      ...pack.coverage.matchCounts ? {
+        matchCounts: pack.coverage.matchCounts.map((count) => ({
+          ...count,
+          inEvidence: inEvidence.get(count.corpusId) ?? 0
+        }))
+      } : {}
+    }
+  };
 }
 function requestExplicitlyTargetsSecureLocal(request, registry) {
   if (request.include_secure_local_content === true)
@@ -23268,7 +23392,7 @@ function provenanceCorpusId(provenance) {
 function sourceItemsEqual(left, right) {
   return left.family === right.family && left.provider === right.provider && left.accountScope === right.accountScope && left.providerItemId === right.providerItemId && left.providerThreadId === right.providerThreadId && left.providerConversationId === right.providerConversationId && left.providerFileId === right.providerFileId && left.providerEventId === right.providerEventId && left.localItemId === right.localItemId && left.sourceVersion === right.sourceVersion;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_CHAR_BUDGET = 40000, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES = 9000, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
 var init_analyst_answer = __esm(() => {
   init_analyst();
   init_analyst_openclaw_infer();
@@ -43177,7 +43301,8 @@ var init_operations = __esm(() => {
         "Search a calling-assistant-safe source-index surface without returning source packets, scopes, tokens, provider cursors, or secure-local raw content.",
         "X bookmarks are internal/S1; connector-store search does not currently return direct X URLs. Dropbox stays secure-local except for its declared locator release, and protected Telegram stays secure-local.",
         "Each hit includes selected_item when it can be safely passed back to source_answer.selected_items for item-pinned evidence hydration.",
-        "Dropbox file locators are opt-in only: set include_locators=true when the user explicitly asks for file paths, Finder links, or Dropbox links. Folder locators are not supported."
+        "Dropbox file locators are opt-in only: set include_locators=true when the user explicitly asks for file paths, Finder links, or Dropbox links. Folder locators are not supported.",
+        "Folders are not returned as results; search returns the files inside them, readable documents ahead of name-only matches."
       ].join(" "),
       params: SOURCE_INDEX_SEARCH_PARAMS,
       mutating: false,
@@ -80302,6 +80427,7 @@ async function main() {
     }) : undefined;
   };
   const sourceIndexAnswerMaxResults = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS");
+  const sourceIndexLocalAnalystEvidenceBytes = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES, "OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES");
   const sourceIndexAnswerMaxCharsPerCandidate = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE");
   const sourceIndexTrustedAnalystTimeoutMs = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS, "OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS");
   const sourceAnswerLocalAnalystTimeoutMs = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_ANSWER_ANALYST_TIMEOUT_MS, "OLYMPUS_SOURCE_ANSWER_ANALYST_TIMEOUT_MS");
@@ -80376,6 +80502,7 @@ async function main() {
         requestedProvider
       }),
       ...sourceIndexAnswerMaxResults !== undefined ? { defaultMaxResults: sourceIndexAnswerMaxResults } : {},
+      ...sourceIndexLocalAnalystEvidenceBytes !== undefined ? { localAnalystEvidenceByteBudget: sourceIndexLocalAnalystEvidenceBytes } : {},
       ...sourceIndexAnswerMaxCharsPerCandidate !== undefined ? { maxCharsPerCandidate: sourceIndexAnswerMaxCharsPerCandidate } : {},
       ...effectiveTrustedAnalystTimeoutMs !== undefined ? { trustedAnalystTimeoutMs: effectiveTrustedAnalystTimeoutMs } : {},
       ...sourceAnswerLocalAnalystTimeoutMs !== undefined ? { localAnalystTimeoutMs: sourceAnswerLocalAnalystTimeoutMs } : {},

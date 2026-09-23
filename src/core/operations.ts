@@ -359,6 +359,7 @@ export const operations: Operation[] = [
       'X bookmarks are internal/S1; connector-store search does not currently return direct X URLs. Dropbox stays secure-local except for its declared locator release, and protected Telegram stays secure-local.',
       'Each hit includes selected_item when it can be safely passed back to source_answer.selected_items for item-pinned evidence hydration.',
       'Dropbox file locators are opt-in only: set include_locators=true when the user explicitly asks for file paths, Finder links, or Dropbox links. Folder locators are not supported.',
+      'Folders are not returned as results; search returns the files inside them, readable documents ahead of name-only matches.',
     ].join(' '),
     params: SOURCE_INDEX_SEARCH_PARAMS,
     mutating: false,

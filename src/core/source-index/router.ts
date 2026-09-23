@@ -105,6 +105,7 @@ export interface SourceIndexCorpusMatchCount {
 export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount {
   corpusId: string;
   family: SourceFamily;
+  trustDomain: SourceTrustDomain;
 }
 
 export interface SourceIndexCorpusSearchAdapter {
@@ -336,6 +337,7 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
       matchCounts.push({
         corpusId: corpus.corpusId,
         family: corpus.family,
+        trustDomain: corpus.trustDomain,
         matchedItems: response.matchCount.matchedItems,
         contentMatchedItems: response.matchCount.contentMatchedItems,
         saturated: response.matchCount.saturated,

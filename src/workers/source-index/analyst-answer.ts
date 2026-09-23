@@ -27,11 +27,13 @@
 // - The Castor-visible result carries the gated answer, citation locators, and
 //   audits — never raw chunks, packets, or pack internals.
 
-import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidencePack } from '../../core/contracts.ts';
+import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
+  clipChunksToUtf8Bytes,
+  utf8ByteLength,
   hasTemporalIntent,
   type EvidencePackBuildDetail,
   type LocalContentProviderMap,
@@ -121,8 +123,10 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   queryPlanner?: (question: string) => Promise<readonly string[]>;
   defaultMaxResults?: number;
   maxCharsPerCandidate?: number;
-  // Total passage characters across the evidence pack; see DEFAULT_EVIDENCE_CHAR_BUDGET.
-  evidenceCharBudget?: number;
+  // Total passage UTF-8 bytes across the evidence pack; see DEFAULT_EVIDENCE_BYTE_BUDGET.
+  evidenceByteBudget?: number;
+  // Passage bytes a LOCAL analyst leg receives; see DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES.
+  localAnalystEvidenceByteBudget?: number;
   // Per-lane retrieval deadline for the fan-out. Its own quantity, like the two
   // analyst bounds below: it governs how long ONE corpus may take to answer,
   // not how long the whole answer may take. Absent, the router uses its
@@ -198,20 +202,30 @@ export interface SourceAnswerSelfHealResult {
   healed: boolean;
 }
 
-// Evidence is sized by a character budget, not a handful of slots. A broad
+// Evidence is sized by a byte budget, not a handful of slots. A broad
 // question ("what do I have on X?") routinely matches dozens of emails, a
 // message, and a folder of documents; three candidates could show one item per
-// source at best and hid the rest. Up to 24 items share a 40,000-character
-// passage budget (about 10k tokens): 24 items get ~1,650 chars each (their best
-// two or three passages), 3 items keep the old 3,000-char ceiling. With
-// per-candidate metadata and the system prompt the analyst prompt stays near
-// 55k chars (about 14k tokens) — inside every analyst lane in use: the
-// OpenClaw infer lane's 100,000-byte argv ceiling with room for multi-byte
-// text, Venice's model contexts, and a local Argus context. A caller's
-// max_results still asks for fewer, up to MAX_EVIDENCE_CANDIDATES.
+// source at best and hid the rest. Up to 24 items share a 40,000-byte UTF-8
+// passage budget: 24 items get ~1,666 bytes each (their best two or three
+// passages), 3 items keep the 3,000 ceiling. Bytes, because the tightest lane
+// ceiling is bytes: the OpenClaw infer lane refuses prompts over 100,000 bytes
+// (it rides argv). Worst case for that lane is 48 candidates of CJK titles and
+// passages: 40k passage bytes plus about 30k of labels and 5k of system rules,
+// so about 75k, with 25k of margin for JSON escaping. Venice Private contexts
+// are far larger. A local analyst gets its own, smaller budget
+// (DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES). A caller's max_results still asks
+// for fewer, up to MAX_EVIDENCE_CANDIDATES.
 const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
-const DEFAULT_EVIDENCE_CHAR_BUDGET = 40_000;
+const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
+// A local model served over an OpenAI-compatible endpoint (Ollama, llama.cpp,
+// Delphi) can run a small context the request cannot raise (Ollama's default
+// num_ctx, for one) and truncates the prompt HEAD, which is where the system
+// rules sit. Nothing in the sovereignty config declares a local context, so a
+// local leg gets the pre-budget footprint that ran safely: 9,000 passage bytes
+// (the old 3 x 3,000). A host that serves a larger context declares it with
+// OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES.
+const DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES = 9_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
 const TEMPORAL_INTENT_MIN_RESULTS = 8;
 const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
@@ -340,7 +354,7 @@ export function createAnalystSourceIndexAnswerHandler(
             ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS)
             : configuredMaxResults),
       );
-      const evidenceCharBudget = options.evidenceCharBudget ?? DEFAULT_EVIDENCE_CHAR_BUDGET;
+      const evidenceByteBudget = options.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET;
       const evidencePackStartedAt = Date.now();
       const buildDetail = (
         activeLanes: AnalystAnswerLanes,
@@ -361,7 +375,7 @@ export function createAnalystSourceIndexAnswerHandler(
           adapters: activeLanes.adapters,
           contentProviders: activeLanes.contentProviders,
           maxCharsPerCandidate,
-          evidenceCharBudget,
+          evidenceByteBudget,
           ...(options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}),
         }));
       const initialAttempt = request.selected_items?.length
@@ -401,6 +415,19 @@ export function createAnalystSourceIndexAnswerHandler(
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       let pack = detail.pack;
+      const localEvidenceBytes = options.localAnalystEvidenceByteBudget ?? DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES;
+      // Leg fitting is keyed by the candidates of the pack actually analyzed,
+      // so a rebuilt pack (the private-outage fallback below) is fitted and its
+      // matchCounts restated against its own candidates, never the first build's.
+      const legFitting = (analysisDetail: EvidencePackBuildDetail) => {
+        const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
+          candidate,
+          analysisDetail.candidateCorpusIds[index] ?? '',
+        ] as const));
+        return {
+          localLeg: (analyst: Analyst): Analyst => localBudgetedAnalyst(analyst, localEvidenceBytes, candidateCorpus),
+        };
+      };
       assertEvidencePackModelEligible(pack);
       const policyDeniedEmptyPack = pack.candidates.length === 0
         && (detail.policyDeniedCandidates ?? 0) > 0;
@@ -429,30 +456,35 @@ export function createAnalystSourceIndexAnswerHandler(
       // Private legs keep the operator's configured budgets whether secure_local
       // was included by default or explicitly: slow-but-working private answers
       // are the product posture, so no default-path cap cuts them short.
-      const analyze = (analysisPack: EvidencePack, analysisLocalOnly: boolean) => routeAnalysis({
-        pack: analysisPack,
-        localOnly: analysisLocalOnly,
-        requestedProvider: requestedAnalystProvider,
-        local: options.analyst,
-        ...(options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {}),
-        ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
-        // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
-        // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
-        // it must never inflate this bound, or a ~20s Venice attempt silently
-        // becomes a 10-minute one. (2026-07-15 answer-latency WO.)
-        trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-        localAnalystTimeoutMs,
-        cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-        ...(options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: options.sovereigntyAnalystRoute } : {}),
-        secureAnalystPoolState,
-        ...(options.secureAnalystPool?.sloMs !== undefined
-          ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs }
-          : {}),
-        ...(options.secureAnalystPool?.reserveMs !== undefined
-          ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
-          : {}),
-        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
-      });
+      const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
+        const { localLeg } = legFitting(analysisDetail);
+        return routeAnalysis({
+          pack: analysisDetail.pack,
+          localOnly: analysisLocalOnly,
+          requestedProvider: requestedAnalystProvider,
+          local: localLeg(options.analyst),
+          ...(options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {}),
+          ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
+          // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
+          // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
+          // it must never inflate this bound, or a ~20s Venice attempt silently
+          // becomes a 10-minute one. (2026-07-15 answer-latency WO.)
+          trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
+          localAnalystTimeoutMs,
+          cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+          ...(options.sovereigntyAnalystRoute
+            ? { sovereigntyAnalystRoute: withLocalLegBudget(options.sovereigntyAnalystRoute, localLeg) }
+            : {}),
+          secureAnalystPoolState,
+          ...(options.secureAnalystPool?.sloMs !== undefined
+            ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs }
+            : {}),
+          ...(options.secureAnalystPool?.reserveMs !== undefined
+            ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs }
+            : {}),
+          secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs,
+        });
+      };
       const analystStartedAt = Date.now();
       let routedAnalysis: RoutedAnalysis;
       if (policyDeniedEmptyPack) {
@@ -467,7 +499,7 @@ export function createAnalystSourceIndexAnswerHandler(
         // failure.
         const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
         try {
-          routedAnalysis = await analyze(pack, localOnly);
+          routedAnalysis = await analyze(detail, localOnly);
         } catch (error) {
           if (!privateDefaulted || !isPrivateRouteUnavailable(error)) throw error;
           const secureIndex = allowedTrustDomains.indexOf('secure_local');
@@ -483,7 +515,7 @@ export function createAnalystSourceIndexAnswerHandler(
           assertEvidencePackModelEligible(pack);
           localOnly = pack.candidates.some((candidate) => candidate.trustDomain === 'secure_local');
           if (localOnly) throw error;
-          routedAnalysis = await analyze(pack, false);
+          routedAnalysis = await analyze(detail, false);
         }
       }
       const secureCandidates = pack.candidates.filter((c) => c.trustDomain === 'secure_local');
@@ -723,6 +755,99 @@ function secureLocalExclusionCoverageNotes(detail: EvidencePackBuildDetail): str
     );
   }
   return notes;
+}
+
+// Every local leg sees the pack fitted to the local budget; other legs see it
+// whole. Fitting keeps each contributing corpus represented (round-robin over
+// corpora in pack order), gives the kept candidates equal byte shares, and
+// restates matchCounts.inEvidence for what the local model actually receives.
+function withLocalLegBudget(
+  route: NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']>,
+  localLeg: (analyst: Analyst) => Analyst,
+): NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']> {
+  return (input) => {
+    const resolved = route(input);
+    const fit = (steps: SovereigntyAnalystRouteStep[]) => steps.map((step) => (
+      step.backend === 'local' ? { ...step, analyst: localLeg(step.analyst) } : step
+    ));
+    return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
+  };
+}
+
+function localBudgetedAnalyst(
+  analyst: Analyst,
+  evidenceBytes: number,
+  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+): Analyst {
+  return {
+    analyze: (pack, analyzeOptions) => analyst.analyze(
+      fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus),
+      analyzeOptions,
+    ),
+  };
+}
+
+// Floor for one candidate's share when fitting a pack to a small lane.
+const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
+
+export function fitPackToEvidenceBytes(
+  pack: EvidencePack,
+  evidenceBytes: number,
+  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+): EvidencePack {
+  const total = pack.candidates.reduce(
+    (sum, candidate) => sum + candidate.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0),
+    0,
+  );
+  if (total <= evidenceBytes) return pack;
+  const keepCount = Math.max(1, Math.min(
+    pack.candidates.length,
+    Math.floor(evidenceBytes / MIN_FITTED_BYTES_PER_CANDIDATE),
+  ));
+  const byCorpus = new Map<string, EvidenceCandidate[]>();
+  for (const candidate of pack.candidates) {
+    const corpusId = candidateCorpus.get(candidate) ?? '';
+    const bucket = byCorpus.get(corpusId);
+    if (bucket) bucket.push(candidate);
+    else byCorpus.set(corpusId, [candidate]);
+  }
+  const kept = new Set<EvidenceCandidate>();
+  for (let round = 0; kept.size < keepCount; round += 1) {
+    let seated = false;
+    for (const bucket of byCorpus.values()) {
+      const candidate = bucket[round];
+      if (!candidate) continue;
+      kept.add(candidate);
+      seated = true;
+      if (kept.size >= keepCount) break;
+    }
+    if (!seated) break;
+  }
+  const share = Math.floor(evidenceBytes / kept.size);
+  const candidates = pack.candidates
+    .filter((candidate) => kept.has(candidate))
+    .map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, share) }));
+  const inEvidence = new Map<string, number>();
+  for (const candidate of pack.candidates) {
+    if (!kept.has(candidate)) continue;
+    const corpusId = candidateCorpus.get(candidate) ?? '';
+    inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+  }
+  return {
+    ...pack,
+    candidates,
+    coverage: {
+      ...pack.coverage,
+      ...(pack.coverage.matchCounts
+        ? {
+            matchCounts: pack.coverage.matchCounts.map((count) => ({
+              ...count,
+              inEvidence: inEvidence.get(count.corpusId) ?? 0,
+            })),
+          }
+        : {}),
+    },
+  };
 }
 
 function requestExplicitlyTargetsSecureLocal(

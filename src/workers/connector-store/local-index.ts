@@ -142,6 +142,17 @@ const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projec
 // questions peak at 0.61 best-cosine; true positives and paraphrases start
 // at 0.66) and may be re-pinned as the corpus grows.
 export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
+// Media types that name a container rather than a document, for every source
+// that stores its folders as items: the IANA/freedesktop directory type
+// (Dropbox and local files), its legacy alias, and Google Drive's folder type.
+// A new source that stores folders under another type adds it here; search
+// and evidence exclusion follow without a source branch.
+export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
+  'inode/directory',
+  'application/x-directory',
+  'application/vnd.google-apps.folder',
+]);
+const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
 const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12;
@@ -6628,9 +6639,10 @@ export class LocalConnectorStore {
   // Keyword search over the FTS lane. Returns identity + citation-safe
   // metadata only; bounded text and locators never cross this surface.
   //
-  // Folders (`inode/directory`) stay in the store for structure and status
-  // counts but are never search evidence: a folder has no content to read, and
-  // its path-bearing name out-scores the documents inside it. `contentOnly`
+  // Containers (folders of any source, see CONTAINER_MIME_TYPES) stay in the
+  // store for structure and status counts but are never search evidence: a
+  // folder has no content to read, and its path-bearing name out-scores the
+  // documents inside it. `contentOnly`
   // matches content chunk rows alone, so a corpus of many title-only items
   // cannot crowd its few readable documents out of the lane.
   searchItems(
@@ -6640,10 +6652,25 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
   ): ConnectorStoreSearchRow[] {
+    return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
+  }
+
+  // searchItems plus whether the match set may extend past what came back.
+  // `saturated` is read from the RAW fetch hitting its ceiling, before the
+  // multi-concept minimum-signal filter: a 150-row fetch filtered down to 6
+  // says nothing about the rows the fetch never reached, so 6 is only a lower
+  // bound there, not a count.
+  searchItemsDetailed(
+    query: string,
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    ftsOptions: { prefix?: boolean; contentOnly?: boolean } = {},
+  ): { rows: ConnectorStoreSearchRow[]; saturated: boolean } {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const terms = toFtsQuery(query, ftsOptions);
-    if (!terms) return [];
+    if (!terms) return { rows: [], saturated: false };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = sourceIndexFtsTermGroups(query);
     const minimumSignal = groups.length >= 2;
@@ -6667,7 +6694,7 @@ export class LocalConnectorStore {
       WHERE connector_store_fts MATCH ?
         AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
         AND i.tombstoned = 0
-        AND LOWER(COALESCE(i.mime_type, '')) <> 'inode/directory'
+        AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
         ${ftsOptions.contentOnly ? 'AND connector_store_fts.chunk_pk IS NOT NULL' : ''}
         ${selectedAccount ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
@@ -6708,13 +6735,16 @@ export class LocalConnectorStore {
       selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
     }
     const spanTerms = queryTermsForSpan(query);
-    return selected.slice(0, limit).map((row) => {
-      const base = searchRowFromItemRow(row);
-      const chunk = row.chunk_pk === null || row.chunk_pk === undefined
-        ? undefined
-        : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
-      return chunk ? { ...base, chunk } : base;
-    });
+    return {
+      rows: selected.slice(0, limit).map((row) => {
+        const base = searchRowFromItemRow(row);
+        const chunk = row.chunk_pk === null || row.chunk_pk === undefined
+          ? undefined
+          : this.chunkMatchForChunkPk(row.chunk_pk, 'keyword', spanTerms);
+        return chunk ? { ...base, chunk } : base;
+      }),
+      saturated: rows.length >= fetchLimit || selected.length > limit,
+    };
   }
 
   /**
@@ -7312,7 +7342,7 @@ export function createConnectorStoreCorpusAdapter(
         ],
         getId: (row) => row.sourceItem.localItemId,
         limit: Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS)),
-        tieBreaker: compareConnectorStoreSearchCandidates,
+        tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference),
       });
       const hits = withPinnedNewestChatHits({
         store,
@@ -7520,6 +7550,10 @@ async function hybridConnectorStoreSearch(
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
+  const contentBar = semanticRelevanceBar ?? DEFAULT_SEMANTIC_RELEVANCE_BAR;
+  const contentPreference = connectorStoreContentPreference(new Set(vectorRows
+    .filter((row) => row.bestCosine >= contentBar)
+    .map((row) => row.sourceItem.localItemId)));
 
   const fused = fuseRankedCandidateLanes({
     lanes: [
@@ -7529,12 +7563,12 @@ async function hybridConnectorStoreSearch(
     ],
     getId: (row) => row.sourceItem.localItemId,
     limit: maxResults,
-    tieBreaker: compareConnectorStoreSearchCandidates,
+    tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: contentFirstCandidates(fused).map((candidate) => connectorStoreHitFromRow(
+    hits: contentFirstCandidates(fused, contentPreference).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -7654,10 +7688,12 @@ function connectorStoreKeywordLaneRows(
   filters: ConnectorStoreSearchFilters | undefined,
   ftsOptions: { prefix?: boolean } = {},
 ): { rows: ConnectorStoreSearchRow[]; matchCount: SourceIndexCorpusMatchCount; matchedItemIds: ReadonlySet<string> } {
-  const rows = store.searchItems(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
-  const contentRows = rows.every(connectorStoreRowHasContent)
-    ? []
-    : store.searchItems(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+  const plain = store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions);
+  const rows = plain.rows;
+  const content = rows.every(connectorStoreRowHasContent)
+    ? { rows: [], saturated: false }
+    : store.searchItemsDetailed(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true });
+  const contentRows = content.rows;
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
   for (const row of [
@@ -7674,7 +7710,7 @@ function connectorStoreKeywordLaneRows(
     matchCount: {
       matchedItems: merged.length,
       contentMatchedItems: merged.filter(connectorStoreRowHasContent).length,
-      saturated: rows.length >= MAX_SEARCH_RESULTS || contentRows.length >= MAX_SEARCH_RESULTS,
+      saturated: plain.saturated || content.saturated,
     },
     matchedItemIds: seen,
   };
@@ -7688,35 +7724,55 @@ function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
   return row.chunk !== undefined;
 }
 
-// Vector rows score content chunks and recency rows require them, so either
-// lane's rank marks the candidate content-bearing even when the row kept for
-// it came from another lane.
-function connectorStoreCandidateHasContent(candidate: FusedRankedCandidate<ConnectorStoreSearchRow>): boolean {
-  return connectorStoreRowHasContent(candidate.item)
-    || candidate.laneRanks.has('vector')
-    || candidate.laneRanks.has('recency');
+// Which candidates earn content preference. A lexical match on a content
+// chunk always does, and so does a recency row (the lane requires chunks). A
+// vector row does only at or above a relevance bar: the vector lane returns
+// its nearest neighbours however far away they are, and an unvetted neighbour
+// must not jump an exact title match ("brief history everything" must still
+// find the one file of that name). Below the bar a vector hit still competes
+// in RRF on its rank; it just gets no content preference.
+type ContentPreference = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean;
+
+function connectorStoreContentPreference(vettedVectorItemIds: ReadonlySet<string>): ContentPreference {
+  // A vector row also carries a (semantic) chunk locator, so a lexical
+  // content match is read from the keyword lane's own chunk.
+  return (candidate) => candidate.item.chunk?.lane === 'keyword'
+    || candidate.laneRanks.has('recency')
+    || (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId));
 }
+
+const lexicalContentPreference: ContentPreference = connectorStoreContentPreference(new Set());
 
 // Fusion decides which candidates make the cut; within it, a title-only or
 // metadata-only item never outranks one the Analyst can actually read.
 function contentFirstCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
+  hasContent: ContentPreference = lexicalContentPreference,
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
   return [
-    ...candidates.filter(connectorStoreCandidateHasContent),
-    ...candidates.filter((candidate) => !connectorStoreCandidateHasContent(candidate)),
+    ...candidates.filter(hasContent),
+    ...candidates.filter((candidate) => !hasContent(candidate)),
   ];
 }
 
-// RRF tie-breaker: a content-bearing candidate first (a vector hit on a real
-// document beats a keyword hit on a bare file name at the same rank), then
-// better keyword rank, then better vector rank, then recency.
+// RRF tie-breaker: a content-preferred candidate first (a vetted vector hit on
+// a real document beats a keyword hit on a bare file name at the same rank),
+// then better keyword rank, then better vector rank, then recency.
+function connectorStoreCandidateComparator(hasContent: ContentPreference) {
+  return (
+    left: FusedRankedCandidate<ConnectorStoreSearchRow>,
+    right: FusedRankedCandidate<ConnectorStoreSearchRow>,
+  ): number => {
+    const leftContent = hasContent(left);
+    if (leftContent !== hasContent(right)) return leftContent ? -1 : 1;
+    return compareConnectorStoreSearchCandidates(left, right);
+  };
+}
+
 function compareConnectorStoreSearchCandidates(
   left: FusedRankedCandidate<ConnectorStoreSearchRow>,
   right: FusedRankedCandidate<ConnectorStoreSearchRow>,
 ): number {
-  const leftContent = connectorStoreCandidateHasContent(left);
-  if (leftContent !== connectorStoreCandidateHasContent(right)) return leftContent ? -1 : 1;
   const leftKeyword = left.laneRanks.get('keyword') ?? Number.POSITIVE_INFINITY;
   const rightKeyword = right.laneRanks.get('keyword') ?? Number.POSITIVE_INFINITY;
   if (leftKeyword !== rightKeyword) return leftKeyword - rightKeyword;
@@ -7885,7 +7941,7 @@ export function connectorStoreCoverageGaps(
 // or prefix that any connector can emit, so this stays source-agnostic.
 function storedWithoutTextGap(mimeType: string): string {
   const mime = mimeType.trim().toLowerCase();
-  if (mime === 'inode/directory') {
+  if (CONTAINER_MIME_TYPES.includes(mime)) {
     return 'the item is a container entry and carries no text of its own.';
   }
   if (mime === 'application/pdf') {
@@ -8681,7 +8737,7 @@ function selectEvidencePassages(
     maxChars,
     termGroups,
   );
-  return { chunks: bounded.chunks, truncated: true };
+  return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
 }
 
 function budgetChunks(

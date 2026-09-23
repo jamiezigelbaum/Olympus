@@ -8287,7 +8287,10 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-var READ_RESULT_PROJECTION_LOCATOR_URI, CONNECTOR_STORE_FTS_MIGRATION, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
+function connectorStoreContentPreference(vettedVectorItemIds) {
+  return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
+}
+var READ_RESULT_PROJECTION_LOCATOR_URI, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -8300,6 +8303,12 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
+  CONTAINER_MIME_TYPES = Object.freeze([
+    "inode/directory",
+    "application/x-directory",
+    "application/vnd.google-apps.folder"
+  ]);
+  CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
     createTableSql: `
@@ -8326,6 +8335,7 @@ var init_local_index = __esm(() => {
     ORDER BY i.item_pk, c.chunk_index;
   `
   };
+  lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
     "provider",
@@ -8699,11 +8709,13 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-pack.ts
+var utf8;
 var init_evidence_pack = __esm(() => {
   init_source_model_policy();
   init_router();
   init_types();
   init_answer_latency_trace();
+  utf8 = new TextEncoder;
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -15396,7 +15408,8 @@ var operations = [
       "Search a calling-assistant-safe source-index surface without returning source packets, scopes, tokens, provider cursors, or secure-local raw content.",
       "X bookmarks are internal/S1; connector-store search does not currently return direct X URLs. Dropbox stays secure-local except for its declared locator release, and protected Telegram stays secure-local.",
       "Each hit includes selected_item when it can be safely passed back to source_answer.selected_items for item-pinned evidence hydration.",
-      "Dropbox file locators are opt-in only: set include_locators=true when the user explicitly asks for file paths, Finder links, or Dropbox links. Folder locators are not supported."
+      "Dropbox file locators are opt-in only: set include_locators=true when the user explicitly asks for file paths, Finder links, or Dropbox links. Folder locators are not supported.",
+      "Folders are not returned as results; search returns the files inside them, readable documents ahead of name-only matches."
     ].join(" "),
     params: SOURCE_INDEX_SEARCH_PARAMS,
     mutating: false,

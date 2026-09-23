@@ -404,8 +404,8 @@ previously frozen shapes without a runtime or data migration.
 - 2026-09-23 (v1.1.0): `EvidenceCoverage` gains optional `matchCounts`, per
   searched corpus: matched items, how many carry readable content, whether the
   count hit its probe ceiling, and how many are in the evidence. Source answers
-  now size evidence by a character budget (24 candidates sharing 40,000 passage
-  characters by default) rather than three slots, so the pack is a larger but
+  now size evidence by a byte budget (24 candidates sharing 40,000 UTF-8 passage
+  bytes by default) rather than three slots, so the pack is a larger but
   still bounded selection, and the Analyst needs the breadth to describe it
   honestly. Additive and optional: producers that omit it and consumers that
   ignore it are unchanged; no stored data migrates.
