@@ -625,6 +625,90 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
   });
 }
 
+/** A tier store a lane creates only when its first item is routed there. */
+export interface NewTierLegSpec {
+  corpusId: string;
+  dbPath: string;
+  /** Builds the store bound to the set ledger, so even a standalone open honours it. */
+  create: (ledger: TierLedger) => LocalConnectorStore;
+  embeddingProvider?: SourceEmbeddingProvider;
+}
+
+export interface ExistingStoreTierLane {
+  set: TieredStoreSet;
+  ledger: TierLedger;
+  /** The lane's new stores, by domain: opened at boot when their file exists, else on first need. */
+  newStores: Partial<Record<SourceTrustDomain, OnDemandTierStore>>;
+}
+
+/**
+ * The per-tier stores of a lane that has had exactly ONE store: that store
+ * stays the lane's legacy leg (everything stored before per-item routing keeps
+ * its placement there, byte-for-byte), and every other tier store is created
+ * when a new item is first routed to it. The set ledger sits beside the
+ * secure_local store's path, existing or not.
+ */
+export function createExistingStoreTierLane(options: {
+  setId: string;
+  store: LocalConnectorStore;
+  newLegs: Partial<Record<SourceTrustDomain, NewTierLegSpec>>;
+  embeddingProvider?: SourceEmbeddingProvider;
+  restingTier?: SourceTrustTier;
+  splitLayers?: boolean;
+  laneFloor?: TieredLaneFloor;
+  contentArrivesLater?: boolean;
+  tierClassification?: ConnectorStoreTierClassification;
+  secretLocations?: SecretLocationsIndex;
+  onStoreOpened?: (store: LocalConnectorStore) => void;
+}): ExistingStoreTierLane {
+  if (options.newLegs[options.store.trustDomain]) {
+    throw new Error('A lane\'s existing store and a new tier store cannot share a trust domain.');
+  }
+  const secureDbPath = options.store.trustDomain === 'secure_local'
+    ? options.store.dbPath
+    : options.newLegs.secure_local?.dbPath;
+  if (!secureDbPath) throw new Error('A tiered lane needs a secure_local store or a way to create one.');
+  const ledger = (options.store.trustDomain === 'secure_local' ? options.store.tierLedger() : undefined)
+    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+  const newStores: Partial<Record<SourceTrustDomain, OnDemandTierStore>> = {};
+  const legs: Partial<Record<SourceTrustDomain, TieredLaneLeg>> = {};
+  for (const domain of TIER_DOMAIN_ORDER) {
+    if (domain === options.store.trustDomain) {
+      legs[domain] = {
+        store: options.store,
+        legacy: true,
+        ...(options.embeddingProvider ? { embeddingProvider: options.embeddingProvider } : {}),
+        ...(options.restingTier ? { restingTier: options.restingTier } : {}),
+      };
+      continue;
+    }
+    const spec = options.newLegs[domain];
+    if (!spec) continue;
+    const onDemand = onDemandTierStore({
+      corpusId: spec.corpusId,
+      dbPath: spec.dbPath,
+      create: () => spec.create(ledger),
+      ...(options.onStoreOpened ? { onOpened: options.onStoreOpened } : {}),
+    });
+    newStores[domain] = onDemand;
+    legs[domain] = {
+      onDemand,
+      ...(spec.embeddingProvider ? { embeddingProvider: spec.embeddingProvider } : {}),
+    };
+  }
+  const set = createTieredLaneSet({
+    setId: options.setId,
+    ledger,
+    legs: legs as TieredLaneSetOptions['legs'],
+    ...(options.splitLayers === false ? { splitLayers: false } : {}),
+    ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
+    ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
+    ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+  });
+  return { set, ledger, newStores };
+}
+
 /**
  * A per-tier store whose file is created only when its first item is routed
  * there: opened once, on demand or at boot when the file already exists.
@@ -662,6 +746,62 @@ export function onDemandTierStore(options: {
     },
     exists: () => opened !== undefined || (options.dbPath !== ':memory:' && existsSync(options.dbPath)),
     current: () => opened,
+  };
+}
+
+/**
+ * One lane summary from a shared-traversal run: the listing-level facts
+ * (items seen, cursor, completion, exclusions) from the lane's own store, and
+ * what every tier store WROTE, summed. A run whose only leg is the lane's own
+ * store yields exactly that store's summary. The embed summary is the lane
+ * store's identity with every leg's chunk counts summed (zeros when no leg
+ * embedded).
+ */
+export function mergedTieredLaneRun(
+  run: TieredStoreSetRun,
+  primary: SourceTrustDomain,
+): { sync: ConnectorStoreSyncSummary; embed?: ConnectorStoreEmbedSummary } {
+  const lane = run.byDomain[primary];
+  if (!lane) throw new Error(`The lane's ${primary} store did not run.`);
+  const legs = run.legs;
+  const sum = (pick: (sync: ConnectorStoreSyncSummary) => number | undefined): number =>
+    legs.reduce((total, leg) => total + (pick(leg.sync) ?? 0), 0);
+  const optionalSum = (pick: (sync: ConnectorStoreSyncSummary) => number | undefined): number | undefined =>
+    legs.some((leg) => pick(leg.sync) !== undefined) ? sum(pick) : undefined;
+  const deferred = [...new Set(legs.flatMap((leg) => leg.sync.windowRemovalsDeferredLocalItemIds ?? []))];
+  const absence = optionalSum((sync) => sync.absenceItemsTombstoned);
+  const window = optionalSum((sync) => sync.windowRemovedItemsTombstoned);
+  const deleted = optionalSum((sync) => sync.deletedEventItemsTombstoned);
+  const secrets = optionalSum((sync) => sync.secretsTierItemsTombstoned);
+  const demoted = optionalSum((sync) => sync.itemsDemoted);
+  const sync: ConnectorStoreSyncSummary = {
+    ...lane.sync,
+    itemsIndexed: sum((leg) => leg.itemsIndexed),
+    itemsChanged: sum((leg) => leg.itemsChanged),
+    itemsTombstoned: sum((leg) => leg.itemsTombstoned),
+    itemsRejected: sum((leg) => leg.itemsRejected),
+    chunksIndexed: sum((leg) => leg.chunksIndexed),
+    ...(absence !== undefined ? { absenceItemsTombstoned: absence } : {}),
+    ...(window !== undefined ? { windowRemovedItemsTombstoned: window } : {}),
+    ...(deleted !== undefined ? { deletedEventItemsTombstoned: deleted } : {}),
+    ...(secrets !== undefined ? { secretsTierItemsTombstoned: secrets } : {}),
+    ...(demoted !== undefined ? { itemsDemoted: demoted } : {}),
+    ...(lane.sync.windowRemovalsDeferredLocalItemIds !== undefined || deferred.length > 0
+      ? { windowRemovalsDeferredLocalItemIds: deferred }
+      : {}),
+    gaps: [...new Set(legs.flatMap((leg) => leg.sync.gaps))],
+  };
+  const embedded = legs.filter((leg) => leg.embed !== undefined);
+  if (embedded.length === 0) return { sync };
+  const base = lane.embed ?? embedded[0]!.embed!;
+  return {
+    sync,
+    embed: {
+      ...base,
+      chunksSeen: embedded.reduce((total, leg) => total + leg.embed!.chunksSeen, 0),
+      chunksEmbedded: embedded.reduce((total, leg) => total + leg.embed!.chunksEmbedded, 0),
+      chunksSkipped: embedded.reduce((total, leg) => total + leg.embed!.chunksSkipped, 0),
+    },
   };
 }
 

@@ -12,8 +12,16 @@ import {
 import {
   syncAndEmbedFromConnector,
   type ConnectorStoreSyncAndEmbedSummary,
+  type ConnectorStoreSyncOptions,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
+import type { SourceConnector } from '../../core/contracts.ts';
+import {
+  mergedTieredLaneRun,
+  tieredLaneReceiptCounts,
+  type TieredLaneReceiptCounts,
+  type TieredStoreSet,
+} from '../connector-store/tiered-store-set.ts';
 import type { CredentialBroker } from '../credential-broker/index.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { ReadwiseApiError, type ReadwiseApiClientOptions } from './api.ts';
@@ -88,7 +96,7 @@ export interface ReadwiseConnectorStoreReceipt {
     traversal_complete: number;
     /** Always 0 for Readwise: export deletion semantics are unverified. */
     absence_authoritative: number;
-  };
+  } & TieredLaneReceiptCounts;
   api_usage: {
     utc_day: string;
   };
@@ -158,7 +166,14 @@ export interface ReadwiseConnectorStoreSyncHandlerOptions {
   config?: ReadwiseLiveSyncConfig;
   env?: Record<string, string | undefined>;
   now?: () => Date;
+  /**
+   * The lane's per-tier stores (tier-set.ts), whose internal leg is `store`.
+   * Absent: the single-store lane exactly as before per-item routing.
+   */
+  tierSet?: TieredStoreSet;
 }
+
+type ReadwiseLaneRun = ConnectorStoreSyncAndEmbedSummary & { tiered?: TieredLaneReceiptCounts };
 
 export function createReadwiseConnectorStoreSyncHandler(
   options: ReadwiseConnectorStoreSyncHandlerOptions,
@@ -185,17 +200,36 @@ export function createReadwiseConnectorStoreSyncHandler(
     ...(options.now ? { now: options.now } : {}),
   });
 
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec('internal')?.store !== options.store) {
+    throw new Error('The Readwise tier set\'s internal leg must be the lane\'s own store.');
+  }
+  // One traversal feeds every tier store. Existing items keep the lane's
+  // placement in its own store; a NEW item is routed by its recorded tiers
+  // (raised to Private, or Secrets, by what its text says).
+  const runLane = async (
+    connector: SourceConnector,
+    sync: ConnectorStoreSyncOptions,
+    commitCursor = true,
+  ): Promise<ReadwiseLaneRun> => {
+    if (!tierSet) {
+      return syncAndEmbedFromConnector({ store: options.store, connector, embeddingProvider: options.embeddingProvider, sync });
+    }
+    const run = await tierSet.sync(connector, sync, { commitCursor });
+    const merged = mergedTieredLaneRun(run, 'internal');
+    return {
+      sync: merged.sync,
+      embed: merged.embed ?? emptyEmbedSummary(options.store, options.embeddingProvider),
+      tiered: tieredLaneReceiptCounts({ routing: run.routing }),
+    };
+  };
+
   return {
     async sync(): Promise<ReadwiseConnectorStoreSyncResult> {
       const connector = buildConnector();
-      const run = await syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync: {
-          placement: READWISE_STORE_PLACEMENT,
-          fetchContent: true,
-        },
+      const run = await runLane(connector, {
+        placement: READWISE_STORE_PLACEMENT,
+        fetchContent: true,
       });
       const usage = connector.requestBudgetStatus();
       const changed = run.sync.itemsIndexed > 0
@@ -233,7 +267,10 @@ export function createReadwiseConnectorStoreSyncHandler(
       // traversal position: it is written after every run, including a run the
       // budget guard cut short. The scheduler checkpoint covers the case where
       // the last run was an uncursored reconcile (which stores no cursor).
-      const candidate = options.store.lastCompletedSyncRun(READWISE_CONNECTOR_ID)?.cursor
+      // The tier set's committed resume point comes first: it is written only
+      // after every tier store committed.
+      const candidate = tierSet?.committedCursor(READWISE_CONNECTOR_ID)?.cursor
+        ?? options.store.lastCompletedSyncRun(READWISE_CONNECTOR_ID)?.cursor
         ?? request.checkpoint?.trim()
         ?? undefined;
       let resume = isReadwiseConnectorCursor(candidate) ? candidate : undefined;
@@ -243,18 +280,13 @@ export function createReadwiseConnectorStoreSyncHandler(
 
       const provenance = sourceInvocationProvenance(request.provenance);
       let connector = buildConnector(provenance);
-      let run: ConnectorStoreSyncAndEmbedSummary;
+      let run: ReadwiseLaneRun;
       try {
-        run = await syncAndEmbedFromConnector({
-          store: options.store,
-          connector,
-          embeddingProvider: options.embeddingProvider,
-          sync: {
-            placement: READWISE_STORE_PLACEMENT,
-            fetchContent: true,
-            maxItems,
-            ...(resume ? { cursor: resume } : {}),
-          },
+        run = await runLane(connector, {
+          placement: READWISE_STORE_PLACEMENT,
+          fetchContent: true,
+          maxItems,
+          ...(resume ? { cursor: resume } : {}),
         });
       } catch (error) {
         // Cursor validity across days is unverified provider behavior. A
@@ -264,15 +296,10 @@ export function createReadwiseConnectorStoreSyncHandler(
         warnings.push(READWISE_RESUME_REJECTED_WARNING);
         resume = undefined;
         connector = buildConnector(provenance);
-        run = await syncAndEmbedFromConnector({
-          store: options.store,
-          connector,
-          embeddingProvider: options.embeddingProvider,
-          sync: {
-            placement: READWISE_STORE_PLACEMENT,
-            fetchContent: true,
-            maxItems,
-          },
+        run = await runLane(connector, {
+          placement: READWISE_STORE_PLACEMENT,
+          fetchContent: true,
+          maxItems,
         });
       }
 
@@ -292,21 +319,16 @@ export function createReadwiseConnectorStoreSyncHandler(
       // Deliberately un-cursored and un-bounded: the shared spine only treats a
       // traversal as a full snapshot when neither a cursor nor a maxItems bound
       // was supplied and it reached a done page.
-      const run = await syncAndEmbedFromConnector({
-        store: options.store,
-        connector,
-        embeddingProvider: options.embeddingProvider,
-        sync: {
-          placement: READWISE_STORE_PLACEMENT,
-          fetchContent: true,
-          reconcileFullSnapshot: true,
-          reconcileFullSnapshotScope: { provider: READWISE_PROVIDER, accountScope: account },
-          // Weakest honest authority: Readwise export deletion semantics are
-          // unverified, so absence is never evidence of removal and nothing is
-          // tombstoned. Upgrading this is a later tranche with its own proof.
-          reconcileAbsenceAuthority: 'partial_window',
-        },
-      });
+      const run = await runLane(connector, {
+        placement: READWISE_STORE_PLACEMENT,
+        fetchContent: true,
+        reconcileFullSnapshot: true,
+        reconcileFullSnapshotScope: { provider: READWISE_PROVIDER, accountScope: account },
+        // Weakest honest authority: Readwise export deletion semantics are
+        // unverified, so absence is never evidence of removal and nothing is
+        // tombstoned. Upgrading this is a later tranche with its own proof.
+        reconcileAbsenceAuthority: 'partial_window',
+      }, false);
       return taskOutcome({
         kind: READWISE_STORE_RECONCILE_RECEIPT_KIND,
         run,
@@ -323,7 +345,7 @@ export function createReadwiseConnectorStoreSyncHandler(
 
 function taskOutcome(input: {
   kind: ReadwiseConnectorStoreReceipt['kind'];
-  run: ConnectorStoreSyncAndEmbedSummary;
+  run: ReadwiseLaneRun;
   usage: ReadwiseRequestBudgetStatus;
   resumed: boolean;
   warnings: string[];
@@ -355,6 +377,7 @@ function taskOutcome(input: {
       // exactly the pass whose coverage is least certain.
       traversal_complete: Number(input.run.sync.traversalComplete),
       absence_authoritative: 0,
+      ...(input.run.tiered ?? {}),
     },
     api_usage: {
       utc_day: input.usage.utcDay,
@@ -383,6 +406,30 @@ export function readwiseReceiptDigest(
   receipt: Omit<ReadwiseConnectorStoreReceipt, 'receipt_sha256'>,
 ): string {
   return createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
+}
+
+/** A run in which no tier store embedded anything: the lane identity, zero counts. */
+function emptyEmbedSummary(
+  store: LocalConnectorStore,
+  provider: SourceEmbeddingProvider,
+): ConnectorStoreSyncAndEmbedSummary['embed'] {
+  return {
+    corpusId: store.corpusId,
+    modelId: provider.modelId,
+    embeddingProvider: provider.provider,
+    embeddingBackend: provider.backend,
+    embeddingDimension: provider.dimension,
+    embeddingEpoch: provider.epochId,
+    chunksSeen: 0,
+    chunksEmbedded: 0,
+    chunksSkipped: 0,
+    policy: {
+      rawSourceExposed: false,
+      sourceTextReturned: false,
+      trustDomain: store.trustDomain,
+      storage: 'local_sqlite',
+    },
+  };
 }
 
 function isRejectedCursorError(error: unknown): boolean {
