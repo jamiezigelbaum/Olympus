@@ -1,10 +1,13 @@
+import type { ConnectorStorePlacement } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
+import { compactClassificationSignals, signalText, signalTexts } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -445,14 +448,33 @@ export function createReadwiseSourceConnector(
       return item;
     },
 
-    classify(_item: RawItem): SourceSensitivity {
-      return buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' });
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // A saved document or highlight. The original may be public, but the
+      // saved/read relationship is not evidence of that, so no sharing state
+      // is claimed.
+      return compactClassificationSignals({
+        title: signalText(item.metadata, 'title'),
+        sender: signalText(item.metadata, 'author'),
+        labels: signalTexts(item.metadata, 'tags'),
+        folderKeys: [signalText(item.metadata, 'category'), signalText(item.metadata, 'location')]
+          .filter((key): key is string => Boolean(key)),
+      });
     },
 
     requestBudgetStatus: () => requestBudget.status(),
   };
   return connector;
 }
+
+/**
+ * Where Readwise items rest in the existing store: S1/internal, the owner's
+ * classification of the saved/read relationship (source-family posture). This
+ * is the placement the retired connector classify() returned for every item.
+ */
+export const READWISE_STORE_PLACEMENT: ConnectorStorePlacement = Object.freeze({
+  trustTier: 'S1',
+  trustDomain: 'internal',
+});
 
 export function createReadwiseConnectorStore(
   dbPath = defaultReadwiseConnectorStoreDbPath(),

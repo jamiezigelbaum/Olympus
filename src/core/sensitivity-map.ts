@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,7 +10,15 @@ import {
   type SourceTrustTier,
 } from './source-index/types.ts';
 
-export const SENSITIVITY_MAP_SCHEMA_VERSION = 1;
+/**
+ * The newest map schema. Version 2 lets a category target any of the four
+ * tiers, including the lowering targets Public and Personal. Version 1 maps are
+ * still read, and still refuse lowering targets, so an existing map keeps its
+ * raise-only meaning until its owner rewrites it as version 2.
+ */
+export const SENSITIVITY_MAP_SCHEMA_VERSION = 2;
+export const SUPPORTED_SENSITIVITY_MAP_SCHEMA_VERSIONS = [1, 2] as const;
+export type SensitivityMapSchemaVersion = (typeof SUPPORTED_SENSITIVITY_MAP_SCHEMA_VERSIONS)[number];
 export const OLYMPUS_SENSITIVITY_MAP_ENV = 'OLYMPUS_SENSITIVITY_MAP_PATH';
 
 // Schema-v1 identifiers: private means Personal; secure means Private.
@@ -41,7 +50,7 @@ export interface SensitivityMapCategory {
 }
 
 export interface SensitivityMap {
-  schemaVersion: 1;
+  schemaVersion: SensitivityMapSchemaVersion;
   userFacingTiers: typeof USER_FACING_TIER_MAPPING;
   categories: SensitivityMapCategory[];
 }
@@ -56,7 +65,7 @@ export interface SensitivityMapLoadOptions {
 export interface SensitivityMapValidationResult {
   ok: boolean;
   path: string;
-  schemaVersion?: 1;
+  schemaVersion?: SensitivityMapSchemaVersion;
   categories: number;
   categoryIds: string[];
   /** The file's mode after validation, as a 4-digit octal string (e.g. "0600"). */
@@ -174,8 +183,9 @@ function sensitivityMapRemedy(path: string): string {
 export function parseSensitivityMap(rawMap: unknown, label = 'sensitivity map'): SensitivityMap {
   const root = asRecord(rawMap);
   if (!root) throw new OperationError('config_error', `${label} must be an object.`);
-  if (root.schemaVersion !== SENSITIVITY_MAP_SCHEMA_VERSION) {
-    throw new OperationError('config_error', `${label}.schemaVersion must be 1.`);
+  const schemaVersion = root.schemaVersion;
+  if (schemaVersion !== 1 && schemaVersion !== 2) {
+    throw new OperationError('config_error', `${label}.schemaVersion must be 1 or 2.`);
   }
   assertUserFacingTierMapping(root.userFacingTiers, `${label}.userFacingTiers`);
 
@@ -191,7 +201,7 @@ export function parseSensitivityMap(rawMap: unknown, label = 'sensitivity map'):
 
   const seenIds = new Set<string>();
   const categories = root.categories.map((value, index) => {
-    const category = parseCategory(value, `${label}.categories[${index}]`);
+    const category = parseCategory(value, `${label}.categories[${index}]`, schemaVersion);
     if (seenIds.has(category.id)) {
       throw new OperationError('config_error', `${label}.categories id "${category.id}" must be unique.`);
     }
@@ -200,12 +210,27 @@ export function parseSensitivityMap(rawMap: unknown, label = 'sensitivity map'):
   });
 
   return {
-    schemaVersion: SENSITIVITY_MAP_SCHEMA_VERSION,
+    schemaVersion,
     userFacingTiers: USER_FACING_TIER_MAPPING,
     categories,
   };
 }
 
+/** Tier names a category may RAISE an item to. Every other target lowers. */
+const RAISING_TIER_NAMES: ReadonlySet<UserFacingTierName> = new Set(['secure', 'secrets']);
+
+export function isRaisingSensitivityTier(tierName: UserFacingTierName): boolean {
+  return RAISING_TIER_NAMES.has(tierName);
+}
+
+/**
+ * The raise-only reading every pre-tier-ledger caller depends on.
+ *
+ * Only categories that target Private or Secrets are considered, so a version 2
+ * map's lowering categories can never reach a caller that treats any match as
+ * a raise. That keeps existing storage placement byte-for-byte unchanged when
+ * an owner upgrades the map.
+ */
 export function matchSensitivityMap(
   map: SensitivityMap | undefined,
   input: SensitivityMapMatchInput,
@@ -221,6 +246,7 @@ export function matchSensitivityMap(
   let targetTrustTier: Extract<SourceTrustTier, 'S4' | 'S5'> = 'S4';
 
   for (const category of map.categories) {
+    if (!isRaisingSensitivityTier(category.targetTierName)) continue;
     if (!categoryMatches(category, { textHaystack, sender, path })) continue;
     categoryIds.push(category.id);
     if (category.targetTrustTier === 'S5') targetTrustTier = 'S5';
@@ -232,6 +258,49 @@ export function matchSensitivityMap(
     targetTrustTier,
     targetTrustDomain: 'secure_local',
   };
+}
+
+export interface SensitivityMapTierMatch {
+  categoryId: string;
+  tierName: UserFacingTierName;
+}
+
+/**
+ * Every category the input matches, with the tier it targets — raising AND
+ * lowering. The shared tier classifier decides what a match means; this only
+ * reports it. Category ids are the owner's own configuration, not item content.
+ */
+export function matchSensitivityMapTiers(
+  map: SensitivityMap | undefined,
+  input: SensitivityMapMatchInput,
+): SensitivityMapTierMatch[] {
+  if (!map) return [];
+  const textHaystack = [input.subject, input.title, input.text]
+    .map((part) => part?.trim().toLowerCase())
+    .filter((part): part is string => Boolean(part))
+    .join('\n');
+  const sender = input.sender?.trim().toLowerCase() ?? '';
+  const path = input.path?.trim().toLowerCase() ?? '';
+  return map.categories
+    .filter((category) => categoryMatches(category, { textHaystack, sender, path }))
+    .map((category) => ({ categoryId: category.id, tierName: category.targetTierName }));
+}
+
+/**
+ * A short, stable revision id for a parsed map, recorded beside every tier
+ * decision so a later map edit can be told apart from a classifier change.
+ */
+export function sensitivityMapRevision(map: SensitivityMap | undefined): string {
+  if (!map) return 'none';
+  const canonical = JSON.stringify({
+    schemaVersion: map.schemaVersion,
+    categories: map.categories.map((category) => ({
+      id: category.id,
+      targetTierName: category.targetTierName,
+      match: category.match,
+    })),
+  });
+  return `v${map.schemaVersion}:${createHash('sha256').update(canonical).digest('hex').slice(0, 16)}`;
 }
 
 function categoryMatches(
@@ -258,7 +327,11 @@ function assertUserFacingTierMapping(value: unknown, label: string): void {
   }
 }
 
-function parseCategory(value: unknown, label: string): SensitivityMapCategory {
+function parseCategory(
+  value: unknown,
+  label: string,
+  schemaVersion: SensitivityMapSchemaVersion,
+): SensitivityMapCategory {
   const record = asRecord(value);
   if (!record) throw new OperationError('config_error', `${label} must be an object.`);
   const id = boundedString(record.id, `${label}.id`);
@@ -266,10 +339,10 @@ function parseCategory(value: unknown, label: string): SensitivityMapCategory {
     throw new OperationError('config_error', `${label}.id must be a stable lowercase slug like "therapy" or "family-finance".`);
   }
   const targetTierName = enumString(record.targetTierName, USER_FACING_TIER_NAMES, `${label}.targetTierName`) as UserFacingTierName;
-  if (targetTierName === 'public' || targetTierName === 'private') {
+  if (schemaVersion === 1 && (targetTierName === 'public' || targetTierName === 'private')) {
     throw new OperationError(
       'config_error',
-      `${label}.targetTierName is ${targetTierName}, but Phase 2 sensitivity guidance is raise-only: Public/Personal downgrade guidance is not supported yet.`,
+      `${label}.targetTierName is ${targetTierName}, but a schemaVersion 1 map is raise-only: Public/Personal downgrade guidance is not supported yet. Write the map as schemaVersion 2 to use lowering categories.`,
     );
   }
 

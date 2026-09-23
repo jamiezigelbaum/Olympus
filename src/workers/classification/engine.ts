@@ -219,6 +219,71 @@ function buildHaystack(input: ClassifyItemTierInput): string {
     .join('\n');
 }
 
+// --- Detector surface shared with the four-tier classifier -------------------
+// The tier classifier (tier-classifier.ts) reuses these exact detectors rather
+// than keeping a second copy. They are pure and content-free in what they
+// return: finding kinds and fixed-vocabulary categories, never matched text.
+
+/** Secret finding kinds (S5) present in `text`. Empty when none. */
+export function detectSecretFindingKinds(text: string): string[] {
+  if (!text.trim()) return [];
+  const scan = scanDropboxContentPolicyText({ text });
+  return [...new Set(
+    scan.findings
+      .map((finding) => finding.finding_type)
+      .filter((type) => SECRET_FINDING_TYPES.has(type)),
+  )].sort();
+}
+
+export interface SensitiveContentDetection {
+  /** Positive financial/health/identity detector hits (each one raises to S4). */
+  signals: string[];
+  /** Families with a single weak vocabulary hit: not enough to raise, worth a second look. */
+  borderline: string[];
+}
+
+/**
+ * The S4 detectors (financial, health, identity) without the secret scan, plus
+ * which families came close. `input.sender` and `input.path` feed the health
+ * origin hint exactly as they do in classifyItemTier.
+ */
+export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveContentDetection {
+  const haystack = buildHaystack(input);
+  const signals = [
+    ...detectFinancialSignals(haystack),
+    ...detectHealthSignals(input, haystack),
+    ...detectIdentityDocumentSignals(haystack),
+  ];
+  const borderline: string[] = [];
+  if (!signals.some((signal) => signal.startsWith('financial:'))
+    && matchTerms(haystack, FINANCIAL_WEAK_TERMS).length === 1) {
+    borderline.push('financial');
+  }
+  if (!signals.some((signal) => signal.startsWith('health:'))
+    && matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
+    borderline.push('health');
+  }
+  return { signals, borderline };
+}
+
+/**
+ * Whether a set of names (title, path, folder names, labels) uses the fixed
+ * sensitive vocabulary at all. A single weak term is enough: this only decides
+ * whether the privacy-safe sniffer should be ASKED, never the tier itself.
+ */
+export function namesLookPossiblyPrivate(names: string): string[] {
+  if (!names.trim()) return [];
+  const families: string[] = [];
+  if (matchTerms(names, [...FINANCIAL_STRONG_TERMS, ...FINANCIAL_WEAK_TERMS]).length > 0) families.push('financial');
+  if (matchTerms(names, [...HEALTH_STRONG_TERMS, ...HEALTH_WEAK_TERMS]).length > 0) families.push('health');
+  if (IDENTITY_NAME_PATTERN.test(names)) families.push('identity');
+  if (PERSONAL_LIFE_NAME_PATTERN.test(names)) families.push('personal_life');
+  return families;
+}
+
+const IDENTITY_NAME_PATTERN = /\b(?:passport|ssn|social security|driver'?s licen[cs]e|national id|identity card|birth certificate)\b/i;
+const PERSONAL_LIFE_NAME_PATTERN = /\b(?:therapy|therapist|counsel(?:l)?ing|divorce|custody|lawsuit|attorney|legal|bank|banking|mortgage|loan|will and testament|estate)\b/i;
+
 // --- Sensitive detectors (hard S4/S5 floors, any hit wins) ------------------
 
 const SECRET_FINDING_TYPES = new Set([

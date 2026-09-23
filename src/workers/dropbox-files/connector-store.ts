@@ -4,6 +4,7 @@
 // domain `secure_local`. Unlike Drive there is no internal twin: the Dropbox
 // corpus has never had an internal band.
 
+import type { ConnectorStorePlacement } from '../connector-store/tier-placement.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -52,6 +53,17 @@ export const DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA = ['path_prefix', 'media'] a
 
 export const DROPBOX_CONNECTOR_STORE_DB_PATH_ENV =
   'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH';
+
+/**
+ * Where Dropbox files rest in the existing (secure-only) store: S4/secure_local,
+ * raised to S5 — tombstoned, location only — when the textual body carries a
+ * secret. Exactly the rule the retired connector classify() applied.
+ */
+export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacement = Object.freeze({
+  trustTier: 'S4',
+  trustDomain: 'secure_local',
+  secretsInContent: true,
+});
 
 export function defaultDropboxConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,

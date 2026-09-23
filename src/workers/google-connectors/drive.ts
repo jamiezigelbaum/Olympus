@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -17,7 +18,6 @@ import {
   loadSourceIngestionExclusions,
   type SourceExclusionMatcher,
 } from '../../core/source-ingestion-exclusions.ts';
-import type { SourceSensitivity } from '../../core/source-index/types.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -27,10 +27,8 @@ import {
 import type { ConnectorStoreClassificationOptions } from '../connector-store/index.ts';
 import {
   accountFromGoogleHandle,
-  classifyGoogleItemRaiseOnly,
-  loadGoogleSensitivityMap,
   metadataString,
-  type GoogleItemClassifier,
+  metadataStringArray,
 } from './classification.ts';
 import {
   GoogleDailyRequestBudget,
@@ -68,8 +66,6 @@ export interface GoogleDriveSourceConnectorOptions {
   maxContentFiles?: number;
   maxTextBytes?: number;
   query?: string;
-  sensitivityMap?: SensitivityMap;
-  classifier?: GoogleItemClassifier;
   apiClient?: GoogleDriveApiClient;
   /**
    * The runtime's single day counter. Optional only so the owner-facing
@@ -281,8 +277,6 @@ export class GoogleDriveSourceConnector implements SourceConnector {
   private readonly maxContentFiles: number;
   private readonly maxTextBytes: number;
   private readonly query: string | undefined;
-  private readonly sensitivityMap: SensitivityMap | undefined;
-  private readonly classifier: GoogleItemClassifier | undefined;
   private readonly requestBudget: GoogleDailyRequestBudget | undefined;
   private readonly provenance: SourceInvocationProvenance;
   private readonly maxRetries: number | undefined;
@@ -312,8 +306,6 @@ export class GoogleDriveSourceConnector implements SourceConnector {
     this.maxContentFiles = normalizeDriveMaxFiles(options.maxContentFiles ?? DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES);
     this.maxTextBytes = normalizeMaxTextBytes(options.maxTextBytes);
     this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_QUERY?.trim() || undefined;
-    this.sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
-    this.classifier = options.classifier;
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = options.maxRetries;
@@ -442,26 +434,22 @@ export class GoogleDriveSourceConnector implements SourceConnector {
     return this.requestBudget?.status();
   }
 
-  classify(item: RawItem): SourceSensitivity {
+  /**
+   * File facts only: the name, a path when the provider published one, and the
+   * folder ancestry. Drive publishes no folder path, so none is invented; the
+   * shared classifier matches path patterns against the name when no path
+   * exists. No sharing state is read, so none is claimed, and nothing here can
+   * make a file Public.
+   */
+  classificationSignals(item: RawItem): SourceClassificationSignals {
     const title = metadataString(item.metadata, 'title') ?? metadataString(item.metadata, 'name');
-    // Drive publishes no folder path, so the file's own name is the only
-    // path-shaped signal it has. The sensitivity map's path patterns are
-    // filename-shaped in practice — `password-manager-export` — and this
-    // classifier is RAISE-ONLY, so feeding it the name can tighten a tier and
-    // can never loosen one. Before this, the connector fed it a synthetic
-    // `parentFolderId/Title` string; the name is the honest half of that, and
-    // the folder-id half was never a classification signal to begin with.
-    const path = metadataString(item.metadata, 'pathDisplay') ?? title;
-    return classifyGoogleItemRaiseOnly({
-      text: item.content.kind === 'text' ? item.content.text : '',
+    const path = metadataString(item.metadata, 'pathDisplay');
+    const folderKeys = metadataStringArray(item.metadata, 'folderAncestorIds');
+    return {
       ...(title ? { title } : {}),
       ...(path ? { path } : {}),
-    }, {
-      defaultTrustTier: 'S3',
-      defaultTrustDomain: 'internal',
-      ...(this.sensitivityMap ? { sensitivityMap: this.sensitivityMap } : {}),
-      ...(this.classifier ? { classifier: this.classifier } : {}),
-    });
+      ...(folderKeys.length > 0 ? { folderKeys } : {}),
+    };
   }
 
   private async rawItemFromDriveFile(file: GoogleDriveFile): Promise<GoogleDriveListedFile | undefined> {

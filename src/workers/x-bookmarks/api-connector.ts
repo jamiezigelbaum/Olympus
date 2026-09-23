@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -338,9 +339,8 @@ export function createXBookmarksApiSourceConnector(
       return snapshot.fetchItem(localItemId);
     },
 
-    classify(item: RawItem): SourceSensitivity {
-      return snapshot?.classify(item)
-        ?? createXBookmarksSourceConnector({ account, posts: [] }).classify(item);
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      return (snapshot ?? createXBookmarksSourceConnector({ account, posts: [] })).classificationSignals(item);
     },
 
     status: () => latest,

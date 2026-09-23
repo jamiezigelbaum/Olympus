@@ -15,8 +15,10 @@
 
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -136,13 +138,11 @@ export function createRoamSourceConnector(options: RoamSourceConnectorOptions): 
       return rawItemFromPageRecord(record, account, nowIso());
     },
 
-    classify(_item: RawItem): SourceSensitivity {
-      // Conservative floor (PLAN doctrine): Roam notes default to
-      // S4/secure_local. An explicitly configured 'internal' trust domain
-      // relaxes the whole archive to S3/internal; nothing per-item.
-      return buildSourceSensitivity({
-        trustTier: trustDomain === 'internal' ? 'S3' : 'S4',
-        trustDomain,
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // Archive-wide configuration, published as a prior.
+      return compactClassificationSignals({
+        prior: trustDomainPrior(trustDomain, 'source_config'),
+        title: signalText(item.metadata, 'title'),
       });
     },
   };

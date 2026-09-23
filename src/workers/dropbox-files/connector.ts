@@ -14,8 +14,10 @@
 // resurrect removed files on incremental cursors.
 
 import { createHash } from 'node:crypto';
+import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -338,15 +340,14 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
       }
     },
 
-    classify(item: RawItem): SourceSensitivity {
-      // Conservative floor (PLAN doctrine): Dropbox raw payloads default to
-      // S4/secure_local until classified. Cheap deterministic signals may
-      // upgrade the tier to S5; nothing here may downgrade below the floor.
-      const text = classifiableText(item);
-      const scan = text === undefined ? undefined : scanDropboxContentPolicyText({ text });
-      return buildSourceSensitivity({
-        trustTier: scan?.trust_tier === 'S5' ? 'S5' : 'S4',
-        trustDomain: 'secure_local',
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // File facts only. No prior: the store's Private-only placement is a
+      // storage fact (one secure store), not evidence about the file, and the
+      // design judges each file on its own. No sharing state is read, so
+      // nothing here can make a file Public.
+      return compactClassificationSignals({
+        title: signalText(item.metadata, 'name'),
+        path: signalText(item.metadata, 'pathDisplay'),
       });
     },
   };

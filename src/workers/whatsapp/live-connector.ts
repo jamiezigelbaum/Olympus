@@ -45,8 +45,10 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -213,10 +215,16 @@ export function createWhatsAppLiveSourceConnector(
       return rawItemFromSpoolMessage(match, account, nowIso(), reactions);
     },
 
-    classify(_item: RawItem): SourceSensitivity {
-      // Private chat history is ALWAYS S4/secure_local: local-only storage,
-      // never eligible for cloud embeddings. No content signal may downgrade.
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals(item: RawItem): SourceClassificationSignals {
+      // Chat history has always rested at Private here; published as a
+      // prior so the recorded decision is never less private than today's
+      // placement until an owner chat rule replaces it.
+      return compactClassificationSignals({
+        prior: trustDomainPrior('secure_local', 'source_default'),
+        title: signalText(item.metadata, 'chat'),
+        sender: signalText(item.metadata, 'sender'),
+        folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
+      });
     },
   };
 }

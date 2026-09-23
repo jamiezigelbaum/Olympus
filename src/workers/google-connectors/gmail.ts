@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -12,7 +13,6 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
-import type { SourceSensitivity } from '../../core/source-index/types.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -27,11 +27,8 @@ import {
 } from '../email-source/ingest-filter.ts';
 import {
   accountFromGoogleHandle,
-  classifyGoogleItemRaiseOnly,
-  loadGoogleSensitivityMap,
   metadataString,
   metadataStringArray,
-  type GoogleItemClassifier,
 } from './classification.ts';
 import {
   GoogleDailyRequestBudget,
@@ -69,8 +66,6 @@ export interface GoogleGmailSourceConnectorOptions {
   apiBaseUrl?: string;
   maxMessages?: number;
   query?: string;
-  sensitivityMap?: SensitivityMap;
-  classifier?: GoogleItemClassifier;
   apiClient?: GmailApiClient;
   /**
    * The runtime's single day counter. Optional only so owner-facing one-shot
@@ -169,8 +164,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private readonly apiBaseUrl: string;
   private readonly defaultMaxMessages: number;
   private readonly query: string | undefined;
-  private readonly sensitivityMap: SensitivityMap | undefined;
-  private readonly classifier: GoogleItemClassifier | undefined;
   private readonly requestBudget: GoogleDailyRequestBudget | undefined;
   private readonly provenance: SourceInvocationProvenance;
   private readonly maxRetries: number | undefined;
@@ -201,8 +194,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.apiBaseUrl = options.apiBaseUrl?.replace(/\/+$/, '') || GMAIL_API_BASE_URL;
     this.defaultMaxMessages = normalizeGmailMaxMessages(options.maxMessages);
     this.query = options.query?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim() || undefined;
-    this.sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
-    this.classifier = options.classifier;
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = options.maxRetries;
@@ -328,20 +319,20 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     return this.requestBudget?.status();
   }
 
-  classify(item: RawItem): SourceSensitivity {
+  /**
+   * Mail facts only: subject as the title, the sender, and the provider's
+   * labels. Gmail publishes no folder path and no sharing state, so neither is
+   * claimed; the shared tier classifier decides the tier.
+   */
+  classificationSignals(item: RawItem): SourceClassificationSignals {
     const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
     const sender = metadataString(item.metadata, 'from');
-    return classifyGoogleItemRaiseOnly({
-      labels: metadataStringArray(item.metadata, 'labels'),
-      text: item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet') ?? '',
-      ...(subject ? { subject } : {}),
+    const labels = metadataStringArray(item.metadata, 'labels');
+    return {
+      ...(subject ? { title: subject } : {}),
       ...(sender ? { sender } : {}),
-    }, {
-      defaultTrustTier: 'S3',
-      defaultTrustDomain: 'internal',
-      ...(this.sensitivityMap ? { sensitivityMap: this.sensitivityMap } : {}),
-      ...(this.classifier ? { classifier: this.classifier } : {}),
-    });
+      ...(labels.length > 0 ? { labels } : {}),
+    };
   }
 
   private async clientForRequest(): Promise<GmailApiClient> {

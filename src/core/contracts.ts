@@ -16,7 +16,6 @@ import type {
   SourceFamily,
   SourceIndexProvenance,
   SourceItemIdentity,
-  SourceSensitivity,
   SourceTrustDomain,
   SourceTrustTier,
 } from './source-index/types.ts';
@@ -24,8 +23,10 @@ import type { StructuredEvidenceFact } from './opsec.ts';
 
 // --- Contract 1: SourceConnector ------------------------------------------
 // The ONLY per-source code. ~300 lines per source, not 6,000. Emits a
-// normalized RawItem; classify() is the single place where trust policy is
-// allowed to be source-aware.
+// normalized RawItem plus the classification SIGNALS the provider knows about
+// it. Since 2.0.0 a connector no longer decides a tier: the shared,
+// source-agnostic tier classifier does, from these signals and the item's text
+// (docs/design/per-item-four-tier-classification.md, section 6).
 
 export type RawItemContent =
   | { kind: 'text'; text: string }
@@ -64,13 +65,57 @@ export type SourceConnectorListPage =
   | { items: readonly RawItem[]; nextCursor?: string; done: boolean; truncated?: false }
   | { items: readonly RawItem[]; nextCursor?: string; done: false; truncated: true };
 
+// Tier keys use the schema-v1 stored names (TRUST_MODEL.md, "Product tier
+// names"): public = Public, private = Personal, secure = Private,
+// secrets = Secrets. Display names never appear in stored or typed values.
+export type SourceClassificationTier = 'public' | 'private' | 'secure' | 'secrets';
+
+// A provider fact that sets a MINIMUM tier, e.g. a Telegram Secret Chat is at
+// least Private. `basis` is a content-free code naming the fact.
+export interface SourceClassificationFloor {
+  tier: SourceClassificationTier;
+  basis: string;
+}
+
+// A configured resting tier for the item (a chat-level or source-level rule).
+// `prior` sets where the item rests; item-level raises still apply and no
+// automatic signal lowers it. `force` is final except for Secrets and an
+// explicit per-item owner override.
+export interface SourceClassificationPrior {
+  tier: SourceClassificationTier;
+  strength: 'prior' | 'force';
+  basis: string;
+}
+
+// Deterministic sharing evidence. Only `public_link` and `published` are
+// positive evidence for Public; `unknown` and absence are never evidence.
+export type SourceSharingState = 'public_link' | 'published' | 'shared' | 'private' | 'unknown';
+
+export type SourceConversationKind = 'direct' | 'group' | 'channel' | 'secret_chat';
+
+// Source facts only. No field here is a tier decision; the shared classifier
+// turns them into one. Names (title, path, folderKeys, sender, recipients,
+// labels) are classifier INPUT and are never written to the tier ledger.
+export interface SourceClassificationSignals {
+  floor?: SourceClassificationFloor;
+  prior?: SourceClassificationPrior;
+  sharing?: SourceSharingState;
+  title?: string;
+  path?: string;
+  folderKeys?: readonly string[];
+  sender?: string;
+  recipients?: readonly string[];
+  labels?: readonly string[];
+  conversationKind?: SourceConversationKind;
+}
+
 export interface SourceConnector {
   readonly id: string;
   readonly family: SourceFamily;
   authenticate(): Promise<void>;
   listItems(options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage>;
   fetchItem(localItemId: string): Promise<RawItem>;
-  classify(item: RawItem): SourceSensitivity;
+  classificationSignals(item: RawItem): SourceClassificationSignals;
 }
 
 // --- Contract 2: EvidencePack ---------------------------------------------
