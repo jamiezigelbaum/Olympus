@@ -37,7 +37,7 @@ import {
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { gmailConnectorScopeFromApproval } from '../src/workers/source-scope-runtime.ts';
 import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
-import { senderMatchesRule } from '../src/core/sender-rules.ts';
+import { ownerSenderRuleMatches, senderAddress, senderMatchesRule } from '../src/core/sender-rules.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { mailScopeOwnerTierRules } from '../src/core/mail-source-scope.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
@@ -410,6 +410,74 @@ describe('re-review at 537f909b', () => {
       apiClient: client, account: 'personal', env: {}, scope: { skipSenders: ['@shop.example'] },
     }).listItems({ limit: 50 }));
     expect(page.items.map((item) => item.identity.providerItemId)).toEqual(['lookalike']);
+  });
+});
+
+describe('delta review at 15d261cb: sender parsing', () => {
+  const COMMENT_FORM = 'dr@therapist.example (Dr T)';
+  const UNPARSEABLE = 'appointments@mail.therapist.example via Portal';
+
+  test('common legal From forms parse to the real sender address', () => {
+    expect(senderAddress(COMMENT_FORM)).toEqual({ address: 'dr@therapist.example', domain: 'therapist.example' });
+    expect(senderAddress('Dr T (clinic) <DR@Therapist.Example>')?.address).toBe('dr@therapist.example');
+    expect(senderAddress('"Doe, Jane (Dr)" <jane@therapist.example>')?.address).toBe('jane@therapist.example');
+    expect(senderAddress('"jane doe"@therapist.example')?.address).toBe('"jane doe"@therapist.example');
+    expect(senderAddress('jane@therapist.example (nested (comment))')?.address).toBe('jane@therapist.example');
+    expect(senderAddress(UNPARSEABLE)).toBeUndefined();
+  });
+
+  test('a raise rule matches the comment form and falls back to every address when the sender is unparseable', () => {
+    expect(ownerSenderRuleMatches(COMMENT_FORM, '@therapist.example', true)).toBe(true);
+    expect(ownerSenderRuleMatches(UNPARSEABLE, '@therapist.example', true)).toBe(true);
+    // No fallback for a rule that does not raise.
+    expect(ownerSenderRuleMatches(UNPARSEABLE, '@therapist.example', false)).toBe(false);
+    // A parsed sender is never widened: a display-name address still does not count.
+    expect(ownerSenderRuleMatches('"dr@therapist.example" <spam@evil.example>', '@therapist.example', true)).toBe(false);
+  });
+
+  test('a skip rule matches the comment form but never skips an unparseable sender', () => {
+    expect(senderMatchesRule(COMMENT_FORM, '@therapist.example')).toBe(true);
+    expect(senderMatchesRule(UNPARSEABLE, '@therapist.example')).toBe(false);
+  });
+
+  test.each([
+    ['comment form', COMMENT_FORM, 'comment'],
+    ['unparseable header', UNPARSEABLE, 'unparseable'],
+  ] as const)('"always Private" %s mail goes to the secure store and the ledger records the owner rule', async (_name, from, id) => {
+    const dir = tempDir();
+    const stores = fileStores(dir);
+    const mail: GmailMessage = {
+      ...message(id, NOW.getTime() - DAY),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [{ name: 'Subject', value: 'Appointment' }, { name: 'From', value: from }],
+        body: { data: Buffer.from(`Body of ${id}.`).toString('base64url') },
+      },
+    };
+    const cloudInputs: string[] = [];
+    const scope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@therapist.example'] }) });
+    await laneFor(stores, fakeClient([mail]), {
+      scope, internal: recordingProvider('cloud', cloudInputs), secure: recordingProvider('local'),
+    }).pull({ max_items: 50 });
+    expect(stores.secureStore.itemStoredContent(identity(id))).toBeDefined();
+    expect(stores.internalStore.itemStoredContent(identity(id))).toBeUndefined();
+    expect(cloudInputs.join('\n')).not.toContain(`Body of ${id}`);
+    const recorded = stores.secureStore.tierLedger()?.getCurrent(identity(id));
+    expect(recorded).toMatchObject({ metadataTier: 'secure', decidedBy: 'owner_rule' });
+  });
+
+  test.each([
+    ['comment form', COMMENT_FORM, true],
+    ['unparseable header', UNPARSEABLE, false],
+  ] as const)('the skip list on the %s: skipped only when the sender is read', async (_name, from, skipped) => {
+    const mail: GmailMessage = {
+      ...message('m', NOW.getTime() - DAY),
+      payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: 'x' }, { name: 'From', value: from }], body: { data: Buffer.from('Body.').toString('base64url') } },
+    };
+    const page = await collect(new GoogleGmailSourceConnector({
+      apiClient: fakeClient([mail]), account: 'personal', env: {}, scope: { skipSenders: ['@therapist.example'] },
+    }).listItems({ limit: 50 }));
+    expect(page.items).toHaveLength(skipped ? 0 : 1);
   });
 });
 
