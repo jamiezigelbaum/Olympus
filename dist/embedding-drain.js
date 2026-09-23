@@ -4210,7 +4210,7 @@ class EnvCredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
       throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === "reauth_required" || !refreshToken) {
+    if (storedState?.status === "reauth_required" || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
     await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
@@ -4834,6 +4834,9 @@ function isPermanentOAuthClientError(providerError) {
 }
 function serviceAccountDelegationError(handle, capability) {
   return new CredentialBrokerError("credential_reauth_required", `Credential handle ${handle} service-account domain-wide delegation was refused; the impersonated account or one of its scopes is not delegated.`, { handle, capability });
+}
+function registryMarksReauthRequired(definition) {
+  return definition.backendState?.status === "reauth_required";
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : "unknown error";
@@ -5600,7 +5603,7 @@ var init_credential_broker = __esm(() => {
     }
   };
   TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
-  REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the refresh token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
+  REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 });
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash2 } from "node:crypto";

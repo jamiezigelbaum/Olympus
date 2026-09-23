@@ -21,7 +21,12 @@ import {
   type CredentialOAuth2HandleState,
   type CredentialOAuth2StateStore,
 } from '../src/workers/credential-broker/index.ts';
-import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  readConnectedHandleRegistry,
+  upsertConnectedHandle,
+  type ConnectedCredentialHandle,
+} from '../src/workers/credential-broker/connected-handles.ts';
+import type { SecretStore } from '../src/core/secret-store.ts';
 
 const X_REQUEST = {
   handle: 'x.bookmarks.personal',
@@ -423,6 +428,191 @@ function readHeldFile(descriptor: number): string {
   } finally {
     closeSync(descriptor);
   }
+}
+
+describe('a definitive refresh-token refusal latches reauth instead of retrying forever', () => {
+  const REFUSALS: Array<[string, number, Record<string, unknown>]> = [
+    // X, 2026-09-22 on olympus-test: 1,600+ refusals over 59h read as a latched session.
+    ['X invalid_request naming "the token"', 400, {
+      error: 'invalid_request',
+      error_description: 'Value passed for the token was invalid.',
+    }],
+    ['standard invalid_grant', 400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }],
+  ];
+
+  for (const [label, status, body] of REFUSALS) {
+    test(`${label} marks the handle reauth_required in state and registry`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-refusal-latch-'));
+      const registryPath = join(dir, 'handles.json');
+      writeRegisteredXHandle(registryPath);
+      try {
+        const store = new MemoryOAuth2StateStore();
+        await store.save('x.bookmarks.personal', { refreshToken: 'refresh-token-generation-1', status: 'available' });
+        const broker = createEnvCredentialBroker({
+          env: X_CLIENT_ENV,
+          handleRegistryPath: registryPath,
+          oauth2StateStore: store,
+          oauth2CacheNamespace: `refusal-latch-${label}`,
+          now: () => new Date('2026-09-22T03:00:00.000Z'),
+          fetch: async () => new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        });
+
+        const error = await broker.issueSession(X_REQUEST).catch((reason: unknown) => reason);
+
+        expect((error as CredentialBrokerError).code).toBe('credential_reauth_required');
+        expect((error as CredentialBrokerError).retryable).toBe(false);
+        expect((await store.load('x.bookmarks.personal'))?.status).toBe('reauth_required');
+        expect(readConnectedHandleRegistry(registryPath).handles[0]).toMatchObject({
+          backendState: { status: 'reauth_required' },
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  const TRANSIENTS: Array<[string, number, string]> = [
+    ['a 503', 503, JSON.stringify({ error: 'server_error' })],
+    ['a 429', 429, JSON.stringify({ error: 'rate_limited' })],
+  ];
+
+  for (const [label, status, body] of TRANSIENTS) {
+    test(`${label} stays a retryable refresh failure and leaves the registry alone`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-refusal-transient-'));
+      const registryPath = join(dir, 'handles.json');
+      writeRegisteredXHandle(registryPath);
+      try {
+        const store = new MemoryOAuth2StateStore();
+        await store.save('x.bookmarks.personal', { refreshToken: 'refresh-token-generation-1', status: 'available' });
+        const broker = createEnvCredentialBroker({
+          env: X_CLIENT_ENV,
+          handleRegistryPath: registryPath,
+          oauth2StateStore: store,
+          oauth2CacheNamespace: `refusal-transient-${label}`,
+          now: () => new Date('2026-09-22T03:00:00.000Z'),
+          fetch: async () => new Response(body, { status, headers: { 'Content-Type': 'application/json' } }),
+        });
+
+        const error = await broker.issueSession(X_REQUEST).catch((reason: unknown) => reason);
+
+        expect((error as CredentialBrokerError).code).toBe('credential_refresh_failed');
+        expect((error as CredentialBrokerError).retryable).toBe(true);
+        expect((await store.load('x.bookmarks.personal'))?.status).not.toBe('reauth_required');
+        expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('a network failure stays a retryable error and leaves the registry alone', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-refusal-network-'));
+    const registryPath = join(dir, 'handles.json');
+    writeRegisteredXHandle(registryPath);
+    try {
+      const store = new MemoryOAuth2StateStore();
+      await store.save('x.bookmarks.personal', { refreshToken: 'refresh-token-generation-1', status: 'available' });
+      const broker = createEnvCredentialBroker({
+        env: X_CLIENT_ENV,
+        handleRegistryPath: registryPath,
+        oauth2StateStore: store,
+        oauth2CacheNamespace: 'refusal-network',
+        now: () => new Date('2026-09-22T03:00:00.000Z'),
+        fetch: async () => { throw new TypeError('fetch failed: ECONNRESET'); },
+      });
+
+      const error = await broker.issueSession(X_REQUEST).catch((reason: unknown) => reason);
+
+      expect((error as CredentialBrokerError).code).not.toBe('credential_reauth_required');
+      expect((await store.load('x.bookmarks.personal'))?.status).not.toBe('reauth_required');
+      expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('without a broker state store, the registry mark alone stops further token-endpoint calls until reconnect', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-refusal-storeless-'));
+    const registryPath = join(dir, 'handles.json');
+    const handle: ConnectedCredentialHandle = {
+      handle: 'x.bookmarks.personal',
+      provider: 'x',
+      accountRole: 'personal',
+      trustDomain: 'internal',
+      allowedCapabilities: ['x.bookmarks.sync'],
+      scopes: ['tweet.read', 'bookmark.read', 'offline.access'],
+      oauth2Refresh: {
+        tokenUrl: 'https://api.x.test/2/oauth2/token',
+        clientIdSecretRef: 'store:x.personal.oauth.client_id',
+        refreshTokenSecretRef: 'store:x.personal.oauth.refresh_token',
+        scopes: ['tweet.read', 'bookmark.read', 'offline.access'],
+      },
+      connectedAt: '2026-09-01T12:00:00.000Z',
+      providerAccountId: '1234567890',
+    };
+    upsertConnectedHandle(handle, registryPath);
+    const secretStore = new MemorySecretStore({
+      'x.personal.oauth.client_id': 'x-client-id-fixture',
+      'x.personal.oauth.refresh_token': 'refresh-token-generation-1',
+    });
+    let refusing = true;
+    let tokenEndpointCalls = 0;
+    // One long-lived broker, as the email-source server holds.
+    const broker = createEnvCredentialBroker({
+      env: {},
+      handleRegistryPath: registryPath,
+      secretStore,
+      oauth2CacheNamespace: `refusal-storeless-${dir}`,
+      oauth2RefreshFailureBackoffMs: 0,
+      now: () => new Date('2026-09-22T03:00:00.000Z'),
+      fetch: async () => {
+        tokenEndpointCalls += 1;
+        if (refusing) {
+          return new Response(JSON.stringify({
+            error: 'invalid_request',
+            error_description: 'Value passed for the token was invalid.',
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+        }
+        return jsonResponse({ access_token: 'access-token-after-reconnect', expires_in: 7200 });
+      },
+    });
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const error = await broker.issueSession(X_REQUEST).catch((reason: unknown) => reason);
+        expect((error as CredentialBrokerError).code).toBe('credential_reauth_required');
+      }
+      expect(tokenEndpointCalls).toBe(1);
+      expect(readConnectedHandleRegistry(registryPath).handles[0]?.backendState?.status).toBe('reauth_required');
+
+      // Reconnect rewrites the entry without the mark.
+      refusing = false;
+      await secretStore.set('x.personal.oauth.refresh_token', 'refresh-token-after-reconnect');
+      upsertConnectedHandle({ ...handle, connectedAt: '2026-09-22T04:00:00.000Z' }, registryPath);
+
+      const session = await broker.issueSession(X_REQUEST);
+      expect(session).toMatchObject({ token: 'access-token-after-reconnect' });
+      expect(tokenEndpointCalls).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+class MemorySecretStore implements SecretStore {
+  readonly label = 'memory';
+  private readonly values: Map<string, string>;
+
+  constructor(initial: Record<string, string>) {
+    this.values = new Map(Object.entries(initial));
+  }
+
+  async get(key: string): Promise<string | undefined> { return this.values.get(key); }
+  async set(key: string, value: string): Promise<void> { this.values.set(key, value); }
+  async delete(key: string): Promise<void> { this.values.delete(key); }
+  async list(): Promise<string[]> { return [...this.values.keys()]; }
 }
 
 function jsonResponse(payload: Record<string, unknown>): Response {

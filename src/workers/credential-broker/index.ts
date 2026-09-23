@@ -1287,7 +1287,12 @@ export class EnvCredentialBroker implements CredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
 
     if (!clientId) throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === 'reauth_required' || !refreshToken) {
+    // Installs run without a broker state store, so the registry mark is the
+    // only durable record of a refused refresh token; ignoring it re-presented
+    // a dead X token every minute for 59h (x.bookmarks.personal, 2026-09-22).
+    // Definitions are re-read from the registry per request, and a reconnect
+    // rewrites the entry without the mark, which is what clears it.
+    if (storedState?.status === 'reauth_required' || registryMarksReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError(
         'credential_reauth_required',
         `Credential handle ${definition.handle} requires OAuth reauthorization.`,
@@ -2355,6 +2360,10 @@ function serviceAccountDelegationError(handle: string, capability: string): Cred
 }
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 
+function registryMarksReauthRequired(definition: EnvCredentialHandleDefinition): boolean {
+  return (definition.backendState as { status?: unknown } | undefined)?.status === 'reauth_required';
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error';
 }
@@ -2386,9 +2395,12 @@ class OAuth2TokenEndpointError extends Error {
  * test exists for X, which rejects a spent refresh token as a generic
  * `invalid_request` -- indistinguishable by code from a malformed call, so it was
  * retried as a transient fault for two days while the handle was simply dead
- * (x.bookmarks.personal, 2026-07-28). Only a description that names the refresh
- * token counts: a request that really is malformed names something else, and
- * mistaking one for the other would latch a healthy handle into reauth.
+ * (x.bookmarks.personal, 2026-07-28). X has also answered with "the token"
+ * rather than "the refresh token" (2026-09-22, 59h of retries); on this lane the
+ * refresh token is the only token presented, so both wordings count. Only a
+ * description that names the token counts: a request that really is malformed
+ * names something else, and mistaking one for the other would latch a healthy
+ * handle into reauth.
  *
  * The permanent client refusals join them for the same reason they are terminal
  * on the service-account lane: the grant cannot be exchanged until a human fixes
@@ -2414,7 +2426,7 @@ function isTerminalOAuthRefreshError(error: unknown): error is OAuth2TokenEndpoi
 const TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
 
 const REFRESH_TOKEN_REJECTED_DETAIL =
-  /(?:value passed for the refresh token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
+  /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 
 function missingCredentialError(handle: string, capability?: string): CredentialBrokerError {
   return new CredentialBrokerError(
