@@ -121,6 +121,11 @@
       "path": "src/core/connect-gcp.ts",
       "reason": "Legacy credential role strings that persisted secret-store keys still name; see EXPERT_SUBSYSTEM_LEGACY_CREDENTIAL_FILES in test/architecture-guard.test.ts.",
       "retire_when": "The persisted grants are re-keyed, then the module is deleted."
+    },
+    {
+      "path": "src/workers/connector-store/tier-move.ts",
+      "reason": "The four-tier move primitive (stage, copy, flip, rollback). Phase P1b ships and tests it but deliberately runs it on nothing: existing data does not move until the owner-approved migration.",
+      "retire_when": "Phase P3's migration tooling (or the steady-state re-judgment drain) calls it from the product runtime."
     }
   ],
   "operations": [],
