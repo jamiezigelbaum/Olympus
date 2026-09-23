@@ -165,6 +165,7 @@ import {
 import { readBackgroundRuntime } from '../dashboard/background-runtime.ts';
 import type { DashboardBackgroundPageOptions } from '../dashboard/pages/background.ts';
 import {
+  DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   DASHBOARD_SUPPORTED_SOURCES,
   buildSourceDashboardViewModel,
   type DashboardApiKeySource,
@@ -1475,6 +1476,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (!clientId) {
             throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
+          // The saved-secret field's stand-in value means "keep what is stored";
+          // it must never be sent to a provider or stored as a secret.
+          const rawClientSecret = asOptionalString(record.client_secret);
+          const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
           // Resolved after the client id, because which stored secret may be
           // sent depends on which client this flow is going out with. The
           // publisher Google Web client's secret exists only at the publisher
@@ -1483,7 +1488,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // exchange request, or be persisted again.
           const clientSecret = publisher && dashboardGoogleOAuthSource(source)
             ? undefined
-            : await dashboardOAuthClientSecret(source, secretStore, asOptionalString(record.client_secret), clientId);
+            : await dashboardOAuthClientSecret(source, secretStore, submittedClientSecret, clientId);
           if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
             throw new EmailSourceWorkerError(409, 'oauth_client_secret_missing', `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
           }
@@ -1502,7 +1507,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // The secret is a registration for the same reason — and for X it is
           // the credential the token exchange itself authenticates with, so a
           // later Reconnect must find it without the owner re-pasting it.
-          const submittedClientSecret = asOptionalString(record.client_secret);
           if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
             await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
           }

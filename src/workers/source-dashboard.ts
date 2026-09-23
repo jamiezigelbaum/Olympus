@@ -90,6 +90,15 @@ export const DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = 'Waiting for the first sync'
 
 export type DashboardConnectFieldName = 'client_id' | 'client_secret' | 'api_key';
 
+/**
+ * The value a saved secret's field is rendered with, so the browser shows it
+ * masked like any filled password field instead of an empty box asking for
+ * input (owner, 2026-09-23). It is never the secret: the stored value never
+ * leaves the worker. A submission that still carries it means "unchanged",
+ * and the start route reads it exactly as it reads an absent field.
+ */
+export const DASHBOARD_SAVED_SECRET_FIELD_VALUE = 'olympus-saved-secret-unchanged';
+
 export interface DashboardConnectField {
   name: DashboardConnectFieldName;
   label: string;
@@ -886,6 +895,13 @@ export type DashboardSourceAction =
      */
     publisher_client?: true;
     known_client_id?: string;
+    /**
+     * True only when this source already holds a client secret, so the sheet
+     * may leave the secret field optional and say that blank keeps it. A
+     * publisher source reaches `oauth` with nothing stored, and there the same
+     * hint told the owner to leave blank a secret the connection needs.
+     */
+    client_secret_on_file?: true;
     /**
      * The exact callback URI this dashboard sends the provider, for the owner
      * to register on their own app. Public information — the dashboard's own
@@ -3124,7 +3140,9 @@ function sourceAction(
     // offered without a stored secret would start a flow whose exchange is
     // doomed, so a missing secret routes to Set up instead.
     const clientSecretRequired = definition.connect_action.source === 'x';
-    const hasClientSecret = !clientSecretRequired || oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const clientSecretOnFile = clientSecretRequired
+      && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
     const redirectUriGuidance = oauthRedirectUriGuidance(definition.connect_action.source, oauthRedirectBaseUrl);
     const callbackRegistration = oauthCallbackRegistration(
@@ -3149,6 +3167,7 @@ function sourceAction(
         source: definition.connect_action.source,
         label,
         publisher_client: true as const,
+        ...(knownClientId && clientSecretOnFile ? { client_secret_on_file: true as const } : {}),
         ...redirectFields,
         instructions: publisherOAuthSetupInstructions(
           definition.label,
@@ -3181,6 +3200,7 @@ function sourceAction(
       source: definition.connect_action.source,
       label,
       ...(knownClientId ? { known_client_id: knownClientId } : {}),
+      ...(clientSecretOnFile ? { client_secret_on_file: true as const } : {}),
       ...redirectFields,
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
       ...(pending ? { pending_attempt: true as const } : {}),

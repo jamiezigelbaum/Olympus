@@ -10,6 +10,7 @@ export { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS };
  */
 import { createHash } from 'node:crypto';
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
+import { DASHBOARD_SAVED_SECRET_FIELD_VALUE } from '../source-dashboard.ts';
 import type { DashboardCallbackRegistration, DashboardConnectField, DashboardConnectFieldName, DashboardSourceAction, DashboardSourceCard } from '../source-dashboard.ts';
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
@@ -891,6 +892,12 @@ export interface DashboardConnectSheetInput {
   registration?: DashboardCallbackRegistration;
   /** Values to prefill a field with, by field name. Never a secret. */
   values?: Partial<Record<DashboardConnectFieldName, string>>;
+  /**
+   * Secret fields whose value is already stored. Each renders filled with
+   * DASHBOARD_SAVED_SECRET_FIELD_VALUE, so it shows as masked dots; the real
+   * secret never reaches the page.
+   */
+  savedSecrets?: readonly DashboardConnectFieldName[];
   /** Per-field placeholder overrides, by field name. */
   placeholders?: Partial<Record<DashboardConnectFieldName, string>>;
   /** A bounded sentence above everything, e.g. what the provider refused. */
@@ -922,7 +929,9 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
   const id = safeId(input.id);
   const promptId = `${id}-prompt`;
   const inputs = input.fields.map((field) => {
-    const value = input.values?.[field.name];
+    const value = field.secret && input.savedSecrets?.includes(field.name)
+      ? DASHBOARD_SAVED_SECRET_FIELD_VALUE
+      : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     // A prefilled value is rendered as an ordinary editable input, never as a
     // read-only display: a wrong Client ID is exactly the thing the owner came
@@ -1092,16 +1101,24 @@ export function dashboardOAuthConnectSheet(
   // on a publisher action lives under `advanced_byo` — the top level of a
   // publisher action's instructions is the one-click text the sheet leads with.
   const byo = instructions.advanced_byo ?? instructions;
-  // Only the client id is required here. The secret this source already stored
-  // is what makes it an `oauth` action rather than a `needs_setup` one, so a
-  // required secret field would demand the owner re-paste a credential the
-  // worker already holds; blank means "keep the stored one".
+  // A saved secret renders as a filled, masked field; an empty field always
+  // means "put something here". The old placeholder "leave blank to keep the
+  // stored one" truncated to "leave blan" and read as an instruction to leave
+  // a needed field empty (owner, olympus-test, 2026-09-23). The field stays
+  // optional so clearing it also keeps the stored secret.
+  const secretOnFile = action.client_secret_on_file === true;
   const fields = byo.fields.map((field) => (
-    field.name === 'client_id' ? field : { ...field, required: false }
+    field.name === 'client_id' || !secretOnFile ? field : { ...field, required: false }
   ));
-  const secretPlaceholders = Object.fromEntries(byo.fields
-    .filter((field) => field.name !== 'client_id')
-    .map((field) => [field.name, `${field.label} — leave blank to keep the stored one`]));
+  const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
+  // A provider that does not know this callback URI answers with its own
+  // generic error page and never calls back, so the attempt just sits pending.
+  // Say so while it does: the owner otherwise retries the identical request.
+  const pendingNote = action.pending_attempt && action.redirect_uri_to_register
+    ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not`
+      + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.`
+    : undefined;
+  const notice = options.notice ?? pendingNote;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${action.label} ${source.label}`,
@@ -1122,10 +1139,10 @@ export function dashboardOAuthConnectSheet(
         },
       }
       : {}),
-    ...(Object.keys(secretPlaceholders).length > 0 ? { placeholders: secretPlaceholders } : {}),
+    ...(savedSecrets.length > 0 ? { savedSecrets } : {}),
     ...(action.known_client_id ? { values: { client_id: action.known_client_id } } : {}),
     ...(action.pending_attempt ? { cancellable: true } : {}),
-    ...(options.notice === undefined ? {} : { notice: options.notice }),
+    ...(notice === undefined ? {} : { notice }),
     ...redirectUriInput(action),
   });
   return { sheetId, sheet };

@@ -15177,6 +15177,12 @@ var init_vocabulary = __esm(() => {
   ]);
 });
 
+// src/workers/dashboard/phases.ts
+var init_phases = __esm(() => {
+  init_source_dashboard();
+  init_vocabulary();
+});
+
 // src/workers/credential-health.ts
 var ROTATING_PROVIDERS, PASSIVE_EVIDENCE_MAX_AGE_MS, CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS, CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS, CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS;
 var init_credential_health = __esm(() => {
@@ -15355,12 +15361,6 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
-});
-
-// src/workers/dashboard/phases.ts
-var init_phases = __esm(() => {
-  init_source_dashboard();
-  init_vocabulary();
 });
 
 // src/workers/google-connectors/gmail-live-control.ts
@@ -16566,6 +16566,7 @@ var SOURCE_WATCH_POLICY = Object.freeze({
 init_corpora();
 
 // src/workers/dashboard/components.ts
+init_source_dashboard();
 init_phases();
 
 // src/workers/dashboard/theme.ts

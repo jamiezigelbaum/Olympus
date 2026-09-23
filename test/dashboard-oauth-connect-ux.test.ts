@@ -31,6 +31,7 @@ import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
+  DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   buildSourceDashboardViewModel,
   type DashboardPendingConnect,
   type DashboardSourceAction,
@@ -156,6 +157,58 @@ describe('a provider refusal is a state the owner can act on, not a stuck handsh
     expect(card.connection.provider_refusal).toBeUndefined();
     // ...and its action offers the way out of it.
     expect(card.connection.action).toMatchObject({ kind: 'oauth', pending_attempt: true });
+  });
+});
+
+describe('the connect sheet only says a secret is saved when it is (olympus-test, 2026-09-23)', () => {
+  test('X with its secret on file: the field renders filled and masked, never as an empty "leave blank" box', () => {
+    const view = buildView({
+      oauthRedirectBaseUrl: TAILNET,
+      oauthClientIds: { x: 'x-client-id' },
+      oauthClientSecretAvailability: { x: true },
+    });
+    expect(actionOf(view, 'x.bookmarks')).toMatchObject({ kind: 'oauth', client_secret_on_file: true });
+    const sheet = sheetFor(renderDashboardSetupPage(view, { now: NOW }), 'connect-x-bookmarks');
+
+    expect(sheet).toContain(`<input class="keyfield" type="password" name="client_secret"`
+      + ` value="${DASHBOARD_SAVED_SECRET_FIELD_VALUE}" placeholder="Client secret"`);
+    expect(sheet).not.toMatch(/name="client_secret" required/);
+    expect(sheet).not.toContain('leave blank');
+  });
+
+  test('X without a secret on file routes to Set up with a required secret field and no saved claim', () => {
+    const view = buildView({ oauthRedirectBaseUrl: TAILNET, oauthClientIds: { x: 'x-client-id' } });
+    expect(actionOf(view, 'x.bookmarks')).toMatchObject({ kind: 'needs_setup' });
+    const html = renderDashboardSetupPage(view, { now: NOW });
+
+    expect(html).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);
+    expect(html).not.toContain('leave blank');
+  });
+
+  test('a source with no secret field never claims one is saved', () => {
+    const view = buildView({ oauthRedirectBaseUrl: TAILNET, oauthClientIds: { dropbox: 'dropbox-app-key' } });
+    expect(actionOf(view, 'dropbox.files')).not.toHaveProperty('client_secret_on_file');
+    const sheet = sheetFor(renderDashboardSetupPage(view, { now: NOW }), 'connect-dropbox-files');
+
+    expect(sheet).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);
+  });
+
+  test('a pending attempt says what a provider error page means; a quiet one does not', () => {
+    const pendingSheet = sheetFor(renderDashboardSetupPage(buildView({
+      oauthRedirectBaseUrl: TAILNET,
+      oauthClientIds: { x: 'x-client-id' },
+      oauthClientSecretAvailability: { x: true },
+      pendingConnects: [pending('x')],
+    }), { now: NOW }), 'connect-x-bookmarks');
+    expect(pendingSheet).toContain('shows an error instead of asking you to approve, the callback URL below is not'
+      + ' registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.');
+
+    const quietSheet = sheetFor(renderDashboardSetupPage(buildView({
+      oauthRedirectBaseUrl: TAILNET,
+      oauthClientIds: { x: 'x-client-id' },
+      oauthClientSecretAvailability: { x: true },
+    }), { now: NOW }), 'connect-x-bookmarks');
+    expect(quietSheet).not.toContain('shows an error instead of asking you to approve');
   });
 });
 
@@ -752,6 +805,7 @@ async function pendingSources(worker: { fetch(request: Request): Promise<Respons
 function buildView(options: {
   oauthRedirectBaseUrl?: string;
   oauthClientIds?: Record<string, string>;
+  oauthClientSecretAvailability?: Record<string, boolean>;
   pendingConnects?: DashboardPendingConnect[];
 }): SourceDashboardViewModel {
   return buildSourceDashboardViewModel({
@@ -759,6 +813,9 @@ function buildView(options: {
     sovereigntyEngine: fixtureSovereigntyEngine(),
     ...(options.oauthRedirectBaseUrl ? { oauthRedirectBaseUrl: options.oauthRedirectBaseUrl } : {}),
     ...(options.oauthClientIds ? { oauthClientIds: options.oauthClientIds } : {}),
+    ...(options.oauthClientSecretAvailability
+      ? { oauthClientSecretAvailability: options.oauthClientSecretAvailability }
+      : {}),
     ...(options.pendingConnects ? { pendingConnects: options.pendingConnects } : {}),
     now: NOW,
   });
