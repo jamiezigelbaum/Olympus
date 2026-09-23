@@ -371,6 +371,44 @@ export function markConnectedHandleReauthRequired(
 }
 
 /**
+ * Undoes `markConnectedHandleReauthRequired` for an operator-reseeded handle.
+ *
+ * The broker refuses a handle whose registry entry carries the mark even when
+ * its OAuth state store is `available`, so a reseed that only rewrites the
+ * state store leaves the handle dead. A dashboard reconnect clears the mark by
+ * rewriting the whole entry; this clears only the mark. A `backendState` that
+ * the mark itself created (nothing but `kind: 'oauth2_refresh'` left) is
+ * removed, because any `backendState` makes the registry own the backend and
+ * suppresses env-fallback status names. Returns false when there is no
+ * registry, no such handle, or no mark.
+ */
+export function clearConnectedHandleReauthRequired(
+  handleId: string,
+  path: string = defaultHandleRegistryPath(),
+): boolean {
+  if (!existsSync(path)) return false;
+  return withFileLeaseSync(path, (lease) => {
+    const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
+    let changed = false;
+    const handles = registry.handles.map((handle) => {
+      if (handle.handle !== handleId || handle.backendState?.status !== 'reauth_required') return handle;
+      changed = true;
+      const { status: _status, updatedAt: _updatedAt, ...rest } = handle.backendState;
+      const { backendState: _backendState, ...withoutBackendState } = handle;
+      const onlyMarkerKind = Object.keys(rest).length === 1 && rest.kind === 'oauth2_refresh';
+      return onlyMarkerKind ? withoutBackendState : { ...withoutBackendState, backendState: rest };
+    });
+    if (!changed) return false;
+    lease.commit(() => writeConnectedHandleRegistryWithPreservedUnknowns({
+      version: 1,
+      handles,
+      ...(registry.dropped ? { dropped: registry.dropped } : {}),
+    }, path, preservedUnknownHandles));
+    return true;
+  });
+}
+
+/**
  * Records how an already-connected credential's tokens must be exchanged.
  *
  * The one caller is the broker's one-time migration of a Google publisher
