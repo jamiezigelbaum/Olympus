@@ -270,7 +270,9 @@ import {
   gmailConnectorScopeFromApproval,
   type FileSourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
-import { createGmailMailScopeBrowser } from '../google-connectors/gmail-scope-browser.ts';
+import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
+import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
+import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
 import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
@@ -2977,6 +2979,8 @@ export async function main(): Promise<void> {
   // reused for a few minutes per mailbox and draft rather than re-spent on
   // every reopen or estimate refresh.
   const mailScopeSummaryCache = new Map<string, { at: number; value: Promise<unknown> }>();
+  const MAIL_SCOPE_SUMMARY_CACHE_MAX = 16;
+  let gmailPickerRequestBudget: GoogleDailyRequestBudget | undefined;
   const MAIL_SCOPE_SUMMARY_TTL_MS = 10 * 60_000;
   const gmailScopeHandle = () => selectedSourceCredentialHandle({
     env: process.env,
@@ -3046,15 +3050,28 @@ export async function main(): Promise<void> {
       if (!handle) throw new OperationError('source_index_policy_violation', 'The connected Gmail credential is unavailable.');
       const scope = mailScopeFromDraft(input.draft);
       const key = JSON.stringify([accountGeneration, scope, process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY ?? '']);
-      const cached = mailScopeSummaryCache.get(key);
       const now = Date.now();
-      if (!cached || now - cached.at > MAIL_SCOPE_SUMMARY_TTL_MS) {
+      // Expired entries are evicted on every load, and the map is capped, so
+      // a long-running worker never accumulates stale mailbox summaries.
+      for (const [entryKey, entry] of mailScopeSummaryCache) {
+        if (now - entry.at > MAIL_SCOPE_SUMMARY_TTL_MS) mailScopeSummaryCache.delete(entryKey);
+      }
+      while (mailScopeSummaryCache.size >= MAIL_SCOPE_SUMMARY_CACHE_MAX) {
+        const oldest = mailScopeSummaryCache.keys().next().value;
+        if (oldest === undefined) break;
+        mailScopeSummaryCache.delete(oldest);
+      }
+      const cached = mailScopeSummaryCache.get(key);
+      if (!cached) {
         const liveConfig = defaultGmailLiveSyncConfig(process.env);
         const operatorQuery = process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim();
+        gmailPickerRequestBudget ??= createGmailPickerRequestBudget({
+          laneStatePath: defaultGmailRequestBudgetStatePath(process.env),
+        });
         const value = createGmailMailScopeBrowser({
           credentialHandle: handle.handle,
           ...(handle.accountRole ? { account: handle.accountRole } : {}),
-          ...(gmailRequestBudget ? { requestBudget: gmailRequestBudget } : {}),
+          requestBudget: gmailPickerRequestBudget,
         }).summarize({
           scope,
           ...(operatorQuery ? { operatorQuery } : {}),
@@ -3066,7 +3083,18 @@ export async function main(): Promise<void> {
         value.catch(() => mailScopeSummaryCache.delete(key));
         mailScopeSummaryCache.set(key, { at: now, value });
       }
-      const summary = await mailScopeSummaryCache.get(key)!.value;
+      let summary: unknown;
+      try {
+        summary = await mailScopeSummaryCache.get(key)!.value;
+      } catch (error) {
+        if (error instanceof GoogleRequestBudgetError) {
+          throw new OperationError(
+            'source_index_policy_violation',
+            'The mail picker has used today\'s Gmail request allowance, which is kept separate from syncing. Try again after midnight UTC.',
+          );
+        }
+        throw error;
+      }
       const after = fileSourceScopeAuthority.mailSnapshot();
       if (after.accountGeneration !== accountGeneration || after.revision !== before.revision) {
         throw new OperationError('source_index_policy_violation', 'The mailbox or saved mail scope changed while it was being read. Reload the picker.');

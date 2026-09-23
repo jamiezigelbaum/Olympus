@@ -550,10 +550,11 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
       <header class="picker-header">
         <p class="eyebrow">Olympus / Sources</p>
         <h1>Choose mail</h1>
-        <p>Connecting Gmail does not start indexing. Choose how far back Olympus reads mail in full,
+        <p>Connecting Gmail does not start indexing. Choose how far back Olympus stores the body of your mail,
         which categories and labels it skips, and which senders are always Private or never read, then press
-        <strong>Save scope and start</strong>. Mail older than the window is still indexed by subject, sender,
-        date and labels — never its body — so it stays findable, and you can widen the window later.</p>
+        <strong>Save scope and start</strong>. For mail older than the window only the subject, sender, date and
+        labels are stored — the body is never stored — so it stays findable, and you can widen the window later.
+        Mail Olympus already holds is never removed or re-read when you change these choices.</p>
       </header>
       ${sources}
       <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
@@ -645,8 +646,8 @@ function renderMailScopeSource(source: SourceFolderScopeSummary, locations: read
               : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start ingestion.</p>
           <a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
           <fieldset class="mail-scope-group">
-            <legend>Read in full</legend>
-            <p class="mail-scope-help">Mail older than this is indexed by subject, sender, date and labels only — no body.</p>
+            <legend>Store the body of mail from</legend>
+            <p class="mail-scope-help">For older mail only the subject, sender, date and labels are stored; its body is never stored.</p>
             <div class="mail-scope-options">${windows.map(([value, label, hint]) => `
               <label class="mail-scope-option"><input type="radio" name="mail-window" value="${value}" data-mail-window${draft.window === value ? ' checked' : ''}${disabled}>
                 <span>${escapeHtml(label)}${hint ? `<small>${escapeHtml(hint)}</small>` : ''}</span></label>`).join('')}
@@ -670,9 +671,9 @@ function renderMailScopeSource(source: SourceFolderScopeSummary, locations: read
           <fieldset class="mail-scope-group">
             <legend>Senders</legend>
             <div class="mail-scope-senders">
-              <label>Always Private <small>One address or @domain per line. Saved as a rule that their mail is Private.</small>
+              <label>Always Private <small>One address or @domain per line. New mail from these senders is classified Private: stored only in the private store and embedded only by your private model, never in the cloud. Mail Olympus already holds keeps its current tier.</small>
                 <textarea rows="4" data-mail-private-senders spellcheck="false"${disabled}>${escapeHtml(draft.always_private_senders.join('\n'))}</textarea></label>
-              <label>Skip <small>One address or @domain per line. Their mail is never read.</small>
+              <label>Skip <small>One address or @domain per line. Their new mail is never read. Mail already held is not removed.</small>
                 <textarea rows="4" data-mail-skip-senders spellcheck="false"${disabled}>${escapeHtml(draft.skip_senders.join('\n'))}</textarea></label>
             </div>
             <div class="mail-scope-suggestions" data-mail-suggestions hidden>
@@ -685,7 +686,7 @@ function renderMailScopeSource(source: SourceFolderScopeSummary, locations: read
           <h3>Estimate</h3>
           <p class="mail-scope-help">Estimates from Gmail's own counts and a small sample. Nothing has been read yet.</p>
           <dl class="mail-scope-figures">
-            <div><dt>Read in full</dt><dd data-mail-estimate="content_messages">—</dd></div>
+            <div><dt>Body stored</dt><dd data-mail-estimate="content_messages">—</dd></div>
             <div><dt>Metadata only</dt><dd data-mail-estimate="metadata_messages">—</dd></div>
             <div><dt>First read takes</dt><dd data-mail-estimate="sync_days">—</dd></div>
             <div><dt>Gmail requests</dt><dd data-mail-estimate="provider_requests">—</dd></div>

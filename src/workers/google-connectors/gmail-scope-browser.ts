@@ -13,8 +13,10 @@
 //   1   messages.list on the metadata-only query (its resultSizeEstimate;
 //       skipped when the window is Everything)
 //   100 messages.get, format=metadata, From header only (the sender sample)
-// Every request goes through the lane's budgeted client under operator
-// provenance: counted against the Gmail day budget, never refused by it.
+// Every request goes through a budgeted client charged to the picker's own
+// daily allowance (GMAIL_PICKER_DAILY_REQUEST_BUDGET), a separate counter from
+// the scheduled lane's, and enforced: a picker that has spent its allowance is
+// refused until the next UTC day rather than borrowing from the lane.
 
 import {
   compileGmailMailScope,
@@ -35,9 +37,21 @@ import {
   type GmailApiClient,
   type GmailLabel,
 } from './gmail.ts';
-import type { GoogleDailyRequestBudget } from './request-budget.ts';
+import { dirname, join } from 'node:path';
+import { GoogleDailyRequestBudget } from './request-budget.ts';
 
 export { GMAIL_SCOPE_BROWSE_MAX_REQUESTS, GMAIL_SCOPE_SENDER_SAMPLE };
+/** Four full picker loads a day; well under the lane's 5,000 and never charged to it. */
+export const GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+
+export function createGmailPickerRequestBudget(options: { laneStatePath: string; now?: () => Date }): GoogleDailyRequestBudget {
+  return new GoogleDailyRequestBudget({
+    provider: 'Gmail mail picker',
+    dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
+    statePath: join(dirname(options.laneStatePath), 'gmail-picker-daily-request-budget.json'),
+    ...(options.now ? { now: options.now } : {}),
+  });
+}
 const MAX_LISTED_LABELS = 500;
 const MAX_SENDER_SUGGESTIONS = 12;
 /** Skippable system labels. Inbox, spam, trash and drafts are not offered. */
@@ -101,7 +115,10 @@ export function createGmailMailScopeBrowser(options: {
     ...(options.apiClient ? { apiClient: options.apiClient } : {}),
     ...(options.requestBudget ? { requestBudget: options.requestBudget } : {}),
     ...(options.env ? { env: options.env } : {}),
-    provenance: 'operator',
+    // Enforced, not operator-exempt: the picker spends its OWN small daily
+    // allowance (a separate counter from the lane's), so browsing can never
+    // starve the scheduled Gmail lane and is itself capped.
+    provenance: 'scheduled',
   });
   return {
     async summarize(input) {

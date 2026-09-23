@@ -462,16 +462,21 @@ selection and confirmation; a default configuration is not permission.
 Gmail works the same way: **Connect** only connects the mailbox, and the card
 reads Waiting, *waiting for mail selection*, until you open **Choose mail** and
 press **Save scope and start**. Nothing is read before that, not even
-metadata. The picker offers how far back mail is read in full (the last 2 years
-by default; older mail is indexed by subject, sender, date and labels only, with
-no body), which Gmail categories and labels to skip (Promotions and Social are
-skipped by default), and "always Private" and "skip" sender lists seeded from a
-header-only sample of your recent mail. Skipped senders are never read; the
-always-Private list is saved as owner tier rules that per-item classification
-applies once it ships. Before anything runs it shows an
+metadata. The picker offers how far back Olympus stores the body of your mail
+(the last 2 years by default; for older mail only the subject, sender, date and
+labels are stored, never the body), which Gmail categories and labels to skip
+(Promotions and Social are skipped by default), and "always Private" and "skip"
+sender lists seeded from a header-only sample of your recent mail. New mail from
+a skipped sender is never read. New mail from an always-Private sender is
+classified Private (S4): it is stored only in Gmail's secure_local store and
+embedded only by your private model, never by a cloud model. Mail Olympus
+already holds is never removed, re-read or re-tiered by a scope change, so its
+existing chunks and embeddings are kept. Before anything runs it shows an
 estimate of the message count, first-read time and embedding cost; opening the
-picker spends at most 108 Gmail API requests. Saving a changed scope starts a
-fresh traversal under the new query. The approval is stored in
+picker spends at most 108 Gmail API requests, charged to the picker's own
+allowance of 432 requests a day, never to the sync lane's budget. Saving a
+changed scope starts a fresh traversal under the new query that skips mail
+already held; saving an unchanged scope does nothing. The approval is stored in
 `mail-source-scopes.json` beside the connected-handle registry.
 
 Operators can still narrow Gmail with the hidden
