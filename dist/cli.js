@@ -11946,7 +11946,10 @@ function closeSqliteStore(db, options = {}) {
 
 // src/core/sender-rules.ts
 function validDomain(raw) {
-  const domain = raw.toLowerCase().replace(/[.-]+$/, "");
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
   const labels = domain.split(".");
   if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
     return;
@@ -26443,7 +26446,8 @@ function gmailLabelFromJson(record) {
 function rawItemFromGmailMessage(message, account, options = {}) {
   const headers = headersFromPart(message.payload);
   const subject = headers.get("subject") ?? "(no subject)";
-  const from = (headers.get("from") ?? "").slice(0, MAX_FROM_HEADER_CHARS);
+  const rawFrom = headers.get("from") ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
   const date = parsedDate(headers.get("date")) ?? internalDateIso(message.internalDate);
   const metadataOnly = options.metadataOnly === true;
   const text = metadataOnly ? "" : extractMessageText(message);
