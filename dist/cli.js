@@ -10308,7 +10308,8 @@ function rawItemFromFileEntry(entry, account, fetchedAt) {
       ...entry.size !== undefined ? { sizeBytes: entry.size } : {},
       ...entry.clientModified ? { clientModifiedAt: entry.clientModified } : {},
       ...entry.serverModified ? { serverModifiedAt: entry.serverModified } : {},
-      ...entry.contentHash ? { contentHash: entry.contentHash } : {}
+      ...entry.contentHash ? { contentHash: entry.contentHash } : {},
+      ...entry.sharingInfo ? {} : { ownerAuthored: true }
     }),
     fetchedAt
   };
@@ -12316,7 +12317,8 @@ function classifyItemTiers(input, options = {}) {
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
-    ...input.subject ? { subject: input.subject } : {}
+    ...input.subject ? { subject: input.subject } : {},
+    ownerAuthored: input.ownerAuthored === true
   });
   const content = contentPass({
     signals,
@@ -12472,7 +12474,7 @@ function metadataPass(args) {
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
-      solo: Boolean(signals.sender?.trim() || signals.conversationKind || (signals.recipients?.length ?? 0) > 0),
+      solo: args.ownerAuthored !== true,
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
@@ -14049,7 +14051,8 @@ function decideItemTiers(connector, item, text, options, ledger) {
     signals: connector.classificationSignals(item),
     provider: item.identity.provider,
     ...text !== undefined ? { text } : {},
-    subject: item.identity
+    subject: item.identity,
+    ownerAuthored: item.metadata["ownerAuthored"] === true
   }, {
     ...options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {},
     ...options?.rules ? { rules: options.rules } : {},
@@ -29725,7 +29728,8 @@ class GoogleDriveSourceConnector {
       ...file.driveId ? { driveId: file.driveId } : {},
       ...file.parents ? { parents: file.parents } : {},
       ...folderAncestorIds ? { folderAncestorIds } : {},
-      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
+      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {},
+      ...file.ownedByMe === true ? { ownerAuthored: true } : {}
     });
     if (!folderAncestorIds && this.scope)
       return;
@@ -30052,7 +30056,7 @@ class RestGoogleDriveApiClient {
   async listFiles(request) {
     const params = new URLSearchParams({
       pageSize: String(request.pageSize),
-      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)",
+      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),ownedByMe,webViewLink,size,md5Checksum)",
       includeItemsFromAllDrives: "true",
       supportsAllDrives: "true",
       q: request.query ?? "trashed = false"
@@ -30164,6 +30168,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue3).filter(Boolean) } : {},
+    ...record.ownedByMe === true ? { ownedByMe: true } : {},
     ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord7(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
@@ -48658,6 +48663,12 @@ class TierSnifferStore {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(...subjectParams(subject), pass).changes > 0;
   }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
   recordAttemptFailure(subject, pass) {
     this.db.query(`
       UPDATE sniffer_questions SET attempts = attempts + 1
@@ -48757,8 +48768,21 @@ function snifferReasonCode(verdict) {
   const category = SNIFFER_CATEGORIES.includes(verdict.category) ? verdict.category : "other";
   return `${category}:${verdict.confidence.toFixed(2)}`;
 }
+function normalizeSnifferMaterial(material) {
+  const folded = material.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/[\p{Cf}\p{Mn}\p{Me}͏ᅟᅠㅤﾠ]/gu, "");
+  let mapped = "";
+  for (const char of folded) {
+    const at = CONFUSABLE_FROM.indexOf(char);
+    mapped += at >= 0 ? CONFUSABLE_TO[at] : char;
+  }
+  return mapped.normalize("NFKC").replace(/\s+/g, " ").trim();
+}
 function snifferMaterialLooksLikeInjection(material) {
-  return INJECTION_PATTERNS.some((pattern) => pattern.test(material));
+  const normalized = normalizeSnifferMaterial(material);
+  if (INJECTION_PATTERNS.some((pattern) => pattern.test(normalized)))
+    return true;
+  const compact = normalized.replace(/[^a-z0-9.]/g, "");
+  return COMPACT_MARKERS.some((marker) => compact.includes(marker));
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   return `${lane.kind}:${promptVersion}`;
@@ -48846,7 +48870,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_METADATA_BATCH_SIZE = 100, SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20, SNIFFER_CONTENT_BATCH_SIZE = 1, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_PATTERNS, SNIFFER_SYSTEM_PROMPT, SNIFFER_PROMPT_VERSION;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_METADATA_BATCH_SIZE = 100, SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20, SNIFFER_CONTENT_BATCH_SIZE = 1, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_HARD_CATEGORIES, SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_PATTERNS, COMPACT_MARKERS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_engine();
   init_delphi_scorer();
@@ -48865,13 +48889,40 @@ var init_sniffer = __esm(() => {
   ];
   SNIFFER_HARD_CATEGORIES = new Set(["health", "therapy", "financial", "legal", "identity"]);
   INJECTION_PATTERNS = [
-    /\b(?:ignore|disregard|forget|override|bypass)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier)\b/i,
-    /\b(?:system prompt|developer message|assistant:|as an ai|you are an? (?:ai|assistant|model|classifier)|respond with|answer with|reply with|output only|return only)\b/i,
-    /\bverdicts?\b/i,
-    /["']?\b(?:tier|confidence|category)\b["']?\s*[:=]/i,
-    /[{}]/,
-    /\b(?:personal|private|public)\b[^\n]{0,20}\bconfidence\b/i,
-    /\b(?:classify|label|mark|treat)\b[^\n]{0,30}\b(?:as|is)\s+(?:personal|public|not private|safe)\b/i
+    /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
+    /\b(?:system|developer|assistant|user)\s*(?:prompt|message|note)?\s*:/,
+    /\b(?:system prompt|developer message|as an ai|you are an? (?:ai|assistant|model|classifier|sniffer)|respond with|answer with|reply with|output only|return only)\b/,
+    /\bverdicts?\b/,
+    /\b(?:tier|confidence|category)\b\s*["']?\s*[:=]/,
+    /[{}<>]/,
+    /\b(?:personal|private|public|ordinary)\b[^\n]{0,40}\b(?:confidence|0?[.,]\d{1,3}|1[.,]0+)\b/,
+    /\b(?:confidence|0?[.,]9\d?|1[.,]0+)\b[^\n]{0,40}\b(?:personal|public|ordinary)\b/,
+    /\b(?:classify|label|mark|treat|tag|consider|rate|answer|return)\b[^\n]{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
+    /\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b/,
+    /\bthis\s+(?:list|batch|prompt)\b/,
+    /\b(?:everything|all of (?:this|these|them)|these|the rest)\b[^\n]{0,30}\b(?:is|are)\b[^\n]{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/
+  ];
+  COMPACT_MARKERS = [
+    "ignoreprevious",
+    "ignoreall",
+    "ignoretherules",
+    "ignoreinstructions",
+    "disregard",
+    "systemprompt",
+    "verdict",
+    "tierpersonal",
+    "tierpublic",
+    "personalordinary",
+    "confidence",
+    "everyitem",
+    "allitems",
+    "eachitem",
+    "classifyas",
+    "markas",
+    "answerpersonal",
+    "respondpersonal",
+    "personal099",
+    "personal0.99"
   ];
   SNIFFER_SYSTEM_PROMPT = [
     "You are a privacy sniffer for a personal data index. For each numbered item, decide whether it is",
@@ -86121,6 +86172,7 @@ async function runSnifferPass(options) {
     secretRefused: 0,
     injectionRefused: 0,
     staleDropped: 0,
+    staleRekeyed: 0,
     awaitingPlacement: 0,
     movesQueued: 0,
     awaitingResync: 0,
@@ -86145,8 +86197,10 @@ async function runSnifferPass(options) {
       mapRevision: item.question.mapRevision
     }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
     if (applied?.outcome === "stale_map") {
-      item.target.sniffer.deleteQuestion(item.question, item.question.pass);
-      report.staleDropped += 1;
+      const row = item.target.ledger.getCurrent(item.question);
+      if (row)
+        item.target.sniffer.rekey(item.question, item.question.pass, row.mapRevision);
+      report.staleRekeyed += 1;
       return;
     }
     if (applied?.outcome === "needs_placement") {
@@ -86166,7 +86220,14 @@ async function runSnifferPass(options) {
   };
   const stillOpen = (target, question) => {
     const row = target.ledger.getCurrent(question);
-    return row !== undefined && row.state === "pending" && row.decidedBy !== "override" && row.mapRevision === question.mapRevision && openPasses(row).includes(question.pass);
+    const open6 = row !== undefined && row.state === "pending" && row.decidedBy !== "override" && openPasses(row).includes(question.pass);
+    if (open6 && row.mapRevision !== question.mapRevision) {
+      target.sniffer.rekey(question, question.pass, row.mapRevision);
+      question.mapRevision = row.mapRevision;
+      question.attempts = 0;
+      report.staleRekeyed += 1;
+    }
+    return open6;
   };
   const work = { metadata: [], content: [] };
   for (const target of options.targets) {

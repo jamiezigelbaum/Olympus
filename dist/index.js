@@ -7327,7 +7327,8 @@ class GoogleDriveSourceConnector {
       ...file.driveId ? { driveId: file.driveId } : {},
       ...file.parents ? { parents: file.parents } : {},
       ...folderAncestorIds ? { folderAncestorIds } : {},
-      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}
+      ...file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {},
+      ...file.ownedByMe === true ? { ownerAuthored: true } : {}
     });
     if (!folderAncestorIds && this.scope)
       return;
@@ -7578,7 +7579,7 @@ class RestGoogleDriveApiClient {
   async listFiles(request) {
     const params = new URLSearchParams({
       pageSize: String(request.pageSize),
-      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)",
+      fields: "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),ownedByMe,webViewLink,size,md5Checksum)",
       includeItemsFromAllDrives: "true",
       supportsAllDrives: "true",
       q: request.query ?? "trashed = false"
@@ -7690,6 +7691,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
+    ...record.ownedByMe === true ? { ownedByMe: true } : {},
     ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord14(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
