@@ -148,10 +148,11 @@ export function defaultWhatsAppInternalConnectorStoreDbPath(
  * message stored before per-item routing keeps its place there, and every new
  * message rests there too, at Private, by default. A chat is a chat-level
  * prior that a message is never lowered below. Only an explicit OWNER chat
- * rule that sets a chat to Personal (or a per-item owner override) lifts that
- * floor, and then only a message judged Personal from its own text goes to
- * `internal.whatsapp.messages`; any message the detectors raise, or whose
- * question is still open, stays Private. A message is kept whole (names and
+ * rule that sets a chat to Personal lifts that floor, and then only a message
+ * judged Personal from its own text goes to `internal.whatsapp.messages`; any
+ * message the detectors raise, or whose question is still open, stays
+ * Private. A per-item owner override also lifts it, and is final by design:
+ * it sets that one message's tier whatever its text says. A message is kept whole (names and
  * text in one store), and one carrying a secret is stored nowhere.
  */
 export function createWhatsAppTierLane(options: {

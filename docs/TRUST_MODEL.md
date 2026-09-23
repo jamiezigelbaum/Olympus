@@ -446,12 +446,15 @@ Rules:
   - Dropbox is no longer a Private-only vault in Olympus. Every file already
     stored stays in `secure_local.dropbox.files`, untouched. A NEW file's
     names (file name and path) go to its metadata tier's store when it is
-    listed, Personal by default (`internal.dropbox.files`); its text, read
+    listed, Personal by default (`internal.dropbox.files`), per the owner's
+    ruling that names are Personal unless something raises them (an owner
+    rule, a map category, or names that look private); its text, read
     later by the shared extraction factory, goes to the store its content
     tier decides: Personal for reference material, Private
     (`secure_local.dropbox.files`) when the text says so. Names that look
     private keep the whole file Private until the privacy-safe sniffer
-    answers, and an unread file is never sent to an extractor at less than
+    answers, the owner's sensitivity map judges both names and text, and an
+    unread file is never sent to an extractor at less than
     Private. `public_safe.dropbox.files` receives a file only on positive
     public evidence. The folder-scope approval filters reads in every one of
     these stores.
@@ -462,9 +465,11 @@ Rules:
   - WhatsApp fails closed. Its store stays `secure_local.whatsapp.messages`
     and every message rests Private there by default. A chat is a prior no
     message is lowered below: only an explicit OWNER chat rule that sets a
-    chat to Personal (or a per-item owner override) lets a message whose own
-    text stays Personal go to `internal.whatsapp.messages`. Owner rules load
-    in phase P2, so until then no WhatsApp message leaves the Private store.
+    chat to Personal lets a message whose own text stays Personal go to
+    `internal.whatsapp.messages` (the text can still raise it). A per-item
+    owner override is final by design: it sets that one message's tier and
+    the text does not change it. Owner rules load in phase P2, so until then
+    no WhatsApp message leaves the Private store.
 
 Current email implication: until Olympus has row/chunk sensitivity
 classification for the local Gmail index, treat the entire email index as
