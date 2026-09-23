@@ -2931,7 +2931,8 @@ describe('onboarding walkthrough invariant', () => {
       verification: 'unverified',
       advanced_byo_supported: true,
     });
-    expect(shared.google_pilot?.warning).toContain('3–5-user pilot');
+    expect(shared.google_pilot?.warning).toContain('unverified app');
+    expect(shared.google_pilot?.warning).not.toMatch(/pilot|3–5-user/i);
   });
 
   test('the ordinary first-sync window keeps an active step and a rendered explanation', () => {

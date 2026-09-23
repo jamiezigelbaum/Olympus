@@ -554,35 +554,40 @@ describe('dashboard setup framing and copy', () => {
     expect(html).not.toContain('javascript:');
   });
 
-  test('names the unverified-app warning before the buttons that lead to it', () => {
-    // The v0.4 shared-OAuth decision: the shared pilot client is published but
-    // unverified, and the dashboard is where that is said. The note has to sit
-    // above the Google rows, because Google shows the interstitial after the
-    // reader has already pressed Connect.
+  test('names the unverified-app warning inside the Gmail and Drive sheets only', () => {
+    // Olympus's shared Google app has not finished Google's verification, and
+    // Google shows its interstitial after the reader presses Connect. The note
+    // lives in the Google connect sheets, so it meets the reader about to
+    // connect Google and nobody else (owner, 2026-09-23: it used to be a banner
+    // over the whole source list).
     const html = renderDashboardSetupPage(buildSourceDashboardViewModel({
       sourceIndexStatus: emptyStatus(),
       sovereigntyEngine: fixtureSovereigntyEngine(),
       googlePilotClientConfigured: true,
+      oauthClientIds: { dropbox: 'fixture-dropbox-app-key' },
       now: NOW,
     }), { now: NOW });
 
-    expect(html).toContain('class="pilotnote"');
-    expect(html).toContain('Shared Google pilot client');
-    expect(html).toContain('Google may show an unverified-app warning');
-    expect(html).toContain('Gmail and Drive request their read scopes separately.');
-    const note = html.indexOf('class="pilotnote"');
-    const firstControl = html.indexOf('class="setrow');
-    expect(firstControl).toBeGreaterThan(-1);
-    expect(note).toBeGreaterThan(-1);
-    expect(note).toBeLessThan(firstControl);
+    expect(html).not.toContain('class="pilotnote"');
+    expect(html).not.toMatch(/pilot/i);
+    expect(html).not.toContain('3–5-user');
+    for (const sourceId of ['gmail.email', 'google_drive.docs']) {
+      const sheet = sheetFor(html, sourceId);
+      expect(sheet).toContain('class="providernote"');
+      expect(sheet).toContain('Google may show an “unverified app” warning when you connect');
+      expect(sheet).toContain('Gmail and Drive ask for their read access separately.');
+    }
+    // One note per Google sheet, and none anywhere else on the page.
+    expect(html.split('class="providernote"').length - 1).toBe(2);
+    expect(sheetFor(html, 'dropbox.files')).not.toContain('class="providernote"');
   });
 
   test('an advanced BYO install is not warned about a client it does not use', () => {
     const html = renderDashboardSetupPage(realView(), { now: NOW });
 
-    expect(html).not.toContain('class="pilotnote"');
+    expect(html).not.toContain('class="providernote"');
     expect(html).not.toContain('Advanced Google BYO required');
-    expect(html).not.toContain('unverified-app warning');
+    expect(html).not.toContain('unverified app');
   });
 
   test('says the connector prompt needs a source checkout the package does not carry', () => {
@@ -618,6 +623,17 @@ describe('dashboard setup framing and copy', () => {
 });
 
 /** The markup between one row marker and the next, for row-local assertions. */
+/** A source's connect or set-up sheet, whichever the page rendered. */
+function sheetFor(html: string, sourceId: string): string {
+  const suffix = sourceId.replace(/[^A-Za-z0-9_-]+/g, '-');
+  const start = [`id="connect-${suffix}"`, `id="setup-${suffix}"`]
+    .map((marker) => html.indexOf(marker))
+    .find((index) => index > -1) ?? -1;
+  expect(start).toBeGreaterThan(-1);
+  const end = html.indexOf('<div class="sheet"', start + 1);
+  return html.slice(start, end === -1 ? undefined : end);
+}
+
 function segmentFor(html: string, label: string): string {
   // A state row is a div when it carries a control and an anchor when the whole
   // row is the link; the name inside is a span or an anchor by the same rule.

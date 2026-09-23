@@ -246,15 +246,17 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     return view;
   }
   if (state === 'first-install') {
-    // The owner's first-install test (2026-09-23): model keys in, Dropbox
-    // connected with its folders not yet chosen, Readwise before its first
-    // sync. Both should read Waiting; the models should read as compact rows.
+    // The owner's first-install test (2026-09-23): model keys in, Dropbox and
+    // Google Drive connected with their folders not yet chosen, Readwise
+    // before its first sync. All three should read Waiting; the models should
+    // read as compact rows.
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: emptyStatus(),
       schedulerStatus: scheduler([]),
       sovereigntyEngine: engine,
       connectedHandleRegistry: registry([
         handle('dropbox.personal', 'dropbox', ['dropbox.files.sync'], ['files.content.read']),
+        handle('google_drive.personal', 'google_drive', ['google_drive.docs.sync'], ['https://www.googleapis.com/auth/drive.readonly']),
         handle('readwise.personal', 'readwise', ['readwise.library.sync'], []),
       ]),
       apiKeyAvailability: { readwise: true },
@@ -262,7 +264,8 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       oauthClientSecretAvailability: { google: true },
       googlePilotClientConfigured: true,
       oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
-      fileSourceScopeStatus: { 'dropbox.files': 'scope_pending' },
+      // Both keys, always, as the worker's scope summaries publish them.
+      fileSourceScopeStatus: { 'google_drive.docs': 'scope_pending', 'dropbox.files': 'scope_pending' },
       now: NOW,
     });
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();

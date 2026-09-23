@@ -90,8 +90,6 @@ export const SETUP_JOURNEY_CSS = `.setupsummary { display: grid; grid-template-c
 .setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
 .setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
 .setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
-.pilotnote b { color: var(--warn); }
 @media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`;
 
 export const BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }

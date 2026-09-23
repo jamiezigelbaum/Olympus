@@ -26,6 +26,7 @@ import {
   attentionRow,
   backgroundRow,
   dashboardNeedsSetupSheet,
+  dashboardGoogleProviderNote,
   dashboardOAuthConnectSheet,
   escapeHtml,
   pageShell,
@@ -100,7 +101,7 @@ export function renderDashboardHomePage(
   // section follows it and keeps its bottom margin when one does.
   const background = renderBackgroundSection(view, options);
   const blocks = groups.map((group, index) =>
-    renderSection(group, options, background === '' && index === groups.length - 1)
+    renderSection(group, view, options, background === '' && index === groups.length - 1)
   );
   blocks.push(background);
   blocks.push(renderSetupLink(options));
@@ -176,20 +177,22 @@ function backgroundHref(basePath?: string): string {
 
 function renderSection(
   group: DashboardStatusGroup,
+  view: SourceDashboardViewModel,
   options: DashboardPageOptions | undefined,
   last: boolean,
 ): string {
   return ATTENTION_STATUSES.includes(group.status)
-    ? renderAttentionSection(group, options)
+    ? renderAttentionSection(group, view, options)
     : renderCardSection(group, options, last);
 }
 
 function renderAttentionSection(
   group: DashboardStatusGroup,
+  view: SourceDashboardViewModel,
   options: DashboardPageOptions | undefined,
 ): string {
   const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, options);
+    const resolved = attentionAction(source, view, options);
     const row = attentionRow({
       label: source.label,
       why: dashboardAttentionLine(source, options),
@@ -277,6 +280,7 @@ export function detailHref(source: DashboardSourceCard, basePath?: string): stri
  */
 function attentionAction(
   source: DashboardSourceCard,
+  view: SourceDashboardViewModel,
   options: DashboardPageOptions | undefined,
 ): { action: DashboardActionInput; sheet?: string } | undefined {
   const action = source.connection.action;
@@ -294,7 +298,8 @@ function attentionAction(
     if (!dashboardControlsAvailable(options)) {
       return { action: lockedAction(reconnecting ? 'Reauthenticate' : action.label, options?.basePath) };
     }
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const note = dashboardGoogleProviderNote(view, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
     return {
       action: { label: reconnecting ? 'Reauthenticate' : action.label, kind: 'none', sheet: sheetId, primary: true },
       sheet,
@@ -311,8 +316,10 @@ function attentionAction(
   // button used to start the identical attempt the provider had just refused
   // (owner, 2026-09-03).
   if (action.kind === 'oauth') {
+    const note = dashboardGoogleProviderNote(view, action);
     const connect = dashboardOAuthConnectSheet(source, action, {
       ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...(note === undefined ? {} : { providerNote: note }),
     });
     if (connect) {
       return {

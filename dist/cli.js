@@ -38273,7 +38273,7 @@ function googlePilotStatus(configured) {
   return {
     mode: configured ? "shared_pilot" : "advanced_byo_required",
     verification: "unverified",
-    warning: configured ? "The shared Google pilot client is published but unverified. Google may show an unverified-app warning during this 3–5-user pilot." : "The shared Google pilot client is not provisioned in this install. Use the advanced bring-your-own Google app flow.",
+    warning: configured ? "Google may show an “unverified app” warning when you connect: Olympus’s Google app has not finished Google’s verification yet." : "Olympus’s shared Google app is not set up in this install. Use the advanced bring-your-own Google app flow.",
     advanced_byo_supported: true
   };
 }
@@ -64815,8 +64815,6 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
 .setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
 .setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
-.pilotnote b { color: var(--warn); }
 @media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
@@ -66704,6 +66702,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet.on { display: block; }
 .sheet h4 { margin: 0 0 6px; font-size: 13.5px; }
 .sheet p { color: var(--t3); font-size: 12.5px; margin: 0 0 10px; max-width: 66ch; }
+.sheet .providernote { border-left: 2px solid var(--warn-line); padding-left: 10px; }
 .promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
 /* The popup-blocked authorization link. Empty on every render that did not
    need it, so it must take no space until the script fills it in. */
@@ -67012,7 +67011,7 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""}` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
-  const notice = input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`;
+  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
@@ -67037,7 +67036,7 @@ function callbackRegistrationSteps(id, registration) {
   const consoleStep = consoleUrl === undefined ? escapeHtml(registration.console.label) : `${escapeHtml(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml(new URL(consoleUrl).host)} →</a>`;
   return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml(registration.finish)}</li>` + `</ol>`;
 }
-function dashboardNeedsSetupSheet(source, action) {
+function dashboardNeedsSetupSheet(source, action, options = {}) {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const sheet = connectSetupSheet({
     id: sheetId,
@@ -67046,6 +67045,7 @@ function dashboardNeedsSetupSheet(source, action) {
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
   return { sheetId, sheet };
@@ -67079,9 +67079,15 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
     ...notice === undefined ? {} : { notice },
+    ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
   return { sheetId, sheet };
+}
+function dashboardGoogleProviderNote(view, action) {
+  if (view.google_pilot?.mode !== "shared_pilot" || !isGoogleOAuthSource2(action.source))
+    return;
+  return `${view.google_pilot.warning} Gmail and Drive ask for their read access separately.`;
 }
 function redirectUriInput(action) {
   const registration = action.callback_registration === undefined ? {} : { registration: action.callback_registration };
@@ -68255,7 +68261,7 @@ var init_background = __esm(() => {
 function renderDashboardHomePage(view, options) {
   const groups = dashboardConnectedStatusGroups(view, options);
   const background = renderBackgroundSection(view, options);
-  const blocks = groups.map((group, index) => renderSection(group, options, background === "" && index === groups.length - 1));
+  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
   blocks.push(background);
   blocks.push(renderSetupLink(options));
   const nav = renderDashboardNav("home", {
@@ -68305,12 +68311,12 @@ function backgroundHref(basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
 }
-function renderSection(group, options, last) {
-  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, options) : renderCardSection(group, options, last);
+function renderSection(group, view, options, last) {
+  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
 }
-function renderAttentionSection(group, options) {
+function renderAttentionSection(group, view, options) {
   const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, options);
+    const resolved = attentionAction(source, view, options);
     const row = attentionRow({
       label: source.label,
       why: dashboardAttentionLine(source, options),
@@ -68362,14 +68368,15 @@ function detailHref2(source, basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
 }
-function attentionAction(source, options) {
+function attentionAction(source, view, options) {
   const action = source.connection.action;
   const reconnecting = source.coverage.indexed_items > 0;
   if (action.kind === "needs_setup") {
     if (!dashboardControlsAvailable(options)) {
       return { action: lockedAction(reconnecting ? "Reauthenticate" : action.label, options?.basePath) };
     }
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const note = dashboardGoogleProviderNote(view, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
     return {
       action: { label: reconnecting ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
       sheet
@@ -68382,8 +68389,10 @@ function attentionAction(source, options) {
     return { action: lockedAction(label, options?.basePath) };
   }
   if (action.kind === "oauth") {
+    const note = dashboardGoogleProviderNote(view, action);
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...note === undefined ? {} : { providerNote: note }
     });
     if (connect) {
       return {
@@ -69400,9 +69409,8 @@ var init_model_setup2 = __esm(() => {
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
-  const pilotNote = renderGooglePilotNote(view);
   const sections = SETUP_GROUPS.map((group) => {
-    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath);
+    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
     return group.id === "not_connected" && view.model_setup && !view.model_setup.ready && rendered ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
   }).filter((section) => section.length > 0);
   const body = [
@@ -69413,7 +69421,6 @@ function renderDashboardSetupPage(view, options) {
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
-    ...pilotNote ? [pilotNote] : [],
     ...sections,
     connectorRow(),
     connectorSheet({
@@ -69445,12 +69452,6 @@ function renderSetupSummary(view) {
   const connected = view.sources.filter(dashboardIsConnectedSource).length;
   const line = `${ready} answer-ready · ${connected} connected`;
   return `<div class="setupsummary" aria-label="Setup summary">` + `<div class="sumcard"><b>Security preset</b><span>Configured</span></div>` + `<div class="sumcard"><b>Sources</b><span>${escapeHtml(line)}</span></div>` + `</div>`;
-}
-function renderGooglePilotNote(view) {
-  const pilot = view.google_pilot;
-  if (pilot?.mode !== "shared_pilot")
-    return "";
-  return `<div class="pilotnote"><b>Shared Google pilot client:</b> ${escapeHtml(pilot.warning)} ` + `Gmail and Drive request their read scopes separately.</div>`;
 }
 function groupSources(sources, degraded) {
   const grouped = {
@@ -69490,10 +69491,10 @@ function setupGroupOf(source, degraded) {
       return "not_connected";
   }
 }
-function renderGroup(group, sources, degraded, basePath) {
+function renderGroup(group, sources, degraded, basePath, view) {
   if (sources.length === 0)
     return "";
-  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)).join(`
+  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, basePath) : renderStateRow(group, source, degraded, basePath, view)).join(`
 `);
   return `${sectionHeading2(group.heading, sources.length, group.attention)}
 ${rows}`;
@@ -69502,12 +69503,12 @@ function sectionHeading2(heading, count, attention) {
   const marker = attention ? "▲ " : "";
   return `<div class="sect${attention ? " attn" : ""}">${marker}${heading} — ${count}</div>`;
 }
-function renderStateRow(group, source, degraded, basePath) {
+function renderStateRow(group, source, degraded, basePath, view) {
   const why = stateLine(group.id, source, degraded);
   const href = detailHref2(source, basePath);
   const action = source.connection.action;
   if (group.id === "needs_you" && action.kind === "needs_setup") {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const disconnect2 = custodyAction(source);
     const row = attentionRow({
       label: source.label,
@@ -69522,7 +69523,8 @@ ${sheet}`;
   }
   if ((group.id === "needs_you" || group.id === "connecting") && action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...providerNote(view, action)
     });
     if (connect) {
       const secondary = group.id === "connecting" ? cancelAction(action) : custodyAction(source);
@@ -69549,7 +69551,7 @@ ${connect.sheet}`;
     ...disconnect ? { secondaryAction: disconnect } : {}
   });
 }
-function renderSetupRow(source, basePath) {
+function renderSetupRow(source, view, basePath) {
   const action = source.connection.action;
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -69570,7 +69572,7 @@ function renderSetupRow(source, basePath) {
 ${sheet}`;
   }
   if (action.kind === "needs_setup") {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const link2 = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
@@ -69584,7 +69586,8 @@ ${sheet}`;
   }
   if (action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...providerNote(view, action)
     });
     if (connect) {
       const row = setupRow({
@@ -69605,6 +69608,10 @@ ${connect.sheet}`;
     action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: "none" },
     ...link === undefined ? {} : { blurbLink: link }
   });
+}
+function providerNote(view, action) {
+  const note = dashboardGoogleProviderNote(view, action);
+  return note === undefined ? {} : { providerNote: note };
 }
 function keyLocationLink(instructions) {
   const url = safeExternalHref(instructions.provider_console_url);
