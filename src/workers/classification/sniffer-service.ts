@@ -43,6 +43,8 @@ export interface TierSnifferServiceOptions {
   model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
+  /** Where the day's call count is kept across restarts (owner-only JSON). */
+  budgetStatePath?: string;
   intervalMs?: number;
   maxCallsPerPass?: number;
   maxCallsPerDay?: number;
@@ -65,6 +67,7 @@ export class TierSnifferService {
   private running = false;
   private abort: AbortController | undefined;
   private lastTick: TierSnifferTick | undefined;
+  private stopped = false;
   private readonly ledgers = new Map<string, TierLedger>();
 
   constructor(options: TierSnifferServiceOptions) {
@@ -72,6 +75,7 @@ export class TierSnifferService {
     this.budget = new SnifferCallBudget({
       maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
       ...(options.now ? { now: options.now } : {}),
+      ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
   }
 
@@ -81,11 +85,23 @@ export class TierSnifferService {
     this.timer.unref?.();
   }
 
+  /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running) this.closeLedgers();
+  }
+
+  /**
+   * An answer needs the private pool (the worker calls this when answers in
+   * flight go from 0 to 1): abort the sniffer's in-flight call at once. The
+   * pass stops as `preempted`; nothing is counted against any item, and the
+   * sniffer never records anything in the answer pool's breakers.
+   */
+  preempt(): void {
+    this.abort?.abort();
   }
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick } {
@@ -98,7 +114,7 @@ export class TierSnifferService {
   }
 
   async runOnce(): Promise<TierSnifferTick> {
-    if (this.running) return { state: 'skipped_running' };
+    if (this.running || this.stopped) return { state: 'skipped_running' };
     this.running = true;
     this.abort = new AbortController();
     try {
@@ -113,6 +129,7 @@ export class TierSnifferService {
     } finally {
       this.running = false;
       this.abort = undefined;
+      if (this.stopped) this.closeLedgers();
     }
   }
 
@@ -156,21 +173,24 @@ export class TierSnifferService {
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
-    const pair = { modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
-    if (!isClassifierApproved(ledger.entries, pair)) {
+    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
+    if (!isClassifierApproved(ledger.entries, key)) {
+      // Until then no question is sent anywhere: flagged items wait, pending
+      // and held Private, and their questions stay queued for the approval.
       // Make the open decision visible once, never as an approval.
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
         kind: 'classifier_model_decision',
-        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} with prompt ${SNIFFER_PROMPT_VERSION}; it waits for the owner's approval before classifying anything.`,
+        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${SNIFFER_PROMPT_VERSION}; it waits for the owner's approval before classifying anything.`,
         model_id: lane.modelId,
         prompt_version: SNIFFER_PROMPT_VERSION,
         lane: lane.kind,
+        profile_id: lane.profileId,
         approved_by: 'system-automatic',
         status: 'pending',
-        entry_id: `sniffer-approval-requested:${lane.modelId}:${SNIFFER_PROMPT_VERSION}`,
+        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${SNIFFER_PROMPT_VERSION}`,
       });
-      return { state: 'awaiting_owner_approval', ...pair };
+      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
     }
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {

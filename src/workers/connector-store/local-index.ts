@@ -2013,7 +2013,6 @@ export class LocalConnectorStore {
     }
   }
 
-  /** The ledger this store records tier decisions in, opening the default one on first use. */
   /**
    * The path of the ledger this store records decisions in: a tiered store
    * set's (once it handed this store its ledger) or the store's own. The
@@ -2023,6 +2022,7 @@ export class LocalConnectorStore {
     return this.tierLedgerHandle?.dbPath ?? tierLedgerPathForStore(this.dbPath);
   }
 
+  /** The ledger this store records tier decisions in, opening the default one on first use. */
   tierLedger(): TierLedger | undefined {
     if (this.tierLedgerDisabled === true) return undefined;
     if (!this.tierLedgerHandle) {

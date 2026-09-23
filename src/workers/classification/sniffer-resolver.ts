@@ -22,9 +22,14 @@
 // - The pass only updates ledger decisions. It never moves, embeds or deletes
 //   stored content.
 
+import { mkdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { AnalystModel } from '../../core/analyst.ts';
+import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
   SNIFFER_CONTENT_BATCH_SIZE,
+  SNIFFER_INJECTION_CATEGORY,
+  SNIFFER_LOCAL_METADATA_BATCH_SIZE,
   SNIFFER_MAX_ATTEMPTS,
   SNIFFER_METADATA_BATCH_SIZE,
   SNIFFER_PROMPT_VERSION,
@@ -33,6 +38,7 @@ import {
   parseSnifferBatchResponse,
   snifferId,
   snifferMaterialCarriesSecret,
+  snifferMaterialLooksLikeInjection,
   snifferReasonCode,
   snifferTierKey,
 } from './sniffer.ts';
@@ -64,23 +70,51 @@ export interface SnifferTarget {
   placementFor?: (decision: TierDecision) => TierPlacementPlan;
 }
 
-/** A per-UTC-day call cap shared by every pass in the process. */
+/**
+ * A per-UTC-day call cap shared by every pass in the process. With a
+ * `statePath` the day's count survives a restart (an owner-only JSON file),
+ * so restarting the worker never grants a fresh allowance.
+ */
 export class SnifferCallBudget {
   readonly maxCallsPerDay: number;
   private readonly now: () => Date;
+  private readonly statePath: string | undefined;
   private day = '';
   private used = 0;
 
-  constructor(options: { maxCallsPerDay?: number; now?: () => Date } = {}) {
+  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string } = {}) {
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date());
+    this.statePath = options.statePath;
+    if (this.statePath) {
+      try {
+        const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as { day?: unknown; used?: unknown };
+        if (typeof saved.day === 'string' && typeof saved.used === 'number' && Number.isFinite(saved.used)) {
+          this.day = saved.day;
+          this.used = Math.max(0, Math.floor(saved.used));
+        }
+      } catch {
+        // No saved count yet (or unreadable): start the day at zero.
+      }
+    }
   }
 
   tryConsume(): boolean {
     this.roll();
     if (this.used >= this.maxCallsPerDay) return false;
     this.used += 1;
+    this.save();
     return true;
+  }
+
+  private save(): void {
+    if (!this.statePath) return;
+    try {
+      mkdirSync(dirname(this.statePath), { recursive: true, mode: 0o700 });
+      writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}\n`);
+    } catch {
+      // A count that cannot be saved still bounds this process.
+    }
   }
 
   usedToday(): number {
@@ -113,7 +147,7 @@ export interface SnifferPassOptions {
   signal?: AbortSignal;
 }
 
-export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'transport_failures' | 'aborted';
+export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted';
 
 export interface SnifferPassReport {
   /** Queued questions read this pass. */
@@ -129,6 +163,8 @@ export interface SnifferPassReport {
   /** Answered from the cache: another item had already asked the same question. */
   cacheHits: number;
   secretRefused: number;
+  /** Injection-shaped material resolved to Private without being sent. */
+  injectionRefused: number;
   /** Routed items whose set planner was not available: verdict cached, question kept. */
   awaitingPlacement: number;
   /** Routed items the verdict moved to other stores: queued for the move primitive (P1b). */
@@ -164,6 +200,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     failSafePrivate: 0,
     cacheHits: 0,
     secretRefused: 0,
+    injectionRefused: 0,
     staleDropped: 0,
     awaitingPlacement: 0,
     movesQueued: 0,
@@ -186,7 +223,13 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
       modelId: options.lane.modelId,
+      mapRevision: item.question.mapRevision,
     }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
+    if (applied?.outcome === 'stale_map') {
+      item.target.sniffer.deleteQuestion(item.question, item.question.pass);
+      report.staleDropped += 1;
+      return;
+    }
     if (applied?.outcome === 'needs_placement') {
       // A routed item whose set is not open here: the verdict is cached, the
       // question stays, and the next pass (or sync) with the set applies it.
@@ -201,9 +244,13 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     else report.resolvedPrivate += 1;
   };
 
+  // A question is open only while the item still waits on it AND was asked
+  // under the map revision the item's decision was made with: a verdict on
+  // material judged under an older map is stale, so the next sync re-asks.
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
     return row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
+      && row.mapRevision === question.mapRevision
       && openPasses(row).includes(question.pass);
   };
 
@@ -225,6 +272,15 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       if (snifferMaterialCarriesSecret(question.material)) {
         target.sniffer.deleteQuestion(question, question.pass);
         report.secretRefused += 1;
+        continue;
+      }
+      // Material shaped like an instruction to the model is never sent: the
+      // item is Private at once (fail safe), and that verdict is cached.
+      if (snifferMaterialLooksLikeInjection(question.material)) {
+        const failSafe = { tier: 'private' as const, category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true };
+        target.sniffer.putVerdict(keyOf(question), failSafe);
+        apply({ target, question }, failSafe);
+        report.injectionRefused += 1;
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
@@ -254,17 +310,18 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       report.staleDropped += 1;
       return false;
     });
-    const groups = groupByMaterial(open);
     const batchSize = pass === 'metadata'
-      ? options.metadataBatchSize ?? SNIFFER_METADATA_BATCH_SIZE
+      ? options.metadataBatchSize ?? (options.lane.kind === 'local' ? SNIFFER_LOCAL_METADATA_BATCH_SIZE : SNIFFER_METADATA_BATCH_SIZE)
       : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
-    for (let start = 0; start < groups.length; start += batchSize) {
+    // Third-party material (a sender's subject, chat text, any excerpt) is
+    // asked on its own: it can never steer the verdict on another item.
+    const batches = batchGroups(groupByMaterial(open), batchSize);
+    for (const batch of batches) {
       const stop = stopReason(options, report, maxCallsPerPass);
       if (stop) {
         report.stoppedBy = stop;
         return finish(report);
       }
-      const batch = groups.slice(start, start + batchSize);
       // Re-checked at every dispatch: a policy that changed under a running
       // worker still cannot route possibly-private names to a cloud model.
       assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
@@ -283,6 +340,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         });
         text = completion.text;
       } catch {
+        if (options.signal?.aborted) {
+          // Preempted by an answer that needs the private pool: not a failure
+          // of anything, so nothing is counted against the items or the lane.
+          report.stoppedBy = 'preempted';
+          return finish(report);
+        }
         // Transport failure: nothing about the items is known. They stay
         // pending (held Private) and are asked again on a later pass.
         report.failedCalls += 1;
@@ -331,6 +394,25 @@ function openPasses(row: TierLedgerRecord): SnifferPass[] {
   // a sniffer question.
   if (row.contentPending && row.contentRead) passes.push('content');
   return passes;
+}
+
+/** Batches of at most `size` groups; a group whose material is third-party is a batch of one. */
+function batchGroups(groups: readonly WorkItem[][], size: number): WorkItem[][][] {
+  const batches: WorkItem[][][] = [];
+  let shared: WorkItem[][] = [];
+  for (const group of groups) {
+    if (group.some((item) => item.question.solo)) {
+      batches.push([group]);
+      continue;
+    }
+    shared.push(group);
+    if (shared.length >= size) {
+      batches.push(shared);
+      shared = [];
+    }
+  }
+  if (shared.length > 0) batches.push(shared);
+  return batches;
 }
 
 /** Items sharing names (or an excerpt) under one map revision are asked once. */

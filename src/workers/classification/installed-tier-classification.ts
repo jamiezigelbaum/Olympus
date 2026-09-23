@@ -11,14 +11,17 @@
 // Unconfigured (tests, one-off scripts), it is absent and stores behave
 // exactly as before.
 //
-// Fail-safe: an INVALID rules file does not fall back to "no rules" — that
-// would record the owner's "always Private" folders as Personal. It returns
-// `unavailableReason`, and the store records no decisions for that run
-// (reported as a content-free gap) until the file is fixed.
+// Fail-safe: an INVALID rules file or map (unparseable, half-written, changed
+// mid-read, or writable by anyone but its owner) never falls back to "no
+// rules" or "no map" — that would record the owner's Private folders and
+// categories as Personal. The inputs come back with `unavailableReason` and
+// the LAST GOOD rules and map: a tiered store set holds every new decision
+// pending (Private, embedding held) and a plain store records none, until the
+// file is fixed.
 
-import { statSync } from 'node:fs';
+import { ownerConfigStamp } from '../../core/owner-config-read.ts';
 import {
-  loadOwnerSensitivityMap,
+  readOwnerSensitivityMap,
   resolveSensitivityMapPath,
   type SensitivityMap,
 } from '../../core/sensitivity-map.ts';
@@ -49,10 +52,13 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   private readonly now: (() => Date) | undefined;
   private readonly snifferStores = new Map<string, TierSnifferStore>();
   private mapStamp: string | undefined;
+  /** The last map that read cleanly. */
   private map: SensitivityMap | undefined;
+  private mapInvalid = false;
   private rulesStamp: string | undefined;
-  private rules: OwnerTierRule[] | undefined;
-  private rulesError = false;
+  /** The last rules that read cleanly. */
+  private rules: OwnerTierRule[] = [];
+  private rulesInvalid = false;
 
   constructor(options: InstalledTierClassificationOptions = {}) {
     this.env = options.env ?? process.env;
@@ -67,8 +73,10 @@ export class InstalledTierClassification implements InstalledTierClassificationP
    */
   forLedger(ledgerPath: string): InstalledStoreTierClassification {
     const rules = this.currentRules();
-    if (rules === undefined) return { unavailableReason: 'tier_rules_invalid' };
     const sensitivityMap = this.currentMap();
+    const unavailableReason = this.rulesInvalid
+      ? 'tier_rules_invalid'
+      : this.mapInvalid ? 'sensitivity_map_invalid' : undefined;
     let sniffer: TierSniffer | undefined;
     if (this.lane && ledgerPath !== ':memory:') {
       try {
@@ -81,6 +89,7 @@ export class InstalledTierClassification implements InstalledTierClassificationP
       ...(sensitivityMap ? { sensitivityMap } : {}),
       ...(rules.length > 0 ? { rules } : {}),
       ...(sniffer ? { sniffer } : {}),
+      ...(unavailableReason ? { unavailableReason } : {}),
     };
   }
 
@@ -106,31 +115,47 @@ export class InstalledTierClassification implements InstalledTierClassificationP
     this.snifferStores.clear();
   }
 
+  /**
+   * The last good map, re-read (through the one owner-map loader) only when
+   * the file's stamp changes, so every lane sees an edit at its next pass.
+   * An unusable file keeps the last good map and marks the inputs invalid; a
+   * torn read is retried at the next call because its stamp is not kept.
+   */
   private currentMap(): SensitivityMap | undefined {
-    const stamp = fileStamp(resolveSensitivityMapPath({ env: this.env }));
+    const stamp = ownerConfigStamp(resolveSensitivityMapPath({ env: this.env }));
     if (stamp !== this.mapStamp) {
-      // The one owner-map loader (core/sensitivity-map.ts), re-run only when
-      // the file's stamp changes: every lane sees an edit at its next pass.
-      this.map = loadOwnerSensitivityMap(this.env);
-      this.mapStamp = stamp;
+      const read = readOwnerSensitivityMap(this.env);
+      if (read.status === 'ok') {
+        this.map = read.map;
+        this.mapInvalid = false;
+        this.mapStamp = read.stamp;
+      } else if (read.status === 'missing') {
+        this.map = undefined;
+        this.mapInvalid = false;
+        this.mapStamp = stamp;
+      } else {
+        this.mapInvalid = true;
+        this.mapStamp = read.reason === 'torn_read' ? undefined : stamp;
+      }
     }
     return this.map;
   }
 
-  /** The current rules, reloaded when the file changes; undefined while the file is invalid. */
-  private currentRules(): OwnerTierRule[] | undefined {
+  /** The last good rules, reloaded when the file changes; an unusable file marks the inputs invalid. */
+  private currentRules(): OwnerTierRule[] {
     const stamp = tierRulesFileStamp({ env: this.env });
     if (stamp !== this.rulesStamp) {
-      this.rulesStamp = stamp;
       try {
         this.rules = loadOwnerTierRules({ env: this.env, allowMissing: true });
-        this.rulesError = false;
+        this.rulesInvalid = false;
+        this.rulesStamp = stamp;
       } catch {
-        this.rules = undefined;
-        this.rulesError = true;
+        this.rulesInvalid = true;
+        // Not kept: a torn or mid-edit read is retried at the next call.
+        this.rulesStamp = undefined;
       }
     }
-    return this.rulesError ? undefined : this.rules;
+    return this.rules;
   }
 }
 
@@ -154,11 +179,3 @@ export function clearInstalledTierClassification(): void {
   installed = undefined;
 }
 
-function fileStamp(path: string): string {
-  try {
-    const stat = statSync(path);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return 'missing';
-  }
-}

@@ -23,6 +23,7 @@ import {
   CachedTierSniffer,
   SNIFFER_PROMPT_VERSION,
   parseSnifferBatchResponse,
+  snifferId,
   snifferTierKey,
 } from '../src/workers/classification/sniffer.ts';
 import {
@@ -40,6 +41,17 @@ import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool
 // Built at runtime so the repository's credential-pattern check never sees a
 // literal key in the diff.
 const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+
+function approvalKey(lane: SnifferLane) {
+  return { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
+}
+
+const VENICE_LANE: SnifferLane = {
+  kind: 'venice',
+  modelId: 'fixture-venice-sniffer',
+  profileId: 'venice-sniffer',
+  profile: { provider: 'venice', trust: 'encrypted_cloud', model: 'fixture-venice-sniffer' },
+};
 
 const LOCAL_LANE: SnifferLane = {
   kind: 'local',
@@ -166,13 +178,13 @@ describe('secrets are never sent', () => {
 });
 
 describe('batching, cache and threshold', () => {
-  test('250 flagged names take three calls of at most 100 names, with localOnly set', async () => {
+  test('250 flagged names take calls of at most 100 names on Venice, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
     try {
       for (let n = 0; n < 250; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
       const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }));
-      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, maxCallsPerPass: 10 });
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 10 });
       expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual([100, 100, 50]);
       expect(model.requests.every((request) => request.localOnly === true)).toBe(true);
       expect(report).toMatchObject({ calls: 3, verdictsApplied: 250, resolvedPrivate: 250 });
@@ -180,8 +192,8 @@ describe('batching, cache and threshold', () => {
       const record = ledger.getCurrent(subject(7))!;
       expect(record.metadataPending).toBe(false);
       expect(record.metadataTier).toBe('secure');
-      expect(record.modelId).toBe(LOCAL_LANE.modelId);
-      expect(record.reasons).toContain('metadata:sniffer:local:v1:financial:0.97');
+      expect(record.modelId).toBe(VENICE_LANE.modelId);
+      expect(record.reasons).toContain(`metadata:sniffer:${snifferId(VENICE_LANE)}:financial:0.97`);
       expect(record.reasons.some((reason) => reason.includes('undecided') || reason.includes('possibly_private'))).toBe(false);
       expect(store.counts().questions).toBe(0);
     } finally {
@@ -203,7 +215,7 @@ describe('batching, cache and threshold', () => {
       const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
       const again = classifyItemTiers({ signals: { title: 'therapy' }, subject: subject(0) }, { sniffer });
       expect(again.metadataPending).toBe(false);
-      expect(again.reasons).toContain('metadata:sniffer:local:v1:ordinary:0.95');
+      expect(again.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:ordinary:0.95`);
       expect(store.counts().questions).toBe(0);
 
       const second = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
@@ -297,7 +309,7 @@ describe('fail-safe behaviour', () => {
       const third = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
       expect(third.failSafePrivate).toBe(1);
       expect(ledger.getCurrent(subject(1))).toMatchObject({ metadataTier: 'secure', metadataPending: false });
-      expect(ledger.getCurrent(subject(1))?.reasons).toContain('metadata:sniffer:local:v1:unresolved:0.00');
+      expect(ledger.getCurrent(subject(1))?.reasons).toContain(`metadata:sniffer:${snifferId(LOCAL_LANE)}:unresolved:0.00`);
       const again = classifyItemTiers({ signals: { title: 'divorce papers' }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LOCAL_LANE) });
       expect(again.metadataTier).toBe('secure');
     } finally {
@@ -446,7 +458,7 @@ describe('bounds and the owner-approval gate', () => {
       const recorded = await readClassificationLedger(ledgerPath);
       expect(recorded.entries).toHaveLength(1);
       expect(recorded.entries[0]).toMatchObject({ approved_by: 'system-automatic', status: 'pending' });
-      expect(isClassifierApproved(recorded.entries, { modelId: LOCAL_LANE.modelId, promptVersion: SNIFFER_PROMPT_VERSION })).toBe(false);
+      expect(isClassifierApproved(recorded.entries, approvalKey(LOCAL_LANE))).toBe(false);
       await service.runOnce();
       expect((await readClassificationLedger(ledgerPath)).entries).toHaveLength(1);
 
@@ -456,6 +468,8 @@ describe('bounds and the owner-approval gate', () => {
         what: 'Owner approved the fixture sniffer.',
         model_id: LOCAL_LANE.modelId,
         prompt_version: SNIFFER_PROMPT_VERSION,
+        lane: LOCAL_LANE.kind,
+        profile_id: LOCAL_LANE.profileId,
         approved_by: 'owner',
         status: 'complete',
       });
@@ -472,13 +486,22 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
-  test('a revocation or a different prompt version is not an approval', () => {
-    const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'v1', status: 'complete' as const };
+  test('an approval names lane, profile, model and prompt version: changing any one needs a new approval', () => {
+    const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'p1', lane: 'local', profile_id: 'local-a', status: 'complete' as const };
     const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };
     const revoked = { ...base, recorded_at: '2026-09-23T11:00:00.000Z', kind: 'classifier_model_revoked' as const, approved_by: 'owner' as const };
-    expect(isClassifierApproved([approved], { modelId: 'm', promptVersion: 'v1' })).toBe(true);
-    expect(isClassifierApproved([approved], { modelId: 'm', promptVersion: 'v2' })).toBe(false);
-    expect(isClassifierApproved([revoked, approved], { modelId: 'm', promptVersion: 'v1' })).toBe(false);
-    expect(isClassifierApproved([{ ...approved, approved_by: 'system-automatic' }], { modelId: 'm', promptVersion: 'v1' })).toBe(false);
+    const key = { lane: 'local', profileId: 'local-a', modelId: 'm', promptVersion: 'p1' };
+    expect(isClassifierApproved([approved], key)).toBe(true);
+    expect(isClassifierApproved([approved], { ...key, promptVersion: 'p2' })).toBe(false);
+    // The same model id reached through Venice, or another profile, is another decision.
+    expect(isClassifierApproved([approved], { ...key, lane: 'venice' })).toBe(false);
+    expect(isClassifierApproved([approved], { ...key, profileId: 'local-b' })).toBe(false);
+    expect(isClassifierApproved([revoked, approved], key)).toBe(false);
+    expect(isClassifierApproved([{ ...approved, approved_by: 'system-automatic' }], key)).toBe(false);
+  });
+
+  test('the prompt version is derived from the prompt text, so an edit is a new version', () => {
+    expect(SNIFFER_PROMPT_VERSION).toMatch(/^p-[0-9a-f]{12}$/);
+    expect(snifferId(LOCAL_LANE)).toBe(`local:${SNIFFER_PROMPT_VERSION}`);
   });
 });

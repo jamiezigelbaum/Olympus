@@ -52,6 +52,8 @@ export interface ClassificationLedgerEntry {
   prompt_version?: string;
   /** `local` or `venice`: the lane the model runs on. */
   lane?: string;
+  /** The sovereignty model profile the model is reached through. */
+  profile_id?: string;
   why?: string;
   approved_by: ClassificationLedgerApprovedBy;
   status: ClassificationLedgerStatus;
@@ -126,18 +128,29 @@ export function parseClassificationLedgerJsonl(text: string): { entries: Classif
   return { entries, skipped };
 }
 
+/** What an approval names: all four must match for it to count. */
+export interface ClassifierApprovalKey {
+  lane: string;
+  profileId: string;
+  modelId: string;
+  promptVersion: string;
+}
+
 /**
- * Whether the owner has approved, in advance, this exact model and prompt
- * version, and has not revoked it since. `entries` are newest first, as
- * `readClassificationLedger` returns them; the newest owner-signed decision
- * or revocation for the pair wins. Nothing but the owner's approval counts.
+ * Whether the owner has approved, in advance, this exact lane, model profile,
+ * model and prompt version, and has not revoked it since. The same model id
+ * reached through another lane or profile (say local versus Venice) is a
+ * different decision. `entries` are newest first, as `readClassificationLedger`
+ * returns them; the newest owner-signed decision or revocation for the key
+ * wins. Nothing but the owner's approval counts.
  */
 export function isClassifierApproved(
   entries: readonly ClassificationLedgerEntry[],
-  pair: { modelId: string; promptVersion: string },
+  key: ClassifierApprovalKey,
 ): boolean {
   for (const entry of entries) {
-    if (entry.model_id !== pair.modelId || entry.prompt_version !== pair.promptVersion) continue;
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion
+      || entry.lane !== key.lane || entry.profile_id !== key.profileId) continue;
     if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL) continue;
     if (entry.kind === 'classifier_model_revoked') return false;
     if (entry.kind === 'classifier_model_decision' && entry.status === 'complete') return true;
@@ -153,7 +166,7 @@ export function isClassificationLedgerEntry(value: unknown): value is Classifica
   if (!['classifier_model_decision', 'classifier_model_revoked', 'note'].includes(record.kind as string)) return false;
   if (!['owner', 'system-automatic', 'unattributed-historical'].includes(record.approved_by as string)) return false;
   if (!['pending', 'complete', 'n/a'].includes(record.status as string)) return false;
-  for (const key of ['model_id', 'prompt_version', 'lane', 'why', 'entry_id'] as const) {
+  for (const key of ['model_id', 'prompt_version', 'lane', 'profile_id', 'why', 'entry_id'] as const) {
     if (record[key] !== undefined && typeof record[key] !== 'string') return false;
   }
   return true;

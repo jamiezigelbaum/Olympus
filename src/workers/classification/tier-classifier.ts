@@ -124,6 +124,12 @@ export interface TierSnifferRequest {
   material?: string;
   /** The sensitivity map revision the question is asked under (a cache-key part). */
   mapRevision?: string;
+  /**
+   * The material may be written by a third party (a sender, a chat, a
+   * document's text): it must be asked about on its own, never in a batch
+   * with other items' material.
+   */
+  solo?: boolean;
   subject?: TierSnifferSubject;
 }
 
@@ -539,6 +545,7 @@ function metadataPass(args: {
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
+      solo: Boolean(signals.sender?.trim() || signals.conversationKind || (signals.recipients?.length ?? 0) > 0),
       ...(args.subject ? { subject: args.subject } : {}),
     });
     if (verdict.verdict === 'decided') {
@@ -657,6 +664,7 @@ function contentPass(args: {
       flags,
       material: snifferExcerpt(text),
       mapRevision: args.mapRevision,
+      solo: true,
       ...(args.subject ? { subject: args.subject } : {}),
     });
     if (verdict.verdict === 'decided') {

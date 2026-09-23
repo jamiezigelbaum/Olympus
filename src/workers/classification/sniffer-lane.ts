@@ -12,6 +12,7 @@
 // and `assertSnifferProfileAllowed` re-checks the profile at every dispatch.
 
 import { OperationError } from '../../core/operation-error.ts';
+import { assertSecureAnalystPoolModelIdAllowed } from '../../core/sovereignty.ts';
 import type {
   SovereigntyEngine,
   SovereigntyModelProfile,
@@ -19,7 +20,7 @@ import type {
 } from '../../core/sovereignty.ts';
 import type { SnifferLaneIdentity, SnifferLaneKind } from './sniffer.ts';
 
-export type SnifferLaneRefusalReason = 'standard_cloud' | 'unsupported_provider' | 'no_private_lane';
+export type SnifferLaneRefusalReason = 'standard_cloud' | 'unsupported_provider' | 'no_private_lane' | 'outside_private_policy';
 
 export class SnifferLaneRefusedError extends OperationError {
   readonly reason: SnifferLaneRefusalReason;
@@ -32,7 +33,9 @@ export class SnifferLaneRefusedError extends OperationError {
         ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.`
         : reason === 'unsupported_provider'
           ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.`
-          : 'No private model lane is configured for the privacy sniffer.',
+          : reason === 'outside_private_policy'
+            ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.`
+            : 'No private model lane is configured for the privacy sniffer.',
       'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.',
     );
     this.name = 'SnifferLaneRefusedError';
@@ -46,22 +49,36 @@ export interface SnifferLane extends SnifferLaneIdentity {
   profile: SovereigntyModelProfile;
 }
 
-/** Throws SnifferLaneRefusedError unless the profile is a local model or Venice Private. */
+/**
+ * The per-dispatch check: throws SnifferLaneRefusedError unless the profile is
+ * a loopback local model or a Venice profile whose model passes the secure
+ * pool's model gate (no E2EE-gated ids). It does not re-read the route policy;
+ * `resolveSnifferLane` applies that once, and the Venice adapter re-checks the
+ * model's privacy category at every call (`localOnly`).
+ */
 export function assertSnifferProfileAllowed(profileId: string, profile: SovereigntyModelProfile): SnifferLaneKind {
   if (profile.trust === 'standard_cloud') throw new SnifferLaneRefusedError('standard_cloud', profileId);
   if (profile.provider === 'local-openai-compatible' && profile.trust === 'local') return 'local';
-  if (profile.provider === 'venice' && profile.trust === 'encrypted_cloud') return 'venice';
+  if (profile.provider === 'venice' && profile.trust === 'encrypted_cloud') {
+    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
+    return 'venice';
+  }
   throw new SnifferLaneRefusedError('unsupported_provider', profileId);
 }
 
+/**
+ * The sniffer reads possibly-Private names, so it may use only what the
+ * policy already approves for Private data. The secure_local route must be
+ * enabled (a disabled route, as in no-sensitive, refuses outright). A profile
+ * declared with `purpose: "classification"` is accepted only for a provider
+ * kind the secure pool itself admits: a declared local model when the pool
+ * has a local member, a declared Venice model when the pool has a Venice
+ * member (and never an E2EE-gated model id). Otherwise the pool's own
+ * members are used, local first.
+ */
 export function resolveSnifferLane(
   engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>,
 ): SnifferLane {
-  const declared: SovereigntyResolvedProfile[] = Object.entries(engine.config.modelProfiles)
-    .filter(([, profile]) => profile.purpose === 'classification')
-    .map(([id, profile]) => ({ id, profile }));
-  if (declared.length > 0) return pickLane(declared);
-
   let pool: SovereigntyResolvedProfile[];
   try {
     const resolved = engine.resolveAnalystPool({ trustDomain: 'secure_local' });
@@ -70,9 +87,25 @@ export function resolveSnifferLane(
     throw new SnifferLaneRefusedError('no_private_lane');
   }
   if (pool.length === 0) throw new SnifferLaneRefusedError('no_private_lane');
+  const poolKinds = new Set<SnifferLaneKind>();
+  for (const member of pool) {
+    try {
+      poolKinds.add(assertSnifferProfileAllowed(member.id, member.profile));
+    } catch {
+      // A member the sniffer may not use contributes no kind.
+    }
+  }
+
+  const declared: SovereigntyResolvedProfile[] = Object.entries(engine.config.modelProfiles)
+    .filter(([, profile]) => profile.purpose === 'classification')
+    .map(([id, profile]) => ({ id, profile }));
+  if (declared.length > 0) {
+    const lane = pickLane(declared);
+    if (!poolKinds.has(lane.kind)) throw new SnifferLaneRefusedError('outside_private_policy', lane.profileId);
+    return lane;
+  }
   return pickLane(pool);
 }
-
 /**
  * Local first, then Venice. A standard-cloud candidate is refused outright,
  * even when an acceptable one is also listed: a policy that names a cloud

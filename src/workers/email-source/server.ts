@@ -12,7 +12,7 @@ import { createModelKeyReload } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { existsSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
   fileExtractionCorporaRoster,
@@ -1582,6 +1582,8 @@ export async function main(): Promise<void> {
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
   let sourceAnswersInFlight = 0;
+  // Set once the sniffer runs: aborts its in-flight call when an answer starts.
+  let preemptTierSniffer: (() => void) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED,
@@ -3049,6 +3051,8 @@ export async function main(): Promise<void> {
   const sourceAnswer = analystSourceAnswer
     ? {
         async answer(request: Parameters<typeof analystSourceAnswer.answer>[0]) {
+          // The sniffer shares the private pool: an answer takes it at once.
+          if (sourceAnswersInFlight === 0) preemptTierSniffer?.();
           sourceAnswersInFlight += 1;
           try {
             return await analystSourceAnswer.answer(request);
@@ -3883,6 +3887,7 @@ export async function main(): Promise<void> {
         model: snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+        budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
         maxCallsPerPass: snifferEnv.maxCallsPerPass,
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -3891,6 +3896,7 @@ export async function main(): Promise<void> {
         log: (line) => console.log(line),
       })
     : undefined;
+  preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
   tierSniffer?.start();
 
   // The worker owns a background tick that outlives any request, so the process

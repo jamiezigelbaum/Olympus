@@ -92,17 +92,20 @@ export function resolveStoreTierClassification(
 ): ConnectorStoreTierClassification | undefined {
   const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
   if (!installed) return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
-  if (installed.unavailableReason || !explicit) return installed;
-  if (explicit.unavailableReason) return explicit;
+  if (!explicit) return installed;
   const rules = [...(explicit.rules ?? []), ...(installed.rules ?? [])];
   const sniffer = explicit.sniffer ?? installed.sniffer;
-  // The owner's map as it is now wins over a copy a lane loaded at start,
-  // so an edit takes effect at the next pass on every lane.
-  const sensitivityMap = installed.sensitivityMap;
+  // The owner's map as it is now (or, while the file is unusable, the last
+  // good one) wins over a copy a lane loaded at start, so an edit takes
+  // effect at the next pass on every lane — and a broken edit never drops a
+  // Private category: the inputs then carry `unavailableReason`.
+  const sensitivityMap = installed.sensitivityMap ?? (installed.unavailableReason ? explicit.sensitivityMap ?? laneMap : undefined);
+  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
   return {
     ...(sensitivityMap ? { sensitivityMap } : {}),
     ...(rules.length > 0 ? { rules } : {}),
     ...(sniffer ? { sniffer } : {}),
+    ...(unavailableReason ? { unavailableReason } : {}),
   };
 }
 

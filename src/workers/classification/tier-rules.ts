@@ -30,11 +30,12 @@
 // Per-item overrides are NOT here: they live in the tier ledger, keyed by
 // provider item identity (tier-ledger.ts, `setOverride`).
 
-import { existsSync, lstatSync, chmodSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import { TIER_KEYS, type OwnerTierRule, type TierKey } from './tier-classifier.ts';
 
 export const TIER_RULES_SCHEMA_VERSION = 1;
@@ -81,13 +82,25 @@ export function resolveTierRulesPath(options: Pick<TierRulesLoadOptions, 'path' 
  */
 export function loadOwnerTierRules(options: TierRulesLoadOptions = {}): OwnerTierRule[] {
   const path = resolveTierRulesPath(options);
-  if (!existsSync(path)) {
+  // The same guarded read as the sensitivity map: a file anyone but its owner
+  // can write, or one that changed while it was read, is refused, never used.
+  const read = readOwnerConfigFile(path);
+  if (read.status === 'missing') {
     if (options.allowMissing) return [];
     throw new OperationError('config_error', `Tier rules not found at ${path}.`, tierRulesRemedy(path));
   }
+  if (read.status === 'refused') {
+    throw new OperationError(
+      'config_error',
+      read.reason === 'unsafe_permissions'
+        ? `Tier rules at ${path} are writable by someone other than their owner.`
+        : `Tier rules at ${path} could not be read consistently (${read.reason}).`,
+      read.reason === 'unsafe_permissions' ? `chmod 600 ${path}` : tierRulesRemedy(path),
+    );
+  }
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    raw = JSON.parse(read.text) as unknown;
   } catch {
     throw new OperationError('config_error', `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
   }
@@ -96,13 +109,7 @@ export function loadOwnerTierRules(options: TierRulesLoadOptions = {}): OwnerTie
 
 /** The file's modification stamp, for callers that reload only when it changes. */
 export function tierRulesFileStamp(options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): string {
-  const path = resolveTierRulesPath(options);
-  try {
-    const stat = statSync(path);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return 'missing';
-  }
+  return ownerConfigStamp(resolveTierRulesPath(options));
 }
 
 export function validateTierRulesFile(options: TierRulesLoadOptions = {}): TierRulesValidationResult {

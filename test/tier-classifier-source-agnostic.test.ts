@@ -54,6 +54,7 @@ const IMPORT_ALLOWLIST = new Set([
   'node:os',
   '../../core/analyst.ts',
   '../../core/atomic-file.ts',
+  '../../core/owner-config-read.ts',
   '../../core/operation-error.ts',
   '../../core/sender-rules.ts',
   '../classification/installed-tier-classification-registry.ts',

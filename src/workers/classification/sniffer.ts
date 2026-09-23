@@ -21,6 +21,7 @@
 // - The reason code is content-free: lane kind, prompt version, a category
 //   from a fixed vocabulary, and the confidence.
 
+import { createHash } from 'node:crypto';
 import { detectSecretFindingKinds } from './engine.ts';
 import { isUnitConfidence, parseStrictJsonObject } from './delphi-scorer.ts';
 import {
@@ -32,14 +33,21 @@ import {
 } from './sniffer-store.ts';
 import type { TierSniffer, TierSnifferRequest, TierSnifferVerdict } from './tier-classifier.ts';
 
-/** Bump when the prompt text or output contract changes: that is an owner-approved, ledgered event. */
-export const SNIFFER_PROMPT_VERSION = 'v1';
 /** The sniffer may resolve a flagged item to Personal only at or above this confidence. */
 export const SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
-/** Names are short: about 100 items fit one call. */
+/** Names are short: about 100 fit one Venice call. */
 export const SNIFFER_METADATA_BATCH_SIZE = 100;
-/** Excerpts are up to 1,200 characters each: a handful per call. */
-export const SNIFFER_CONTENT_BATCH_SIZE = 8;
+/**
+ * A local model is shared with Argus's answers: small batches keep any call
+ * short, so an answer that preempts the sniffer never waits long.
+ */
+export const SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20;
+/**
+ * Excerpts are asked one per call: an excerpt is document or message text,
+ * possibly written by someone else, and never shares a prompt with another
+ * item's material.
+ */
+export const SNIFFER_CONTENT_BATCH_SIZE = 1;
 /** A question that failed this many times resolves to Private (fail safe). */
 export const SNIFFER_MAX_ATTEMPTS = 3;
 
@@ -82,11 +90,38 @@ export function snifferTierKey(verdict: Pick<StoredSnifferVerdict, 'tier' | 'cat
     : 'secure';
 }
 
-/** `health:0.83`, or `unresolved:0.00` for the fail-safe verdict. Content-free by construction. */
+/**
+ * `health:0.83`; for a fail-safe verdict `unresolved:0.00` (the model kept
+ * failing) or `injection:0.00` (the material tried to instruct the model and
+ * was never sent). Content-free by construction.
+ */
 export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category' | 'confidence' | 'failSafe'>): string {
-  if (verdict.failSafe) return 'unresolved:0.00';
+  if (verdict.failSafe) return verdict.category === SNIFFER_INJECTION_CATEGORY ? 'injection:0.00' : 'unresolved:0.00';
   const category = (SNIFFER_CATEGORIES as readonly string[]).includes(verdict.category) ? verdict.category : 'other';
   return `${category}:${verdict.confidence.toFixed(2)}`;
+}
+
+/** The stored category of the fail-safe verdict given to injection-shaped material. */
+export const SNIFFER_INJECTION_CATEGORY = 'injection';
+
+/**
+ * Material shaped like an instruction to the model, or like its output
+ * (JSON braces, verdict fields, tier-with-confidence phrasing). It is never
+ * sent: the item resolves to Private at once. False positives cost only
+ * over-privacy.
+ */
+const INJECTION_PATTERNS: readonly RegExp[] = [
+  /\b(?:ignore|disregard|forget|override|bypass)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier)\b/i,
+  /\b(?:system prompt|developer message|assistant:|as an ai|you are an? (?:ai|assistant|model|classifier)|respond with|answer with|reply with|output only|return only)\b/i,
+  /\bverdicts?\b/i,
+  /["']?\b(?:tier|confidence|category)\b["']?\s*[:=]/i,
+  /[{}]/,
+  /\b(?:personal|private|public)\b[^\n]{0,20}\bconfidence\b/i,
+  /\b(?:classify|label|mark|treat)\b[^\n]{0,30}\b(?:as|is)\s+(?:personal|public|not private|safe)\b/i,
+];
+
+export function snifferMaterialLooksLikeInjection(material: string): boolean {
+  return INJECTION_PATTERNS.some((pattern) => pattern.test(material));
 }
 
 export function snifferId(lane: Pick<SnifferLaneIdentity, 'kind'>, promptVersion = SNIFFER_PROMPT_VERSION): string {
@@ -130,6 +165,21 @@ export function buildSnifferBatchPrompt(pass: SnifferPass, items: readonly Sniff
     : { i: item.i, excerpt: item.material }));
   return [intro, `There are ${items.length} items.`, '', ...lines].join('\n');
 }
+
+/**
+ * The prompt version is DERIVED from the system prompt and the batch
+ * template, so any change to either is a new version, which the sniffer will
+ * not use until the owner approves it in the classification ledger. No
+ * manual bump to forget.
+ */
+export const SNIFFER_PROMPT_VERSION = `p-${createHash('sha256')
+  .update(SNIFFER_SYSTEM_PROMPT)
+  .update('\u0000')
+  .update(buildSnifferBatchPrompt('metadata', [{ i: 1, material: 'template' }]))
+  .update('\u0000')
+  .update(buildSnifferBatchPrompt('content', [{ i: 1, material: 'template' }]))
+  .digest('hex')
+  .slice(0, 12)}`;
 
 /**
  * Strict batch parsing: the whole response must be one JSON object with a
@@ -193,6 +243,11 @@ export class CachedTierSniffer implements TierSniffer {
   judge(request: TierSnifferRequest): TierSnifferVerdict {
     const material = request.material?.trim();
     if (!material || snifferMaterialCarriesSecret(material)) return { verdict: 'undecided' };
+    // Material that tries to instruct the model is Private at once, and is
+    // neither queued nor sent.
+    if (snifferMaterialLooksLikeInjection(material)) {
+      return { verdict: 'decided', tier: 'secure', code: 'injection:0.00' };
+    }
     const mapRevision = request.mapRevision ?? 'none';
     try {
       const cached = this.store.getVerdict({
@@ -203,7 +258,14 @@ export class CachedTierSniffer implements TierSniffer {
       });
       if (cached) return { verdict: 'decided', tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
       if (request.subject) {
-        this.store.enqueue({ subject: request.subject, pass: request.pass, material, mapRevision, flags: request.flags });
+        this.store.enqueue({
+          subject: request.subject,
+          pass: request.pass,
+          material,
+          mapRevision,
+          flags: request.flags,
+          solo: request.solo === true || request.pass === 'content',
+        });
       }
     } catch {
       // Fail safe: an unreadable cache or queue leaves the item pending.

@@ -312,7 +312,14 @@ export class TierLedger {
    */
   applySnifferVerdict(
     identity: TierLedgerIdentity,
-    verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string },
+    verdict: {
+      pass: 'metadata' | 'content';
+      tier: 'private' | 'secure';
+      reason: string;
+      modelId: string;
+      /** The map revision the question was asked under; a different current one makes the verdict stale. */
+      mapRevision?: string;
+    },
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan } = {},
   ): { outcome: SnifferVerdictOutcome; record: TierLedgerRecord } | undefined {
     assertTier(verdict.tier);
@@ -326,6 +333,12 @@ export class TierLedger {
       }
       if (existing.decidedBy === 'override') {
         outcome = 'unchanged';
+        return;
+      }
+      if (verdict.mapRevision !== undefined && verdict.mapRevision !== existing.mapRevision) {
+        // Asked under another map: the owner's categories may have changed
+        // what this item is. The next sync asks again under the current map.
+        outcome = 'stale_map';
         return;
       }
       const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith('content:'));
@@ -1703,7 +1716,7 @@ interface EffectiveRow {
 }
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
-export type SnifferVerdictOutcome = TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement';
+export type SnifferVerdictOutcome = TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
 
 /** A settled row as the classifier decision the P1b router takes. */
 function decisionOfRow(row: EffectiveRow): TierDecision {

@@ -901,10 +901,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
+  /** Resolved once per run: one read of the owner's map and rules, not one per item. */
+  private readonly classification: ConnectorStoreTierClassification | undefined;
 
   constructor(set: TieredStoreSet, mode: 'shared' | 'per_leg') {
     this.set = set;
     this.mode = mode;
+    this.classification = set.classification();
     this.routedDomains = new Set();
     this.legOptions = new Map();
     this.plans = new Map();
@@ -989,18 +992,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const deferred = this.set.readsContentLater();
     const text = deferred && input.metadataOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
-    // set's own (TieredStoreSet.classification()).
-    const classification = this.set.classification();
-    let decision = decideItemTiers(
-      connector,
-      item,
-      text,
-      classification?.unavailableReason ? undefined : classification,
-      ledger,
-    );
-    // With the owner's rules file invalid, nothing may be placed below Private
-    // on a decision made without those rules: hold it pending (secure_local,
-    // embedding held) until the file is fixed. Secrets still go nowhere.
+    // set's own (TieredStoreSet.classification()), resolved once per run.
+    const classification = this.classification;
+    let decision = decideItemTiers(connector, item, text, classification, ledger);
+    // With the owner's rules file or map unusable, the decision (made with
+    // the last good ones) may not place anything below Private: hold it
+    // pending (secure_local, embedding held) until the file is fixed.
+    // Secrets still go nowhere.
     if (classification?.unavailableReason && decision.contentTier !== 'secrets') {
       decision = { ...decision, state: 'pending', metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
     }

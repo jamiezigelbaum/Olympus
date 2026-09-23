@@ -59,7 +59,7 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
   'tier set': 'olympus tier set <locator> public|personal|private|secrets|not-secret|clear',
   'tier explain': 'olympus tier explain <locator>',
   'tier rules': 'olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>',
-  'tier classifier': 'olympus tier classifier status | approve --why <reason> [--model <id>] [--prompt-version <version>]',
+  'tier classifier': 'olympus tier classifier status | approve --why <reason>',
 };
 
 export async function runTierCommand(args: readonly string[], context: TierCliContext = {}): Promise<Record<string, unknown>> {
@@ -427,28 +427,34 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     return {
       ...laneSummary,
       promptVersion: SNIFFER_PROMPT_VERSION,
-      approved: 'refused' in lane ? false : isClassifierApproved(ledger.entries, { modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION }),
+      approved: 'refused' in lane
+        ? false
+        : isClassifierApproved(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION }),
       ledger: ledgerPath,
       recent: ledger.entries.slice(0, 5),
       skippedLines: ledger.skipped,
     };
   }
   if (command === 'approve') {
-    const options = parseFlags(rest, ['model', 'prompt-version', 'why']);
+    const options = parseFlags(rest, ['why']);
     const why = options.get('why')?.trim();
     if (!why) throw new OperationError('invalid_params', '--why is required: say what is approved and why.');
-    const modelId = options.get('model')?.trim() || ('refused' in lane ? undefined : lane.modelId);
-    if (!modelId) {
-      throw new OperationError('invalid_params', 'No private sniffer lane is configured; pass --model explicitly or configure one first.');
+    if ('refused' in lane) {
+      throw new OperationError('invalid_params', `No private sniffer lane is configured (${lane.refused}); there is nothing to approve.`);
     }
-    const promptVersion = options.get('prompt-version')?.trim() || SNIFFER_PROMPT_VERSION;
+    // The approval names exactly what the worker would use: the resolved
+    // lane, profile and model, and the prompt version derived from the
+    // prompt text. Any change to one of them needs a new approval.
+    const modelId = lane.modelId;
+    const promptVersion = SNIFFER_PROMPT_VERSION;
     const entry = {
       recorded_at: (context.now?.() ?? new Date()).toISOString(),
       kind: 'classifier_model_decision' as const,
-      what: `The owner approved classifier model ${modelId} with prompt ${promptVersion} for the privacy sniffer.`,
+      what: `The owner approved ${lane.kind} classifier model ${modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer.`,
       model_id: modelId,
       prompt_version: promptVersion,
-      ...('refused' in lane ? {} : { lane: lane.kind }),
+      lane: lane.kind,
+      profile_id: lane.profileId,
       why,
       approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
       status: 'complete' as const,
