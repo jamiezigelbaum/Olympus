@@ -155,8 +155,8 @@ export function openLegStore(
   tierLedger?: TierLedger | null,
 ): LocalConnectorStore {
   return new LocalConnectorStore({
-    dbPath: paths[domain],
-    corpusId: CORPORA[domain],
+    dbPath: paths[domain]!,
+    corpusId: CORPORA[domain]!,
     family: 'file',
     trustDomain: domain,
     ...(tierLedger !== undefined ? { tierLedger } : {}),
