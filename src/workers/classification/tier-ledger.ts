@@ -629,8 +629,10 @@ export class TierLedger {
             engine_version, map_revision, model_id,
             previous_metadata_tier, previous_content_tier, state,
             target_metadata_tier, target_content_tier,
-            stored_trust_domain, stored_trust_tier, decided_at, routed
-          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, 1)
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, routed
+          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         `).run(
           identity.provider,
           identity.accountScope,
@@ -645,6 +647,7 @@ export class TierLedger {
           decision.state,
           plan.stored?.trustDomain ?? null,
           plan.stored?.trustTier ?? null,
+          ...decisionFlags(decision),
           decidedAt,
         );
         this.appendHistory(identity, 1, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
@@ -678,6 +681,7 @@ export class TierLedger {
               previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
               stored_trust_domain = COALESCE(?, stored_trust_domain),
               stored_trust_tier = COALESCE(?, stored_trust_tier),
+              content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
               decided_at = ?, routed = 1
             WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
           `).run(
@@ -693,6 +697,7 @@ export class TierLedger {
             decision.state,
             plan.stored?.trustDomain ?? null,
             plan.stored?.trustTier ?? null,
+            ...decisionFlags(decision),
             decidedAt,
             identity.provider,
             identity.accountScope,
@@ -1338,6 +1343,16 @@ function effectiveRow(existing: TierLedgerRecord | undefined, decision: TierDeci
     };
   }
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+
+function decisionFlags(decision: TierDecision): [number, number, number, number, number] {
+  return [
+    decision.contentRead ? 1 : 0,
+    decision.metadataPending ? 1 : 0,
+    decision.contentPending ? 1 : 0,
+    decision.metadataForced ? 1 : 0,
+    decision.metadataFlagged ? 1 : 0,
+  ];
 }
 
 /** Owner-only permissions on the ledger and its SQLite sidecars. */
