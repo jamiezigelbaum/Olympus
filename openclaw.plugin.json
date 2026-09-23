@@ -597,6 +597,8 @@
             "enum": [
               "secure_local.email.private",
               "internal.email",
+              "public_safe.email",
+              "public_safe.drive.docs",
               "internal.drive.docs",
               "secure_local.drive.docs",
               "internal.telegram.messages",
@@ -738,6 +740,62 @@
                     "answer",
                     "status",
                     "sync",
+                    "search"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "public_safe.email"
+              },
+              "sourceId": {
+                "const": "gmail.email"
+              },
+              "provider": {
+                "const": "gmail"
+              },
+              "family": {
+                "const": "email"
+              },
+              "trustDomain": {
+                "const": "public_safe"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
+                    "search"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "corpusId": {
+                "const": "public_safe.drive.docs"
+              },
+              "sourceId": {
+                "const": "google_drive.docs"
+              },
+              "provider": {
+                "const": "google_drive"
+              },
+              "family": {
+                "const": "file"
+              },
+              "trustDomain": {
+                "const": "public_safe"
+              },
+              "capabilities": {
+                "items": {
+                  "enum": [
+                    "answer",
+                    "status",
                     "search"
                   ]
                 }

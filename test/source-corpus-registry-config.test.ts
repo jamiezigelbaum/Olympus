@@ -446,8 +446,10 @@ describe('config-driven source corpus registry', () => {
     expect(registry.ids('answer')).toEqual([
       'secure_local.email.private',
       'internal.email',
+      'public_safe.email',
       'internal.drive.docs',
       'secure_local.drive.docs',
+      'public_safe.drive.docs',
       'internal.telegram.messages',
       'internal.readwise.library',
       'internal.x.bookmarks',
@@ -458,8 +460,10 @@ describe('config-driven source corpus registry', () => {
     expect(registry.ids('status')).toEqual([
       'secure_local.email.private',
       'internal.email',
+      'public_safe.email',
       'internal.drive.docs',
       'secure_local.drive.docs',
+      'public_safe.drive.docs',
       'internal.telegram.messages',
       'internal.readwise.library',
       'internal.x.bookmarks',
@@ -482,8 +486,10 @@ describe('config-driven source corpus registry', () => {
     expect(registry.ids('search')).toEqual([
       'internal.email',
       'secure_local.email.private',
+      'public_safe.email',
       'internal.drive.docs',
       'secure_local.drive.docs',
+      'public_safe.drive.docs',
       'secure_local.dropbox.files',
       'internal.x.bookmarks',
       'internal.telegram.messages',
