@@ -355,6 +355,46 @@ describe('fail-safe behaviour', () => {
   });
 });
 
+describe('work selection', () => {
+  test('many unread pending rows never starve the open questions behind them', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      // 600 unread, unflagged items sort before the flagged one and are pending
+      // only because their text has not arrived.
+      for (let n = 0; n < 600; n += 1) {
+        ledger.recordDecision({ provider: 'a-first', accountScope: 'personal', providerItemId: `unread-${n}` }, classifyItemTiers({ signals: { title: `garden ${n}` } }));
+      }
+      recordFlagged(ledger, store, 1, 'therapy');
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'therapy', confidence: 0.95 }));
+      await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, pendingPageSize: 500 });
+      expect(ledger.getCurrent(subject(1))?.metadataPending).toBe(false);
+    } finally {
+      store.close();
+      ledger.close();
+    }
+  });
+
+  test('names judged Private settle the excerpt question, which is never sent', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
+      ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'divorce' }, text: 'Notes for Thursday.', subject: subject(1) }, { sniffer }));
+      expect(store.counts().byPass).toEqual({ metadata: 1, content: 1 });
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'legal', confidence: 0.95 }));
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });
+      expect(model.requests).toHaveLength(1);
+      expect(model.requests[0]!.prompt).not.toContain('EXCERPT');
+      expect(report.staleDropped).toBe(1);
+      expect(ledger.getCurrent(subject(1))).toMatchObject({ contentTier: 'secure', state: 'current' });
+    } finally {
+      store.close();
+      ledger.close();
+    }
+  });
+});
+
 describe('bounds and the owner-approval gate', () => {
   test('the pass stops for the per-pass cap, the daily cap and yield', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });

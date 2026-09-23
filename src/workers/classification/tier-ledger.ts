@@ -330,6 +330,9 @@ export class TierLedger {
         }
         const metadataTier = maxTier(existing.metadataTier, verdict.tier);
         const contentTier = maxTier(existing.contentTier, metadataTier);
+        // Names judged Private settle an open excerpt question: the classifier
+        // never asks the sniffer about content that is already Private.
+        const settlesContent = existing.contentRead && existing.contentPending && contentTier === 'secure';
         next = {
           ...rowOf(existing),
           metadataTier,
@@ -338,9 +341,10 @@ export class TierLedger {
           reasons: [
             ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')),
             verdict.reason,
-            ...contentReasons,
+            ...(settlesContent ? contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')) : contentReasons),
           ],
           metadataPending: false,
+          ...(settlesContent ? { contentPending: false } : {}),
         };
       } else {
         if (!existing.contentPending || !existing.contentRead) {

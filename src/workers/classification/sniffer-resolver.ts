@@ -1,7 +1,8 @@
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
-// A bounded pass over each store's tier ledger `listPending`. For every item
-// waiting on a sniffer question it finds the queued question, answers it from
+// A bounded pass over each store's open sniffer questions, each checked
+// against the item's tier-ledger row (it must still be pending on that
+// question). It answers a question from
 // the verdict cache when another item already asked the same thing, and
 // otherwise asks the privacy-safe model in batches (about 100 names, or a
 // handful of excerpts, per call). Verdicts are cached and applied to the
@@ -108,6 +109,7 @@ export interface SnifferPassOptions {
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'transport_failures' | 'aborted';
 
 export interface SnifferPassReport {
+  /** Queued questions read this pass. */
   pendingSeen: number;
   calls: number;
   failedCalls: number;
@@ -179,50 +181,60 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     else report.resolvedPrivate += 1;
   };
 
-  // 0. Drop queued material whose question is no longer open (the item was
-  // re-synced, overridden, deleted or re-decided): it must not linger.
-  for (const target of options.targets) {
-    for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
-      const row = target.ledger.getCurrent(question);
-      if (!row || !openPasses(row).includes(question.pass) || row.decidedBy === 'override') {
-        target.sniffer.deleteQuestion(question, question.pass);
-        report.staleDropped += 1;
-      }
-    }
-  }
+  const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    const row = target.ledger.getCurrent(question);
+    return row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
+      && openPasses(row).includes(question.pass);
+  };
 
-  // 1. Collect the open questions behind each store's pending rows.
+  // 1. The open questions, oldest first, checked against each store's ledger.
+  // Driven by the queue (exactly the set of open questions), not by a page of
+  // pending rows: a store with many unread items would otherwise fill every
+  // page with rows that have no sniffer question and starve the rest.
   const work: Record<SnifferPass, WorkItem[]> = { metadata: [], content: [] };
   for (const target of options.targets) {
-    const pending = target.ledger.listPending({ limit: options.pendingPageSize ?? 500 });
-    report.pendingSeen += pending.length;
-    for (const row of pending) {
-      for (const pass of openPasses(row)) {
-        const question = target.sniffer.questionFor(row, pass);
-        if (!question) {
-          if (pass === 'metadata') report.awaitingResync += 1;
-          continue;
-        }
-        if (snifferMaterialCarriesSecret(question.material)) {
-          target.sniffer.deleteQuestion(row, pass);
-          report.secretRefused += 1;
-          continue;
-        }
-        const cached = target.sniffer.getVerdict(keyOf(question));
-        if (cached) {
-          apply({ target, question }, cached);
-          report.cacheHits += 1;
-          continue;
-        }
-        work[pass].push({ target, question });
+    for (const question of target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500 })) {
+      report.pendingSeen += 1;
+      // Queued material whose question is no longer open (the item was
+      // re-synced, overridden, deleted or re-decided) must not linger.
+      if (!stillOpen(target, question)) {
+        target.sniffer.deleteQuestion(question, question.pass);
+        report.staleDropped += 1;
+        continue;
       }
+      if (snifferMaterialCarriesSecret(question.material)) {
+        target.sniffer.deleteQuestion(question, question.pass);
+        report.secretRefused += 1;
+        continue;
+      }
+      const cached = target.sniffer.getVerdict(keyOf(question));
+      if (cached) {
+        apply({ target, question }, cached);
+        report.cacheHits += 1;
+        continue;
+      }
+      work[question.pass].push({ target, question });
+    }
+    // Reported only: rows waiting on a names question that has no queued
+    // material (recorded before a sniffer lane existed); the next sync asks.
+    for (const row of target.ledger.listPending({ limit: options.pendingPageSize ?? 500 })) {
+      if (row.metadataPending && !target.sniffer.questionFor(row, 'metadata')) report.awaitingResync += 1;
     }
   }
 
   // 2. Ask the model, one batch of distinct materials at a time.
   let consecutiveTransportFailures = 0;
   for (const pass of ['metadata', 'content'] as const) {
-    const groups = groupByMaterial(work[pass]);
+    // Names are asked first. A names verdict of Private settles the content
+    // question too (content is never below the names), so those excerpts are
+    // never sent.
+    const open = work[pass].filter((item) => {
+      if (stillOpen(item.target, item.question)) return true;
+      item.target.sniffer.deleteQuestion(item.question, pass);
+      report.staleDropped += 1;
+      return false;
+    });
+    const groups = groupByMaterial(open);
     const batchSize = pass === 'metadata'
       ? options.metadataBatchSize ?? SNIFFER_METADATA_BATCH_SIZE
       : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
