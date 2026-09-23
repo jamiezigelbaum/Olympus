@@ -10,7 +10,8 @@
 // a stale plan is refused; unmoved items keep byte-identical vectors; moved
 // items have exactly one visible copy per layer; Public <-> Personal copies
 // vectors with zero provider calls; a raise hides first and keeps the cloud
-// vectors; Secrets are hidden and kept; a crash resumes to exactly one
+// vectors; Secrets follow the one Secrets policy and a rollback never
+// re-exposes them; a crash resumes to exactly one
 // visible copy; the approved chunk budget stops a run; rollback embeds
 // nothing; purge needs its own approval; nothing on these paths invalidates
 // or rebinds embedding currency; and every ledger entry is written as
@@ -18,7 +19,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
@@ -40,7 +41,7 @@ import { openTierMigrationLanes, type TierMigrationLaneSpec } from '../src/worke
 import { runTierMigrateCommand } from '../src/workers/classification/tier-migration-cli.ts';
 import { LocalConnectorStore, defineConnectorCorpus, syncAndEmbedFromConnector } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
-import type { TierMoveEmbeddingIdentity } from '../src/workers/connector-store/tier-move.ts';
+import { TierMoveRefusedError, moveTieredItem, type TierMoveEmbeddingIdentity } from '../src/workers/connector-store/tier-move.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
   readEmbeddingLedger,
@@ -348,7 +349,7 @@ describe('tier migration M0 (dry run)', () => {
         itemsScanned: 7,
         proposed: 4,
         unchanged: 3,
-        secretsToHide: 1,
+        secrets: 1,
         raises: 1,
       });
       expect(plan.totals.moves).toEqual(expect.arrayContaining([
@@ -483,7 +484,7 @@ describe('tier migration M2-M6', () => {
         domainIdentity: context.domainIdentity,
         paths: context.paths,
       });
-      expect(result).toMatchObject({ state: 'done', planState: 'done', moved: 3, secretsHidden: 1, skipped: 0, remaining: 0 });
+      expect(result).toMatchObject({ state: 'done', planState: 'done', moved: 3, secrets: 1, skipped: 0, remaining: 0 });
       // No provider was called: text is copied between stores; the
       // destination's own model embeds later (the drain).
       expect(context.cloud.inputs.length).toBe(cloudCalls);
@@ -503,8 +504,15 @@ describe('tier migration M2-M6', () => {
       expect(essay(afterLibrary.vectors)).toEqual(essay(beforeLibrary.vectors));
       expect(essay(afterLibrary.chunks)).toEqual(essay(beforeLibrary.chunks));
       // Every existing vector in the legacy stores is still there, byte for byte
-      // (moved items' previous copies are kept, hidden).
-      expect(afterFiles.vectors).toEqual(beforeFiles.vectors);
+      // (moved items' previous copies are kept, hidden) — except the Secret's:
+      // the one Secrets policy (tombstone_now, today's sync behavior) deleted
+      // its copy, as a sync would, and recorded the deletion.
+      const notKeys = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] !== `${ACCOUNT}:keys`);
+      const keys = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:keys`);
+      expect(notKeys(afterFiles.vectors)).toEqual(notKeys(beforeFiles.vectors));
+      expect(keys(beforeFiles.vectors).length).toBeGreaterThan(0);
+      expect(keys(afterFiles.vectors)).toEqual([]);
+      expect(keys(afterFiles.chunks)).toEqual([]);
       expect(afterLibrary.vectors).toEqual(beforeLibrary.vectors);
       // No existing embedding authority was rebound.
       expect(afterFiles.authority).toEqual(beforeFiles.authority);
@@ -539,6 +547,11 @@ describe('tier migration M2-M6', () => {
         entry_id: `tier-migration-batch-started:${result.batchId}`,
         approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
         status: 'in_progress',
+      });
+      expect(entries.find((entry) => entry.kind === 'invalidation' && entry.what.includes('found Secrets'))).toMatchObject({
+        approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+        status: 'complete',
+        scope: { chunks: { [FILE_CORPORA.secure_local]: keys(beforeFiles.chunks).length } },
       });
       expect(entries.find((entry) => entry.kind === 're_embed_completed')).toMatchObject({
         entry_id: `tier-migration-batch-completed:${result.batchId}`,
@@ -682,11 +695,12 @@ describe('tier migration M2-M6', () => {
     const legacyBefore = snapshotStore(context.files.secure_local);
 
     const rolled = await rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes, paths: context.paths });
-    expect(rolled.rolledBack).toBe(3);
+    expect(rolled).toMatchObject({ rolledBack: 2, secretsKept: 1 });
     expect(context.cloud.inputs.length + context.local.inputs.length).toBe(calls);
     expect(snapshotStore(context.files.secure_local)).toEqual(legacyBefore);
     expect(servedFrom(context, FILE_CORPORA, context.files, 'garden').content).toEqual([FILE_CORPORA.secure_local]);
-    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys').content).toEqual([FILE_CORPORA.secure_local]);
+    // A rollback never makes a Secret visible again.
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
     expect((await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries.find((entry) => entry.entry_id === rolled.entryId))
       .toMatchObject({ kind: 'note', status: 'complete' });
 
@@ -701,15 +715,41 @@ describe('tier migration M2-M6', () => {
     });
     expect(library.moved).toBe(1);
     const beforePurge = snapshotStore(context.library.internal);
+    const journal = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row['local_item_id'] === `${ACCOUNT}:journal`);
+    // The split raise left the journal's Private text and cloud vectors in its
+    // Personal names-only copy: unserved, and reported until a purge strips it.
+    expect(journal(beforePurge.chunks).length).toBeGreaterThan(0);
+    expect(journal(beforePurge.vectors).length).toBeGreaterThan(0);
     const dry = await purgeTierMigration({ planId: plan.planId, approve: false, lanes: write.lanes, paths: context.paths });
     expect(dry.approved).toBe(false);
     expect(dry.copies).toBeGreaterThan(0);
+    expect(dry.namesOnlyCopies).toBe(1);
+    expect(dry.namesOnlyChunks).toEqual({ [LIBRARY_CORPORA.internal]: journal(beforePurge.chunks).length });
+    expect(snapshotStore(context.library.internal)).toEqual(beforePurge);
+    // The approval is bound to the dry run's counts.
+    await expect(purgeTierMigration({ planId: plan.planId, approve: true, why: 'x', lanes: write.lanes, paths: context.paths }))
+      .rejects.toThrow(/counts changed since the dry run/u);
+    await expect(purgeTierMigration({ planId: plan.planId, approve: true, expect: 'not-the-digest', why: 'x', lanes: write.lanes, paths: context.paths }))
+      .rejects.toThrow(/counts changed since the dry run/u);
     expect(snapshotStore(context.library.internal)).toEqual(beforePurge);
 
     const invalidate = invalidationSpy();
     try {
-      const purged = await purgeTierMigration({ planId: plan.planId, approve: true, why: 'rehearsal soak done', lanes: write.lanes, paths: context.paths });
+      const purged = await purgeTierMigration({
+        planId: plan.planId,
+        approve: true,
+        expect: dry.digest,
+        why: 'rehearsal soak done',
+        lanes: write.lanes,
+        paths: context.paths,
+      });
       expect(purged.approved).toBe(true);
+      expect(purged.namesOnlyCopies).toBe(1);
+      // The names-only copy keeps its names row; its kept text and vectors are gone.
+      const after = snapshotStore(context.library.internal);
+      expect(journal(after.items)).toEqual([expect.objectContaining({ tombstoned: 0 })]);
+      expect(journal(after.chunks)).toEqual([]);
+      expect(journal(after.vectors)).toEqual([]);
       expect(invalidate).not.toHaveBeenCalled();
       const entries = (await readEmbeddingLedger(context.paths.embeddingLedgerPath)).entries;
       expect(entries.find((entry) => entry.entry_id === purged.approvalEntryId)).toMatchObject({
@@ -751,11 +791,11 @@ describe('tier migration M2-M6', () => {
     await expect(runTierMigrateCommand(['run', '--plan', planId, '--bogus'], cli)).rejects.toThrow(/Unknown option/u);
     expect(await runTierMigrateCommand(['approve', '--plan', planId, '--why', 'rehearsal'], cli)).toMatchObject({ state: 'approved' });
     const status = await runTierMigrateCommand(['status'], cli);
-    expect(status).toMatchObject({ migration: { plan_id: planId, state: 'approved', in_progress: true }, freshness: { fresh: true } });
+    expect(status).toMatchObject({ migration: { plan_id: planId, state: 'approved', in_progress: false }, freshness: { fresh: true } });
     expect(JSON.stringify(status)).not.toContain('/Files');
     const ran = await runTierMigrateCommand(['run', '--plan', planId, '--batch', 'folder:/Files'], cli);
-    expect(ran).toMatchObject({ kind: 'olympus_tier_migration_run', state: 'done', moved: 2, secrets_hidden: 1 });
-    expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toMatchObject({ rolled_back: 3 });
+    expect(ran).toMatchObject({ kind: 'olympus_tier_migration_run', state: 'done', moved: 2, secrets: 1 });
+    expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toMatchObject({ rolled_back: 2, secrets_kept: 1 });
   });
 });
 
@@ -831,7 +871,15 @@ describe('tier migration status', () => {
       paths: context.paths,
       selector: 'source:rehearsal.files',
     });
-    const stores = write.lanes[0]!.set.openStores();
+    await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.library',
+    });
+    const stores = [...write.lanes[0]!.set.openStores(), ...write.lanes[1]!.set.openStores()];
     const handler = createSourceIndexStatusHandler({
       corpusDefinitions: stores.map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
       connectorStores: stores,
@@ -840,17 +888,139 @@ describe('tier migration status', () => {
     const status = await handler.status({});
     expect(status.tier_migration).toMatchObject({
       plan_id: plan.planId,
-      state: 'approved',
-      in_progress: true,
+      state: 'done',
+      // Finished: the doctor excuses nothing any more.
+      in_progress: false,
       approval_entry_id: `tier-migration-approval:${plan.planId}:${plan.countsSha256}`,
+      destinations: plan.totals.destinations.filter((destination) => destination.chunksToEmbed > 0)
+        .map((destination) => ({ corpus_id: destination.corpusId, chunks_to_embed: destination.chunksToEmbed })),
     });
+    expect(plan.totals.namesOnlyKeptChunks).toBeGreaterThan(0);
+    expect(status.tier_migration?.names_only_kept_chunks).toBe(plan.totals.namesOnlyKeptChunks);
     const counts = (corpusId: string) => (status.corpora.find((corpus) => corpus.corpus_id === corpusId) as { counts: Record<string, number> }).counts;
     // Private files: therapy (text), medical (whole); the garden and keys copies are superseded (kept, uncounted).
     expect(counts(FILE_CORPORA.secure_local)).toMatchObject({ indexed_items: 2, secret_locations: 1 });
     expect(counts(FILE_CORPORA.secure_local)['superseded_chunks']).toBeGreaterThan(0);
     // Personal files: garden (whole) and therapy's names.
     expect(counts(FILE_CORPORA.internal)).toMatchObject({ indexed_items: 2 });
+    // The journal's split raise left its text in the Personal names-only copy: reported, never served.
+    expect(counts(LIBRARY_CORPORA.internal)['names_only_kept_chunks']).toBe(plan.totals.namesOnlyKeptChunks);
     expect(JSON.stringify(status.tier_migration)).not.toContain('/Files');
+  });
+});
+
+describe('tier migration review fixes', () => {
+  test('the Secrets policy is one switch: hide_until_purge keeps the copy hidden through rollback until an approved purge', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const keysVectors = () => snapshotStore(context.files.secure_local).vectors.filter((row) => row['local_item_id'] === `${ACCOUNT}:keys`);
+    const before = keysVectors();
+    const run = await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.files',
+      secretsDisposition: 'hide_until_purge',
+    });
+    expect(run.secrets).toBe(1);
+    expect(keysVectors()).toEqual(before);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+    const rolled = await rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes, paths: context.paths });
+    expect(rolled.secretsKept).toBe(1);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'keys')).toEqual({ names: [], content: [] });
+    const dry = await purgeTierMigration({ planId: plan.planId, approve: false, lanes: write.lanes, paths: context.paths });
+    await purgeTierMigration({ planId: plan.planId, approve: true, expect: dry.digest, why: 'rehearsal', lanes: write.lanes, paths: context.paths });
+    expect(keysVectors()).toEqual([]);
+  });
+
+  test('a run refuses when a destination embedding identity changed, and never counts an unpriced destination as free', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    const cloudless: TierMigrationDomainIdentity = (domain) => (domain === 'secure_local' ? context.domainIdentity(domain) : {
+      ...context.domainIdentity(domain)!,
+      epochId: 'cloud:google-gemini:gemini-embedding-2:other-epoch',
+    });
+    await expect(runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: cloudless, paths: context.paths,
+    })).rejects.toThrow(/embedding identity changed/u);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'garden').content).toEqual([FILE_CORPORA.secure_local]);
+
+    // An approved plan whose recorded destinations were tampered with: the run
+    // stops before handing chunks to a store it never priced.
+    const state = readTierMigrationState(context.paths.statePath);
+    const record = state.plans.find((candidate) => candidate.planId === plan.planId)!;
+    record.totals.destinations = [];
+    writeFileSync(context.paths.statePath, JSON.stringify(state));
+    // The approval is bound to the counts hash, so tampering is refused first.
+    await expect(runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+    })).rejects.toThrow(/no owner approval bound to its counts/u);
+  });
+
+  test('a re-plan supersedes a crashed running plan, and a legacy item routed since planning is left to its newer state', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    // A run that died holding the lock (a pid that is not alive).
+    const state = readTierMigrationState(context.paths.statePath);
+    const record = state.plans.find((candidate) => candidate.planId === plan.planId)!;
+    record.state = 'running';
+    record.lock = { pid: 2_147_483_000, startedAt: new Date().toISOString() };
+    writeFileSync(context.paths.statePath, JSON.stringify(state));
+    // Meanwhile a sync routed the garden file (its generation moved on).
+    const write = lanes(context, 'write');
+    const ledger = write.lanes[0]!.set.ledger;
+    const garden = identityOf('rehearsal-files', 'garden');
+    write.lanes[0]!.set.store('secure_local')!.bindTierSet(ledger);
+    ledger.adoptLegacyPlacement(garden, [{ corpusId: FILE_CORPORA.secure_local, trustDomain: 'secure_local', layers: 'both' }], {
+      whenMissing: { family: 'file', metadataTier: 'secure', contentTier: 'secure' },
+    });
+    ledger.flip(garden, { expectedGeneration: 1, metadataTier: 'secure', contentTier: 'secure' });
+    const run = await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.files',
+    });
+    expect(run.skipped).toBe(1);
+    expect(servedFrom(context, FILE_CORPORA, context.files, 'garden').content).toEqual([FILE_CORPORA.secure_local]);
+
+    const crashed = readTierMigrationState(context.paths.statePath);
+    crashed.plans.find((candidate) => candidate.planId === plan.planId)!.state = 'running';
+    crashed.plans.find((candidate) => candidate.planId === plan.planId)!.lock = { pid: 2_147_483_000, startedAt: new Date().toISOString() };
+    writeFileSync(context.paths.statePath, JSON.stringify(crashed));
+    const read = lanes(context, 'read');
+    read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'essay'), { kind: 'tier', tier: 'secure' });
+    const replanned = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    expect(replanned.supersededPlans).toContain(plan.planId);
+  });
+
+  test('the move primitive refuses to overwrite a superseded copy kept in its destination', async () => {
+    const context = await rehearsal();
+    const read = lanes(context, 'read');
+    read.lanes[1]!.set.ledger.setOverride(identityOf('rehearsal-library', 'launch'), { kind: 'tier', tier: 'public' });
+    const plan = await planTierMigration({ lanes: read.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths });
+    await approveTierMigration({ planId: plan.planId, lanes: read.lanes, inputs: context.inputs, paths: context.paths });
+    const write = lanes(context, 'write');
+    await runTierMigration({
+      planId: plan.planId, lanes: write.lanes, inputs: context.inputs, domainIdentity: context.domainIdentity, paths: context.paths,
+      selector: 'source:rehearsal.library',
+    });
+    // Launch is now Public; its Personal copy is kept, superseded. Moving it
+    // back to Personal would overwrite that kept copy: refused.
+    const set = write.lanes[1]!.set;
+    const launch = identityOf('rehearsal-library', 'launch');
+    await expect(moveTieredItem({
+      set,
+      identity: { ...launch, family: 'readwise', localItemId: `${ACCOUNT}:launch` },
+      target: { metadataTier: 'private', contentTier: 'private' },
+    })).rejects.toThrow(TierMoveRefusedError);
+    expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
   });
 });
 

@@ -19,6 +19,7 @@ describe('dashboard tier counts and migration state', () => {
       secrets_located: 3,
       pending_classification_items: 40,
       superseded_chunks: 3_100,
+      names_only_kept_chunks: 0,
       migration: {
         state: 'running',
         label: 'Tier migration running',

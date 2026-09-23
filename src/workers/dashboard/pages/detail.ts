@@ -986,6 +986,9 @@ function renderSensitivity(source: DashboardSourceCard, basePath?: string): stri
     ...(tiers && tiers.superseded_chunks > 0
       ? [`${dashboardCount(tiers.superseded_chunks)} superseded chunks kept, hidden`]
       : []),
+    ...(tiers && tiers.names_only_kept_chunks > 0
+      ? [`${dashboardCount(tiers.names_only_kept_chunks)} chunks held in names-only copies until a purge`]
+      : []),
   ];
   const factsLine = facts.length > 0 ? `
         <div class="tiernote">${escapeHtml(facts.join(' · '))}</div>` : '';

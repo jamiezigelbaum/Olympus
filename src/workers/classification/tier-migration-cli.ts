@@ -7,7 +7,7 @@
 //   olympus tier migrate approve --plan <id> [--why <reason>]
 //   olympus tier migrate run --plan <id> [--batch <selector>] [--max-items <n>]
 //   olympus tier migrate rollback --batch <id>
-//   olympus tier migrate purge [--plan <id>] [--approve --why <reason>]
+//   olympus tier migrate purge [--plan <id>] [--approve --expect <digest> --why <reason>]
 //   olympus tier migrate status
 //
 // Output is JSON. The plan's top patterns name the owner's own folders,
@@ -47,7 +47,7 @@ import {
 
 export const TIER_MIGRATE_USAGE = 'olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | '
   + 'run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | '
-  + 'rollback --batch <id> | purge [--plan <id>] [--approve --why <reason>] | status';
+  + 'rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status';
 
 /** Seams for tests and for a host that wires the installed inputs differently. */
 export interface TierMigrateCliContext {
@@ -164,10 +164,18 @@ export async function runTierMigrateCommand(
     case 'purge': {
       const planId = flags.string('plan');
       const approve = flags.boolean('approve');
+      const expect = flags.string('expect');
       const why = flags.string('why');
       flags.assertDone('purge');
       if (approve && !why?.trim()) {
         throw new OperationError('invalid_params', 'A purge deletes kept vectors: --approve needs --why <reason>.');
+      }
+      if (approve && !expect?.trim()) {
+        throw new OperationError(
+          'invalid_params',
+          'A purge approval is bound to the counts you reviewed: --approve needs --expect <digest> from the dry run.',
+          'Run olympus tier migrate purge (without --approve) and pass its digest.',
+        );
       }
       const inputs = context.inputs ?? installedInputs(env, { withSniffer: false });
       return withLanes(context, env, approve ? 'write' : 'read', inputs, async (opened) => ({
@@ -175,12 +183,13 @@ export async function runTierMigrateCommand(
         ...snake(await purgeTierMigration({
           ...(planId ? { planId } : {}),
           approve,
+          ...(expect ? { expect: expect.trim() } : {}),
           ...(why ? { why } : {}),
           lanes: opened.lanes,
           paths,
           ...(context.now ? { now: context.now } : {}),
         })),
-        ...(approve ? {} : { note: 'Dry run: nothing was deleted. Add --approve --why <reason> to purge.' }),
+        ...(approve ? {} : { note: 'Dry run: nothing was deleted. To purge exactly these counts, add --approve --expect <digest> --why <reason>.' }),
       }));
     }
     case 'status': {

@@ -29,6 +29,7 @@ import {
   EMBEDDING_LEDGER_KIND_TEXT,
   EMBEDDING_LEDGER_STATUS_TEXT,
   embeddingLedgerScopeText,
+  isOwnerApprovedEmbeddingLedgerEntry,
   type EmbeddingLedgerEntry,
   type EmbeddingLedgerReadResult,
 } from '../../embedding-ledger.ts';
@@ -199,7 +200,7 @@ function pushFact(facts: string[], label: string, value: string | undefined): vo
  * find it without reading a word.
  */
 function approvalClass(entry: EmbeddingLedgerEntry): string {
-  if (entry.approved_by === 'jamie') return 'ledgerapproval ok';
+  if (isOwnerApprovedEmbeddingLedgerEntry(entry)) return 'ledgerapproval ok';
   return 'ledgerapproval no';
 }
 

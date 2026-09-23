@@ -715,6 +715,8 @@ export interface DashboardSourceCard {
     secrets_located: number;
     pending_classification_items: number;
     superseded_chunks: number;
+    /** Chunks names-only copies still hold after a split move: unserved, kept until an approved purge strips them. */
+    names_only_kept_chunks: number;
     migration?: {
       state: string;
       label: string;
@@ -2864,11 +2866,12 @@ function tierClassificationFromCorpora(
   const secrets = sum('secret_locations');
   const pending = sum('pending_classification_items');
   const superseded = sum('superseded_chunks');
+  const namesOnlyKept = sum('names_only_kept_chunks');
   const ids = new Set(corpora.map((corpus) => corpus.corpus_id));
   const touched = migration !== undefined
     && migration.state !== 'superseded'
     && migration.corpora.some((corpusId) => ids.has(corpusId));
-  if (secrets === 0 && pending === 0 && superseded === 0 && !touched) return undefined;
+  if (secrets === 0 && pending === 0 && superseded === 0 && namesOnlyKept === 0 && !touched) return undefined;
   const label = touched
     ? migration.state === 'done' && migration.purged
       ? 'Tier migration done'
@@ -2878,6 +2881,7 @@ function tierClassificationFromCorpora(
     secrets_located: secrets,
     pending_classification_items: pending,
     superseded_chunks: superseded,
+    names_only_kept_chunks: namesOnlyKept,
     ...(touched && label
       ? {
           migration: {

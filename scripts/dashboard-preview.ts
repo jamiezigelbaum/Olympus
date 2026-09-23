@@ -324,9 +324,11 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
       in_progress: true,
       approval_entry_id: 'tier-migration-approval:tm-3f2a9c1d7e5b4a60:8b1e',
       proposed: 2_763,
-      batches: [{ batch_id: 'tm-3f2a9c1d7e5b4a60-b1', state: 'running', moved: 2_120, secrets_hidden: 3, skipped: 4 }],
+      batches: [{ batch_id: 'tm-3f2a9c1d7e5b4a60-b1', state: 'running', moved: 2_120, secrets: 3, skipped: 4 }],
       corpora: ['secure_local.dropbox.files', 'internal.dropbox.files'],
       chunks_to_embed: 3_100,
+      destinations: [{ corpus_id: 'internal.dropbox.files', chunks_to_embed: 3_100 }],
+      names_only_kept_chunks: 0,
       purged: false,
     };
     const view = buildSourceDashboardViewModel({

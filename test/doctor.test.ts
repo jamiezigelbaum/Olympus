@@ -441,7 +441,7 @@ describe('runDoctor', () => {
     expect(sourceIndex.hint).toBeDefined();
   });
 
-  test('reports an approved tier migration in progress instead of a parity failure, and only for its stores', async () => {
+  test('excuses only an approved moving migration\'s lag, only in its destination stores, capped at its chunks', async () => {
     const migration = {
       plan_id: 'tm-0123456789abcdef',
       state: 'running',
@@ -449,15 +449,17 @@ describe('runDoctor', () => {
       approval_entry_id: 'tier-migration-approval:tm-0123456789abcdef:abc',
       proposed: 10,
       batches: [],
-      corpora: ['internal.email'],
+      corpora: ['secure_local.dropbox.files', 'internal.dropbox.files', 'internal.email'],
       chunks_to_embed: 100,
+      destinations: [{ corpus_id: 'secure_local.dropbox.files', chunks_to_embed: 100 }],
+      names_only_kept_chunks: 0,
       purged: false,
     };
-    const statusWith = (tierMigration: unknown) => fakeWorkerFetch({
+    const statusWith = (tierMigration: unknown, corpora: unknown[]) => fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },
       '/v1/source/index/status': {
         kind: 'source_index_status',
-        corpora: [corpusReport('internal.email', { family: 'email', counts: { chunks: 200, embedded_chunks: 100 } })],
+        corpora,
         ...(tierMigration ? { tier_migration: tierMigration } : {}),
       },
     }).fetchImpl;
@@ -465,18 +467,40 @@ describe('runDoctor', () => {
       config: enabledEmailConfig(),
       delphi: healthyDelphi(),
       fetchImpl,
-      handleRegistry: { version: 1, handles: [connectedHandle('gmail')] },
+      handleRegistry: { version: 1, handles: [connectedHandle('gmail'), connectedHandle('dropbox')] },
     }))).checks, 'source_index_status');
+    const personalDropbox = (embedded: number) => corpusReport('secure_local.dropbox.files', {
+      family: 'file',
+      counts: { chunks: 200, embedded_chunks: embedded },
+    });
 
-    const inProgress = await run(statusWith(migration));
+    // 100 chunks of lag in the destination, all of them the approved migration's.
+    const inProgress = await run(statusWith(migration, [personalDropbox(100)]));
     expect(inProgress.ok).toBe(true);
     expect(inProgress.detail).toContain(
-      'internal.email: migration in progress (running, approved, ledger entry tier-migration-approval:tm-0123456789abcdef:abc)',
+      'secure_local.dropbox.files: migration in progress (running, approved, ledger entry tier-migration-approval:tm-0123456789abcdef:abc)',
     );
-    // A plan that is only planned (no approval) or covers other stores excuses nothing.
-    expect((await run(statusWith({ ...migration, approval_entry_id: undefined }))).ok).toBe(false);
-    expect((await run(statusWith({ ...migration, corpora: ['secure_local.dropbox.files'] }))).ok).toBe(false);
-    expect((await run(statusWith({ ...migration, in_progress: false }))).ok).toBe(false);
+    // Lag beyond the plan's chunks for that store is still a failure.
+    const beyond = await run(statusWith(migration, [personalDropbox(40)]));
+    expect(beyond.ok).toBe(false);
+    expect(beyond.detail).toContain('beyond the 100 the migration approved');
+    // An unrelated Gmail store with 40% lag still fails, even though the plan reads from it.
+    const gmail = await run(statusWith(migration, [
+      personalDropbox(200),
+      corpusReport('internal.email', { family: 'email', counts: { chunks: 200, embedded_chunks: 120 } }),
+    ]));
+    expect(gmail.ok).toBe(false);
+    expect(gmail.detail).toContain('internal.email embedding lag is 80 of 200 chunks (over 10%)');
+    // Only approved and moving (running or stopped) excuses anything.
+    for (const other of [
+      { ...migration, approval_entry_id: undefined },
+      { ...migration, state: 'approved' },
+      { ...migration, state: 'done', in_progress: false },
+      { ...migration, destinations: [] },
+    ]) {
+      expect((await run(statusWith(other, [personalDropbox(100)]))).ok).toBe(false);
+    }
+    expect((await run(statusWith({ ...migration, state: 'stopped' }, [personalDropbox(100)]))).ok).toBe(true);
   });
 
   test('flags embedding lag on a non-Dropbox connector-store corpus', async () => {

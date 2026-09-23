@@ -94,12 +94,6 @@ export const SANCTIONED_HITS: readonly SanctionedHit[] = [
     reason: "Comment naming the embedding-ledger approver enum value 'jamie'.",
   },
   {
-    path: 'src/workers/dashboard/pages/embedding-ledger.ts',
-    label: 'a tenant or host identity',
-    match: /^jamie$/i,
-    reason: "Embedding-ledger approver enum value 'jamie' selecting a CSS class; the raw value is never displayed.",
-  },
-  {
     path: 'scripts/dashboard-preview.ts',
     label: 'a tenant or host identity',
     match: /^jamie$/i,

@@ -48,6 +48,7 @@ import type {
   LocalConnectorStore,
 } from '../connector-store/local-index.ts';
 import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
+import { secretsDisposition, settleSecretsCopies, type SecretsDisposition } from '../connector-store/secrets-disposition.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -199,8 +200,20 @@ export interface TierMigrationTotals {
   proposed: number;
   raises: number;
   lowers: number;
-  secretsToHide: number;
+  secrets: number;
   pendingHeld: number;
+  /**
+   * Chunks a split raise leaves in the names-only copy it re-layers in the
+   * lower store: never served, searched or embedded, but still held there
+   * (text and any cloud vectors) until an approved purge strips them.
+   */
+  namesOnlyKeptChunks: number;
+  /**
+   * Each destination domain's embedding identity under the sovereignty
+   * policy when planned (`model|epoch`, or null for none). A run refuses when
+   * any of them changed.
+   */
+  domainIdentities?: Record<string, string | null>;
   moves: TierMigrationMoveCount[];
   destinations: TierMigrationDestinationEstimate[];
   chunksToEmbed: number;
@@ -220,7 +233,7 @@ export interface TierMigrationBatchRecord {
   startedEntryId: string;
   completedEntryId?: string;
   moved: number;
-  secretsHidden: number;
+  secrets: number;
   skipped: number;
   rolledBack: number;
   chunksPlaced: number;
@@ -720,6 +733,9 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           }
           addPlanned(planned, totals, patterns, lane, store, item, decision, from, placement, {
             kind: 'legacy',
+            // The ledger generation the plan saw (0: no row yet), so a run can
+            // tell its own adoption from a sync that routed the item since.
+            expectedGeneration: ledger.getCurrent(item.identity)?.generation ?? 0,
             domainIdentity: options.domainIdentity,
             authorityCache,
           });
@@ -731,6 +747,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
   }
 
   finishTotals(totals, planned, options.prices);
+  totals.domainIdentities = domainIdentityDigest(options.domainIdentity);
   const countsSha256 = tierMigrationCountsSha256(totals);
   const planId = `tm-${sha256([
     inputsRevision,
@@ -779,7 +796,8 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
     };
     const others = state.plans.filter((plan) => plan.planId !== planId);
     for (const plan of others) {
-      if (plan.state === 'planned' || plan.state === 'approved' || plan.state === 'stopped') {
+      const crashed = plan.state === 'running' && !(plan.lock && processAlive(plan.lock.pid));
+      if (plan.state === 'planned' || plan.state === 'approved' || plan.state === 'stopped' || crashed) {
         plan.state = 'superseded';
         plan.updatedAt = now().toISOString();
         superseded.push(plan.planId);
@@ -803,7 +821,8 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
     recorded_at: now().toISOString(),
     kind: 'note',
     what: `Tier migration dry run ${planId}: ${totals.proposed} of ${totals.itemsScanned} stored item(s) would change tier `
-      + `(${totals.raises} raise(s), ${totals.lowers} lowering(s), ${totals.secretsToHide} to hide as Secrets). `
+      + `(${totals.raises} raise(s), ${totals.lowers} lowering(s), ${totals.secrets} Secrets, settled by the Secrets policy: `
+      + `${secretsDisposition() === 'tombstone_now' ? 'tombstoned at once, as a sync does' : 'hidden until an approved purge'}). `
       + `Estimated: ${totals.chunksToEmbed} chunk(s) to embed in their destination stores' existing models, `
       + `${totals.vectorsCopied} vector(s) copied with no provider call, about $${totals.estimatedCostUsd.toFixed(2)} and `
       + `${Math.ceil(totals.estimatedMinutes)} minute(s). Nothing was moved, embedded or deleted; running it needs the owner's approval.`,
@@ -872,10 +891,14 @@ function addPlanned(
   };
   planned.push({ lane, proposal, selectors, from, planned: [...placement], estimate });
   totals.proposed += 1;
-  if (secrets) totals.secretsToHide += 1;
+  if (secrets) totals.secrets += 1;
   else if (placementRaises(from, placement)) totals.raises += 1;
   else if (placementIsLower(from, placement)) totals.lowers += 1;
   if (decision.state === 'pending') totals.pendingHeld += 1;
+  for (const copy of placement) {
+    const kept = from.find((source) => source.corpusId === copy.corpusId);
+    if (kept && kept.layers !== 'metadata' && copy.layers === 'metadata') totals.namesOnlyKeptChunks += item.chunks.length;
+  }
 
   const fromTier = TIER_DISPLAY[domainTier(copyServingLayer(from, 'content')?.trustDomain ?? store.trustDomain)];
   const toNames = secrets ? 'Secrets' : TIER_DISPLAY[domainTier(copyServingLayer(placement, 'metadata')!.trustDomain)];
@@ -917,8 +940,9 @@ function emptyTotals(): TierMigrationTotals {
     proposed: 0,
     raises: 0,
     lowers: 0,
-    secretsToHide: 0,
+    secrets: 0,
     pendingHeld: 0,
+    namesOnlyKeptChunks: 0,
     moves: [],
     destinations: [],
     chunksToEmbed: 0,
@@ -970,6 +994,14 @@ function finishTotals(totals: TierMigrationTotals, planned: readonly PlannedItem
 
 function roundCents(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+/** Each trust domain's embedding identity under the sovereignty policy, as `model|epoch` (null: none). */
+function domainIdentityDigest(domainIdentity: TierMigrationDomainIdentity): Record<string, string | null> {
+  return Object.fromEntries((['public_safe', 'internal', 'secure_local'] as const).map((domain) => {
+    const identity = domainIdentity(domain);
+    return [domain, identity ? `${identity.modelId}|${identity.epochId}` : null];
+  }));
 }
 
 /** The hash an approval binds to: every count and estimate in the plan, canonically. */
@@ -1083,7 +1115,10 @@ export async function approveTierMigration(options: TierMigrationApproveOptions)
       + `stored item(s) to their classified tiers. Estimated ${totals.chunksToEmbed} chunk(s) to embed in each destination `
       + `store's EXISTING model and ${totals.vectorsCopied} vector(s) copied, about $${totals.estimatedCostUsd.toFixed(2)} and `
       + `${Math.ceil(totals.estimatedMinutes)} minute(s) (estimates). No model, epoch or dimension changes and no rebind; `
-      + 'superseded copies and their vectors are kept, hidden, until a separately approved purge.',
+      + 'superseded copies and their vectors are kept, hidden, until a separately approved purge. '
+      + `${totals.secrets} Secret(s) are settled by the Secrets policy (${secretsDisposition() === 'tombstone_now'
+        ? 'copies tombstoned at once, as a sync does'
+        : 'copies hidden until an approved purge'}); ${totals.namesOnlyKeptChunks} chunk(s) stay held, unserved, in names-only copies until a purge strips them.`,
     scope: { corpora: [...new Set([...totals.destinations.map((destination) => destination.corpusId), ...plan.lanes.flatMap((lane) => lane.corpora)])] },
     ...(options.why?.trim() ? { why: options.why.trim() } : {}),
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -1116,6 +1151,8 @@ export interface TierMigrationRunOptions {
   yieldWaitMs?: number;
   /** A pause between items, so the stores' write lock is held in short slices. */
   itemDelayMs?: number;
+  /** Overrides the one Secrets policy (secrets-disposition.ts); tests only. */
+  secretsDisposition?: SecretsDisposition;
   now?: () => Date;
   /** Test seam: called after each item's move, before it is marked moved. */
   afterItemMove?: (proposal: TierMigrationProposal) => void | Promise<void>;
@@ -1127,7 +1164,7 @@ export interface TierMigrationRunResult {
   state: TierMigrationBatchState;
   planState: TierMigrationPlanState;
   moved: number;
-  secretsHidden: number;
+  secrets: number;
   skipped: number;
   remaining: number;
   chunksPlaced: number;
@@ -1181,6 +1218,17 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
     );
   }
 
+  // Each destination domain must still embed with the identity the plan was
+  // costed and approved for (the sovereignty policy's resolution).
+  const identitiesNow = domainIdentityDigest(options.domainIdentity);
+  if (plan.totals.domainIdentities && JSON.stringify(identitiesNow) !== JSON.stringify(plan.totals.domainIdentities)) {
+    throw new OperationError(
+      'invalid_request',
+      `Plan ${plan.planId} is stale: a destination's embedding identity changed since it was approved.`,
+      'Run olympus tier migrate plan again and approve the new plan.',
+    );
+  }
+
   const selectorKey = options.selector ? tierMigrationBatchKey(options.selector) : undefined;
   const selectorText = options.selector ? normalizeSelector(options.selector) : null;
   // Resume an unfinished batch for the same selector (a crash or a stop).
@@ -1209,7 +1257,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
         startedAt: now().toISOString(),
         startedEntryId,
         moved: 0,
-        secretsHidden: 0,
+        secrets: 0,
         skipped: 0,
         rolledBack: 0,
         chunksPlaced: 0,
@@ -1239,7 +1287,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
   const batch = findPlan(options.paths.statePath, plan.planId).batches.find((candidate) => candidate.batchId === batchId)!;
   const tally = {
     moved: batch.moved,
-    secretsHidden: batch.secretsHidden,
+    secrets: batch.secrets,
     skipped: batch.skipped,
     chunksPlaced: batch.chunksPlaced,
     vectorsCopied: batch.vectorsCopied,
@@ -1254,6 +1302,10 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
   ]));
   let stopReason: string | undefined;
   let processed = 0;
+  // Secrets settled in THIS run, per corpus: deleted now, or kept hidden (the
+  // one Secrets policy decides which).
+  const secretsDeleted: Record<string, number> = {};
+  const secretsKept: Record<string, number> = {};
   const authorityCache = new Map<string, ConnectorStoreEmbeddingAuthoritySnapshot[]>();
 
   let failure: unknown;
@@ -1271,6 +1323,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       remainingChunks: approvedChunks - consumed.chunksToEmbed,
       remainingCost: approvedCost - consumed.costUsd,
       costPerChunk,
+      ...(options.secretsDisposition ? { secretsDisposition: options.secretsDisposition } : {}),
     });
     if (outcome.kind === 'cap') {
       stopReason = outcome.reason;
@@ -1286,8 +1339,15 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       continue;
     }
     if (options.afterItemMove) await options.afterItemMove(proposal);
-    if (outcome.kind === 'secrets') tally.secretsHidden += 1;
-    else tally.moved += 1;
+    if (outcome.kind === 'secrets') {
+      tally.secrets += 1;
+      for (const [corpusId, chunks] of Object.entries(outcome.secretsChunks ?? {})) {
+        const bucket = outcome.secretsDisposition === 'hide_until_purge' ? secretsKept : secretsDeleted;
+        bucket[corpusId] = (bucket[corpusId] ?? 0) + chunks;
+      }
+    } else {
+      tally.moved += 1;
+    }
     tally.chunksPlaced += outcome.chunksPlaced;
     tally.vectorsCopied += outcome.vectorsCopied;
     for (const [corpusId, chunks] of Object.entries(outcome.chunksToEmbed)) {
@@ -1321,6 +1381,21 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
   }
 
   const remaining = options.lanes.reduce((sum, lane) => sum + lane.set.ledger.migrationProposalCounts(plan.planId).proposed, 0);
+  if (Object.keys(secretsDeleted).length > 0) {
+    const deleted = Object.values(secretsDeleted).reduce((sum, count) => sum + count, 0);
+    await appendEmbeddingLedgerEntry(options.paths.embeddingLedgerPath, {
+      recorded_at: now().toISOString(),
+      kind: 'invalidation',
+      what: `Tier migration batch ${batchId} of approved plan ${plan.planId} found Secrets: under the Secrets policy their copies `
+        + `were tombstoned and ${deleted} chunk(s) and their vectors deleted, as a sync does. Only their locations are kept.`,
+      scope: { corpora: Object.keys(secretsDeleted).sort(), chunks: secretsDeleted },
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: 'complete',
+    });
+  }
+  const keptSecretsText = Object.keys(secretsKept).length > 0
+    ? ` Secrets were hidden and kept (${Object.values(secretsKept).reduce((sum, count) => sum + count, 0)} chunk(s)) until an approved purge.`
+    : '';
   const batchState: TierMigrationBatchState = stopReason ? 'stopped' : 'done';
   let completedEntryId: string | undefined;
   if (batchState === 'done') {
@@ -1330,7 +1405,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       recorded_at: now().toISOString(),
       kind: 're_embed_completed',
       what: `Tier migration batch ${batchId} of approved plan ${plan.planId} finished moving: ${tally.moved} item(s) moved, `
-        + `${tally.secretsHidden} hidden as Secrets (kept, not deleted), ${tally.skipped} skipped because they changed since planning. `
+        + `${tally.secrets} settled as Secrets (location only), ${tally.skipped} skipped because they changed since planning.${keptSecretsText} `
         + `${tally.vectorsCopied} vector(s) were copied with no provider call; the chunks counted here were handed to each `
         + 'destination store\'s own existing model, which the embedding drain embeds on its usual budget. Every previous copy is kept, hidden.',
       scope: {
@@ -1345,7 +1420,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       recorded_at: now().toISOString(),
       kind: 'note',
       what: `Tier migration batch ${batchId} of plan ${plan.planId} stopped (${stopReason}): ${tally.moved} item(s) moved and `
-        + `${tally.secretsHidden} hidden so far; observed chunks for destination models so far are in scope. Running it again resumes it.`,
+        + `${tally.secrets} settled as Secrets so far; observed chunks for destination models so far are in scope. Running it again resumes it.${keptSecretsText}`,
       scope: { corpora: Object.keys(tally.chunksToEmbed).sort(), chunks: tally.chunksToEmbed },
       approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
       status: 'in_progress',
@@ -1375,7 +1450,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
     state: batchState,
     planState: finalPlan.state,
     moved: tally.moved,
-    secretsHidden: tally.secretsHidden,
+    secrets: tally.secrets,
     skipped: tally.skipped,
     remaining,
     chunksPlaced: tally.chunksPlaced,
@@ -1402,7 +1477,7 @@ function persistBatch(
   statePath: string,
   planId: string,
   batchId: string,
-  tally: Pick<TierMigrationBatchRecord, 'moved' | 'secretsHidden' | 'skipped' | 'chunksPlaced' | 'vectorsCopied' | 'chunksToEmbed' | 'estimatedCostUsd'>,
+  tally: Pick<TierMigrationBatchRecord, 'moved' | 'secrets' | 'skipped' | 'chunksPlaced' | 'vectorsCopied' | 'chunksToEmbed' | 'estimatedCostUsd'>,
 ): void {
   updatePlan(statePath, planId, (record) => {
     const batch = record.batches.find((candidate) => candidate.batchId === batchId);
@@ -1422,9 +1497,28 @@ function sleep(ms: number): Promise<void> {
 }
 
 type ItemOutcome =
-  | { kind: 'moved' | 'secrets'; generation: number; chunksPlaced: number; vectorsCopied: number; chunksToEmbed: Record<string, number> }
+  | {
+    kind: 'moved' | 'secrets';
+    generation: number;
+    chunksPlaced: number;
+    vectorsCopied: number;
+    chunksToEmbed: Record<string, number>;
+    secretsChunks?: Record<string, number>;
+    secretsDisposition?: SecretsDisposition;
+  }
   | { kind: 'skipped'; reason: string }
   | { kind: 'cap'; reason: string };
+
+/**
+ * Whether a routed legacy item was routed by THIS migration (adopted, perhaps
+ * mid-move after a crash): adoption keeps the generation the plan saw, or
+ * mints generation 1 for an item that had no ledger row.
+ */
+function adoptedByThisPlan(record: TierLedgerRecord, proposal: TierMigrationProposal): boolean {
+  const expected = proposal.expectedGeneration ?? 0;
+  if (record.generation === expected) return true;
+  return expected === 0 && record.generation === 1 && record.decidedBy === 'legacy_placement';
+}
 
 function fullIdentity(proposal: TierMigrationProposal, localItemId: string): SourceItemIdentity {
   return {
@@ -1451,6 +1545,7 @@ async function migrateOne(
     remainingChunks: number;
     remainingCost: number;
     costPerChunk: ReadonlyMap<string, number>;
+    secretsDisposition?: SecretsDisposition;
   },
 ): Promise<ItemOutcome> {
   const set = lane.set;
@@ -1507,13 +1602,16 @@ async function migrateOne(
         },
       },
     );
+  } else if (!adoptedByThisPlan(record, proposal)) {
+    // Routed by someone else (a sync) since planning: its newer state wins.
+    return { kind: 'skipped', reason: 'changed_since_plan' };
   } else if (record.state === 'moving'
     && (record.targetMetadataTier !== decision.metadataTier || record.targetContentTier !== decision.contentTier)) {
     return { kind: 'skipped', reason: 'changed_since_plan' };
   }
 
   if (secrets) {
-    return hideAsSecrets(lane, proposal, identity, exported.chunks.map((chunk) => chunk.boundedText).join(''), sourceStore);
+    return secretsMove(lane, proposal, identity, exported.chunks.map((chunk) => chunk.boundedText).join(''), sourceStore, context.secretsDisposition);
   }
 
   // The destination identities, and the exact chunks this move hands to a
@@ -1535,6 +1633,20 @@ async function migrateOne(
         && exported.chunks.some((chunk) => chunk.chunkIndex === vector.chunkIndex && chunk.embeddingInputHash === vector.contentHash)).length
       : 0;
     projected[copy.corpusId] = Math.max(0, exported.chunks.length - copyable);
+  }
+  // A destination store that still keeps a SUPERSEDED copy of this item (an
+  // earlier move's) would have it overwritten: nothing superseded is lost
+  // before an approved purge, so the item waits.
+  const existing = ledger.copies(proposal.identity);
+  for (const copy of placement) {
+    if (sources.some((source) => source.corpusId === copy.corpusId)) continue;
+    if (existing.some((row) => row.corpusId === copy.corpusId && row.state === 'superseded')) {
+      return { kind: 'skipped', reason: 'destination_keeps_superseded_copy' };
+    }
+  }
+  // A destination the approved plan never priced is never counted as free.
+  if (Object.entries(projected).some(([corpusId, count]) => count > 0 && !context.costPerChunk.has(corpusId))) {
+    return { kind: 'cap', reason: 'unplanned_destination' };
   }
   const projectedChunks = Object.values(projected).reduce((sum, count) => sum + count, 0);
   const projectedCost = Object.entries(projected).reduce((sum, [corpusId, count]) => sum + count * (context.costPerChunk.get(corpusId) ?? 0), 0);
@@ -1563,16 +1675,18 @@ async function migrateOne(
 }
 
 /**
- * A move to Secrets during migration HIDES every copy (the flip supersedes
- * them all in one write) and records the location. Nothing is deleted here:
- * the copies and their vectors are kept until the owner approves a purge.
+ * A move to Secrets during migration: one ledger write hides every copy, the
+ * location is recorded, and then the ONE Secrets policy
+ * (connector-store/secrets-disposition.ts) decides, exactly as it does for the
+ * sync: tombstone the copies now, or keep them hidden for an approved purge.
  */
-function hideAsSecrets(
+function secretsMove(
   lane: TierMigrationLane,
   proposal: TierMigrationProposal,
   identity: SourceItemIdentity,
   text: string,
   sourceStore: LocalConnectorStore,
+  disposition: SecretsDisposition | undefined,
 ): ItemOutcome {
   const ledger = lane.set.ledger;
   const record = ledger.getCurrent(proposal.identity);
@@ -1592,7 +1706,26 @@ function hideAsSecrets(
       findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
       text,
     });
-    return { kind: 'secrets', generation: flipped.record.generation, chunksPlaced: 0, vectorsCopied: 0, chunksToEmbed: {} };
+    const settled = settleSecretsCopies({
+      ledger,
+      identity,
+      copies: flipped.copies,
+      storeFor: (corpusId) => {
+        const domain = lane.set.domainForCorpus(corpusId);
+        return domain ? lane.set.store(domain) : undefined;
+      },
+      connectorId: 'olympus_tier_migration',
+      ...(disposition ? { disposition } : {}),
+    });
+    return {
+      kind: 'secrets',
+      generation: flipped.record.generation,
+      chunksPlaced: 0,
+      vectorsCopied: 0,
+      chunksToEmbed: {},
+      secretsChunks: settled.chunks,
+      secretsDisposition: settled.disposition,
+    };
   } catch (error) {
     if (error instanceof TierLedgerGenerationConflictError) return { kind: 'skipped', reason: 'changed_since_plan' };
     throw error;
@@ -1606,6 +1739,8 @@ export interface TierMigrationRollbackResult {
   batchId: string;
   rolledBack: number;
   skipped: number;
+  /** Secrets outcomes left settled: a rollback never re-exposes a Secret. */
+  secretsKept: number;
   entryId: string;
 }
 
@@ -1628,8 +1763,15 @@ export async function rollbackTierMigrationBatch(options: {
   }
   let rolledBack = 0;
   let skipped = 0;
+  let secretsKept = 0;
   for (const lane of options.lanes) {
     for (const proposal of lane.set.ledger.migrationProposals(plan.planId, { status: 'moved', batchId: batch.batchId })) {
+      // A rollback never makes a Secret visible again, whatever the Secrets
+      // policy did with its copies: it stays settled as Secrets.
+      if (proposal.outcome?.['kind'] === 'secrets' || proposal.contentTier === 'secrets' || proposal.metadataTier === 'secrets') {
+        secretsKept += 1;
+        continue;
+      }
       const record = lane.set.ledger.getCurrent(proposal.identity);
       if (!record || record.generation !== proposal.movedGeneration) {
         // A sync re-judged the item after the move; its newer state wins.
@@ -1658,7 +1800,8 @@ export async function rollbackTierMigrationBatch(options: {
     recorded_at: now().toISOString(),
     kind: 'note',
     what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) `
-      + `serve from their previous copies again${skipped > 0 ? ` (${skipped} left alone because a later sync changed them)` : ''}. `
+      + `serve from their previous copies again${skipped > 0 ? ` (${skipped} left alone because a later sync changed them)` : ''}`
+      + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ''}. `
       + 'Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.',
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
@@ -1668,7 +1811,7 @@ export async function rollbackTierMigrationBatch(options: {
     entry.state = 'rolled_back';
     entry.rolledBack = rolledBack;
   });
-  return { planId: plan.planId, batchId: batch.batchId, rolledBack, skipped, entryId };
+  return { planId: plan.planId, batchId: batch.batchId, rolledBack, skipped, secretsKept, entryId };
 }
 
 // ---- M6: purge -----------------------------------------------------------------------------
@@ -1679,20 +1822,88 @@ export interface TierMigrationPurgeResult {
   /** Superseded copies eligible (dry run) or deleted (approved). */
   copies: number;
   chunks: Record<string, number>;
+  /** Names-only copies a split raise left holding text and vectors: eligible (dry run) or stripped (approved). */
+  namesOnlyCopies: number;
+  namesOnlyChunks: Record<string, number>;
+  /** Binds an approval to exactly these dry-run counts: pass it back as `expect`. */
+  digest: string;
   approvalEntryId?: string;
   invalidationEntryId?: string;
 }
 
+interface PurgeTarget {
+  lane: TierMigrationLane;
+  proposal: TierMigrationProposal;
+  /** Superseded copies THIS migration's flip (or rollback) left behind. */
+  superseded: TierCopy[];
+  /** Current names-only copies this migration re-layered that still hold chunks. */
+  namesOnly: TierCopy[];
+}
+
 /**
- * Delete the superseded copies a plan's moves left behind. Without `approve`
- * it only counts them. With it, an owner-approval entry is written FIRST, then
- * each superseded copy is tombstoned in its store (chunks, FTS rows and
- * vectors of that one copy), then an invalidation entry records what was
- * deleted, per corpus. Current copies are never touched.
+ * What a purge of this plan would touch, counts only: superseded copies this
+ * migration's own flips (or rollbacks) left, and names-only copies it
+ * re-layered that still hold the item's text and vectors.
+ */
+function purgeTargets(plan: TierMigrationPlanRecord, lanes: readonly TierMigrationLane[]): {
+  targets: PurgeTarget[];
+  chunks: Record<string, number>;
+  namesOnlyChunks: Record<string, number>;
+  digest: string;
+} {
+  const targets: PurgeTarget[] = [];
+  const chunks: Record<string, number> = {};
+  const namesOnlyChunks: Record<string, number> = {};
+  for (const lane of lanes) {
+    // Moved items keep their previous copies superseded; rolled-back items keep
+    // the copies the move wrote superseded. Only copies superseded by THIS
+    // migration's generation count; nothing current is deleted.
+    const settled = [
+      ...lane.set.ledger.migrationProposals(plan.planId, { status: 'moved' }),
+      ...lane.set.ledger.migrationProposals(plan.planId, { status: 'rolled_back' }),
+    ];
+    for (const proposal of settled) {
+      if (proposal.movedGeneration === null) continue;
+      const copies = lane.set.ledger.copies(proposal.identity);
+      const superseded = copies.filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === proposal.movedGeneration);
+      const namesOnly = proposal.status === 'moved'
+        ? copies.filter((copy) => copy.state === 'current' && copy.layers === 'metadata'
+          && copy.previousLayers !== null && copy.previousLayers !== 'metadata' && copy.generation === proposal.movedGeneration
+          && chunkCountIn(lane, copy.corpusId, proposal) > 0)
+        : [];
+      if (superseded.length === 0 && namesOnly.length === 0) continue;
+      targets.push({ lane, proposal, superseded, namesOnly });
+      for (const copy of superseded) chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + chunkCountIn(lane, copy.corpusId, proposal);
+      for (const copy of namesOnly) {
+        namesOnlyChunks[copy.corpusId] = (namesOnlyChunks[copy.corpusId] ?? 0) + chunkCountIn(lane, copy.corpusId, proposal);
+      }
+    }
+  }
+  const copies = targets.reduce((sum, target) => sum + target.superseded.length, 0);
+  const namesOnly = targets.reduce((sum, target) => sum + target.namesOnly.length, 0);
+  const digest = sha256(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
+  return { targets, chunks, namesOnlyChunks, digest };
+}
+
+function chunkCountIn(lane: TierMigrationLane, corpusId: string, proposal: TierMigrationProposal): number {
+  const domain = lane.set.domainForCorpus(corpusId);
+  return domain ? lane.set.store(domain)?.itemStoredContent(identityForStore(proposal))?.chunkCount ?? 0 : 0;
+}
+
+/**
+ * Delete what a plan's moves left behind. Without `approve` it only counts,
+ * and returns a digest of those counts. With it, the caller must pass that
+ * digest back (`expect`): the approval is bound to exactly the counts the
+ * owner saw. An owner-approval entry is written FIRST; then each superseded
+ * copy is tombstoned in its store, and each names-only copy the migration
+ * re-layered has its kept chunks and vectors stripped (its names row stays);
+ * then an invalidation entry records what was deleted, per corpus. Current
+ * content copies are never touched.
  */
 export async function purgeTierMigration(options: {
   planId?: string;
   approve: boolean;
+  expect?: string;
   why?: string;
   lanes: readonly TierMigrationLane[];
   paths: TierMigrationPaths;
@@ -1707,56 +1918,47 @@ export async function purgeTierMigration(options: {
   if (plan.state === 'running' && plan.lock && processAlive(plan.lock.pid) && plan.lock.pid !== process.pid) {
     throw new OperationError('invalid_request', `Plan ${plan.planId} is running; purge after it stops.`);
   }
-  const eligible: Array<{ lane: TierMigrationLane; proposal: TierMigrationProposal; copies: TierCopy[] }> = [];
-  const chunks: Record<string, number> = {};
-  for (const lane of options.lanes) {
-    // Moved items keep their previous copies superseded; rolled-back items keep
-    // the copies the move wrote superseded. Both are purged; nothing current is.
-    const settled = [
-      ...lane.set.ledger.migrationProposals(plan.planId, { status: 'moved' }),
-      ...lane.set.ledger.migrationProposals(plan.planId, { status: 'rolled_back' }),
-    ];
-    for (const proposal of settled) {
-      const superseded = lane.set.ledger.copies(proposal.identity).filter((copy) => copy.state === 'superseded');
-      if (superseded.length === 0) continue;
-      eligible.push({ lane, proposal, copies: superseded });
-      for (const copy of superseded) {
-        const domain = lane.set.domainForCorpus(copy.corpusId);
-        const count = domain ? lane.set.store(domain)?.itemStoredContent(identityForStore(proposal))?.chunkCount ?? 0 : 0;
-        chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + count;
-      }
-    }
+  const { targets, chunks, namesOnlyChunks, digest } = purgeTargets(plan, options.lanes);
+  const copyCount = targets.reduce((sum, target) => sum + target.superseded.length, 0);
+  const namesOnlyCount = targets.reduce((sum, target) => sum + target.namesOnly.length, 0);
+  const counted = { planId: plan.planId, copies: copyCount, chunks, namesOnlyCopies: namesOnlyCount, namesOnlyChunks, digest };
+  if (!options.approve) return { ...counted, approved: false };
+  if (options.expect !== digest) {
+    throw new OperationError(
+      'invalid_request',
+      `The purge counts changed since the dry run (digest ${digest}${options.expect ? `, expected ${options.expect}` : ''}).`,
+      `Run olympus tier migrate purge --plan ${plan.planId} to see the counts, then approve with --expect <digest>.`,
+    );
   }
-  const copyCount = eligible.reduce((sum, entry) => sum + entry.copies.length, 0);
-  if (!options.approve) return { planId: plan.planId, approved: false, copies: copyCount, chunks };
-  if (copyCount === 0) return { planId: plan.planId, approved: true, copies: 0, chunks };
+  if (copyCount === 0 && namesOnlyCount === 0) return { ...counted, approved: true };
 
-  const digest = sha256(JSON.stringify(canonical({ copyCount, chunks }))).slice(0, 16);
   const approvalEntryId = `tier-migration-purge-approval:${plan.planId}:${digest}`;
-  const corpora = Object.keys(chunks).sort();
+  const total = (counts: Record<string, number>) => Object.values(counts).reduce((sum, count) => sum + count, 0);
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
     entry_id: approvalEntryId,
     recorded_at: now().toISOString(),
     kind: 'invalidation',
-    what: `The owner approved purging the ${copyCount} superseded copy(ies) tier migration plan ${plan.planId} kept hidden, `
-      + `with their chunks and vectors (${Object.values(chunks).reduce((sum, count) => sum + count, 0)} chunk(s)). Current copies are not touched.`,
-    scope: { corpora },
+    what: `The owner approved purging what tier migration plan ${plan.planId} kept hidden (counts digest ${digest}): `
+      + `${copyCount} superseded copy(ies) with ${total(chunks)} chunk(s) and their vectors, and the ${total(namesOnlyChunks)} chunk(s) `
+      + `and vectors held in ${namesOnlyCount} names-only copy(ies) a split move left. Current content copies are not touched.`,
+    scope: { corpora: [...new Set([...Object.keys(chunks), ...Object.keys(namesOnlyChunks)])].sort() },
     ...(options.why?.trim() ? { why: options.why.trim() } : {}),
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'pending',
   });
   const deleted: Record<string, number> = {};
   let copiesDeleted = 0;
-  for (const { lane, proposal, copies } of eligible) {
-    for (const copy of copies) {
+  let namesOnlyStripped = 0;
+  for (const { lane, proposal, superseded, namesOnly } of targets) {
+    const storeIdentity = identityForStore(proposal);
+    for (const copy of superseded) {
       const domain = lane.set.domainForCorpus(copy.corpusId);
       const store = domain ? lane.set.store(domain) : undefined;
       if (!store) continue;
-      const storeIdentity = identityForStore(proposal);
-      const count = store.itemStoredContent(storeIdentity)?.chunkCount ?? 0;
-      // Re-read: only a copy that is STILL superseded is purged.
+      // Re-read: only a copy that is STILL superseded by this migration is purged.
       const still = lane.set.ledger.copies(proposal.identity).find((candidate) => candidate.corpusId === copy.corpusId);
-      if (still?.state !== 'superseded') continue;
+      if (still?.state !== 'superseded' || still.supersededByGeneration !== copy.supersededByGeneration) continue;
+      const count = store.itemStoredContent(storeIdentity)?.chunkCount ?? 0;
       const localItemId = store.exportItemCopy(storeIdentity)?.identity.localItemId;
       if (localItemId) {
         const secrets = proposal.contentTier === 'secrets' || proposal.metadataTier === 'secrets';
@@ -1769,7 +1971,18 @@ export async function purgeTierMigration(options: {
       deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + count;
       copiesDeleted += 1;
     }
-    if (lane.set.ledger.copies(proposal.identity).every((copy) => copy.state !== 'superseded')) {
+    for (const copy of namesOnly) {
+      const domain = lane.set.domainForCorpus(copy.corpusId);
+      const store = domain ? lane.set.store(domain) : undefined;
+      if (!store) continue;
+      const still = lane.set.ledger.copies(proposal.identity).find((candidate) => candidate.corpusId === copy.corpusId);
+      if (still?.state !== 'current' || still.layers !== 'metadata') continue;
+      const stripped = store.stripCopyContent(storeIdentity);
+      deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + stripped;
+      namesOnlyStripped += 1;
+    }
+    const left = lane.set.ledger.copies(proposal.identity);
+    if (left.every((copy) => !(copy.state === 'superseded' && copy.supersededByGeneration === proposal.movedGeneration))) {
       lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, { status: 'purged' });
     }
   }
@@ -1778,8 +1991,9 @@ export async function purgeTierMigration(options: {
     entry_id: invalidationEntryId,
     recorded_at: now().toISOString(),
     kind: 'invalidation',
-    what: `Purged ${copiesDeleted} superseded copy(ies) that tier migration plan ${plan.planId} had kept hidden: their chunks and `
-      + 'vectors were deleted, per corpus as counted in scope. Only superseded copies were touched; every current copy is unchanged.',
+    what: `Purged what tier migration plan ${plan.planId} had kept hidden: ${copiesDeleted} superseded copy(ies) tombstoned and `
+      + `${namesOnlyStripped} names-only copy(ies) stripped of their kept text and vectors; chunks deleted per corpus are in scope. `
+      + 'Every current content copy is unchanged.',
     scope: { corpora: Object.keys(deleted).sort(), chunks: deleted },
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
@@ -1790,10 +2004,17 @@ export async function purgeTierMigration(options: {
       if (batch.state === 'done' || batch.state === 'stopped') batch.state = 'purged';
     }
   });
-  return { planId: plan.planId, approved: true, copies: copiesDeleted, chunks: deleted, approvalEntryId, invalidationEntryId };
+  return {
+    ...counted,
+    approved: true,
+    copies: copiesDeleted,
+    namesOnlyCopies: namesOnlyStripped,
+    chunks: deleted,
+    approvalEntryId,
+    invalidationEntryId,
+  };
 }
 
-/** The identity a store lookup needs (it keys on provider, account, conversation and item id only). */
 function identityForStore(proposal: TierMigrationProposal): SourceItemIdentity {
   return fullIdentity(proposal, '');
 }
@@ -1808,10 +2029,14 @@ export interface TierMigrationStatusSummary {
   in_progress: boolean;
   approval_entry_id?: string;
   proposed: number;
-  batches: Array<{ batch_id: string; state: TierMigrationBatchState; moved: number; secrets_hidden: number; skipped: number }>;
+  batches: Array<{ batch_id: string; state: TierMigrationBatchState; moved: number; secrets: number; skipped: number }>;
   /** Stores the plan reads from or writes to. */
   corpora: string[];
   chunks_to_embed: number;
+  /** Stores the plan hands chunks to embed, and how many: the only lag a doctor may excuse, and only up to these counts. */
+  destinations: Array<{ corpus_id: string; chunks_to_embed: number }>;
+  /** Chunks split raises leave in names-only copies (unserved) until an approved purge strips them. */
+  names_only_kept_chunks: number;
   purged: boolean;
 }
 
@@ -1824,8 +2049,9 @@ export function tierMigrationStatusSummary(statePath: string): TierMigrationStat
   }
   const plan = [...state.plans].reverse().find((candidate) => candidate.state !== 'superseded') ?? state.plans[state.plans.length - 1];
   if (!plan) return undefined;
-  const inProgress = plan.state === 'running' || plan.state === 'stopped'
-    || (plan.state === 'approved' && plan.approval !== undefined);
+  // Only an approved plan that is moving (or stopped mid-batch) is in
+  // progress; lag it may excuse is limited to its destinations' chunks.
+  const inProgress = (plan.state === 'running' || plan.state === 'stopped') && plan.approval !== undefined;
   return {
     plan_id: plan.planId,
     state: plan.state,
@@ -1836,11 +2062,15 @@ export function tierMigrationStatusSummary(statePath: string): TierMigrationStat
       batch_id: batch.batchId,
       state: batch.state,
       moved: batch.moved,
-      secrets_hidden: batch.secretsHidden,
+      secrets: batch.secrets,
       skipped: batch.skipped,
     })),
     corpora: [...new Set([...plan.lanes.flatMap((lane) => lane.corpora), ...plan.totals.destinations.map((destination) => destination.corpusId)])].sort(),
     chunks_to_embed: plan.totals.chunksToEmbed,
+    destinations: plan.totals.destinations
+      .filter((destination) => destination.chunksToEmbed > 0)
+      .map((destination) => ({ corpus_id: destination.corpusId, chunks_to_embed: destination.chunksToEmbed })),
+    names_only_kept_chunks: plan.totals.namesOnlyKeptChunks ?? 0,
     purged: plan.purge !== undefined,
   };
 }

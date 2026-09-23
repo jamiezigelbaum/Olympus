@@ -800,6 +800,12 @@ export interface ConnectorStoreTierStatus {
   supersededChunks: number;
   /** Items with a copy here that are mid-move. */
   tierMoveInProgress: number;
+  /**
+   * Chunks still held by copies here that serve names only (a split move
+   * re-layered a whole copy): never searched, served, counted or embedded,
+   * kept until an approved purge strips them. Absent when none.
+   */
+  namesOnlyKeptChunks?: number;
 }
 
 /**
@@ -2878,6 +2884,36 @@ export class LocalConnectorStore {
     const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index')
       .all(row.item_pk) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
     return migrationFingerprint(row.content_hash, hashes);
+  }
+
+  /**
+   * Strip the kept text of a names-only copy (the owner-approved tier
+   * migration purge): its chunks, their FTS rows and every vector go; the item
+   * row (its names) stays. Returns the chunks removed. The caller has checked
+   * the tier ledger says this copy serves names only.
+   */
+  stripCopyContent(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): number {
+    return this.db.transaction((): number => {
+      const row = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
+      `).get(
+        identity.provider,
+        identity.accountScope,
+        normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId,
+      ) as { item_pk: number } | null;
+      if (!row) return 0;
+      const count = (this.db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?').get(row.item_pk) as { n: number }).n;
+      if (count === 0) return 0;
+      this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
+      this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+      this.refreshFtsForItem(row.item_pk);
+      return count;
+    })();
   }
 
   /**
@@ -8333,6 +8369,7 @@ export class LocalConnectorStore {
               `).get(JSON.stringify(tier.hidden)) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
+          ...namesOnlyKept(this.db, tier.metadataLayer),
         }
       : undefined;
     // "Last" means most-recently-inserted. started_at has only millisecond
@@ -9985,6 +10022,14 @@ export function tierRowVisible(
   if (!copies || copies.length === 0) return true;
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current');
   return copyServingLayer(here, layer) !== undefined;
+}
+
+/** Chunks held by names-only copies, as a status field present only when non-zero. */
+function namesOnlyKept(db: Database, itemPks: readonly number[]): { namesOnlyKeptChunks?: number } {
+  if (itemPks.length === 0) return {};
+  const n = (db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))')
+    .get(JSON.stringify(itemPks)) as { n: number }).n;
+  return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 
 /** Content-free fingerprint of an item's stored text: its content hash and its chunks' hashes. */

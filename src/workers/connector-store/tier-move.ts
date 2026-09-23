@@ -39,10 +39,19 @@ import {
 } from '../embedding-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
+import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposition.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
+
+/** A move the primitive refuses before writing anything (the item stays where it is). */
+export class TierMoveRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TierMoveRefusedError';
+  }
+}
 
 export type TierMoveEmbeddingIdentity = Pick<
   SourceEmbeddingProvider,
@@ -66,6 +75,8 @@ export interface TierMoveOptions {
    * only into a store whose identity is given here and matches the vectors'.
    */
   vectorIdentities?: Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>>;
+  /** Overrides the Secrets policy (secrets-disposition.ts); tests only. */
+  secretsDisposition?: SecretsDisposition;
   /** Where to record the move. Omitted: nothing is appended (tests only). */
   embeddingLedger?: { path: string; approvedBy: EmbeddingLedgerApprovedBy; why?: string };
 }
@@ -92,6 +103,9 @@ export interface TierMoveResult {
   supersededCorpora: string[];
   /** Chunks the move touched: written or kept at the destination, or tombstoned for Secrets. */
   chunkCount: number;
+  /** Secrets only: chunks per corpus deleted (tombstone_now) or kept hidden (hide_until_purge). */
+  secretsChunks?: Record<string, number>;
+  secretsDisposition?: SecretsDisposition;
 }
 
 export async function moveTieredItem(options: TierMoveOptions): Promise<TierMoveResult> {
@@ -124,6 +138,16 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     || (copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration));
   if (sources.length === 0) throw new Error('The item has no copy to move from.');
   const raise = placementIsRaise(sources, placement.copies);
+  // Staging a destination rewrites that store's row. A copy kept there as
+  // superseded (an earlier move's) would be lost before any approved purge:
+  // refuse instead, and leave the item where it is.
+  const kept = ledger.copies(identity);
+  for (const planned of placement.copies) {
+    if (sources.some((source) => source.corpusId === planned.corpusId)) continue;
+    if (kept.some((copy) => copy.corpusId === planned.corpusId && copy.state === 'superseded')) {
+      throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.');
+    }
+  }
 
   // 1. Stage (a raise hides the source first).
   ledger.stageMove(identity, {
@@ -229,48 +253,56 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
 async function moveToSecrets(options: TierMoveOptions, expectedGeneration: number): Promise<TierMoveResult> {
   const { set, identity } = options;
   const ledger = set.ledger;
+  // One write hides every copy; what happens to them next is the Secrets
+  // policy's (secrets-disposition.ts), decided in one place.
   const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
-  let chunkCount = 0;
-  const tombstoned: string[] = [];
   let located = false;
   for (const copy of copies) {
+    if (located) break;
     const domain = set.domainForCorpus(copy.corpusId);
-    const store = domain ? set.store(domain) : undefined;
-    if (!store) continue;
-    const exported = store.exportItemCopy(identity);
-    chunkCount += exported?.chunks.length ?? 0;
-    if (exported && !located) {
-      // Location only: the kinds come from the detector, never the text.
-      const text = exported.chunks.map((chunk) => chunk.boundedText).join('\n');
-      const kinds = detectSecretFindingKinds(text);
-      const locator = exported.columns.locator_uri;
-      const title = exported.columns.title;
-      set.secrets()?.record({
-        identity,
-        // The names' tier before the item became Secrets decides whether its
-        // title may be released.
-        namesReleasable: record.previousMetadataTier === 'public' || record.previousMetadataTier === 'private',
-        ...(typeof locator === 'string' ? { locator } : {}),
-        ...(typeof title === 'string' ? { title } : {}),
-        findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
-        text,
-      });
-      located = true;
-    }
-    store.tombstoneCopy(fullIdentity(identity), { connectorId: TIER_MOVE_CONNECTOR_ID, trustTier: 'S5' });
-    tombstoned.push(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (!exported) continue;
+    // Location only: the kinds come from the detector, never the text.
+    const text = exported.chunks.map((chunk) => chunk.boundedText).join('\n');
+    const kinds = detectSecretFindingKinds(text);
+    const locator = exported.columns.locator_uri;
+    const title = exported.columns.title;
+    set.secrets()?.record({
+      identity,
+      // The names' tier before the item became Secrets decides whether its
+      // title may be released.
+      namesReleasable: record.previousMetadataTier === 'public' || record.previousMetadataTier === 'private',
+      ...(typeof locator === 'string' ? { locator } : {}),
+      ...(typeof title === 'string' ? { title } : {}),
+      findingKinds: kinds.length > 0 ? kinds : ['owner_marked_secret'],
+      text,
+    });
+    located = true;
   }
-  ledger.removeCopies(identity);
+  const settled = settleSecretsCopies({
+    ledger,
+    identity: fullIdentity(identity),
+    copies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    ...(options.secretsDisposition ? { disposition: options.secretsDisposition } : {}),
+  });
+  const corpora = Object.keys(settled.chunks);
+  const chunkCount = Object.values(settled.chunks).reduce((sum, count) => sum + count, 0);
   if (options.embeddingLedger) {
+    const deleted = settled.disposition === 'tombstone_now';
     await appendEmbeddingLedgerEntry(options.embeddingLedger.path, {
       recorded_at: new Date().toISOString(),
-      kind: 'invalidation',
-      what: `One item became Secrets: its copies in ${tombstoned.join(', ') || 'no store'} were tombstoned and `
-        + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.`,
-      scope: {
-        corpora: tombstoned,
-        chunks: Object.fromEntries(tombstoned.map((corpusId) => [corpusId, 0])),
-      },
+      kind: deleted ? 'invalidation' : 'note',
+      what: deleted
+        ? `One item became Secrets: its copies in ${corpora.join(', ') || 'no store'} were tombstoned and `
+          + `${chunkCount} chunk(s) and their vectors deleted. Only its location is kept.`
+        : `One item became Secrets: its copies in ${corpora.join(', ') || 'no store'} (${chunkCount} chunk(s)) `
+          + 'are hidden and kept until an owner-approved purge. Only its location is served.',
+      scope: { corpora, chunks: settled.chunks },
       ...(options.embeddingLedger.why ? { why: options.embeddingLedger.why } : {}),
       approved_by: options.embeddingLedger.approvedBy,
       status: 'complete',
@@ -281,8 +313,10 @@ async function moveToSecrets(options: TierMoveOptions, expectedGeneration: numbe
     raise: true,
     generation: record.generation,
     destinations: [],
-    supersededCorpora: tombstoned,
+    supersededCorpora: corpora,
     chunkCount,
+    secretsChunks: settled.chunks,
+    secretsDisposition: settled.disposition,
   };
 }
 

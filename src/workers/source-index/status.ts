@@ -105,9 +105,12 @@ export interface SourceIndexTierMigrationStatus {
   in_progress: boolean;
   approval_entry_id?: string;
   proposed: number;
-  batches: Array<{ batch_id: string; state: string; moved: number; secrets_hidden: number; skipped: number }>;
+  batches: Array<{ batch_id: string; state: string; moved: number; secrets: number; skipped: number }>;
   corpora: string[];
   chunks_to_embed: number;
+  /** The stores the plan hands chunks to embed, and how many: the only lag the doctor excuses, capped at these counts. */
+  destinations: Array<{ corpus_id: string; chunks_to_embed: number }>;
+  names_only_kept_chunks: number;
   purged: boolean;
 }
 
@@ -510,6 +513,7 @@ function connectorStoreStatus(
             pending_classification_items: status.tier.pendingClassificationItems,
             superseded_chunks: status.tier.supersededChunks,
             tier_move_in_progress: status.tier.tierMoveInProgress,
+            ...(status.tier.namesOnlyKeptChunks ? { names_only_kept_chunks: status.tier.namesOnlyKeptChunks } : {}),
           }
         : {}),
       // Secrets are stored nowhere: this is how many locations the lane keeps.

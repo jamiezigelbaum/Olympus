@@ -8175,7 +8175,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
-
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -14234,7 +14233,6 @@ async function sourceIndexStatusCheck(deps) {
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   const migration = approvedTierMigrationInProgress(status.tier_migration);
-  const migrationCorpora = new Set(migration?.corpora ?? []);
   for (const entry of corpora) {
     const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
@@ -14260,8 +14258,12 @@ async function sourceIndexStatusCheck(deps) {
       summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
-      if (migration && migrationCorpora.has(corpusId)) {
-        informational.push(`${corpusId}: migration in progress (${migration.state}, approved, ledger entry ` + `${migration.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks is expected`);
+      const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
+      const unexcused = embeddingLag - approvedLag;
+      if (approvedLag > 0 && unexcused <= chunks * EMBEDDING_LAG_RATIO) {
+        informational.push(`${corpusId}: migration in progress (${migration.state}, approved, ledger entry ` + `${migration.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks, ${approvedLag} of them approved`);
+      } else if (approvedLag > 0) {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10% beyond the ${approvedLag} ` + `the migration approved, ledger entry ${migration.approvalEntryId})`);
       } else {
         problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
       }
@@ -14290,15 +14292,19 @@ function approvedTierMigrationInProgress(value) {
   const migration = asRecord15(value);
   if (migration.in_progress !== true)
     return;
+  const state = typeof migration.state === "string" ? migration.state : "";
+  if (state !== "running" && state !== "stopped")
+    return;
   const approvalEntryId = typeof migration.approval_entry_id === "string" ? migration.approval_entry_id : undefined;
   if (!approvalEntryId)
     return;
-  const corpora = Array.isArray(migration.corpora) ? migration.corpora.filter((corpus) => typeof corpus === "string") : [];
-  return {
-    state: typeof migration.state === "string" ? migration.state : "approved",
-    approvalEntryId,
-    corpora
-  };
+  const destinations = new Map;
+  for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
+    const destination = asRecord15(entry);
+    if (typeof destination.corpus_id === "string")
+      destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+  }
+  return { state, approvalEntryId, destinations };
 }
 async function workerCredentialLanesCheck(deps) {
   const name = "worker_credential_lanes";
