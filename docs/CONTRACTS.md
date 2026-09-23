@@ -466,7 +466,9 @@ see both change logs.
   `secure_local.*` stores governed by one tier ledger per source, and every
   tier is searched. Two build-detail fields ride BESIDE the pack, by the
   2026-08-20 precedent: `EvidencePackBuildDetail.secretLocations` (where a
-  matching Secret lives: source, locator, a scanned title, finding kinds; never
+  matching Secret lives: source, an opaque ref, finding kinds, and a locator
+  and scanned title only when the item's metadata is below Private; confined
+  to the corpora, account and approved scope the build searched; never
   content) and `EvidencePackBuildDetail.classificationCoverage` (counts of
   searched items whose tier is not final). Neither enters the pack, so no
   model reads them, and the routing to the private analyst is unchanged in

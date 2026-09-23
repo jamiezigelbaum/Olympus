@@ -28,6 +28,12 @@ export interface FixtureSpec {
   legacyDomain?: 'internal' | 'secure_local';
   deleted?: boolean;
   version?: string;
+  /** A chat item's conversation: message ids repeat across conversations. */
+  conversation?: string;
+}
+
+export function fixtureLocalId(spec: Pick<FixtureSpec, 'id' | 'conversation'>): string {
+  return spec.conversation ? `${ACCOUNT}:${spec.conversation}:${spec.id}` : `${ACCOUNT}:${spec.id}`;
 }
 
 export function fixtureItem(spec: FixtureSpec): RawItem {
@@ -37,8 +43,9 @@ export function fixtureItem(spec: FixtureSpec): RawItem {
       provider: PROVIDER,
       accountScope: ACCOUNT,
       providerItemId: spec.id,
-      localItemId: `${ACCOUNT}:${spec.id}`,
+      localItemId: fixtureLocalId(spec),
       sourceVersion: spec.version ?? 'v1',
+      ...(spec.conversation ? { providerConversationId: spec.conversation } : {}),
     },
     mimeType: 'text/plain',
     content: spec.text === undefined ? { kind: 'metadata_only' } : { kind: 'text', text: spec.text },
@@ -68,12 +75,13 @@ export function fixtureConnector(specs: () => readonly FixtureSpec[], options: {
       })();
     },
     async fetchItem(localItemId) {
-      const spec = specs().find((entry) => `${ACCOUNT}:${entry.id}` === localItemId);
+      const spec = specs().find((entry) => fixtureLocalId(entry) === localItemId);
       if (!spec) throw new Error('unknown fixture item');
       return fixtureItem(spec);
     },
     classificationSignals(item) {
-      const spec = specs().find((entry) => entry.id === item.identity.providerItemId);
+      const spec = specs().find((entry) => entry.id === item.identity.providerItemId
+        && (entry.conversation ?? undefined) === item.identity.providerConversationId);
       return {
         title: spec?.name ?? String(item.metadata['name'] ?? ''),
         path: `/Files/${spec?.name ?? ''}`,
@@ -269,6 +277,6 @@ export function localId(id: string): string {
   return `${ACCOUNT}:${id}`;
 }
 
-export function identityOf(id: string) {
-  return fixtureItem({ id, name: id }).identity;
+export function identityOf(id: string, conversation?: string) {
+  return fixtureItem({ id, name: id, ...(conversation ? { conversation } : {}) }).identity;
 }
