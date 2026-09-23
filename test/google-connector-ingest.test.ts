@@ -92,12 +92,16 @@ describe('Google connector-store ingestion', () => {
     expect(client.listCalls).toBe(1);
     expect(client.getCalls).toEqual(['msg-plain', 'msg-therapy']);
 
+    // New messages are routed by their recorded tiers (P1b): the other leg
+    // skips each as routed elsewhere, not as a rejection.
     expect(result.internal.itemsSeen).toBe(2);
     expect(result.internal.itemsIndexed).toBe(1);
-    expect(result.internal.itemsRejected).toBe(1);
+    expect(result.internal.itemsRejected).toBe(0);
+    expect(result.internal.itemsRoutedElsewhere).toBe(1);
     expect(result.secure.itemsSeen).toBe(2);
     expect(result.secure.itemsIndexed).toBe(1);
-    expect(result.secure.itemsRejected).toBe(1);
+    expect(result.secure.itemsRejected).toBe(0);
+    expect(result.secure.itemsRoutedElsewhere).toBe(1);
 
     const plain = await localContent(internalStore, 'personal:msg-plain');
     const secure = await localContent(secureStore, 'personal:msg-therapy');

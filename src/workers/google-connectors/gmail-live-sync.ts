@@ -22,11 +22,19 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import {
-  syncAndEmbedFromConnector,
   type ConnectorStoreEmbedSummary,
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
+import {
+  createLaneTieredStoreSet,
+  tieredLaneReceiptCounts,
+  type TieredLaneReceiptCounts,
+  type TieredStoreRoutingCounts,
+  type TieredStoreSet,
+  type TieredStoreSetRun,
+} from '../connector-store/tiered-store-set.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
@@ -34,6 +42,7 @@ import {
 import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classification.ts';
 import {
   GMAIL_PROVIDER,
+  GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GoogleGmailSourceConnector,
   gmailConnectorStoreClassification,
   gmailCursorIsMidTraversal,
@@ -117,7 +126,7 @@ export interface GmailConnectorStoreReceipt {
     traversal_complete: number;
     /** Always 0: neither lane's absence is evidence of deletion. */
     absence_authoritative: number;
-  };
+  } & TieredLaneReceiptCounts;
   api_usage: {
     utc_day: string;
   };
@@ -191,6 +200,14 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
    * one's watermark. The compiled query itself rides `scope`.
    */
   scopeApproval?: { generation: string; revision: string };
+  /**
+   * The lane's per-tier stores (tiered-store-set.ts). Omitted: a set over the
+   * internal and secure stores, with the Public store below when given.
+   */
+  tierSet?: TieredStoreSet;
+  publicStore?: { open: () => LocalConnectorStore; exists: () => boolean };
+  secretLocations?: SecretLocationsIndex;
+  onTierLegOpened?: (store: LocalConnectorStore) => void;
 }
 
 export function createGmailConnectorStoreSyncHandler(
@@ -242,16 +259,31 @@ export function createGmailConnectorStoreSyncHandler(
       provenance: sourceInvocationProvenance(overrides.provenance),
     });
 
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: connectorId,
+    internalStore: options.internalStore,
+    secureStore: options.secureStore,
+    ...(options.publicStore
+      ? { publicLeg: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } }
+      : {}),
+    ...(options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {}),
+    ...(options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {}),
+    tierClassification,
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+    ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
+  });
+
   const runBothStores = async (input: {
     connector: SourceConnector;
     maxItems?: number;
     cursor?: string;
     reconcile?: boolean;
   }): Promise<GmailStoreRun> => {
-    // One provider traversal, shared with the second store. The two stores
-    // differ only in the trust domain the spine accepts, so the second listing
-    // pass was pure duplicate provider cost.
-    const traversal = sharedTraversal(input.connector, connectorId);
+    // One provider traversal feeds every tier store: the set records it on
+    // its first pass and replays it to the other legs, routes each NEW message
+    // by its recorded tiers, and leaves every existing message on the lane's
+    // own placement. Its resume point commits only after every leg did.
+    const traversal = scopedTraversal(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
@@ -269,23 +301,13 @@ export function createGmailConnectorStoreSyncHandler(
         }
         : {}),
     };
-    const internal = await runStore({
-      store: options.internalStore,
-      connector: traversal,
-      sync,
-      ...(options.internalEmbeddingProvider
-        ? { embeddingProvider: options.internalEmbeddingProvider }
-        : {}),
-    });
-    const secure = await runStore({
-      store: options.secureStore,
-      connector: traversal,
-      sync,
-      ...(options.secureEmbeddingProvider
-        ? { embeddingProvider: options.secureEmbeddingProvider }
-        : {}),
-    });
-    return { internal, secure };
+    const run = await tierSet.sync(traversal, sync, { commitCursor: input.reconcile !== true });
+    return {
+      internal: gmailLegOf(run, 'internal'),
+      secure: gmailLegOf(run, 'secure_local'),
+      ...(run.byDomain.public_safe ? { public: gmailLegOf(run, 'public_safe') } : {}),
+      routing: run.routing,
+    };
   };
 
   return {
@@ -310,8 +332,12 @@ export function createGmailConnectorStoreSyncHandler(
       const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
       const warnings: string[] = [];
       const resume = decodeCheckpoint(request.checkpoint, scopeTag);
-      const headStoreCursor = options.internalStore
-        .lastCompletedSyncRun(connectorId)?.cursor;
+      // The tier set's committed resume point, written only after every leg of
+      // a run committed. Before a set has committed one, fall back to the LAST
+      // leg's own completed run: legs ran in order, so it is never ahead of a
+      // window an earlier leg missed (the first leg's row can be).
+      const headStoreCursor = tierSet.committedCursor(connectorId)?.cursor
+        ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
       let headResume = resume.head ?? (isGmailConnectorCursor(headStoreCursor) ? headStoreCursor : undefined);
       if (resume.headRejected) warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
@@ -393,67 +419,26 @@ interface GmailStoreRunLeg {
 interface GmailStoreRun {
   internal: GmailStoreRunLeg;
   secure: GmailStoreRunLeg;
+  /** Present once the lane's Public store exists and ran. */
+  public?: GmailStoreRunLeg;
+  routing: TieredStoreRoutingCounts;
 }
 
-async function runStore(input: {
-  store: LocalConnectorStore;
-  connector: SourceConnector;
-  sync: Parameters<LocalConnectorStore['syncFromConnector']>[1];
-  embeddingProvider?: SourceEmbeddingProvider;
-}): Promise<GmailStoreRunLeg> {
-  if (!input.embeddingProvider) {
-    // Honest degradation rather than a silent one: the store still fills, and
-    // the receipt's chunks_embedded of 0 says the lane cannot become servable
-    // until an embedding provider is configured.
-    return { sync: await input.store.syncFromConnector(input.connector, input.sync), embed: undefined };
-  }
-  const run = await syncAndEmbedFromConnector({
-    store: input.store,
-    connector: input.connector,
-    embeddingProvider: input.embeddingProvider,
-    ...(input.sync ? { sync: input.sync } : {}),
-  });
-  return { sync: run.sync, embed: run.embed };
+function gmailLegOf(run: TieredStoreSetRun, domain: 'public_safe' | 'internal' | 'secure_local'): GmailStoreRunLeg {
+  const leg = run.byDomain[domain];
+  if (!leg) throw new Error(`The Gmail ${domain} store did not run.`);
+  return { sync: leg.sync, embed: leg.embed };
 }
 
-/**
- * Records the provider traversal on first use and shares it afterwards. The
- * recording is faithful even when the store stops early on its own maxItems
- * bound, because the second store applies the same bound to the same pages.
- */
-function sharedTraversal(connector: SourceConnector, connectorId: string): SourceConnector {
-  const pages: SourceConnectorListPage[] = [];
-  let recorded = false;
-  let failed = false;
+/** The connector under this lane's (scope-bound) cursor id. */
+function scopedTraversal(connector: SourceConnector, connectorId: string): SourceConnector {
   return {
     id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
     classificationSignals: (item: RawItem) => connector.classificationSignals(item),
-    listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
-      if (recorded) {
-        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-          for (const page of pages) yield page;
-        })();
-      }
-      return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-        try {
-          for await (const page of connector.listItems(options)) {
-            pages.push(page);
-            yield page;
-          }
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          // Reached on normal completion and on the store breaking out early.
-          // A thrown traversal is never shareable: its recording is partial
-          // and the caller is aborting the whole run anyway.
-          if (!failed) recorded = true;
-        }
-      })();
-    },
+    listItems: (options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> => connector.listItems(options),
   };
 }
 
@@ -549,7 +534,9 @@ function taskOutcome(input: {
     || internalTombstoned > 0
     || secureTombstoned > 0
     || internalEmbedded > 0
-    || secureEmbedded > 0;
+    || secureEmbedded > 0
+    || (input.head.public?.sync.itemsIndexed ?? 0) > 0
+    || (input.head.public?.embed?.chunksEmbedded ?? 0) > 0;
   const warnings = [...new Set(input.warnings)];
   if (input.traversal.attachmentsNotIngested > 0) {
     warnings.push(GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING);
@@ -590,6 +577,7 @@ function taskOutcome(input: {
       // ~1.4% of a large mailbox.
       traversal_complete: Number(input.head.internal.sync.traversalComplete),
       absence_authoritative: 0,
+      ...tieredLaneReceiptCounts(input.head),
     },
     api_usage: {
       utc_day: input.usage?.utcDay ?? '',

@@ -426,6 +426,48 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
   });
 }
 
+/** The counts a lane receipt gains from its tier set. All optional. */
+// A type alias, not an interface: receipt counts are consumed as
+// Record<string, number>, which an interface cannot satisfy.
+export type TieredLaneReceiptCounts = {
+  public_items_indexed?: number;
+  public_chunks_indexed?: number;
+  public_chunks_embedded?: number;
+  tier_routed_items?: number;
+  tier_pending_items?: number;
+  tier_secret_items?: number;
+  tier_moves_queued?: number;
+};
+
+/**
+ * The receipt counts a lane gains from per-tier stores, present only when
+ * there is something to say, so a run that routed nothing and has no Public
+ * store yields exactly its pre-P1b receipt.
+ */
+export function tieredLaneReceiptCounts(input: {
+  public?: { sync: ConnectorStoreSyncSummary; embed?: ConnectorStoreEmbedSummary | undefined };
+  routing: TieredStoreRoutingCounts;
+}): TieredLaneReceiptCounts {
+  const routing = input.routing;
+  return {
+    ...(input.public
+      ? {
+          public_items_indexed: input.public.sync.itemsIndexed,
+          public_chunks_indexed: input.public.sync.chunksIndexed,
+          public_chunks_embedded: input.public.embed?.chunksEmbedded ?? 0,
+        }
+      : {}),
+    ...(routing.itemsRouted + routing.itemsSecrets + routing.movesQueued + routing.routedDeletions > 0
+      ? {
+          tier_routed_items: routing.itemsRouted,
+          tier_pending_items: routing.itemsPendingHeld,
+          tier_secret_items: routing.itemsSecrets,
+          tier_moves_queued: routing.movesQueued,
+        }
+      : {}),
+  };
+}
+
 /** The router one run hands every leg. Plans are made once per item per run. */
 // Fields are assigned in the constructor, not as class-field initializers:
 // initializers defeat the bundler's tree-shaking of this module and inflate

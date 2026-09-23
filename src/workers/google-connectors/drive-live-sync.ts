@@ -28,6 +28,8 @@ import {
 } from '../connector-store/index.ts';
 import {
   createLaneTieredStoreSet,
+  tieredLaneReceiptCounts,
+  type TieredLaneReceiptCounts,
   type TieredStoreRoutingCounts,
   type TieredStoreSet,
   type TieredStoreSetRun,
@@ -118,16 +120,7 @@ export interface GoogleDriveConnectorStoreReceipt {
     traversal_complete: number;
     /** Always 0 for Drive: deletion semantics are unproven until a later leg. */
     absence_authoritative: number;
-    /** Present once the lane's Public store exists and ran. */
-    public_items_indexed?: number;
-    public_chunks_indexed?: number;
-    public_chunks_embedded?: number;
-    /** Present when this run routed new items by their recorded tiers. */
-    tier_routed_items?: number;
-    tier_pending_items?: number;
-    tier_secret_items?: number;
-    tier_moves_queued?: number;
-  };
+  } & TieredLaneReceiptCounts;
   api_usage: {
     utc_day: string;
   };
@@ -596,7 +589,7 @@ function taskOutcome(input: {
       // full traversal — including one the content budget stopped halfway.
       traversal_complete: Number(input.run.internal.sync.traversalComplete),
       absence_authoritative: 0,
-      ...tieredReceiptCounts(input.run),
+      ...tieredLaneReceiptCounts(input.run),
     },
     api_usage: {
       utc_day: input.usage?.utcDay ?? '',
@@ -625,32 +618,6 @@ export function googleDriveReceiptDigest(
   receipt: Omit<GoogleDriveConnectorStoreReceipt, 'receipt_sha256'>,
 ): string {
   return createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
-}
-
-/**
- * Counts the lane gained with per-tier stores. Present only when there is
- * something to say, so a receipt from a run that routed nothing is exactly
- * the pre-P1b receipt.
- */
-function tieredReceiptCounts(run: DriveStoreRun): Partial<GoogleDriveConnectorStoreReceipt['counts']> {
-  const routing = run.routing;
-  return {
-    ...(run.public
-      ? {
-          public_items_indexed: run.public.sync.itemsIndexed,
-          public_chunks_indexed: run.public.sync.chunksIndexed,
-          public_chunks_embedded: run.public.embed?.chunksEmbedded ?? 0,
-        }
-      : {}),
-    ...(routing.itemsRouted + routing.itemsSecrets + routing.movesQueued + routing.routedDeletions > 0
-      ? {
-          tier_routed_items: routing.itemsRouted,
-          tier_pending_items: routing.itemsPendingHeld,
-          tier_secret_items: routing.itemsSecrets,
-          tier_moves_queued: routing.movesQueued,
-        }
-      : {}),
-  };
 }
 
 function isRejectedCursorError(error: unknown): boolean {
