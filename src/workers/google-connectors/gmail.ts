@@ -14,7 +14,7 @@ import {
 } from '../../core/invocation-provenance.ts';
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
-import { senderMatchesRule } from '../../core/sender-rules.ts';
+import { MAX_FROM_HEADER_CHARS, senderMatchesRule } from '../../core/sender-rules.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   createEnvCredentialBroker,
@@ -967,7 +967,9 @@ function rawItemFromGmailMessage(
 ): RawItem {
   const headers = headersFromPart(message.payload);
   const subject = headers.get('subject') ?? '(no subject)';
-  const from = headers.get('from') ?? '';
+  // Sender-controlled and uncapped from Gmail: stored at most 4 KB, the same
+  // bound every sender-rule parse applies.
+  const from = (headers.get('from') ?? '').slice(0, MAX_FROM_HEADER_CHARS);
   const date = parsedDate(headers.get('date')) ?? internalDateIso(message.internalDate);
   // Mail older than the approved window: subject, sender, date and labels
   // only. No body and no snippet (the snippet is body text), so the item stays

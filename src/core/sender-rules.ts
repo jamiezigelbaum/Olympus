@@ -18,18 +18,39 @@
 // cannot be read: matching wider can only make more mail Private, never less.
 // A skip rule never falls back, so unattributable mail is never skipped.
 
-// Local part: a dot-atom or an RFC 5322 quoted string; domain: dotted labels.
-const ADDRESS = /^((?:"(?:[^"\\]|\\.)*")|(?:[^\s<>"(),;:@]+))@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
-const ANY_ADDRESS = /((?:"(?:[^"\\]|\\.)*")|(?:[^\s<>"(),;:@]+))@([a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi;
+/**
+ * Longest From header anything here will look at. Gmail hands the header over
+ * uncapped and it is sender-controlled; every parse below is linear, and this
+ * cap bounds the constant. A longer header is treated as unparseable (raising
+ * rules then scan only this prefix; skip rules never match it).
+ */
+export const MAX_FROM_HEADER_CHARS = 4_096;
+
+const LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+const DOMAIN_CHAR = /[a-z0-9.-]/i;
+
+type Address = { address: string; domain: string };
+
+/** A dotted domain with non-empty labels, lower-cased; undefined otherwise. */
+function validDomain(raw: string): string | undefined {
+  const domain = raw.toLowerCase().replace(/[.-]+$/, '');
+  const labels = domain.split('.');
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith('-') || label.endsWith('-'))) return undefined;
+  return domain;
+}
 
 /**
- * Remove RFC 5322 comments — `(...)`, nested, outside quoted strings — so
- * `dr@therapist.example (Dr T)` reads as its address.
+ * Strip RFC 5322 comments — `(...)`, nested, outside quoted strings — and
+ * report the header's structure in the same single pass: how many angle
+ * brackets open and whether a comma separates mailboxes (outside quotes and
+ * comments). Linear.
  */
-function stripComments(value: string): string {
+function scanHeader(value: string): { text: string; angleOpens: number; comma: boolean } {
   let out = '';
   let depth = 0;
   let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
   for (let index = 0; index < value.length; index += 1) {
     const char = value[index]!;
     if (char === '\\' && index + 1 < value.length) {
@@ -40,33 +61,79 @@ function stripComments(value: string): string {
     if (depth === 0 && char === '"') quoted = !quoted;
     if (!quoted && char === '(') { depth += 1; continue; }
     if (!quoted && char === ')' && depth > 0) { depth -= 1; continue; }
-    if (depth === 0) out += char;
+    if (depth > 0) continue;
+    if (!quoted && char === '<') angleOpens += 1;
+    if (!quoted && char === ',') comma = true;
+    out += char;
   }
-  return out;
+  return { text: out, angleOpens, comma };
+}
+
+/** One addr-spec (`local@domain`, local may be quoted), exactly; linear. */
+function parseAddrSpec(value: string): Address | undefined {
+  const spec = value.trim();
+  let local: string;
+  let rest: string;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"') index += spec[index] === '\\' ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== '@') return undefined;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf('@');
+    if (at <= 0) return undefined;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local) if (!LOCAL_CHAR.test(char)) return undefined;
+  }
+  for (const char of rest) if (!DOMAIN_CHAR.test(char)) return undefined;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase()) return undefined;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
 }
 
 /**
  * The sender's own address (lower-cased), or undefined when it cannot be read
- * confidently. Handles `addr`, `Name <addr>`, `"Quoted, Name" <addr>`,
- * `addr (comment)`, `Name (comment) <addr>` and quoted local parts.
+ * confidently: more than 4 KB, more than one mailbox (two angle-bracketed
+ * addresses, or a comma outside quotes and comments), or no single valid
+ * address. Handles `addr`, `Name <addr>`, `"Quoted, Name" <addr>`,
+ * `addr (comment)`, `Name (comment) <addr>` and quoted local parts. Linear.
  */
-export function senderAddress(from: string | undefined): { address: string; domain: string } | undefined {
-  if (!from) return undefined;
-  const cleaned = stripComments(from);
-  const bracketed = [...cleaned.matchAll(/<([^<>]*)>/g)].at(-1)?.[1];
-  const candidate = (bracketed ?? cleaned).trim();
-  const match = ADDRESS.exec(candidate);
-  if (!match) return undefined;
-  return { address: `${match[1]!.toLowerCase()}@${match[2]!.toLowerCase()}`, domain: match[2]!.toLowerCase() };
+export function senderAddress(from: string | undefined): Address | undefined {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS) return undefined;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma) return undefined;
+  if (scanned.angleOpens === 1) {
+    const open = scanned.text.indexOf('<');
+    const close = scanned.text.indexOf('>', open + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== '') return undefined;
+    return parseAddrSpec(scanned.text.slice(open + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
 }
 
-/** Every address-shaped string anywhere in the header, comments included. */
-function everyAddressIn(from: string | undefined): Array<{ address: string; domain: string }> {
+/**
+ * Every plain `local@domain` anywhere in the first 4 KB of the header,
+ * comments and display names included. A linear tokenizer, not a pattern:
+ * from each `@` it walks left over local-part characters (which stop at the
+ * previous `@`) and right over domain characters, so every character is
+ * visited a bounded number of times.
+ */
+function everyAddressIn(from: string | undefined): Address[] {
   if (!from) return [];
-  return [...from.matchAll(ANY_ADDRESS)].map((match) => ({
-    address: `${match[1]!.toLowerCase()}@${match[2]!.toLowerCase()}`,
-    domain: match[2]!.toLowerCase(),
-  }));
+  const text = from.slice(0, MAX_FROM_HEADER_CHARS);
+  const found: Address[] = [];
+  for (let at = text.indexOf('@'); at >= 0; at = text.indexOf('@', at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text[start - 1]!)) start -= 1;
+    let end = at + 1;
+    while (end < text.length && DOMAIN_CHAR.test(text[end]!)) end += 1;
+    if (start === at) continue;
+    const domain = validDomain(text.slice(at + 1, end));
+    if (domain) found.push({ address: `${text.slice(start, at).toLowerCase()}@${domain}`, domain });
+  }
+  return found;
 }
 
 function addressMatches(sender: { address: string; domain: string }, normalizedRule: string): boolean {
@@ -99,7 +166,7 @@ export function senderMatchesRule(from: string | undefined, rule: string): boole
 export function ownerSenderRuleMatches(from: string | undefined, value: string, raises: boolean): boolean {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return false;
-  if (!normalized.includes('@')) return raises && (from ?? '').toLowerCase().includes(normalized);
+  if (!normalized.includes('@')) return raises && (from ?? '').slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
   const sender = senderAddress(from);
   if (sender) return addressMatches(sender, normalized);
   return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));

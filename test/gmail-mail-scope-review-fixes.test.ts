@@ -37,7 +37,7 @@ import {
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { gmailConnectorScopeFromApproval } from '../src/workers/source-scope-runtime.ts';
 import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
-import { ownerSenderRuleMatches, senderAddress, senderMatchesRule } from '../src/core/sender-rules.ts';
+import { MAX_FROM_HEADER_CHARS, ownerSenderRuleMatches, senderAddress, senderMatchesRule } from '../src/core/sender-rules.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { mailScopeOwnerTierRules } from '../src/core/mail-source-scope.ts';
 import { closeSqliteStore } from '../src/core/sqlite-store.ts';
@@ -478,6 +478,72 @@ describe('delta review at 15d261cb: sender parsing', () => {
       apiClient: fakeClient([mail]), account: 'personal', env: {}, scope: { skipSenders: ['@therapist.example'] },
     }).listItems({ limit: 50 }));
     expect(page.items).toHaveLength(skipped ? 0 : 1);
+  });
+});
+
+describe('delta review at a201e996: bounded parsing and multi-author From', () => {
+  const MULTI = 'Dr <dr@therapist.example>, A <a@x.example>';
+
+  test('a 100 KB hostile From header is checked against 10 rules in under 50 ms', () => {
+    const hostile = [
+      'a'.repeat(100_000),
+      'a@'.repeat(50_000),
+      `${'x.'.repeat(50_000)}@`,
+      `${'"'.repeat(20_000)}${'('.repeat(20_000)}${'<'.repeat(20_000)}@${'a.'.repeat(20_000)}`,
+    ];
+    const rules = Array.from({ length: 10 }, (_, index) => `@domain${index}.example`);
+    for (const header of hostile) {
+      const started = performance.now();
+      for (const rule of rules) {
+        ownerSenderRuleMatches(header, rule, true);
+        senderMatchesRule(header, rule);
+      }
+      expect(performance.now() - started).toBeLessThan(50);
+    }
+    expect(senderAddress(`dr@therapist.example${' '.repeat(MAX_FROM_HEADER_CHARS)}`)).toBeUndefined();
+  });
+
+  test('more than one mailbox is unparseable: raise rules scan every address, skip rules never match', () => {
+    expect(senderAddress(MULTI)).toBeUndefined();
+    expect(senderAddress('dr@therapist.example, a@x.example')).toBeUndefined();
+    // A comma inside a quoted display name or a comment is not a second mailbox.
+    expect(senderAddress('"Doe, Jane" <jane@therapist.example>')?.address).toBe('jane@therapist.example');
+    expect(senderAddress('jane@therapist.example (Doe, Jane)')?.address).toBe('jane@therapist.example');
+    expect(ownerSenderRuleMatches(MULTI, '@therapist.example', true)).toBe(true);
+    expect(senderMatchesRule(MULTI, '@therapist.example')).toBe(false);
+    expect(senderMatchesRule(MULTI, '@x.example')).toBe(false);
+  });
+
+  test('multi-author mail from an always-Private sender goes to the secure store only and the ledger agrees', async () => {
+    const dir = tempDir();
+    const stores = fileStores(dir);
+    const mail: GmailMessage = {
+      ...message('multi', NOW.getTime() - DAY),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [{ name: 'Subject', value: 'Joint note' }, { name: 'From', value: MULTI }],
+        body: { data: Buffer.from('Body of multi.').toString('base64url') },
+      },
+    };
+    const cloudInputs: string[] = [];
+    await laneFor(stores, fakeClient([mail]), {
+      scope: gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@therapist.example'] }) }),
+      internal: recordingProvider('cloud', cloudInputs), secure: recordingProvider('local'),
+    }).pull({ max_items: 50 });
+    expect(stores.secureStore.itemStoredContent(identity('multi'))).toBeDefined();
+    expect(stores.internalStore.itemStoredContent(identity('multi'))).toBeUndefined();
+    expect(cloudInputs.join('\n')).not.toContain('Body of multi');
+    expect(stores.secureStore.tierLedger()?.getCurrent(identity('multi'))).toMatchObject({ metadataTier: 'secure', decidedBy: 'owner_rule' });
+  });
+
+  test('the stored From is capped at 4 KB', async () => {
+    const huge = `x@y.example ${'z'.repeat(20_000)}`;
+    const mail: GmailMessage = {
+      ...message('huge', NOW.getTime() - DAY),
+      payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: 's' }, { name: 'From', value: huge }], body: { data: Buffer.from('b').toString('base64url') } },
+    };
+    const page = await collect(new GoogleGmailSourceConnector({ apiClient: fakeClient([mail]), account: 'personal', env: {} }).listItems({ limit: 5 }));
+    expect(String(page.items[0]!.metadata.from).length).toBe(MAX_FROM_HEADER_CHARS);
   });
 });
 
