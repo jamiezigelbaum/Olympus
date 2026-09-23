@@ -205,6 +205,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/registry.ts',
   'src/workers/file-extraction/runner.ts',
   'src/workers/file-extraction/store-sink.ts',
+  'src/workers/file-extraction/tiered-store-sink.ts',
   'src/workers/file-extraction/types.ts',
   'src/workers/source-index/analyst-answer.ts',
   'src/workers/source-index/answer-types.ts',

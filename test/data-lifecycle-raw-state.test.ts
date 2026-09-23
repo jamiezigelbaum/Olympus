@@ -140,7 +140,11 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
       // `join(stateDir, 'connector-store.db')` and `join(stateDir, 'spool')`)
       // rather than imported, so this stays a statement about paths and not a
       // second construction of the live store.
-      expect(whatsappSpec().connectorStorePaths!(context)).toEqual([join(stateDir, 'connector-store.db')]);
+      // Its Personal tier store (P1c, created on first need) sits in the same state dir.
+      expect(whatsappSpec().connectorStorePaths!(context)).toEqual([
+        join(stateDir, 'connector-store.db'),
+        join(stateDir, 'connector-store-internal.db'),
+      ]);
       expect(whatsappSpec().rawStatePaths!(context)).toContain(join(stateDir, 'spool'));
     } finally {
       rmSync(dir, { recursive: true, force: true });

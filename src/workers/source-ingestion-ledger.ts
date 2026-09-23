@@ -43,11 +43,19 @@ import {
   LocalConnectorStore,
 } from './connector-store/index.ts';
 import { defaultReadwiseConnectorStoreDbPath } from './readwise/index.ts';
+import { READWISE_SECURE_LIBRARY_CORPUS_ID, defaultReadwiseSecureConnectorStoreDbPath } from './readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './x-bookmarks/index.ts';
+import { X_BOOKMARKS_SECURE_CORPUS_ID, defaultXBookmarksSecureConnectorStoreDbPath } from './x-bookmarks/tier-set.ts';
+import { WHATSAPP_INTERNAL_CORPUS_ID, defaultWhatsAppInternalConnectorStoreDbPath } from './whatsapp/store-sync.ts';
 import {
   DROPBOX_FILES_CORPUS_ID,
+  DROPBOX_INTERNAL_FILES_CORPUS_ID,
+  DROPBOX_PUBLIC_FILES_CORPUS_ID,
   createDropboxConnectorStore,
+  createDropboxTierConnectorStore,
   defaultDropboxConnectorStoreDbPath,
+  defaultDropboxInternalConnectorStoreDbPath,
+  defaultDropboxPublicConnectorStoreDbPath,
   dropboxIngestionExclusionMatcher,
 } from './dropbox-files/index.ts';
 import {
@@ -723,7 +731,13 @@ export async function collectLocalSourceIngestionLedger(
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
     const handle = store.corpusId === DROPBOX_FILES_CORPUS_ID
       ? createDropboxConnectorStore(env, { readOnly: true })
-      : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
+      : store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
+        ? createDropboxTierConnectorStore(
+          store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID ? 'internal' : 'public_safe',
+          env,
+          { readOnly: true },
+        )
+        : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
     handles.push(handle);
     connectorStores.push(handle);
     if (gated) {
@@ -733,7 +747,9 @@ export async function collectLocalSourceIngestionLedger(
         present: debt.excluded,
         metadataOnlyContentPresent: debt.metadataOnlyContent,
         ...(store.corpusId === DROPBOX_FILES_CORPUS_ID
-          ? { sourceId: 'dropbox.personal', corpusIds: [DROPBOX_FILES_CORPUS_ID] }
+          || store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID
+          || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
+          ? { sourceId: 'dropbox.personal', corpusIds: [store.corpusId] }
           : driveCorpusIds.has(store.corpusId)
             ? { sourceId: 'google_drive.docs', corpusIds: [store.corpusId] }
             : {}),
@@ -752,8 +768,15 @@ export async function collectLocalSourceIngestionLedger(
   const sourceCorpusRegistry = createSourceCorpusRegistry(config.sourceIndex.corpusRegistry);
 
   try {
+    // A per-tier store created on demand that does not exist yet is simply
+    // absent, not an uninitialized corpus.
+    const absentOnDemand = new Set(sourceCorpusRegistry.list('status')
+      .filter((corpus) => corpus.createdOnDemand === true
+        && !connectorStores.some((store) => store.corpusId === corpus.corpusId))
+      .map((corpus) => corpus.corpusId));
     const status = await createSourceIndexStatusHandler({
-      corpusDefinitions: sourceCorpusRegistry.definitions('status'),
+      corpusDefinitions: sourceCorpusRegistry.definitions('status')
+        .filter((definition) => !absentOnDemand.has(definition.corpusId)),
       connectorStores,
     }).status({ include_items: false });
     const snapshot = buildSourceIngestionLedgerSnapshot(status, {
@@ -1499,9 +1522,39 @@ function localConnectorStores(env: Record<string, string | undefined>): Array<Co
       trustDomain: 'secure_local',
     },
     {
+      corpusId: DROPBOX_INTERNAL_FILES_CORPUS_ID,
+      dbPath: defaultDropboxInternalConnectorStoreDbPath(env),
+      family: 'file',
+      trustDomain: 'internal',
+    },
+    {
+      corpusId: DROPBOX_PUBLIC_FILES_CORPUS_ID,
+      dbPath: defaultDropboxPublicConnectorStoreDbPath(env),
+      family: 'file',
+      trustDomain: 'public_safe',
+    },
+    {
       corpusId: 'internal.readwise.library',
       dbPath: defaultReadwiseConnectorStoreDbPath(env),
       family: 'readwise',
+      trustDomain: 'internal',
+    },
+    {
+      corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
+      dbPath: defaultReadwiseSecureConnectorStoreDbPath(env),
+      family: 'readwise',
+      trustDomain: 'secure_local',
+    },
+    {
+      corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
+      dbPath: defaultXBookmarksSecureConnectorStoreDbPath(env),
+      family: 'x',
+      trustDomain: 'secure_local',
+    },
+    {
+      corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
+      dbPath: defaultWhatsAppInternalConnectorStoreDbPath(env),
+      family: 'chat',
       trustDomain: 'internal',
     },
     {
