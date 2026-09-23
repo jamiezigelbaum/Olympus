@@ -22,6 +22,7 @@ import {
   type CredentialBroker,
 } from '../credential-broker/index.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
   XApiClient,
   XApiError,
@@ -65,6 +66,8 @@ export interface XBookmarksContentRecoveryCounts {
   items_skipped_by_policy: number;
   items_unrecoverable: number;
   items_deferred: number;
+  /** Candidates left alone because per-item routing placed them (present only when non-zero). */
+  candidates_tier_routed?: number;
   chunks_awaiting_embedding: number;
   chunks_embedded: number;
   provider_failures: number;
@@ -94,6 +97,12 @@ export interface XBookmarksContentRecoveryHandler {
 
 export interface XBookmarksContentRecoveryOptions {
   store: LocalConnectorStore;
+  /**
+   * The lane's tier-set ledger (per-item routing). A bookmark it routed is
+   * placed by its tiers: this repair never writes text into its store copy,
+   * which may serve only its names while its text is Private elsewhere.
+   */
+  tierLedger?: Pick<TierLedger, 'isRouted'>;
   usageStore: LocalXBookmarksApiUsageStore;
   reconcileStateStore?: LocalXBookmarksReconcileStateStore;
   embeddingProvider?: SourceEmbeddingProvider;
@@ -138,8 +147,14 @@ export function createXBookmarksContentRecoveryHandler(
         withoutChunksOnly: true,
         mimeTypes: ['text/plain; charset=utf-8'],
       }).candidates;
-      const recoverable = candidates.filter(isRecoverableXBookmarkCandidate);
+      const routed = options.tierLedger
+        ? candidates.filter((candidate) => options.tierLedger!.isRouted(candidate.identity)).length
+        : 0;
+      const recoverable = candidates
+        .filter((candidate) => !options.tierLedger?.isRouted(candidate.identity))
+        .filter(isRecoverableXBookmarkCandidate);
       const counts = emptyCounts();
+      if (routed > 0) counts.candidates_tier_routed = routed;
       counts.candidates_scanned = candidates.length;
       counts.candidates_with_post_url = recoverable.length;
       counts.candidates_without_recoverable_url = candidates.length - recoverable.length;
