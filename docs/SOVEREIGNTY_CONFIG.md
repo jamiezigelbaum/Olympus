@@ -434,9 +434,17 @@ never for a hard category.
 
 Cost: one call per flagged name. Per call about 300 input and 20 output
 tokens (measured on the eval corpus), so 100k flagged names is about 30M
-input and 2M output tokens. The daily cap (`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`,
-default 2,000) bounds that, so a large first backfill needs the owner to
-raise it. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+input and 2M output tokens. Pace: one pass a minute
+(`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`), at most 10 calls a pass on a local model
+(it is shared with answers, which also preempt it at once) and 30 on Venice
+(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS` overrides both). The daily cap
+(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`, default 20,000) works through a
+100k-item backlog in about five days; on Venice that is at most about $1.10 a
+day at an assumed, unverified price, and a local model is bounded by its own
+throughput first. Source index status reports the backlog as counts only
+(`tier_classification`: "Checking N items, about X questions remaining"), and
+each store's `pending_classification_items`; there is deliberately no time
+estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 

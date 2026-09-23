@@ -1584,6 +1584,8 @@ export async function main(): Promise<void> {
   let sourceAnswersInFlight = 0;
   // Set once the sniffer runs: aborts its in-flight call when an answer starts.
   let preemptTierSniffer: (() => void) | undefined;
+  // Set once the sniffer runs: its backlog, for the status surface.
+  let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED,
@@ -3089,6 +3091,17 @@ export async function main(): Promise<void> {
       connectorStores,
       connectorStoreStatusScope,
       retrievalAvailability,
+      tierClassification: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog
+          ? {
+              checking_items: backlog.checkingItems,
+              remaining_questions: backlog.remainingQuestions,
+              summary: backlog.summary,
+              awaiting_owner_approval: backlog.awaitingOwnerApproval,
+            }
+          : undefined;
+      },
       // The policy and queue half of the readiness counts, from the shared
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the
@@ -3889,7 +3902,7 @@ export async function main(): Promise<void> {
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
-        maxCallsPerPass: snifferEnv.maxCallsPerPass,
+        ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
         shouldYield: () => sourceAnswersInFlight > 0
           || secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -3897,6 +3910,7 @@ export async function main(): Promise<void> {
       })
     : undefined;
   preemptTierSniffer = tierSniffer ? () => tierSniffer.preempt() : undefined;
+  tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   tierSniffer?.start();
 
   // The worker owns a background tick that outlives any request, so the process

@@ -15,7 +15,7 @@ import { SNIFFER_PROMPT_VERSION } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-  DEFAULT_SNIFFER_MAX_CALLS_PER_PASS,
+  defaultSnifferMaxCallsPerPass,
   SnifferCallBudget,
   runSnifferPass,
   type SnifferPassReport,
@@ -52,6 +52,16 @@ export interface TierSnifferServiceOptions {
   shouldYield?: () => boolean;
   now?: () => Date;
   log?: (line: string) => void;
+}
+
+export interface TierClassificationBacklog {
+  /** Items with an open sniffer question (held pending, Private). */
+  checkingItems: number;
+  /** Questions still to ask (an item can have a names and an excerpt question). */
+  remainingQuestions: number;
+  summary: string;
+  /** The sniffer is waiting for the owner to approve its model and prompt. */
+  awaitingOwnerApproval: boolean;
 }
 
 export type TierSnifferTick =
@@ -102,6 +112,33 @@ export class TierSnifferService {
    */
   preempt(): void {
     this.abort?.abort();
+  }
+
+  /**
+   * The classification backlog, counts only: how many items are waiting on
+   * the sniffer and how many questions are still to ask. No time estimate
+   * (owner ruling: an unreliable one is worse than none).
+   */
+  backlog(): TierClassificationBacklog {
+    let checkingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      try {
+        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        checkingItems += counts.items;
+        remainingQuestions += counts.questions;
+      } catch {
+        // An unreadable queue contributes nothing; its items stay pending.
+      }
+    }
+    return {
+      checkingItems,
+      remainingQuestions,
+      summary: checkingItems === 0
+        ? 'No items waiting for classification.'
+        : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`,
+      awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
+    };
   }
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick } {
@@ -207,7 +244,7 @@ export class TierSnifferService {
       lane,
       model: this.options.model,
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass ?? DEFAULT_SNIFFER_MAX_CALLS_PER_PASS,
+      maxCallsPerPass: this.options.maxCallsPerPass ?? defaultSnifferMaxCallsPerPass(lane.kind),
       ...(this.options.shouldYield ? { shouldYield: this.options.shouldYield } : {}),
       signal,
     });
@@ -226,14 +263,17 @@ export class TierSnifferService {
 export function tierSnifferServiceEnv(env: Record<string, string | undefined>): {
   enabled: boolean;
   intervalMs: number;
-  maxCallsPerPass: number;
+  /** Absent: the lane's default pace (10 a minute local, 30 on Venice). */
+  maxCallsPerPass?: number;
   maxCallsPerDay: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
     enabled: !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'no' || enabledRaw === 'off'),
     intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 5_000),
-    maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, DEFAULT_SNIFFER_MAX_CALLS_PER_PASS, 1),
+    ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
+      ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
+      : {}),
     maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0),
   };
 }

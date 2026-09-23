@@ -41,8 +41,14 @@ import {
 } from '../src/workers/classification/sniffer.ts';
 import { sharingInfoFromDropboxJson } from '../src/workers/dropbox-files/provider-client.ts';
 import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
-import { runSnifferPass, SnifferCallBudget } from '../src/workers/classification/sniffer-resolver.ts';
-import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import {
+  DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+  defaultSnifferMaxCallsPerPass,
+  runSnifferPass,
+  SnifferCallBudget,
+} from '../src/workers/classification/sniffer-resolver.ts';
+import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
@@ -520,5 +526,51 @@ describe('6b. one item per call: no name can steer another item', () => {
     expect(sharingInfoFromDropboxJson({ sharing_info: { parent_shared_folder_id: 'sf:1' } })).toEqual({ parentSharedFolderId: 'sf:1' });
     expect(sharingInfoFromDropboxJson({ sharing_info: {} })).toBeUndefined();
     expect(sharingInfoFromDropboxJson({})).toBeUndefined();
+  });
+});
+
+describe('pace, daily cap and the visible backlog', () => {
+  test('defaults: 20,000 calls a day; 10 a minute on a local model, 30 on Venice', () => {
+    expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
+    expect(defaultSnifferMaxCallsPerPass('local')).toBe(10);
+    expect(defaultSnifferMaxCallsPerPass('venice')).toBe(30);
+    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 60_000, maxCallsPerDay: 20_000 });
+    expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
+  });
+
+  test('the backlog says "checking N items, about X remaining", counts only, and reaches source index status', async () => {
+    const dir = workspace();
+    const storePath = join(dir, 'store.sqlite');
+    const ledgerPath = tierLedgerPathForStore(storePath);
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    cleanups.push(() => ledger.close());
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const sniffer = new CachedTierSniffer(installed.snifferStoreForLedger(ledgerPath), LANE);
+    ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'bank' }, text: 'Lunch on Friday.', subject: subject(1) }, { sniffer }));
+    ledger.recordDecision(subject(2), classifyItemTiers({ signals: { title: 'tax' }, subject: subject(2) }, { sniffer }));
+    const service = new TierSnifferService({
+      installed,
+      lane: LANE,
+      model: answering(() => ({ tier: 'private', category: 'other', confidence: 1 })),
+      stores: () => [{ dbPath: storePath }],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+    });
+    cleanups.push(() => service.stop());
+    const backlog = service.backlog();
+    expect(backlog).toMatchObject({ checkingItems: 2, remainingQuestions: 3 });
+    expect(backlog.summary).toBe('Checking 2 items, about 3 questions remaining.');
+    expect(backlog.summary).not.toMatch(/minute|hour|day|time/i);
+
+    const status = await createSourceIndexStatusHandler({
+      corpusDefinitions: [],
+      tierClassification: () => ({
+        checking_items: backlog.checkingItems,
+        remaining_questions: backlog.remainingQuestions,
+        summary: backlog.summary,
+        awaiting_owner_approval: backlog.awaitingOwnerApproval,
+      }),
+    }).status();
+    expect(status.tier_classification).toMatchObject({ checking_items: 2, remaining_questions: 3 });
   });
 });

@@ -74,6 +74,8 @@ export interface SourceIndexStatusResult {
   embedding_lane?: SourceIndexEmbeddingLaneState;
   ingestion_ledger?: unknown;
   sender_aggregation?: ConnectorStoreSenderAggregation;
+  /** Four-tier classification backlog: "checking N items, about X remaining", counts only. */
+  tier_classification?: SourceIndexTierClassificationStatus;
   answer_latency_ledger?: {
     write_failure_count: number;
     last_failure_class?: string;
@@ -183,7 +185,16 @@ export interface SourceIndexStatusHandlerOptions {
   readinessLedger?: SourceIndexReadinessLedger;
   /** Dynamic trusted scope for store counts; absent preserves whole-store status. */
   connectorStoreStatusScope?: (store: LocalConnectorStore) => ConnectorStoreStatusScope | undefined;
+  /** The four-tier classification backlog (counts only, never a time estimate). */
+  tierClassification?: () => SourceIndexTierClassificationStatus | undefined;
   nowMs?: () => number;
+}
+
+export interface SourceIndexTierClassificationStatus {
+  checking_items: number;
+  remaining_questions: number;
+  summary: string;
+  awaiting_owner_approval: boolean;
 }
 
 /**
@@ -289,10 +300,12 @@ export function createSourceIndexStatusHandler(
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
       });
+      const tierClassification = options.tierClassification?.();
       const result: SourceIndexStatusResult = {
         kind: 'source_index_status',
         generated_at: new Date().toISOString(),
         corpora: statuses,
+        ...(tierClassification ? { tier_classification: tierClassification } : {}),
         policy: {
           read_only: true,
           raw_source_exposed: false,

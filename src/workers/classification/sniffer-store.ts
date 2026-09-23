@@ -217,7 +217,7 @@ export class TierSnifferStore {
   }
 
   /** Content-free counts for status surfaces and the CLI. */
-  counts(): { questions: number; byPass: Record<SnifferPass, number>; verdicts: number } {
+  counts(): { questions: number; items: number; byPass: Record<SnifferPass, number>; verdicts: number } {
     const byPass: Record<SnifferPass, number> = { metadata: 0, content: 0 };
     let questions = 0;
     for (const row of this.db.query('SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass').all() as Array<{ pass: SnifferPass; n: number }>) {
@@ -225,7 +225,12 @@ export class TierSnifferStore {
       questions += row.n;
     }
     const verdicts = (this.db.query('SELECT COUNT(*) AS n FROM sniffer_verdicts').get() as { n: number }).n;
-    return { questions, byPass, verdicts };
+    const items = (this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get() as { n: number }).n;
+    return { questions, items, byPass, verdicts };
   }
 }
 

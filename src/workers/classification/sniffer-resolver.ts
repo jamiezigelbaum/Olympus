@@ -50,8 +50,26 @@ import type {
 import type { TierDecision } from './tier-classifier.ts';
 import type { TierLedger, TierLedgerRecord, TierPlacementPlan } from './tier-ledger.ts';
 
+/**
+ * Calls per pass (one pass a minute by default). A local model is shared with
+ * Argus's answers, so it gets 10 a minute (answers also preempt it at once);
+ * Venice has no such contention and gets 30, so the daily cap, not the pace,
+ * is what bounds it.
+ */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
-export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2_000;
+export const DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS = 30;
+/**
+ * One call per flagged item. 20,000 a day works through a 100k-item backlog
+ * in about five days; on Venice that is at most about $1.10 a day at the
+ * assumed (unverified) price, and a local model is bounded by its throughput
+ * long before this.
+ */
+export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
+
+/** The default pace for a lane (see DEFAULT_SNIFFER_MAX_CALLS_PER_PASS). */
+export function defaultSnifferMaxCallsPerPass(kind: 'local' | 'venice'): number {
+  return kind === 'venice' ? DEFAULT_SNIFFER_VENICE_MAX_CALLS_PER_PASS : DEFAULT_SNIFFER_MAX_CALLS_PER_PASS;
+}
 const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 /** Output budget per item: one short JSON verdict. */
 const OUTPUT_CHARS_PER_ITEM = 110;
