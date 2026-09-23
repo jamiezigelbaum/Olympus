@@ -201,6 +201,18 @@ export class TierSnifferStore {
     `).run(...subjectParams(subject), pass).changes > 0;
   }
 
+  /**
+   * Re-ask a question under the item's current map revision: the queued
+   * material (names or excerpt) is still the item's, only the map it is
+   * judged under changed. Attempts start over.
+   */
+  rekey(subject: TierSnifferSubject, pass: SnifferPass, mapRevision: string): void {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+
   /** Count one failed attempt; returns the new attempt count. */
   recordAttemptFailure(subject: TierSnifferSubject, pass: SnifferPass): number {
     this.db.query(`

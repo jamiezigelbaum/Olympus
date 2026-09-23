@@ -232,6 +232,8 @@ export interface GoogleDriveFile {
   driveId?: string;
   parents?: string[];
   owners?: Array<{ emailAddress?: string }>;
+  /** Drive's own answer to "does the connected account own this file". */
+  ownedByMe?: boolean;
   webViewLink?: string;
   size?: string;
   md5Checksum?: string;
@@ -486,6 +488,9 @@ export class GoogleDriveSourceConnector implements SourceConnector {
       // gate reads exactly that distinction.
       ...(folderAncestorIds ? { folderAncestorIds } : {}),
       ...(file.owners?.[0]?.emailAddress ? { ownerEmail: file.owners[0].emailAddress } : {}),
+      // Provable ownership only: Drive says the connected account owns it.
+      // Shared-with-me files (anyone else's names) are never marked.
+      ...(file.ownedByMe === true ? { ownerAuthored: true } : {}),
     });
     if (!folderAncestorIds && this.scope) return undefined;
     if (this.scope && !this.scope.allowsMetadata(folderAncestorIds ?? [])) return undefined;
@@ -1060,7 +1065,7 @@ class RestGoogleDriveApiClient implements GoogleDriveApiClient {
   async listFiles(request: GoogleDriveListFilesRequest): Promise<GoogleDriveListFilesResponse> {
     const params = new URLSearchParams({
       pageSize: String(request.pageSize),
-      fields: 'nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),webViewLink,size,md5Checksum)',
+      fields: 'nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,version,driveId,parents,owners(emailAddress),ownedByMe,webViewLink,size,md5Checksum)',
       includeItemsFromAllDrives: 'true',
       supportsAllDrives: 'true',
       q: request.query ?? 'trashed = false',
@@ -1215,6 +1220,7 @@ function normalizeDriveFile(record: Record<string, unknown>): GoogleDriveFile {
     ...optionalStringProp(record, 'size'),
     ...optionalStringProp(record, 'md5Checksum'),
     ...(Array.isArray(record.parents) ? { parents: record.parents.map(stringValue).filter(Boolean) } : {}),
+    ...(record.ownedByMe === true ? { ownedByMe: true } : {}),
     ...(Array.isArray(record.owners)
       ? { owners: record.owners.map((owner) => asRecord(owner, 'Google Drive owner')).map((owner) => optionalStringProp(owner, 'emailAddress')) }
       : {}),

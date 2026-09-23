@@ -79,6 +79,8 @@ export function createReflectSourceConnector(options: ReflectSourceConnectorOpti
       tags: note.tags,
       ...(note.createdAt ? { createdAt: note.createdAt } : {}),
       ...(note.updatedAt ? { updatedAt: note.updatedAt } : {}),
+      // The owner's own notes, from the owner's own export.
+      ownerAuthored: true,
     }),
     fetchedAt,
   });

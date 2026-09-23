@@ -186,6 +186,10 @@ export function decideItemTiers(
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
       subject: item.identity,
+      // Only a connector that can PROVE the owner wrote the names marks them
+      // (`ownerAuthored: true` in the item's metadata); everything else,
+      // unknown included, is asked about on its own.
+      ownerAuthored: item.metadata['ownerAuthored'] === true,
     },
     {
       ...(options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),

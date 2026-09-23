@@ -212,6 +212,7 @@ describe('Dropbox SourceConnector (Contract 1)', () => {
     expect(file.mimeType).toBe('application/pdf');
     expect(file.content).toEqual({ kind: 'metadata_only' });
     expect(file.metadata).toEqual({
+      ownerAuthored: true,
       entryKind: 'file',
       deleted: false,
       name: 'Portugal Receipt.pdf',

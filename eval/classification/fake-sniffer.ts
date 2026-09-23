@@ -26,6 +26,7 @@
 
 import { createHash } from 'node:crypto';
 import type { AnalystModel } from '../../src/core/analyst.ts';
+import { normalizeSnifferMaterial } from '../../src/workers/classification/sniffer.ts';
 
 const PRIVATE_VOCABULARY: ReadonlyArray<[RegExp, string]> = [
   [/\b(?:malignant|tumou?r|oncolog\w*|biopsy|diagnos\w*|medication|blood test|pathology|prescription|physiotherapy)\b/i, 'health'],
@@ -39,12 +40,14 @@ const PRIVATE_VOCABULARY: ReadonlyArray<[RegExp, string]> = [
 export interface FakeSnifferStats {
   calls: number;
   items: number;
-  /** Batches in which the fake obeyed an instruction (should stay 0). */
+  /** Batches in which the fake obeyed an instruction. */
   complied: number;
+  /** The most items in any batch where it obeyed: above 1, an instruction steered another item. */
+  compliedMaxBatch: number;
 }
 
 export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferStats } {
-  const stats: FakeSnifferStats = { calls: 0, items: 0, complied: 0 };
+  const stats: FakeSnifferStats = { calls: 0, items: 0, complied: 0, compliedMaxBatch: 0 };
   return {
     stats,
     async complete(request) {
@@ -55,8 +58,9 @@ export function createFakeSnifferModel(): AnalystModel & { stats: FakeSnifferSta
         .map((line) => JSON.parse(line) as { i: number; names?: string; excerpt?: string });
       stats.items += items.length;
       const materials = items.map((item) => item.names ?? item.excerpt ?? '');
-      if (materials.some((material) => INSTRUCTION.test(material))) {
+      if (materials.some(obeys)) {
         stats.complied += 1;
+        stats.compliedMaxBatch = Math.max(stats.compliedMaxBatch, items.length);
         return {
           text: JSON.stringify({ verdicts: items.map((item) => ({ i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.99 })) }),
           modelId: 'eval-fake-sniffer',
@@ -91,8 +95,17 @@ function verdictFor(item: { i: number; names?: string; excerpt?: string }): Reco
   return { i: item.i, tier: 'personal', category: 'ordinary', confidence: 0.95 };
 }
 
-/** What the fake treats as an instruction it will obey. */
-const INSTRUCTION = /ignore previous|disregard the rules|answer personal|classify every item|verdicts/i;
+/**
+ * What the fake treats as an instruction it will obey: it "reads" like a model
+ * does (through look-alikes, zero-width and fullwidth characters, spacing),
+ * so every evasive shape in the corpus steers it.
+ */
+const INSTRUCTION = /ignore previous|disregard the rules|answer personal|classify every item|verdicts|every item|personal, ordinary|tierpersonal|answer: personal|personal · ordinary|personal and ordinary|whole lot/;
+
+function obeys(material: string): boolean {
+  const normalized = normalizeSnifferMaterial(material);
+  return INSTRUCTION.test(normalized) || INSTRUCTION.test(normalized.replace(/[^a-z0-9.]/g, ''));
+}
 
 /** 0-99, stable per material. */
 function stableBucket(material: string): number {

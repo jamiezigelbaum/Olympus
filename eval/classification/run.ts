@@ -82,7 +82,13 @@ export async function runClassificationEval(options: {
     const subjectOf = (entry: ClassificationCase) => ({ provider: `eval-${entry.family}`, accountScope: 'eval', providerItemId: entry.id });
     for (const entry of cases) {
       const decision = classifyItemTiers(
-        { signals: entry.signals, provider: `eval-${entry.family}`, ...(entry.text !== undefined ? { text: entry.text } : {}), subject: subjectOf(entry) },
+        {
+          signals: entry.signals,
+          provider: `eval-${entry.family}`,
+          ...(entry.text !== undefined ? { text: entry.text } : {}),
+          subject: subjectOf(entry),
+          ownerAuthored: entry.ownerAuthored === true,
+        },
         { sniffer },
       );
       ledger.recordDecision(subjectOf(entry), decision);
@@ -150,7 +156,7 @@ function score(
   const below = (tier: TierKey, pending: boolean) => !pending && tierRank(tier) < tierRank('secure');
   const hard = outcomes.filter(({ entry }) => entry.set === 'hard' || entry.hardCategory !== undefined);
   const hardMisses = hard.filter(({ tier, pending }) => below(tier, pending));
-  const injectionLeaks = outcomes.filter(({ entry, tier, pending }) => entry.set === 'injection' && below(tier, pending));
+  const injectionLeaks = outcomes.filter(({ entry, tier, pending }) => (entry.set === 'injection' || (entry.set === 'evasive' && entry.role === 'owner_batch_mate')) && below(tier, pending));
   const malformedLeaks = outcomes.filter(({ entry, tier, pending }) => entry.set === 'malformed' && below(tier, pending));
 
   const ambiguousPrivate = outcomes.filter(({ entry }) => entry.set === 'ambiguous' && entry.label === 'secure');

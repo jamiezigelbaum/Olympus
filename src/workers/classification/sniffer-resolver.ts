@@ -169,6 +169,8 @@ export interface SnifferPassReport {
   awaitingPlacement: number;
   /** Routed items the verdict moved to other stores: queued for the move primitive (P1b). */
   movesQueued: number;
+  /** Questions asked under an older map, re-keyed to the current one and asked again. */
+  staleRekeyed: number;
   /** Queued material dropped because its question was no longer open. */
   staleDropped: number;
   /** Pending on a names question with no queued material: the next sync re-asks. */
@@ -202,6 +204,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     secretRefused: 0,
     injectionRefused: 0,
     staleDropped: 0,
+    staleRekeyed: 0,
     awaitingPlacement: 0,
     movesQueued: 0,
     awaitingResync: 0,
@@ -226,8 +229,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       mapRevision: item.question.mapRevision,
     }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
     if (applied?.outcome === 'stale_map') {
-      item.target.sniffer.deleteQuestion(item.question, item.question.pass);
-      report.staleDropped += 1;
+      // The map changed while this was being asked: re-ask under the new one.
+      const row = item.target.ledger.getCurrent(item.question);
+      if (row) item.target.sniffer.rekey(item.question, item.question.pass, row.mapRevision);
+      report.staleRekeyed += 1;
       return;
     }
     if (applied?.outcome === 'needs_placement') {
@@ -244,14 +249,22 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     else report.resolvedPrivate += 1;
   };
 
-  // A question is open only while the item still waits on it AND was asked
-  // under the map revision the item's decision was made with: a verdict on
-  // material judged under an older map is stale, so the next sync re-asks.
+  // A question is open while the item still waits on it. One asked under a
+  // map revision other than the one the item's decision was made with is
+  // STALE: it is re-keyed to the current revision and asked again (never
+  // answered with a verdict judged under the old map, and never left to
+  // wait forever for a re-sync).
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const row = target.ledger.getCurrent(question);
-    return row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
-      && row.mapRevision === question.mapRevision
+    const open = row !== undefined && row.state === 'pending' && row.decidedBy !== 'override'
       && openPasses(row).includes(question.pass);
+    if (open && row.mapRevision !== question.mapRevision) {
+      target.sniffer.rekey(question, question.pass, row.mapRevision);
+      question.mapRevision = row.mapRevision;
+      question.attempts = 0;
+      report.staleRekeyed += 1;
+    }
+    return open;
   };
 
   // 1. The open questions, oldest first, checked against each store's ledger.

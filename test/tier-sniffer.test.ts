@@ -87,7 +87,8 @@ function subject(n: number) {
 /** Record a flagged, metadata-only item through the real classifier + cached sniffer. */
 function recordFlagged(ledger: TierLedger, store: TierSnifferStore, n: number, title: string): void {
   const sniffer = new CachedTierSniffer(store, LOCAL_LANE);
-  const decision = classifyItemTiers({ signals: { title }, subject: subject(n) }, { sniffer });
+  // The owner's own file names: the only names that may share a batch.
+  const decision = classifyItemTiers({ signals: { title }, subject: subject(n), ownerAuthored: true }, { sniffer });
   ledger.recordDecision(subject(n), decision);
 }
 

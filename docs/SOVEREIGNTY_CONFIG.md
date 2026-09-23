@@ -406,9 +406,24 @@ from the prompt text, so any change to the prompt, the model, the profile or
 the lane stops it until the owner approves again; flagged items wait, pending
 and held Private, meanwhile. An answer that needs the private pool aborts the
 sniffer's in-flight call, and a local lane asks at most 20 names per call.
-Names with a sender, chat text and excerpts are asked one item per call, and
-material shaped like an instruction to the model is Private without being
-sent. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+
+**Which model, when both are allowed.** Without a declared classifier the
+sniffer uses the pool's local model when there is one, and Venice only when
+there is none. A profile the owner declares with `"purpose":
+"classification"` is an explicit choice and is used as declared, even when
+the pool also has a local model. So `local-first` plus a declared Venice
+classifier sends flagged names (and short excerpts) to Venice Private, off the
+box; declare a local classifier, or none, to keep them on it.
+
+**Batching is an allow list.** Only names a lane PROVES the owner wrote share
+a call: the owner's own notes (Reflect, Roam), Drive files Drive reports as
+owned by the connected account, and Dropbox files outside any shared folder.
+Everything else (mail, chats, bookmarks, shared or shared-with-me files, and
+anything of unknown authorship) is asked one item per call, as is every text
+excerpt, so it can at most talk about itself. Material shaped like an
+instruction to the model is also refused outright, after normalizing
+fullwidth, zero-width and look-alike characters; that detector is defense in
+depth, not the defense. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 

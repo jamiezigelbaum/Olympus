@@ -168,6 +168,8 @@ function rawItemFromPageRecord(record: RoamPageRecord, account: string, fetchedA
       blockCount: record.blockCount,
       ...(record.createdAt ? { createdAt: record.createdAt } : {}),
       ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
+      // The owner's own graph, from the owner's own export.
+      ownerAuthored: true,
     }),
     fetchedAt,
   };

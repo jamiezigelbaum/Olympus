@@ -106,22 +106,61 @@ export const SNIFFER_INJECTION_CATEGORY = 'injection';
 
 /**
  * Material shaped like an instruction to the model, or like its output
- * (JSON braces, verdict fields, tier-with-confidence phrasing). It is never
- * sent: the item resolves to Private at once. False positives cost only
- * over-privacy.
+ * (braces, verdict fields, tier-with-confidence phrasing, "every item ...
+ * personal"). It is never sent: the item resolves to Private at once.
+ *
+ * DEFENSE IN DEPTH ONLY. A blocklist can always be evaded; the structural
+ * defense is that only names the lane PROVED the owner wrote ever share a
+ * batch, so anything else can at most talk about itself. The text is
+ * normalized first (NFKC, format and zero-width characters removed, marks
+ * stripped, common Cyrillic/Greek look-alikes mapped to Latin) and checked
+ * both as words and with every separator removed, so fullwidth, zero-width,
+ * look-alike and letter-spaced shapes are caught too. False positives cost
+ * only over-privacy.
  */
 const INJECTION_PATTERNS: readonly RegExp[] = [
-  /\b(?:ignore|disregard|forget|override|bypass)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier)\b/i,
-  /\b(?:system prompt|developer message|assistant:|as an ai|you are an? (?:ai|assistant|model|classifier)|respond with|answer with|reply with|output only|return only)\b/i,
-  /\bverdicts?\b/i,
-  /["']?\b(?:tier|confidence|category)\b["']?\s*[:=]/i,
-  /[{}]/,
-  /\b(?:personal|private|public)\b[^\n]{0,20}\bconfidence\b/i,
-  /\b(?:classify|label|mark|treat)\b[^\n]{0,30}\b(?:as|is)\s+(?:personal|public|not private|safe)\b/i,
+  /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier|guidance)\b/,
+  /\b(?:system|developer|assistant|user)\s*(?:prompt|message|note)?\s*:/,
+  /\b(?:system prompt|developer message|as an ai|you are an? (?:ai|assistant|model|classifier|sniffer)|respond with|answer with|reply with|output only|return only)\b/,
+  /\bverdicts?\b/,
+  /\b(?:tier|confidence|category)\b\s*["']?\s*[:=]/,
+  /[{}<>]/,
+  /\b(?:personal|private|public|ordinary)\b[^\n]{0,40}\b(?:confidence|0?[.,]\d{1,3}|1[.,]0+)\b/,
+  /\b(?:confidence|0?[.,]9\d?|1[.,]0+)\b[^\n]{0,40}\b(?:personal|public|ordinary)\b/,
+  /\b(?:classify|label|mark|treat|tag|consider|rate|answer|return)\b[^\n]{0,30}\b(?:as|is|:)\s*(?:personal|public|ordinary|not private|safe|harmless)\b/,
+  /\b(?:every|all|each|any|other)\s+(?:of the\s+)?(?:items?|files?|entries|entry|documents?|names?|messages?|rows?|lines?)\b/,
+  /\bthis\s+(?:list|batch|prompt)\b/,
+  /\b(?:everything|all of (?:this|these|them)|these|the rest)\b[^\n]{0,30}\b(?:is|are)\b[^\n]{0,20}\b(?:personal|ordinary|public|safe|harmless)\b/,
 ];
 
+/** Separator-free forms of instruction words ("t i e r : p e r s o n a l"). */
+const COMPACT_MARKERS: readonly string[] = [
+  'ignoreprevious', 'ignoreall', 'ignoretherules', 'ignoreinstructions', 'disregard', 'systemprompt',
+  'verdict', 'tierpersonal', 'tierpublic', 'personalordinary', 'confidence', 'everyitem', 'allitems',
+  'eachitem', 'classifyas', 'markas', 'answerpersonal', 'respondpersonal', 'personal099', 'personal0.99',
+];
+
+/** Common Cyrillic/Greek look-alikes and their Latin reading, position by position. */
+const CONFUSABLE_FROM = 'авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı';
+const CONFUSABLE_TO = 'abeekmhopctyxiijsdqwgiabenikvoptuxywvli';
+
+/** NFKC, format/zero-width characters and marks removed, look-alikes mapped to Latin, lower case. */
+export function normalizeSnifferMaterial(material: string): string {
+  const folded = material.normalize('NFKC').toLowerCase().normalize('NFKD')
+    .replace(/[\p{Cf}\p{Mn}\p{Me}͏ᅟᅠㅤﾠ]/gu, '');
+  let mapped = '';
+  for (const char of folded) {
+    const at = CONFUSABLE_FROM.indexOf(char);
+    mapped += at >= 0 ? CONFUSABLE_TO[at]! : char;
+  }
+  return mapped.normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
+
 export function snifferMaterialLooksLikeInjection(material: string): boolean {
-  return INJECTION_PATTERNS.some((pattern) => pattern.test(material));
+  const normalized = normalizeSnifferMaterial(material);
+  if (INJECTION_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+  const compact = normalized.replace(/[^a-z0-9.]/g, '');
+  return COMPACT_MARKERS.some((marker) => compact.includes(marker));
 }
 
 export function snifferId(lane: Pick<SnifferLaneIdentity, 'kind'>, promptVersion = SNIFFER_PROMPT_VERSION): string {

@@ -402,6 +402,9 @@ function rawItemFromFileEntry(entry: DropboxFileMetadataEntry, account: string, 
       ...(entry.clientModified ? { clientModifiedAt: entry.clientModified } : {}),
       ...(entry.serverModified ? { serverModifiedAt: entry.serverModified } : {}),
       ...(entry.contentHash ? { contentHash: entry.contentHash } : {}),
+      // The owner's own namespace: Dropbox reports sharing_info for anything
+      // inside a shared folder, so its absence proves the file is not in one.
+      ...(entry.sharingInfo ? {} : { ownerAuthored: true }),
     }),
     fetchedAt,
   };
