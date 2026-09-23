@@ -7334,7 +7334,11 @@ function classifyContentTier(input, options = {}) {
   const content = contentPass({
     signals: {},
     text,
-    matchInput: {},
+    matchInput: mapMatchInput({
+      ...input.title?.trim() ? { title: input.title } : {},
+      ...input.path?.trim() ? { path: input.path } : {},
+      ...input.sender?.trim() ? { sender: input.sender } : {}
+    }),
     metadata: {
       tier: input.metadataTier,
       decidedBy: "default",
@@ -18853,6 +18857,8 @@ var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
 var EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty";
 var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
 var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
+var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
+var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
 
 // src/workers/file-extraction/runner.ts
 var SINK_SKIP_SETTLEMENTS = Object.freeze({
@@ -18860,6 +18866,8 @@ var SINK_SKIP_SETTLEMENTS = Object.freeze({
   [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
   [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
+  [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
+  [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
   [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
   [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
 });
@@ -20222,6 +20230,7 @@ init_x_bookmarks();
 init_dropbox_files();
 init_provider_store_sync();
 init_tier_set();
+init_sensitivity_map();
 init_source_ingestion_exclusions();
 init_telegram_messages();
 init_connector_store();

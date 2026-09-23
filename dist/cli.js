@@ -11377,6 +11377,9 @@ function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
   return options.path?.trim() || env[OLYMPUS_SENSITIVITY_MAP_ENV]?.trim() || defaultSensitivityMapPath();
 }
+function loadOwnerSensitivityMap(env = process.env) {
+  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
+}
 function loadSensitivityMap(options = {}) {
   const path = resolveSensitivityMapPath(options);
   if (!existsSync12(path)) {
@@ -12262,7 +12265,11 @@ function classifyContentTier(input, options = {}) {
   const content = contentPass({
     signals: {},
     text,
-    matchInput: {},
+    matchInput: mapMatchInput({
+      ...input.title?.trim() ? { title: input.title } : {},
+      ...input.path?.trim() ? { path: input.path } : {},
+      ...input.sender?.trim() ? { sender: input.sender } : {}
+    }),
     metadata: {
       tier: input.metadataTier,
       decidedBy: "default",
@@ -27874,7 +27881,7 @@ var init_ingest_filter = __esm(() => {
 
 // src/workers/google-connectors/classification.ts
 function loadGoogleSensitivityMap(env = process.env) {
-  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
+  return loadOwnerSensitivityMap(env);
 }
 function accountFromGoogleHandle(handle, fallback = "personal") {
   const trimmed = handle?.trim();
@@ -37661,8 +37668,11 @@ function createXBookmarksContentRecoveryHandler(options) {
         withoutChunksOnly: true,
         mimeTypes: ["text/plain; charset=utf-8"]
       }).candidates;
-      const recoverable = candidates.filter(isRecoverableXBookmarkCandidate);
+      const routed = options.tierLedger ? candidates.filter((candidate) => options.tierLedger.isRouted(candidate.identity)).length : 0;
+      const recoverable = candidates.filter((candidate) => !options.tierLedger?.isRouted(candidate.identity)).filter(isRecoverableXBookmarkCandidate);
       const counts = emptyCounts();
+      if (routed > 0)
+        counts.candidates_tier_routed = routed;
       counts.candidates_scanned = candidates.length;
       counts.candidates_with_post_url = recoverable.length;
       counts.candidates_without_recoverable_url = candidates.length - recoverable.length;
@@ -67311,7 +67321,7 @@ function planExtractionSinkWrite(store, request) {
     expectation: buildExtractionRepresentationExpectation(identity, text)
   };
 }
-var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded";
+var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
 var init_store_sink = __esm(() => {
   init_source_ingestion_exclusions();
   init_connector_store();
@@ -67926,6 +67936,8 @@ var init_runner = __esm(() => {
     [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
     [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
     [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
+    [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
     [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
     [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only"
   });
@@ -67934,6 +67946,7 @@ var init_runner = __esm(() => {
 // src/workers/file-extraction/tiered-store-sink.ts
 function createTieredStoreExtractionSink(options) {
   const set2 = options.set;
+  const tierClassification = options.tierClassification ?? set2.classification();
   const sinkFor = (store, recordContentTier) => createConnectorStoreExtractionSink({
     store,
     classify: (item) => buildSourceSensitivity({
@@ -67944,7 +67957,7 @@ function createTieredStoreExtractionSink(options) {
     ownerConnectorId: options.ownerConnectorId,
     ownershipKind: options.ownershipKind,
     ...options.claims ? { claims: options.claims } : {},
-    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...tierClassification ? { tierClassification } : {},
     ...recordContentTier ? {} : { recordContentTier: false }
   });
   return {
@@ -67972,14 +67985,18 @@ function createTieredStoreExtractionSink(options) {
       if ("skippedReason" in plan)
         return skipped(plan.skippedReason);
       const override = ledger.getOverride(identity);
+      const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
+      const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const content = classifyContentTier({
         text: request.text,
         metadataTier: record3.metadataTier,
         metadataForced: record3.metadataForced,
-        metadataFlagged: record3.metadataFlagged
+        metadataFlagged: record3.metadataFlagged,
+        ...itemTitle2 ? { title: itemTitle2 } : {},
+        ...itemPath ? { path: itemPath } : {}
       }, {
-        ...options.tierClassification?.sensitivityMap ? { sensitivityMap: options.tierClassification.sensitivityMap } : {},
-        ...options.tierClassification?.sniffer ? { sniffer: options.tierClassification.sniffer } : {},
+        ...tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {},
+        ...tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {},
         ...override ? { override } : {}
       });
       const decision = {
@@ -68012,7 +68029,7 @@ function createTieredStoreExtractionSink(options) {
           store?.tombstoneCopy(plan.item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, trustTier: "S5" });
         }
         ledger.removeCopies(identity);
-        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+        return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
       const placement = set2.placementFor(decision);
       const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
@@ -68125,14 +68142,12 @@ function singleItemConnector(store, item) {
     }
   };
 }
-var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED;
 var init_tiered_store_sink = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
   init_tiered_store_set();
   init_store_sink();
-  EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE;
 });
 
 // src/workers/connector-store/tiered-extraction.ts
@@ -85863,6 +85878,8 @@ async function main() {
     tierLanes.push(lane);
     return lane;
   };
+  const ownerSensitivityMap = loadOwnerSensitivityMap(process.env);
+  const ownerTierClassification = ownerSensitivityMap ? { sensitivityMap: ownerSensitivityMap } : undefined;
   const tierSecretLocations = (query, searched) => tierLanes.flatMap((lane) => {
     const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
     if (!scope || !lane.secrets)
@@ -85913,6 +85930,7 @@ async function main() {
       return existingStoreTierSet(createReadwiseTierLane({
         store,
         env: process.env,
+        ...ownerTierClassification ? { tierClassification: ownerTierClassification } : {},
         ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
         ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
         ...secrets ? { secretLocations: secrets } : {},
@@ -85932,6 +85950,7 @@ async function main() {
       return existingStoreTierSet(createXBookmarksTierLane({
         store,
         env: process.env,
+        ...ownerTierClassification ? { tierClassification: ownerTierClassification } : {},
         ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
         ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
         ...secrets ? { secretLocations: secrets } : {},
@@ -86010,6 +86029,7 @@ async function main() {
     secureStore: dropboxConnectorStore,
     env: process.env,
     policy: dropboxIngestionPolicy,
+    ...ownerTierClassification ? { tierClassification: ownerTierClassification } : {},
     ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
     onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
   }) : undefined;
@@ -86039,6 +86059,7 @@ async function main() {
   const whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
     store: whatsappConnectorStore,
     env: process.env,
+    ...ownerTierClassification ? { tierClassification: ownerTierClassification } : {},
     ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
     ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
     onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
@@ -87386,6 +87407,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
+    ...options.tierSet ? { tierLedger: options.tierSet.ledger } : {},
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
@@ -87680,6 +87702,7 @@ var init_server4 = __esm(async () => {
   init_dropbox_files();
   init_provider_store_sync();
   init_tier_set();
+  init_sensitivity_map();
   init_tiered_extraction();
   init_source_ingestion_exclusions();
   init_telegram_messages();
