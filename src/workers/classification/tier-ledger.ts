@@ -610,6 +610,15 @@ export class TierLedger {
     identity: TierLedgerIdentity,
     decision: TierDecision,
     plan: TierPlacementPlan,
+    options: {
+      /**
+       * The caller verified that no store holds an active copy any more (a
+       * lane removed it on its own, e.g. a trust eviction). Nothing is visible
+       * anywhere, so the new placement replaces the stale rows outright: it is
+       * a fresh placement, not a move.
+       */
+      staleCopiesGone?: boolean;
+    } = {},
   ): { outcome: TierRoutedOutcome; record: TierLedgerRecord; previousCopies: TierCopy[]; raise: boolean } {
     const decidedAt = this.now().toISOString();
     const reasonsJson = JSON.stringify(decision.reasons);
@@ -666,7 +675,7 @@ export class TierLedger {
         || existing.contentTier !== decision.contentTier;
       const current = previousCopies.filter((copy) => copy.state === 'current');
       const staged = previousCopies.some((copy) => copy.state === 'staged');
-      const firstPlacement = !existing.routed;
+      const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || (samePlan(current, plan.copies) && !staged)) {
         const generation = tiersChanged ? existing.generation + 1 : existing.generation;
         const detailChanged = tiersChanged

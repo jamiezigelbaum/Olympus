@@ -334,6 +334,21 @@ export class TieredStoreSet {
     return undefined;
   }
 
+  /**
+   * @internal Whether a routed item's current copies have all vanished from
+   * their stores (a lane evicted them on its own). Only then may a new
+   * placement replace the ledger rows without a move.
+   */
+  routedCopiesGone(identity: SourceItemIdentity): boolean {
+    const current = this.ledger.copies(identity).filter((copy) => copy.state === 'current');
+    if (current.length === 0) return false;
+    return current.every((copy) => {
+      const domain = this.domainForCorpus(copy.corpusId);
+      const store = domain ? this.store(domain) : undefined;
+      return store !== undefined && !store.itemPresence(identity).active;
+    });
+  }
+
   /** @internal Whether any store of the set has ever held a row for this item. */
   anyLegHasRow(identity: SourceItemIdentity): boolean {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
@@ -578,7 +593,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
 
     const placement = this.set.placementFor(decision);
-    const recorded = ledger.recordRoutedPlacement(identity, decision, placement);
+    const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
+      staleCopiesGone: routed && this.set.routedCopiesGone(identity),
+    });
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
