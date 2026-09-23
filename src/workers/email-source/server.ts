@@ -267,8 +267,16 @@ import {
   fileSourceScopeMetadataFilters,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
+  gmailConnectorScopeFromApproval,
+  mailScopeDraftView,
+  mailScopeFromDraft,
   type FileSourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
+import { createGmailMailScopeBrowser } from '../google-connectors/gmail-scope-browser.ts';
+import { MAIL_SCOPE_WINDOW_LABELS } from '../../core/mail-source-scope.ts';
+import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
+import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
+import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
 import {
   createDropboxFolderScopeBrowser,
   createGoogleDriveFolderScopeBrowser,
@@ -1487,7 +1495,12 @@ export async function main(): Promise<void> {
   };
 
   const fileSourceScopeAuthority = connectedHandleRegistryPath
-    ? new FileSourceScopeAuthority({ registryPath: connectedHandleRegistryPath })
+    ? new FileSourceScopeAuthority({
+        registryPath: connectedHandleRegistryPath,
+        // The mail scope binds to the handle the Gmail lane reads, so a pinned
+        // second mailbox never inherits the first one's approval.
+        mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE,
+      })
     : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
@@ -2234,13 +2247,25 @@ export async function main(): Promise<void> {
   // registry says, so without this guard an enabled lane would build a sync
   // handler that falls back to the connector's default credential handle and
   // reads a mailbox nobody selected.
+  //
+  // No approved mail scope, no handler either (design §2.5): a connected
+  // mailbox waits for the owner's mail selection exactly as a folder source
+  // waits for its folders, and nothing — not even metadata — is read before
+  // it. The handler is bound to the approval it was built under; a new
+  // revision builds a new one on the next scheduler pass.
   const createGmailConnectorStoreSyncForHandle = (
     handle: ConnectedCredentialHandle | undefined,
-  ) => handle && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
+  ) => {
+    const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
+    const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+    return handle && scopeRef && approval && fileSourceScopeAuthority
+      && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
     ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
+      scope: gmailConnectorScopeFromApproval(approval),
+      scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
       // A fresh provider traversal is a bounded, resumable history walk.
       // Legacy replay is explicit one-time convergence tooling and is never
       // auto-wired into the product server.
@@ -2248,15 +2273,16 @@ export async function main(): Promise<void> {
       // Without it the pull fills both stores with chunks and no embeddings,
       // and the corpus can never become servable.
       ...(sourceIndexEmbeddingProvider
-        ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider }
+        ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
         : {}),
       ...(secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider)
-        ? { secureEmbeddingProvider: secureLocalPolicyEmbeddingProvider }
+        ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) }
         : {}),
       ...(handle?.handle ? { credentialHandle: handle.handle } : {}),
       ...(handle?.accountRole ? { account: handle.accountRole } : {}),
     })
     : undefined;
+  };
   const createGoogleDriveConnectorStoreSyncForHandle = (
     handle: ConnectedCredentialHandle | undefined,
   ): GoogleDriveConnectorStoreSyncHandler | undefined => {
@@ -2743,6 +2769,9 @@ export async function main(): Promise<void> {
       handles,
     });
     const currentGmailConnectorStoreSync = createGmailConnectorStoreSyncForHandle(currentGmailHandle);
+    const currentGmailScopeRef = currentGmailHandle && fileSourceScopeAuthority
+      ? fileSourceScopeAuthority.mailPolicyRef()
+      : undefined;
     const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority
       ? fileSourceScopeAuthority.policyRef('google_drive.docs')
       : undefined;
@@ -2799,13 +2828,20 @@ export async function main(): Promise<void> {
     const sources = [
       recordLane(
         SCHEDULER_SOURCE_IDS.gmail,
-        currentGmailHandle ? undefined : 'no_handle',
-        () => createGmailConnectorStoreSchedulerSource({
+        !currentGmailHandle ? 'no_handle' : !currentGmailScopeRef ? 'scope_pending' : undefined,
+        () => {
+          const source = createGmailConnectorStoreSchedulerSource({
           config: olympusConfig,
           ...(currentGmailConnectorStoreSync ? { sync: currentGmailConnectorStoreSync } : {}),
           ...(gmailInternalConnectorStore ? { internalStore: gmailInternalConnectorStore } : {}),
           ...(gmailSecureConnectorStore ? { secureStore: gmailSecureConnectorStore } : {}),
-        }),
+          });
+          // Keyed to the mail scope revision like the folder lanes: a new
+          // revision is a new task id and so a fresh scheduler checkpoint.
+          return source && currentGmailScopeRef && fileSourceScopeAuthority
+            ? scopeBoundSchedulerSource({ source, authority: fileSourceScopeAuthority, ref: currentGmailScopeRef })
+            : undefined;
+        },
       ),
       recordLane(
         SCHEDULER_SOURCE_IDS.googleDrive,
@@ -2939,13 +2975,46 @@ export async function main(): Promise<void> {
   const sourceAnswerLatencyLog = sourceAnswerLatencyLogPath
     ? createFileSourceAnswerLatencyLog(sourceAnswerLatencyLogPath)
     : undefined;
+  // The mail picker's summary costs up to ~108 Gmail requests, so one load is
+  // reused for a few minutes per mailbox and draft rather than re-spent on
+  // every reopen or estimate refresh.
+  const mailScopeSummaryCache = new Map<string, { at: number; value: Promise<unknown> }>();
+  const MAIL_SCOPE_SUMMARY_TTL_MS = 10 * 60_000;
+  const gmailScopeHandle = () => selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
+    provider: 'gmail',
+    capability: 'gmail.email.sync',
+    handles: readActiveConnectedHandles(process.env),
+  });
+  const mailScopeSummary = () => {
+    const snapshot = fileSourceScopeAuthority!.mailSnapshot();
+    return {
+      kind: 'mail' as const,
+      source_id: 'gmail.email' as const,
+      disposition_source_id: 'gmail.email',
+      label: 'Gmail',
+      connected: snapshot.accountGeneration !== undefined,
+      status: snapshot.status,
+      ...(snapshot.accountGeneration ? { account_generation: snapshot.accountGeneration } : {}),
+      scope_revision: snapshot.revision,
+      // Approved mail always reads something (at least the window's metadata).
+      ingestion_enabled: snapshot.status === 'approved',
+      mail_scope: mailScopeDraftView(snapshot.mailScope),
+      ...(snapshot.mailScope?.contentAfter ? { content_after: snapshot.mailScope.contentAfter } : {}),
+      ...(snapshot.reason === 'malformed'
+        ? { error: 'Saved mail scope is unreadable. Review and save the scope again.' }
+        : {}),
+    };
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
-    summaries: () => ([
+    summaries: () => [...([
       ['google_drive.docs', GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE, 'Google Drive'],
       ['dropbox.files', DROPBOX_INGESTION_EXCLUSION_SOURCE, 'Dropbox'],
     ] as const).map(([sourceId, dispositionSourceId, label]) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
       return {
+        kind: 'folders' as const,
         source_id: sourceId,
         disposition_source_id: dispositionSourceId,
         label,
@@ -2963,7 +3032,88 @@ export async function main(): Promise<void> {
           ? { error: 'Saved scope state is unreadable. Review and save the scope again.' }
           : {}),
       };
-    }),
+    }), mailScopeSummary()],
+    /**
+     * The mail picker's data: labels, categories, sender suggestions and the
+     * estimate for `draft`. Refused unless the mailbox is connected; reads no
+     * message body and changes no state.
+     */
+    browseMail: async (input: { draft: OlympusMailScopeDraft }) => {
+      const before = fileSourceScopeAuthority.mailSnapshot();
+      const accountGeneration = before.accountGeneration;
+      if (!accountGeneration) {
+        throw new OperationError('source_index_policy_violation', 'Connect Gmail before choosing which mail Olympus may use.');
+      }
+      const handle = gmailScopeHandle();
+      if (!handle) throw new OperationError('source_index_policy_violation', 'The connected Gmail credential is unavailable.');
+      const scope = mailScopeFromDraft(input.draft);
+      const key = JSON.stringify([accountGeneration, scope, process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY ?? '']);
+      const cached = mailScopeSummaryCache.get(key);
+      const now = Date.now();
+      if (!cached || now - cached.at > MAIL_SCOPE_SUMMARY_TTL_MS) {
+        const liveConfig = defaultGmailLiveSyncConfig(process.env);
+        const operatorQuery = process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim();
+        const value = createGmailMailScopeBrowser({
+          credentialHandle: handle.handle,
+          ...(handle.accountRole ? { account: handle.accountRole } : {}),
+          ...(gmailRequestBudget ? { requestBudget: gmailRequestBudget } : {}),
+        }).summarize({
+          scope,
+          ...(operatorQuery ? { operatorQuery } : {}),
+          messagesPerPass: liveConfig.storePullMaxItems,
+          passIntervalMinutes: liveConfig.storePullIntervalMs / 60_000,
+          dailyRequestBudget: gmailDailyRequestBudgetFromEnv(process.env),
+        });
+        // A failed load is never cached; the next open retries.
+        value.catch(() => mailScopeSummaryCache.delete(key));
+        mailScopeSummaryCache.set(key, { at: now, value });
+      }
+      const summary = await mailScopeSummaryCache.get(key)!.value;
+      const after = fileSourceScopeAuthority.mailSnapshot();
+      if (after.accountGeneration !== accountGeneration || after.revision !== before.revision) {
+        throw new OperationError('source_index_policy_violation', 'The mailbox or saved mail scope changed while it was being read. Reload the picker.');
+      }
+      return {
+        ok: true,
+        kind: 'mail_scope_browse',
+        source_id: 'gmail.email',
+        account_generation: accountGeneration,
+        scope_revision: before.revision,
+        status: before.status,
+        draft: mailScopeDraftView(scope),
+        window_labels: MAIL_SCOPE_WINDOW_LABELS,
+        summary,
+      };
+    },
+    approveMailAndStart: async (input: {
+      accountGeneration: string;
+      expectedRevision: string;
+      draft: OlympusMailScopeDraft;
+    }) => {
+      const approval = fileSourceScopeAuthority.approveMail({
+        accountGeneration: input.accountGeneration,
+        expectedRevision: input.expectedRevision,
+        scope: mailScopeFromDraft(input.draft),
+      });
+      let started = false;
+      if (sourceScheduler) {
+        sourceScheduler.updateSources(schedulerSourcesForHandles(readActiveConnectedHandles(process.env)).sources);
+        if (sourceScheduler.status().sources.some((source) => source.source_id === 'gmail.email')) {
+          await sourceScheduler.runSource('gmail.email', undefined, 'operator');
+          started = true;
+        }
+      }
+      return {
+        ok: true,
+        kind: 'mail_source_scope_approved',
+        source_id: 'gmail.email',
+        status: approval.status,
+        scope_revision: approval.revision,
+        ...(approval.mailScope?.contentAfter ? { content_after: approval.mailScope.contentAfter } : {}),
+        owner_tier_rules: approval.ownerTierRules?.length ?? 0,
+        ingestion_started: started,
+      };
+    },
     browse: async (input: {
       sourceId: 'google_drive.docs' | 'dropbox.files';
       parentKey?: string;

@@ -48,7 +48,14 @@ import {
 import { OperationError } from '../core/operation-error.ts';
 import { DASHBOARD_THEME_CSS } from './dashboard/theme.ts';
 import { dashboardPageSignature } from './dashboard/components.ts';
-import type { OlympusDashboardReadResult, OlympusFolderScopeSourceId, OlympusSourceScopeStatus, OlympusSourceScopeSelection } from '../control-ui-contract.ts';
+import type {
+  OlympusDashboardReadResult,
+  OlympusFolderScopeSourceId,
+  OlympusMailScopeDraft,
+  OlympusMailScopeSourceId,
+  OlympusSourceScopeStatus,
+  OlympusSourceScopeSelection,
+} from '../control-ui-contract.ts';
 import { mountDispositionsController } from '../control-ui/browser-controller.ts';
 import {
   defaultSourceIngestionExclusionsPath,
@@ -116,8 +123,16 @@ export interface SourceDispositionsSourceView {
 }
 
 export interface SourceFolderScopeSummary {
-  source_id: OlympusFolderScopeSourceId;
+  /** Folder sources choose folders; the mail source chooses a window, categories, labels and senders. */
+  kind?: 'folders' | 'mail';
+  source_id: OlympusFolderScopeSourceId | OlympusMailScopeSourceId;
   disposition_source_id: string;
+  /** Mail only: whether the approved scope starts ingestion. */
+  ingestion_enabled?: boolean;
+  /** Mail only: the saved choices, or the defaults while nothing is saved. */
+  mail_scope?: OlympusMailScopeDraft;
+  /** Mail only: the saved full-content cutoff (ISO timestamp). */
+  content_after?: string;
   label: string;
   connected: boolean;
   status: OlympusSourceScopeStatus;

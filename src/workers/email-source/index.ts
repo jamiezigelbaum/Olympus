@@ -145,9 +145,11 @@ import {
   OLYMPUS_DASHBOARD_VIEWS,
   type OlympusFolderScopeBrowseResult,
   type OlympusFolderScopeSourceId,
+  type OlympusMailScopeDraft,
   type OlympusSourceScopeSelection,
   type OlympusDashboardReadParams,
 } from '../../control-ui-contract.ts';
+import { parseMailScopeDraft } from '../source-scope-runtime.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
@@ -512,6 +514,14 @@ export interface EmailSourceWorkerOptions {
         selections: OlympusSourceScopeSelection[];
         wholeAccount: boolean;
         explicitWholeAccountConfirmation: boolean;
+      }): Promise<Record<string, unknown>>;
+      /** The mail picker's labels, categories, sender suggestions and estimate. Absent: no mail picker. */
+      browseMail?(input: { draft: OlympusMailScopeDraft }): Promise<Record<string, unknown>>;
+      /** The only act that starts a connected mailbox's ingestion. */
+      approveMailAndStart?(input: {
+        accountGeneration: string;
+        expectedRevision: string;
+        draft: OlympusMailScopeDraft;
       }): Promise<Record<string, unknown>>;
     };
   };
@@ -1013,6 +1023,34 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               scope_browser: scopeBrowser,
             });
           }
+          if (postBody?.action === 'browse_mail_scope') {
+            if (!sourceDashboard.fileSourceScopes?.browseMail) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'The mail scope picker is not configured.');
+            }
+            if (postBody.source_id !== 'gmail.email') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must be gmail.email.');
+            }
+            return json(await sourceDashboard.fileSourceScopes.browseMail({ draft: parseMailScopeDraft(postBody.draft) }));
+          }
+          if (postBody?.action === 'approve_mail_scope_and_start') {
+            assertDashboardModelsReady();
+            if (!sourceDashboard.fileSourceScopes?.approveMailAndStart) {
+              throw new EmailSourceWorkerError(501, 'source_index_not_enabled', 'Mail scope approval is not configured.');
+            }
+            if (postBody.source_id !== 'gmail.email') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'source_id must be gmail.email.');
+            }
+            const accountGeneration = asOptionalString(postBody.account_generation);
+            const expectedRevision = asOptionalString(postBody.expected_scope_revision);
+            if (!accountGeneration || !expectedRevision) {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'account_generation and expected_scope_revision are required.');
+            }
+            return json(await sourceDashboard.fileSourceScopes.approveMailAndStart({
+              accountGeneration,
+              expectedRevision,
+              draft: parseMailScopeDraft(postBody.scope),
+            }));
+          }
           if (postBody?.action === 'approve_source_scope_and_start') {
             assertDashboardModelsReady();
             if (!sourceDashboard.fileSourceScopes) {
@@ -1213,10 +1251,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   fileSourceScopeIngestionEnabled: Object.fromEntries(
                     sourceDashboard.fileSourceScopes.summaries().map((scope) => [
                       scope.source_id,
-                      scope.status === 'approved' && (
+                      scope.ingestion_enabled ?? (scope.status === 'approved' && (
                         scope.whole_account_selected === true
                         || scope.selections?.some((selection) => selection.state !== 'exclude') === true
-                      ),
+                      )),
                     ]),
                   ),
                 }
@@ -2801,6 +2839,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   function assertFileSourceSyncApproved(sourceId: string | undefined): void {
+    if (sourceId === 'gmail.email') {
+      // A worker that publishes a mail scope gates Gmail on it; one that does
+      // not (no connected-handle registry) has no Gmail lane to start either.
+      const scope = sourceDashboard?.fileSourceScopes?.summaries()
+        .find((candidate) => candidate.source_id === sourceId);
+      if (scope && (scope.status !== 'approved' || !scope.connected)) {
+        throw new OperationError(
+          'source_index_policy_violation',
+          'Choose and approve which mail Olympus may use before starting ingestion.',
+        );
+      }
+      return;
+    }
     if (sourceId === 'google_drive.docs' || sourceId === 'dropbox.files') {
       const scope = sourceDashboard?.fileSourceScopes?.summaries()
         .find((candidate) => candidate.source_id === sourceId);
