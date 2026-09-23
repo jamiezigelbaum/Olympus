@@ -1,0 +1,721 @@
+// Connect-time mail scope for Gmail (design: per-item-four-tier-classification
+// §2.5, owner decision 2026-09-23).
+//
+// The mail equivalent of the Dropbox/Drive folder scope, on the same approval
+// machinery: the same account generation (a reconnect invalidates approval),
+// the same opaque revision and compare-and-swap save, the same file lease and
+// private atomic write, and the same `scope_pending` status that keeps the lane
+// from starting. What differs is only what the owner chooses — a time window,
+// Gmail categories and labels, and sender rules — so that choice is the one
+// thing this module adds.
+//
+// Stored beside file-source-scopes.json in its own mail-source-scopes.json, so
+// an older build that does not know the mail shape can never read the folder
+// file as malformed and drop Dropbox or Drive back to scope_pending.
+
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { withFileLeaseSync } from './file-lease.ts';
+import { OperationError } from './operation-error.ts';
+import {
+  connectedSourceScopeAccountGeneration,
+  type SourceScopeConnectedHandleRegistry,
+} from './source-scope-approval.ts';
+import type { OlympusMailScopeDraft } from '../control-ui-contract.ts';
+import type { OwnerTierRule } from '../workers/classification/tier-classifier.ts';
+
+/**
+ * The picker's bounded provider cost. One load spends at most
+ * GMAIL_SCOPE_BROWSE_MAX_REQUESTS Gmail requests: labels.list, one labels.get
+ * per category, the two estimate lists, and a header-only sender sample.
+ */
+export const GMAIL_SCOPE_SENDER_SAMPLE = 100;
+export const GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+
+export const MAIL_SOURCE_SCOPE_ID = 'gmail.email' as const;
+export type MailSourceScopeId = typeof MAIL_SOURCE_SCOPE_ID;
+
+export const MAIL_SOURCE_SCOPE_CAPABILITY = {
+  sourceId: MAIL_SOURCE_SCOPE_ID,
+  provider: 'gmail',
+  credentialCapability: 'gmail.email.sync',
+  scopeRequirement: 'explicit_mail_scope',
+} as const;
+
+/** How far back mail is read in full. Older mail is indexed metadata-only. */
+export const MAIL_SCOPE_WINDOWS = ['6m', '1y', '2y', '5y', 'all'] as const;
+export type MailScopeWindow = typeof MAIL_SCOPE_WINDOWS[number];
+export const DEFAULT_MAIL_SCOPE_WINDOW: MailScopeWindow = '2y';
+export const MAIL_SCOPE_WINDOW_LABELS: Readonly<Record<MailScopeWindow, string>> = {
+  '6m': 'Last 6 months',
+  '1y': 'Last year',
+  '2y': 'Last 2 years',
+  '5y': 'Last 5 years',
+  all: 'Everything',
+};
+const MAIL_SCOPE_WINDOW_MONTHS: Readonly<Record<Exclude<MailScopeWindow, 'all'>, number>> = {
+  '6m': 6,
+  '1y': 12,
+  '2y': 24,
+  '5y': 60,
+};
+
+/** Gmail's five inbox categories, by their `category:` search names. */
+export const GMAIL_SCOPE_CATEGORIES = ['primary', 'social', 'promotions', 'updates', 'forums'] as const;
+export type GmailScopeCategory = typeof GMAIL_SCOPE_CATEGORIES[number];
+/**
+ * Owner decision 2026-09-23: Promotions and Social are skipped by default.
+ * Updates (receipts, statements, shipping) and Forums (lists the owner joined)
+ * carry real knowledge value and are included by default.
+ */
+export const DEFAULT_SKIPPED_GMAIL_CATEGORIES: readonly GmailScopeCategory[] = ['promotions', 'social'];
+export const GMAIL_SCOPE_CATEGORY_LABELS: Readonly<Record<GmailScopeCategory, string>> = {
+  primary: 'Primary',
+  social: 'Social',
+  promotions: 'Promotions',
+  updates: 'Updates',
+  forums: 'Forums',
+};
+/** The provider label id for each category, as messages carry it in labelIds. */
+export const GMAIL_SCOPE_CATEGORY_LABEL_IDS: Readonly<Record<GmailScopeCategory, string>> = {
+  primary: 'CATEGORY_PERSONAL',
+  social: 'CATEGORY_SOCIAL',
+  promotions: 'CATEGORY_PROMOTIONS',
+  updates: 'CATEGORY_UPDATES',
+  forums: 'CATEGORY_FORUMS',
+};
+
+const MAX_SCOPE_LABELS = 500;
+const MAX_SENDER_RULES = 500;
+const MAX_LABEL_NAME_CHARS = 225;
+const MAX_SENDER_CHARS = 320;
+
+export interface MailScopeLabel {
+  /** Gmail's opaque label id; the name is kept only to build the search. */
+  id: string;
+  name: string;
+}
+
+export interface MailScopeSelection {
+  window: MailScopeWindow;
+  /**
+   * The full-content cutoff, fixed when the scope is approved (ISO timestamp).
+   * Absent for `all`. Fixed rather than rolling so a traversal's query is a
+   * property of its approval revision and never moves under it.
+   */
+  contentAfter?: string;
+  skippedCategories: GmailScopeCategory[];
+  /** Labels the owner chose to skip. Every other label is included. */
+  skippedLabels: MailScopeLabel[];
+  /** Sender addresses or @domains whose mail is always Private. */
+  alwaysPrivateSenders: string[];
+  /** Sender addresses or @domains that are never read. */
+  skipSenders: string[];
+}
+
+/**
+ * The picker's "always Private" list as P1a owner tier rules (design §2.4,
+ * `OwnerTierRule` in workers/classification/tier-classifier.ts): one `sender`
+ * rule per address or @domain, tier Private (`secure`), strength `force`.
+ * The Gmail lane hands them to its store placement (secure_local only) and to
+ * the recorded four-tier decision, whose reason then reads
+ * `metadata:owner_rule:sender:<id>:force`. The id is a content-free digest of
+ * the sender, so a reason never names who wrote.
+ *
+ * TODO(P2, tier rules): when the rule file (`~/.olympus/tier-rules.json`)
+ * loader lands, load these alongside it (or migrate them into it).
+ */
+export type MailScopeOwnerTierRule = OwnerTierRule;
+
+/** The provider the rules name, matched as data against item identity. */
+const MAIL_SCOPE_RULE_SOURCE = 'gmail';
+
+export interface MailSourceScopeApprovalSnapshot {
+  sourceId: MailSourceScopeId;
+  status: 'scope_pending' | 'approved';
+  accountGeneration?: string;
+  revision: string;
+  mailScope?: MailScopeSelection;
+  ownerTierRules?: MailScopeOwnerTierRule[];
+  reason?: 'not_connected' | 'missing' | 'malformed' | 'account_changed';
+}
+
+interface PersistedMailSourceScopeApproval {
+  source_id: MailSourceScopeId;
+  account_generation: string;
+  revision: string;
+  status: 'approved';
+  mail_scope: {
+    window: MailScopeWindow;
+    content_after?: string;
+    skipped_categories: GmailScopeCategory[];
+    skipped_labels: MailScopeLabel[];
+    always_private_senders: string[];
+    skip_senders: string[];
+  };
+  owner_tier_rules: MailScopeOwnerTierRule[];
+  approved_at: string;
+}
+
+interface PersistedMailSourceScopeState {
+  version: 1;
+  approvals: PersistedMailSourceScopeApproval[];
+}
+
+export function defaultMailSourceScopeStatePath(handleRegistryPath: string): string {
+  return join(dirname(handleRegistryPath), 'mail-source-scopes.json');
+}
+
+/** The picker's opening state: 2 years in full, Promotions and Social skipped. */
+export function defaultMailScopeSelection(): Omit<MailScopeSelection, 'contentAfter'> {
+  return {
+    window: DEFAULT_MAIL_SCOPE_WINDOW,
+    skippedCategories: [...DEFAULT_SKIPPED_GMAIL_CATEGORIES],
+    skippedLabels: [],
+    alwaysPrivateSenders: [],
+    skipSenders: [],
+  };
+}
+
+export function connectedMailSourceAccountGeneration(
+  registry: SourceScopeConnectedHandleRegistry,
+  pinnedHandle?: string,
+): ReturnType<typeof connectedSourceScopeAccountGeneration> {
+  return connectedSourceScopeAccountGeneration(MAIL_SOURCE_SCOPE_ID, MAIL_SOURCE_SCOPE_CAPABILITY, registry, pinnedHandle);
+}
+
+export function readMailSourceScopeApproval(input: {
+  registry: SourceScopeConnectedHandleRegistry;
+  statePath: string;
+  pinnedHandle?: string;
+}): MailSourceScopeApprovalSnapshot {
+  const account = connectedMailSourceAccountGeneration(input.registry, input.pinnedHandle);
+  if (!account) return pendingSnapshot('not-connected', undefined, 'not_connected');
+  const read = readState(input.statePath);
+  if (read.kind === 'missing') return pendingSnapshot(`missing:${account.generation}`, account.generation, 'missing');
+  if (read.kind === 'malformed') return pendingSnapshot(`malformed:${read.digest}`, account.generation, 'malformed');
+  const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
+  if (!approval) return pendingSnapshot(`missing:${account.generation}`, account.generation, 'missing');
+  if (approval.account_generation !== account.generation) {
+    return pendingSnapshot(`stale:${approval.revision}:${account.generation}`, account.generation, 'account_changed');
+  }
+  return {
+    sourceId: MAIL_SOURCE_SCOPE_ID,
+    status: 'approved',
+    accountGeneration: account.generation,
+    revision: approval.revision,
+    mailScope: fromPersistedScope(approval.mail_scope),
+    ownerTierRules: approval.owner_tier_rules,
+  };
+}
+
+/**
+ * Save an approved mail scope. Every save mints a new revision, which is what
+ * re-binds the Gmail traversal: the scheduler task id and the store cursor are
+ * both keyed to it, so a changed scope starts a fresh traversal under the new
+ * query instead of resuming the old one's watermark.
+ */
+export function approveMailSourceScope(input: {
+  registry: SourceScopeConnectedHandleRegistry;
+  statePath: string;
+  pinnedHandle?: string;
+  accountGeneration: string;
+  expectedRevision: string;
+  scope: Omit<MailScopeSelection, 'contentAfter'>;
+  now?: Date;
+}): MailSourceScopeApprovalSnapshot {
+  return withFileLeaseSync(input.statePath, (lease) => {
+    const current = readMailSourceScopeApproval(input);
+    if (!current.accountGeneration || current.accountGeneration !== input.accountGeneration) {
+      throw new OperationError('source_index_policy_violation', 'The connected mailbox changed. Reopen the picker and choose its scope again.');
+    }
+    if (current.revision !== input.expectedRevision) {
+      throw new OperationError('source_index_policy_violation', 'The mail scope changed. Reload it before saving.');
+    }
+    const now = input.now ?? new Date();
+    // Saving the scope that is already approved changes nothing: same
+    // revision, same cutoff, no fresh traversal. Only a real change mints a
+    // new revision (and, for the same window, keeps the approved cutoff).
+    if (current.status === 'approved' && current.mailScope) {
+      const unchanged = normalizeMailScope(
+        { ...input.scope, ...(current.mailScope.contentAfter ? { contentAfter: current.mailScope.contentAfter } : {}) },
+        now,
+      );
+      if (sameMailScope(unchanged, current.mailScope)) return current;
+    }
+    const keptCutoff = current.status === 'approved' && current.mailScope?.window === input.scope.window
+      ? current.mailScope.contentAfter
+      : undefined;
+    const scope = normalizeMailScope({ ...input.scope, ...(keptCutoff ? { contentAfter: keptCutoff } : {}) }, now);
+    const existing = readState(input.statePath);
+    const approvals = existing.kind === 'valid'
+      ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID)
+      : [];
+    const revision = randomUUID();
+    const ownerTierRules = mailScopeOwnerTierRules(scope);
+    approvals.push({
+      source_id: MAIL_SOURCE_SCOPE_ID,
+      account_generation: input.accountGeneration,
+      revision,
+      status: 'approved',
+      mail_scope: toPersistedScope(scope),
+      owner_tier_rules: ownerTierRules,
+      approved_at: now.toISOString(),
+    });
+    const state: PersistedMailSourceScopeState = { version: 1, approvals };
+    lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}\n`));
+    return {
+      sourceId: MAIL_SOURCE_SCOPE_ID,
+      status: 'approved',
+      accountGeneration: input.accountGeneration,
+      revision,
+      mailScope: scope,
+      ownerTierRules,
+    };
+  });
+}
+
+export function assertMailSourceScopeApproved(input: {
+  registry: SourceScopeConnectedHandleRegistry;
+  statePath: string;
+  pinnedHandle?: string;
+  expectedAccountGeneration?: string;
+  expectedRevision?: string;
+}): MailSourceScopeApprovalSnapshot & { status: 'approved'; mailScope: MailScopeSelection; accountGeneration: string } {
+  const approval = readMailSourceScopeApproval(input);
+  if (
+    approval.status !== 'approved'
+    || !approval.mailScope
+    || !approval.accountGeneration
+    || (input.expectedAccountGeneration !== undefined && approval.accountGeneration !== input.expectedAccountGeneration)
+    || (input.expectedRevision !== undefined && approval.revision !== input.expectedRevision)
+  ) {
+    throw new OperationError('source_index_policy_violation', 'Mail scope approval is required for this connected mailbox.');
+  }
+  return approval as MailSourceScopeApprovalSnapshot & { status: 'approved'; mailScope: MailScopeSelection; accountGeneration: string };
+}
+
+/** The design's §2.4 rules the picker's "always Private" list becomes. */
+export function mailScopeOwnerTierRules(scope: Pick<MailScopeSelection, 'alwaysPrivateSenders'>): MailScopeOwnerTierRule[] {
+  return scope.alwaysPrivateSenders.map((sender) => ({
+    id: `mail-scope-always-private-${createHash('sha256').update(sender).digest('hex').slice(0, 12)}`,
+    source: MAIL_SCOPE_RULE_SOURCE,
+    match: { kind: 'sender' as const, value: sender },
+    tier: 'secure' as const,
+    strength: 'force' as const,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Query compilation
+// ---------------------------------------------------------------------------
+
+export interface CompiledGmailMailScope {
+  /**
+   * Every filter except the date bound: categories, labels, skipped senders,
+   * and the operator's hidden query override (ANDed). Undefined when nothing
+   * filters.
+   */
+  baseQuery?: string;
+  /** Mail at or after this instant has its body stored; older mail is metadata-only. */
+  contentAfterMs?: number;
+  /** The full-content traversal's query (base AND after:). */
+  contentQuery?: string;
+  /** The metadata-only traversal's query (base AND before:); absent for `all`. */
+  metadataQuery?: string;
+  /** Category label ids the scope skips, for the connector's post-fetch filter. */
+  skippedCategoryLabelIds: string[];
+  /**
+   * Label ids the scope skips. The query names labels, which a rename or an
+   * unusual character can slip past; the connector re-checks these ids on
+   * every fetched message.
+   */
+  skippedLabelIds: string[];
+}
+
+/**
+ * System labels are searched with `in:`, which is stable across locales and
+ * never collides with a user label of the same name.
+ */
+const GMAIL_SYSTEM_LABEL_SEARCH: Readonly<Record<string, string>> = {
+  SENT: 'in:sent',
+  CHAT: 'in:chats',
+};
+
+/**
+ * The approved scope as Gmail search syntax. Terms are space-separated, which
+ * Gmail ANDs; the operator override is parenthesised so an OR inside it cannot
+ * leak across the picker's terms.
+ */
+export function compileGmailMailScope(
+  scope: MailScopeSelection,
+  options: { operatorQuery?: string | undefined } = {},
+): CompiledGmailMailScope {
+  const terms = [
+    ...scope.skippedCategories.map((category) => `-category:${category}`),
+    ...scope.skippedLabels.map((label) => GMAIL_SYSTEM_LABEL_SEARCH[label.id]
+      ? `-${GMAIL_SYSTEM_LABEL_SEARCH[label.id]}`
+      : `-label:${gmailSearchValue(label.name)}`),
+    // A whole-domain rule is written `@example.com`; Gmail's from: matches a
+    // bare domain, so the leading @ is dropped from the search term.
+    ...scope.skipSenders.map((sender) => `-from:${gmailSearchValue(sender.startsWith('@') ? sender.slice(1) : sender)}`),
+  ];
+  const operator = options.operatorQuery?.trim();
+  if (operator) terms.push(`(${operator})`);
+  const baseQuery = terms.length > 0 ? terms.join(' ') : undefined;
+  const parsedCutoff = scope.contentAfter ? Date.parse(scope.contentAfter) : undefined;
+  const contentAfterMs = parsedCutoff !== undefined && Number.isFinite(parsedCutoff)
+    ? Math.floor(parsedCutoff / 1_000) * 1_000
+    : undefined;
+  const skippedCategoryLabelIds = scope.skippedCategories.map((category) => GMAIL_SCOPE_CATEGORY_LABEL_IDS[category]);
+  const skippedLabelIds = scope.skippedLabels.map((label) => label.id);
+  const withBase = (bound: string | undefined): string | undefined =>
+    [bound, baseQuery].filter((part): part is string => Boolean(part)).join(' ') || undefined;
+  const contentQuery = withBase(gmailAfterBound({ contentAfterMs }));
+  const metadataQuery = contentAfterMs !== undefined ? withBase(gmailBeforeBound(contentAfterMs)) : undefined;
+  return {
+    ...(baseQuery ? { baseQuery } : {}),
+    ...(contentAfterMs !== undefined ? { contentAfterMs } : {}),
+    ...(contentQuery ? { contentQuery } : {}),
+    ...(metadataQuery ? { metadataQuery } : {}),
+    skippedCategoryLabelIds,
+    skippedLabelIds,
+  };
+}
+
+/**
+ * The one date bound every Gmail query in a scoped lane uses, for the picker's
+ * estimate and the connector's traversal alike.
+ *
+ * Gmail's after:/before: take epoch seconds. after:(s-1) admits every message
+ * stamped in second s or later and before:s every one before it, so the
+ * full-content and metadata-only legs partition the mailbox at the cutoff
+ * second. A watermark never pulls the bound below the cutoff: a quiet mailbox
+ * whose newest mail is older than the window is still bounded at the window.
+ * Undefined means unbounded (window Everything, no watermark yet).
+ */
+export function gmailAfterBound(input: { contentAfterMs?: number | undefined; watermarkMs?: number | undefined }): string | undefined {
+  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1_000) - 1 : undefined;
+  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1_000) : undefined;
+  const seconds = cutoffSeconds === undefined
+    ? watermarkSeconds
+    : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
+  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
+}
+
+export function gmailBeforeBound(contentAfterMs: number): string {
+  return `before:${Math.floor(contentAfterMs / 1_000)}`;
+}
+
+/**
+ * The full-content cutoff for a window, measured back from `now` in calendar
+ * months at UTC midnight. The day is clamped to the target month's length, so
+ * 31 August minus 6 months is 28 (or 29) February, never 3 March.
+ */
+export function mailScopeContentAfter(window: MailScopeWindow, now: Date): string | undefined {
+  if (window === 'all') return undefined;
+  const monthIndex = now.getUTCFullYear() * 12 + now.getUTCMonth() - MAIL_SCOPE_WINDOW_MONTHS[window];
+  const year = Math.floor(monthIndex / 12);
+  const month = monthIndex - year * 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(now.getUTCDate(), lastDay))).toISOString();
+}
+
+function sameMailScope(left: MailScopeSelection, right: MailScopeSelection): boolean {
+  return JSON.stringify(toPersistedScope(left)) === JSON.stringify(toPersistedScope(right));
+}
+
+function gmailSearchValue(value: string): string {
+  // Quotes delimit a multi-word label or address; a value may not carry one.
+  const cleaned = value.replace(/"/g, '').trim();
+  return /[\s()]/.test(cleaned) ? `"${cleaned}"` : cleaned;
+}
+
+// ---------------------------------------------------------------------------
+// Estimate
+// ---------------------------------------------------------------------------
+
+/**
+ * Stated assumptions behind the estimate. These are rough on purpose and the
+ * picker labels every number built from them as an estimate. There is
+ * deliberately no sync-time figure (owner, 2026-09-23): it would ignore
+ * extraction and embedding throughput, host uptime and rate limits, on top of
+ * Gmail's own approximate counts, and could not be made accurate enough.
+ */
+export const MAIL_SCOPE_ESTIMATE_ASSUMPTIONS = {
+  /** An average email body is ~3,000 characters, ~750 embedding tokens. */
+  tokensPerFullMessage: 750,
+  /**
+   * Gemini Embedding 2 list price assumed by the design doc (§4.4, UNVERIFIED;
+   * read the live price before relying on it). Private mail embeds locally or
+   * on Venice for less, so this is an upper bound for the full-content leg.
+   */
+  embeddingUsdPerMillionTokens: 0.15,
+} as const;
+
+export interface MailScopeEstimateInput {
+  /** Messages the full-content query matches (Gmail resultSizeEstimate). */
+  contentMessages: number;
+  /** Messages the metadata-only query matches. */
+  metadataMessages: number;
+}
+
+export interface MailScopeEstimate {
+  estimate: true;
+  content_messages: number;
+  metadata_messages: number;
+  total_messages: number;
+  embedding_tokens: number;
+  /** Upper bound at the assumed cloud price. */
+  embedding_cost_usd: number;
+}
+
+export function estimateMailScope(input: MailScopeEstimateInput): MailScopeEstimate {
+  const content = nonNegativeInteger(input.contentMessages);
+  const metadata = nonNegativeInteger(input.metadataMessages);
+  const total = content + metadata;
+  const embeddingTokens = content * MAIL_SCOPE_ESTIMATE_ASSUMPTIONS.tokensPerFullMessage;
+  return {
+    estimate: true,
+    content_messages: content,
+    metadata_messages: metadata,
+    total_messages: total,
+    embedding_tokens: embeddingTokens,
+    embedding_cost_usd: Math.round(
+      (embeddingTokens / 1_000_000) * MAIL_SCOPE_ESTIMATE_ASSUMPTIONS.embeddingUsdPerMillionTokens * 100,
+    ) / 100,
+  };
+}
+
+function nonNegativeInteger(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Picker drafts (the dashboard's wire shape)
+// ---------------------------------------------------------------------------
+
+/** The picker's view of a saved scope, or of the defaults when none is saved. */
+export function mailScopeDraftView(scope: MailScopeSelection | undefined): OlympusMailScopeDraft {
+  const source = scope ?? defaultMailScopeSelection();
+  return {
+    window: source.window,
+    skipped_categories: [...source.skippedCategories],
+    skipped_labels: source.skippedLabels.map((label) => ({ id: label.id, name: label.name })),
+    always_private_senders: [...source.alwaysPrivateSenders],
+    skip_senders: [...source.skipSenders],
+  };
+}
+
+export function mailScopeFromDraft(draft: OlympusMailScopeDraft): Omit<MailScopeSelection, 'contentAfter'> {
+  return {
+    window: draft.window,
+    skippedCategories: [...draft.skipped_categories],
+    skippedLabels: draft.skipped_labels.map((label) => ({ id: label.id, name: label.name })),
+    alwaysPrivateSenders: [...draft.always_private_senders],
+    skipSenders: [...draft.skip_senders],
+  };
+}
+
+/**
+ * Untrusted request JSON to a draft. Shape only; the approval re-validates
+ * every value (senders, categories, window) before anything is written.
+ */
+export function parseMailScopeDraft(value: unknown): OlympusMailScopeDraft {
+  const invalid = (message: string): never => {
+    throw new OperationError('invalid_request', message);
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('The mail scope draft must be an object.');
+  const record = value as Record<string, unknown>;
+  if (!isMailScopeWindow(record.window)) invalid('Choose a valid mail time window.');
+  const strings = (field: string, max: number): string[] => {
+    const list = record[field];
+    if (!Array.isArray(list) || list.length > max || list.some((entry) => typeof entry !== 'string' || entry.length > 320)) {
+      invalid(`${field} must be a list of at most ${max} strings.`);
+    }
+    return list as string[];
+  };
+  const categories = strings('skipped_categories', GMAIL_SCOPE_CATEGORIES.length);
+  if (categories.some((category) => !isGmailScopeCategory(category))) invalid('Every skipped category must be a Gmail category.');
+  const labels = record.skipped_labels;
+  if (!Array.isArray(labels) || labels.length > 500) invalid('skipped_labels must be a list of at most 500 labels.');
+  return {
+    window: record.window as OlympusMailScopeDraft['window'],
+    skipped_categories: categories as OlympusMailScopeDraft['skipped_categories'],
+    skipped_labels: (labels as unknown[]).map((label) => {
+      const entry = label && typeof label === 'object' && !Array.isArray(label) ? label as Record<string, unknown> : {};
+      if (typeof entry.id !== 'string' || typeof entry.name !== 'string' || entry.id.length > 256 || entry.name.length > 256) {
+        return invalid('Every skipped label needs its Gmail id and name.');
+      }
+      return { id: entry.id, name: entry.name };
+    }),
+    always_private_senders: strings('always_private_senders', 500),
+    skip_senders: strings('skip_senders', 500),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Validation and persistence
+// ---------------------------------------------------------------------------
+
+export function isMailScopeWindow(value: unknown): value is MailScopeWindow {
+  return typeof value === 'string' && (MAIL_SCOPE_WINDOWS as readonly string[]).includes(value);
+}
+
+export function isGmailScopeCategory(value: unknown): value is GmailScopeCategory {
+  return typeof value === 'string' && (GMAIL_SCOPE_CATEGORIES as readonly string[]).includes(value);
+}
+
+export function normalizeMailScope(
+  input: Omit<MailScopeSelection, 'contentAfter'> & { contentAfter?: string },
+  now: Date,
+): MailScopeSelection {
+  if (!isMailScopeWindow(input.window)) throw new OperationError('invalid_request', 'Choose a valid mail time window.');
+  if (!Array.isArray(input.skippedCategories) || input.skippedCategories.some((category) => !isGmailScopeCategory(category))) {
+    throw new OperationError('invalid_request', 'Every skipped category must be a Gmail category.');
+  }
+  if (!Array.isArray(input.skippedLabels) || input.skippedLabels.length > MAX_SCOPE_LABELS) {
+    throw new OperationError('invalid_request', `Skip at most ${MAX_SCOPE_LABELS} labels.`);
+  }
+  const labels = new Map<string, MailScopeLabel>();
+  for (const label of input.skippedLabels) {
+    const id = typeof label?.id === 'string' ? label.id.trim() : '';
+    const name = typeof label?.name === 'string' ? label.name.replace(/"/g, '').trim() : '';
+    if (!id || id.length > 256 || !name || name.length > MAX_LABEL_NAME_CHARS) {
+      throw new OperationError('invalid_request', 'Every skipped label needs its Gmail id and name.');
+    }
+    labels.set(id, { id, name });
+  }
+  const contentAfter = input.window === 'all'
+    ? undefined
+    : input.contentAfter && Number.isFinite(Date.parse(input.contentAfter))
+      ? new Date(Date.parse(input.contentAfter)).toISOString()
+      : mailScopeContentAfter(input.window, now);
+  return {
+    window: input.window,
+    ...(contentAfter ? { contentAfter } : {}),
+    skippedCategories: GMAIL_SCOPE_CATEGORIES.filter((category) => input.skippedCategories.includes(category)),
+    skippedLabels: [...labels.values()].sort((left, right) => left.id.localeCompare(right.id)),
+    alwaysPrivateSenders: normalizeSenders(input.alwaysPrivateSenders, 'always Private'),
+    skipSenders: normalizeSenders(input.skipSenders, 'skip'),
+  };
+}
+
+/**
+ * A sender rule is an address (`name@example.com`) or a whole domain
+ * (`@example.com`), lower-cased and de-duplicated. Anything else is refused so
+ * a typo cannot compile into a search term that silently matches nothing.
+ */
+export function normalizeSenders(input: unknown, label: string): string[] {
+  if (!Array.isArray(input) || input.length > MAX_SENDER_RULES) {
+    throw new OperationError('invalid_request', `The ${label} list holds at most ${MAX_SENDER_RULES} senders.`);
+  }
+  const senders = new Set<string>();
+  for (const value of input) {
+    const sender = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (!sender) continue;
+    if (sender.length > MAX_SENDER_CHARS || !/^(?:[^\s@"()]+)?@[a-z0-9.-]+\.[a-z]{2,}$/.test(sender)) {
+      throw new OperationError('invalid_request', `"${sender.slice(0, 80)}" in the ${label} list is not an email address or @domain.`);
+    }
+    senders.add(sender);
+  }
+  return [...senders].sort();
+}
+
+function toPersistedScope(scope: MailScopeSelection): PersistedMailSourceScopeApproval['mail_scope'] {
+  return {
+    window: scope.window,
+    ...(scope.contentAfter ? { content_after: scope.contentAfter } : {}),
+    skipped_categories: scope.skippedCategories,
+    skipped_labels: scope.skippedLabels,
+    always_private_senders: scope.alwaysPrivateSenders,
+    skip_senders: scope.skipSenders,
+  };
+}
+
+function fromPersistedScope(scope: PersistedMailSourceScopeApproval['mail_scope']): MailScopeSelection {
+  return {
+    window: scope.window,
+    ...(scope.content_after ? { contentAfter: scope.content_after } : {}),
+    skippedCategories: scope.skipped_categories,
+    skippedLabels: scope.skipped_labels,
+    alwaysPrivateSenders: scope.always_private_senders,
+    skipSenders: scope.skip_senders,
+  };
+}
+
+function pendingSnapshot(
+  revision: string,
+  accountGeneration: string | undefined,
+  reason: NonNullable<MailSourceScopeApprovalSnapshot['reason']>,
+): MailSourceScopeApprovalSnapshot {
+  return {
+    sourceId: MAIL_SOURCE_SCOPE_ID,
+    status: 'scope_pending',
+    ...(accountGeneration ? { accountGeneration } : {}),
+    revision,
+    reason,
+  };
+}
+
+type StateRead =
+  | { kind: 'missing' }
+  | { kind: 'malformed'; digest: string }
+  | { kind: 'valid'; state: PersistedMailSourceScopeState };
+
+function readState(path: string): StateRead {
+  if (!existsSync(path)) return { kind: 'missing' };
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return { kind: 'malformed', digest: 'unreadable' };
+  }
+  const digest = createHash('sha256').update(raw).digest('hex');
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('record');
+    const record = parsed as Record<string, unknown>;
+    if (record.version !== 1 || !Array.isArray(record.approvals)) throw new Error('version');
+    const approvals = record.approvals.map(parseApproval);
+    if (new Set(approvals.map((entry) => entry.source_id)).size !== approvals.length) throw new Error('duplicate');
+    return { kind: 'valid', state: { version: 1, approvals } };
+  } catch {
+    return { kind: 'malformed', digest };
+  }
+}
+
+function parseApproval(value: unknown): PersistedMailSourceScopeApproval {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('approval');
+  const record = value as Record<string, unknown>;
+  if (
+    record.source_id !== MAIL_SOURCE_SCOPE_ID
+    || typeof record.account_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.account_generation)
+    || typeof record.revision !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision)
+    || record.status !== 'approved'
+    || typeof record.approved_at !== 'string' || !Number.isFinite(Date.parse(record.approved_at))
+    || !record.mail_scope || typeof record.mail_scope !== 'object' || Array.isArray(record.mail_scope)
+  ) throw new Error('approval');
+  const scope = record.mail_scope as Record<string, unknown>;
+  const normalized = normalizeMailScope({
+    window: scope.window as MailScopeWindow,
+    ...(typeof scope.content_after === 'string' ? { contentAfter: scope.content_after } : {}),
+    skippedCategories: scope.skipped_categories as GmailScopeCategory[],
+    skippedLabels: scope.skipped_labels as MailScopeLabel[],
+    alwaysPrivateSenders: scope.always_private_senders as string[],
+    skipSenders: scope.skip_senders as string[],
+  }, new Date(Date.parse(record.approved_at)));
+  return {
+    source_id: MAIL_SOURCE_SCOPE_ID,
+    account_generation: record.account_generation,
+    revision: record.revision,
+    status: 'approved',
+    mail_scope: toPersistedScope(normalized),
+    // Derived, never trusted from disk: the rules are a function of the list.
+    owner_tier_rules: mailScopeOwnerTierRules(normalized),
+    approved_at: record.approved_at,
+  };
+}

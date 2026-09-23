@@ -779,7 +779,9 @@ function workingLine(source: DashboardSourceCard): string {
 }
 
 function waitingLine(source: DashboardSourceCard): string {
-  if (dashboardScopePending(source)) return 'waiting for folder selection';
+  if (dashboardScopePending(source)) {
+    return source.scope_selection?.kind === 'mail' ? 'waiting for mail selection' : 'waiting for folder selection';
+  }
   if (source.connection.state === 'waiting_for_first_sync') return 'waiting for the first sync';
   const queued = source.queue_health.waiting + source.queue_health.active;
   if (queued > 0) return `${dashboardCount(queued)} in queue`;

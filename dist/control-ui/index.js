@@ -1018,6 +1018,271 @@ function mountDispositionsController(options) {
         scopeControls(form, draft);
     }
   }
+  const mailDrafts = new Map;
+  function mailState(form) {
+    let state = mailDrafts.get(form);
+    if (!state) {
+      state = {
+        generation: form.dataset.accountGeneration || "",
+        revision: form.dataset.scopeRevision || "",
+        loaded: false,
+        loadAttempted: false,
+        loading: false,
+        busy: false,
+        invalid: false,
+        edited: false
+      };
+      mailDrafts.set(form, state);
+    }
+    return state;
+  }
+  function mailAllowed(form, state) {
+    return canWrite && form.dataset.connected === "true" && !state.busy && !state.invalid;
+  }
+  function mailLines(form, selector) {
+    const value = form.querySelector(selector)?.value || "";
+    return value.split(/[\n,]+/).map((line) => line.trim()).filter((line) => line !== "");
+  }
+  function mailSavedSkippedLabels(form) {
+    try {
+      const parsed = JSON.parse(form.dataset.mailSkippedLabels || "[]");
+      return Array.isArray(parsed) ? parsed.filter((entry) => !!entry && typeof entry === "object" && typeof entry.id === "string" && typeof entry.name === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  function readMailDraft(form) {
+    const windowInput = form.querySelector("[data-mail-window]:checked");
+    const windowValue = windowInput?.value;
+    const labelInputs = Array.from(form.querySelectorAll("[data-mail-label]"));
+    const skippedLabels = labelInputs.length > 0 ? labelInputs.filter((input) => !input.checked).map((input) => ({ id: input.value, name: input.dataset.mailLabelName || input.value })) : mailSavedSkippedLabels(form);
+    return {
+      window: windowValue === "6m" || windowValue === "1y" || windowValue === "5y" || windowValue === "all" ? windowValue : "2y",
+      skipped_categories: Array.from(form.querySelectorAll("[data-mail-category]")).filter((input) => !input.checked).map((input) => input.value).filter((value) => value === "primary" || value === "social" || value === "promotions" || value === "updates" || value === "forums"),
+      skipped_labels: skippedLabels,
+      always_private_senders: mailLines(form, "[data-mail-private-senders]"),
+      skip_senders: mailLines(form, "[data-mail-skip-senders]")
+    };
+  }
+  function mailSummaryText(draft) {
+    const windows = { "6m": "last 6 months", "1y": "last year", "2y": "last 2 years", "5y": "last 5 years", all: "everything" };
+    const skipped = draft.skipped_categories.length + draft.skipped_labels.length;
+    return `Full content: ${windows[draft.window] || draft.window}. ${skipped} ${skipped === 1 ? "category or label" : "categories and labels"} skipped.` + ` ${draft.always_private_senders.length} always Private, ${draft.skip_senders.length} skipped ${draft.skip_senders.length === 1 ? "sender" : "senders"}.`;
+  }
+  function mailControls(form, state) {
+    const allowed = mailAllowed(form, state);
+    form.querySelectorAll("input,textarea,button").forEach((control) => {
+      control.disabled = !allowed;
+    });
+    const start = form.querySelector("[data-mail-start]");
+    if (start)
+      start.disabled = !allowed || !state.loaded || state.loading || !state.generation || !state.revision;
+    const summary = form.querySelector("[data-mail-summary]");
+    if (summary)
+      summary.textContent = mailSummaryText(readMailDraft(form));
+  }
+  function mailCount(value) {
+    return typeof value === "number" && Number.isFinite(value) ? Math.round(value).toLocaleString("en-US") : "—";
+  }
+  function renderMailSummary(form, summary) {
+    const skipped = new Set(readMailDraft(form).skipped_labels.map((label) => label.id));
+    const labelsSlot = form.querySelector("[data-mail-labels]");
+    const labels2 = Array.isArray(summary.labels) ? summary.labels : [];
+    if (labelsSlot) {
+      labelsSlot.replaceChildren();
+      if (labels2.length === 0) {
+        const empty = labelsSlot.ownerDocument.createElement("p");
+        empty.className = "mail-scope-help";
+        empty.textContent = "This mailbox has no labels of its own.";
+        labelsSlot.append(empty);
+      }
+      for (const label of labels2) {
+        if (typeof label.id !== "string" || typeof label.name !== "string")
+          continue;
+        const row = labelsSlot.ownerDocument.createElement("label");
+        row.className = "mail-scope-option";
+        row.setAttribute("role", "listitem");
+        const input = labelsSlot.ownerDocument.createElement("input");
+        input.type = "checkbox";
+        input.value = label.id;
+        input.dataset.mailLabel = "";
+        input.dataset.mailLabelName = label.name;
+        input.checked = !skipped.has(label.id);
+        const text = labelsSlot.ownerDocument.createElement("span");
+        text.textContent = label.id === "SENT" ? "Sent" : label.name;
+        row.append(input, text);
+        labelsSlot.append(row);
+      }
+    }
+    const categories = Array.isArray(summary.categories) ? summary.categories : [];
+    for (const category of categories) {
+      const slot = form.querySelector(`[data-mail-category-count="${String(category.category)}"]`);
+      if (slot)
+        slot.textContent = typeof category.messages_total === "number" ? ` · ${mailCount(category.messages_total)} in mailbox` : "";
+    }
+    const suggestions = Array.isArray(summary.sender_suggestions) ? summary.sender_suggestions : [];
+    const box = form.querySelector("[data-mail-suggestions]");
+    const list = form.querySelector("[data-mail-suggestion-list]");
+    if (box && list) {
+      list.replaceChildren();
+      for (const suggestion of suggestions) {
+        if (typeof suggestion.sender !== "string")
+          continue;
+        const item = list.ownerDocument.createElement("li");
+        const sender = list.ownerDocument.createElement("span");
+        sender.className = "sender";
+        sender.textContent = suggestion.sender;
+        const count = list.ownerDocument.createElement("span");
+        count.className = "count";
+        count.textContent = `${mailCount(suggestion.sample_messages)} of ${mailCount(summary.sample_size)}`;
+        const makePrivate = list.ownerDocument.createElement("button");
+        makePrivate.type = "button";
+        makePrivate.textContent = "Always Private";
+        makePrivate.dataset.mailSuggest = "private";
+        makePrivate.dataset.sender = suggestion.sender;
+        const skip = list.ownerDocument.createElement("button");
+        skip.type = "button";
+        skip.textContent = "Skip";
+        skip.dataset.mailSuggest = "skip";
+        skip.dataset.sender = suggestion.sender;
+        item.append(sender, count, makePrivate, skip);
+        list.append(item);
+      }
+      box.hidden = list.childElementCount === 0;
+    }
+    const estimate = summary.estimate && typeof summary.estimate === "object" ? summary.estimate : {};
+    const put = (key, text) => {
+      const slot = form.querySelector(`[data-mail-estimate="${key}"]`);
+      if (slot)
+        slot.textContent = text;
+    };
+    put("content_messages", `~${mailCount(estimate.content_messages)}`);
+    put("metadata_messages", `~${mailCount(estimate.metadata_messages)}`);
+    put("embedding_cost_usd", typeof estimate.embedding_cost_usd === "number" ? `≤ $${estimate.embedding_cost_usd.toFixed(2)}` : "—");
+  }
+  async function browseMail(form) {
+    const state = mailState(form);
+    if (!mailAllowed(form, state) || state.loading)
+      return;
+    state.loading = true;
+    state.loadAttempted = true;
+    mailControls(form, state);
+    scopeMessage(form, "Reading labels, counts and a sample of senders from Gmail…");
+    try {
+      const result = await options.transport.control({
+        action: "browse_mail_scope",
+        source_id: "gmail.email",
+        draft: readMailDraft(form)
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status === 401 || result.status === 403) {
+        canWrite = false;
+        scopeMessage(form, "Write access expired. Reconnect before reading your mailbox.");
+        return;
+      }
+      const body = result.body;
+      const summary = body.summary && typeof body.summary === "object" ? body.summary : undefined;
+      if (result.status < 200 || result.status >= 300 || body.ok !== true || !summary || typeof body.account_generation !== "string" || typeof body.scope_revision !== "string") {
+        const error = body.error;
+        const message2 = error && typeof error === "object" ? error.message : undefined;
+        scopeMessage(form, typeof message2 === "string" ? message2 : "Could not read the mailbox. Check the connection and reopen this picker.");
+        return;
+      }
+      if (state.loaded && (state.generation !== body.account_generation || state.revision !== body.scope_revision)) {
+        state.invalid = true;
+        scopeMessage(form, "The mailbox or saved scope changed. Reopen this picker before saving.");
+        return;
+      }
+      state.generation = body.account_generation;
+      state.revision = body.scope_revision;
+      state.loaded = true;
+      renderMailSummary(form, summary);
+      scopeMessage(form, "Nothing has been read yet. Review the estimate, then save and start.");
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Reading the mailbox failed. Your choices are still here; retry when the connection is ready.");
+    } finally {
+      state.loading = false;
+      if (!disposed && root.contains(form))
+        mailControls(form, state);
+    }
+  }
+  async function approveMail(form) {
+    const state = mailState(form);
+    if (!mailAllowed(form, state) || !state.loaded || !state.generation || !state.revision) {
+      scopeMessage(form, "Wait for the estimate to load before saving.");
+      return;
+    }
+    state.busy = true;
+    mailControls(form, state);
+    scopeMessage(form, "Saving your approved mail scope…");
+    try {
+      const result = await options.transport.control({
+        action: "approve_mail_scope_and_start",
+        source_id: "gmail.email",
+        account_generation: state.generation,
+        expected_scope_revision: state.revision,
+        scope: readMailDraft(form)
+      });
+      if (disposed || options.signal.aborted || !root.contains(form))
+        return;
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        if (result.status === 401 || result.status === 403)
+          canWrite = false;
+        if (result.status === 409)
+          state.invalid = true;
+        const error = result.body.error;
+        const message2 = error && typeof error === "object" ? error.message : undefined;
+        scopeMessage(form, typeof message2 === "string" ? message2 : "Scope was not activated. Your choices are still here.");
+        return;
+      }
+      state.edited = false;
+      scopeMessage(form, "Scope saved. Opening Gmail…");
+      options.navigate("/dashboard?source=gmail.email");
+    } catch {
+      if (!disposed && root.contains(form))
+        scopeMessage(form, "Could not confirm the result. Reopen the picker to check the saved scope before retrying.");
+    } finally {
+      state.busy = false;
+      if (!disposed && root.contains(form))
+        mailControls(form, state);
+    }
+  }
+  function mailClick(target) {
+    const form = target.closest("form[data-mail-scope-source]");
+    if (!form || !root.contains(form))
+      return false;
+    const state = mailState(form);
+    if (!mailAllowed(form, state))
+      return true;
+    if (target.closest("[data-mail-refresh]")) {
+      browseMail(form);
+      return true;
+    }
+    if (target.closest("[data-mail-cancel]")) {
+      form.reset();
+      state.edited = false;
+      form.querySelector("[data-mail-labels]")?.querySelectorAll("[data-mail-label]").forEach((input) => {
+        input.checked = !mailSavedSkippedLabels(form).some((label) => label.id === input.value);
+      });
+      mailControls(form, state);
+      scopeMessage(form, "Changes cancelled.");
+      return true;
+    }
+    const suggest = target.closest("[data-mail-suggest]");
+    if (suggest?.dataset.sender) {
+      const area = form.querySelector(suggest.dataset.mailSuggest === "skip" ? "[data-mail-skip-senders]" : "[data-mail-private-senders]");
+      if (area && !mailLines(form, suggest.dataset.mailSuggest === "skip" ? "[data-mail-skip-senders]" : "[data-mail-private-senders]").includes(suggest.dataset.sender)) {
+        area.value = `${area.value.trim()}${area.value.trim() ? `
+` : ""}${suggest.dataset.sender}`;
+        state.edited = true;
+        mailControls(form, state);
+      }
+      return true;
+    }
+    return false;
+  }
   function scopeClick(target) {
     const form = target.closest("form[data-folder-scope-source]");
     if (!form || !root.contains(form))
@@ -1159,6 +1424,12 @@ function mountDispositionsController(options) {
       if (presented && !form.closest("[data-scope-panel]")?.hidden && !draft.loadAttempted && scopeAllowed(form, draft))
         browseScope(form, []);
     });
+    root.querySelectorAll("form[data-mail-scope-source]").forEach((form) => {
+      const state = mailState(form);
+      mailControls(form, state);
+      if (presented && !form.closest("[data-scope-panel]")?.hidden && !state.loadAttempted && mailAllowed(form, state))
+        browseMail(form);
+    });
     if (appliedCanWrite === canWrite)
       return;
     appliedCanWrite = canWrite;
@@ -1260,6 +1531,8 @@ function mountDispositionsController(options) {
     }
     if (scopeClick(target))
       return;
+    if (mailClick(target))
+      return;
     const row = target.closest(".folder-row");
     if (row) {
       selectFolder(row);
@@ -1310,6 +1583,13 @@ function mountDispositionsController(options) {
     selectFolder(row);
   }
   function onInput(event) {
+    const mailForm = event.target instanceof Element ? event.target.closest("form[data-mail-scope-source]") : null;
+    if (mailForm && root.contains(mailForm)) {
+      const state = mailState(mailForm);
+      state.edited = true;
+      mailControls(mailForm, state);
+      return;
+    }
     if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
       const form2 = event.target.closest("form[data-folder-scope-source]");
       if (form2 && event.target.matches("[data-scope-search]")) {
@@ -1349,6 +1629,11 @@ function mountDispositionsController(options) {
       approveScope(form);
       return;
     }
+    if (form.hasAttribute("data-mail-scope-source")) {
+      event.preventDefault();
+      approveMail(form);
+      return;
+    }
     if (!form.hasAttribute("data-dispositions-source"))
       return;
     event.preventDefault();
@@ -1366,7 +1651,8 @@ function mountDispositionsController(options) {
     } catch {}
   }
   async function refreshNow(force) {
-    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy)))
+    const pickerOpen = () => Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy) || Array.from(mailDrafts.values()).some((state) => state.loaded || state.loading || state.busy || state.edited);
+    if (disposed || inFlight || options.signal.aborted || !force && (!presented || dirty || pickerOpen()))
       return;
     inFlight = true;
     try {
@@ -1374,7 +1660,7 @@ function mountDispositionsController(options) {
       if (!result || disposed || options.signal.aborted)
         return;
       canWrite = result.can_write;
-      if (!force && (dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy))) {
+      if (!force && (dirty || pickerOpen())) {
         applyWriteCapability();
         return;
       }
@@ -1410,6 +1696,7 @@ function mountDispositionsController(options) {
         root.innerHTML = result.body;
       dirty = false;
       scopeDrafts.clear();
+      mailDrafts.clear();
       if (activeScopeSource)
         showScopePanel(activeScopeSource);
       signature = result.signature;
@@ -2011,7 +2298,40 @@ var DISPOSITIONS_CSS = `
       .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
       [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
+      /* Mail scope picker: the same Finder frame, with form groups where the
+         folder tree sits and the estimate where the inspector sits. */
+      .mail-scope-main { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); padding: 6px 0; }
+      .mail-scope-group { border: 0; border-bottom: 1px solid var(--line2); margin: 0; padding: 12px 16px 14px; display: grid; gap: 8px; }
+      .mail-scope-group:last-child { border-bottom: 0; }
+      .mail-scope-group legend { float: left; width: 100%; padding: 0; color: var(--t1); font-size: 13px; font-weight: 600; }
+      .mail-scope-help { color: var(--t4); font-size: 11.5px; }
+      .mail-scope-options { display: flex; flex-wrap: wrap; gap: 6px; }
+      .mail-scope-option { display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); font-size: 12.5px; cursor: pointer; }
+      .mail-scope-option:has(input:checked) { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
+      .mail-scope-option input { width: auto; margin: 2px 0 0; padding: 0; }
+      .mail-scope-option span { display: grid; gap: 1px; }
+      .mail-scope-option small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-labels { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; }
+      .mail-scope-senders { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .mail-scope-senders label { display: grid; gap: 4px; color: var(--t2); font-size: 12.5px; }
+      .mail-scope-senders small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-senders textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 7px 9px; }
+      .mail-scope-suggestions ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+      .mail-scope-suggestions li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--t2); font-size: 12px; }
+      .mail-scope-suggestions li:hover { background: rgba(255,255,255,.035); }
+      .mail-scope-suggestions .sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mail-scope-suggestions .count { color: var(--t4); font-variant-numeric: tabular-nums; font-size: 11px; }
+      .mail-scope-suggestions button { padding: 3px 9px; font-size: 11px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; }
+      .mail-scope-estimate { display: grid; align-content: start; gap: 10px; }
+      .mail-scope-figures { margin: 0; display: grid; gap: 8px; }
+      .mail-scope-figures div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line2); padding-bottom: 6px; }
+      .mail-scope-figures dt { color: var(--t3); font-size: 12px; }
+      .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; }
+      .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: 12px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      [data-mail-scope-source] [hidden] { display: none !important; }
+      [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {
+        .mail-scope-senders { grid-template-columns: 1fr; }
         .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
         .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
         .finder-footer { grid-row: 3; }

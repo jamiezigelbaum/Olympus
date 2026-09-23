@@ -35,6 +35,9 @@ import { renderEmbeddingLedgerPage } from '../src/workers/dashboard/pages/embedd
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
+import { buildSourceDispositionsView, renderSourceDispositionsHtml } from '../src/workers/source-dispositions.ts';
+import { estimateMailScope, mailScopeDraftView } from '../src/core/mail-source-scope.ts';
+import type { OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
 
 export const DASHBOARD_PREVIEW_NOW = new Date('2026-07-07T21:00:00.000Z');
 const NOW = DASHBOARD_PREVIEW_NOW;
@@ -271,6 +274,31 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
     return view;
   }
+  if (state === 'gmail-scope-pending') {
+    // Gmail connected, no mail scope approved yet (design §2.5): the card, the
+    // Setup row and home all read Waiting · waiting for mail selection, and the
+    // banner leads to the mail picker (/mail-picker in this harness).
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: emptyStatus(),
+      schedulerStatus: scheduler([]),
+      sovereigntyEngine: engine,
+      connectedHandleRegistry: registry([
+        handle('gmail.personal', 'gmail', ['gmail.email.sync'], ['https://www.googleapis.com/auth/gmail.readonly']),
+        handle('readwise.personal', 'readwise', ['readwise.library.sync'], []),
+      ]),
+      apiKeyAvailability: { readwise: true },
+      oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, gmail: PREVIEW_GOOGLE_CLIENT_ID },
+      oauthClientSecretAvailability: { google: true },
+      googlePilotClientConfigured: true,
+      oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+      ingestionDispositionsAvailable: true,
+      fileSourceScopeStatus: { 'gmail.email': 'scope_pending' },
+      fileSourceScopeIngestionEnabled: { 'gmail.email': false },
+      now: NOW,
+    });
+    view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
+    return view;
+  }
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -392,6 +420,107 @@ function withPreviewMovement(view: ReturnType<typeof buildSourceDashboardViewMod
   return view;
 }
 
+const PREVIEW_MAIL_GENERATION = 'a'.repeat(64);
+
+/** The mail picker page as the worker renders it, with Drive beside Gmail in Locations. */
+export function renderMailPickerPreview(approved = false): string {
+  const draft: OlympusMailScopeDraft = approved
+    ? {
+      window: '1y',
+      skipped_categories: ['promotions', 'social'],
+      skipped_labels: [{ id: 'Label_7', name: 'Newsletters' }],
+      always_private_senders: ['@clinic.example'],
+      skip_senders: ['notifications@saas.example'],
+    }
+    : mailScopeDraftView(undefined);
+  const view = buildSourceDispositionsView({
+    sources: [],
+    folderScopes: [
+      {
+        kind: 'folders',
+        source_id: 'google_drive.docs',
+        disposition_source_id: 'google_drive.personal',
+        label: 'Google Drive',
+        connected: true,
+        status: 'approved',
+        account_generation: 'b'.repeat(64),
+        scope_revision: '00000000-0000-4000-8000-000000000001',
+        selections: [],
+        whole_account_selected: false,
+      },
+      {
+        kind: 'mail',
+        source_id: 'gmail.email',
+        disposition_source_id: 'gmail.email',
+        label: 'Gmail',
+        connected: true,
+        status: approved ? 'approved' : 'scope_pending',
+        account_generation: PREVIEW_MAIL_GENERATION,
+        scope_revision: approved ? '00000000-0000-4000-8000-000000000002' : `missing:${PREVIEW_MAIL_GENERATION}`,
+        ingestion_enabled: approved,
+        mail_scope: draft,
+        ...(approved ? { content_after: '2025-09-23T00:00:00.000Z' } : {}),
+      },
+    ],
+    document: { schemaVersion: 1, rules: [] },
+    rulesPath: '/preview/ingestion-dispositions.json',
+    now: NOW,
+  });
+  return renderSourceDispositionsHtml(view, { csrfToken: 'preview-csrf-token', selectedSourceId: 'gmail.email' });
+}
+
+/** A fixture mailbox: what browse_mail_scope returns for `draft`. Never contacts Gmail. */
+export function mailPickerBrowseFixture(draft: OlympusMailScopeDraft | undefined) {
+  const current = draft ?? mailScopeDraftView(undefined);
+  const windowShare: Record<OlympusMailScopeDraft['window'], number> = { '6m': 0.12, '1y': 0.22, '2y': 0.4, '5y': 0.75, all: 1 };
+  const categoryShare: Record<string, number> = { primary: 0.3, updates: 0.25, forums: 0.05, social: 0.1, promotions: 0.3 };
+  const mailbox = 84_000;
+  const kept = 1 - current.skipped_categories.reduce((sum, category) => sum + (categoryShare[category] ?? 0), 0);
+  const inScope = Math.round(mailbox * kept);
+  const content = Math.round(inScope * windowShare[current.window]);
+  return {
+    ok: true,
+    kind: 'mail_scope_browse',
+    source_id: 'gmail.email',
+    account_generation: PREVIEW_MAIL_GENERATION,
+    scope_revision: `missing:${PREVIEW_MAIL_GENERATION}`,
+    status: 'scope_pending',
+    draft: current,
+    summary: {
+      labels: [
+        { id: 'Label_3', name: 'Family', system: false },
+        { id: 'Label_4', name: 'Finance/Taxes', system: false },
+        { id: 'Label_5', name: 'Kids School', system: false },
+        { id: 'Label_7', name: 'Newsletters', system: false },
+        { id: 'Label_9', name: 'Travel', system: false },
+        { id: 'Label_12', name: 'Work/Olympus', system: false },
+        { id: 'SENT', name: 'SENT', system: true },
+      ],
+      categories: [
+        { category: 'primary', label: 'Primary', messages_total: 25_200 },
+        { category: 'social', label: 'Social', messages_total: 8_400 },
+        { category: 'promotions', label: 'Promotions', messages_total: 25_200 },
+        { category: 'updates', label: 'Updates', messages_total: 21_000 },
+        { category: 'forums', label: 'Forums', messages_total: 4_200 },
+      ],
+      sender_suggestions: [
+        { sender: 'notifications@github.com', sample_messages: 14 },
+        { sender: 'no-reply@bank.example', sample_messages: 9 },
+        { sender: 'team@newsletter.example', sample_messages: 7 },
+        { sender: 'portal@clinic.example', sample_messages: 5 },
+        { sender: 'orders@shop.example', sample_messages: 4 },
+        { sender: 'alex@family.example', sample_messages: 3 },
+      ],
+      sample_size: 100,
+      estimate: estimateMailScope({
+        contentMessages: content,
+        metadataMessages: inScope - content,
+      }),
+      provider_requests: 108,
+    },
+  };
+}
+
 function dropboxPreview(mode: 'initial' | 'update') {
   const status = emptyStatus();
   const dropbox = corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000);
@@ -487,7 +616,7 @@ if (import.meta.main) {
   const port = Number(process.env.DASHBOARD_PREVIEW_PORT ?? 8930);
   Bun.serve({
   port,
-  fetch(request) {
+  async fetch(request) {
     const url = new URL(request.url);
     // The page's own unlock form posts here. There is no worker behind this
     // harness, so ANY non-empty paste mints a pretend control session (a
@@ -503,6 +632,14 @@ if (import.meta.main) {
         },
       });
     }
+    // The mail picker's read-only browse answers from a fixture mailbox, so
+    // the picker renders populated; saving still needs a worker.
+    if (request.method === 'POST' && url.pathname === '/dashboard/dispositions') {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      if (body.action === 'browse_mail_scope') {
+        return Response.json(mailPickerBrowseFixture(body.draft as OlympusMailScopeDraft));
+      }
+    }
     // Every other control POST (connect, sync now, disconnect, embedding
     // priority) needs a worker. Say so in the words the page prints, instead
     // of a bare "Request failed." that reads as a broken credential.
@@ -517,9 +654,17 @@ if (import.meta.main) {
     }
     const previewUnlocked = url.searchParams.has('controls')
       || /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
+    // The Gmail mail picker, served as the worker serves /dashboard/dispositions
+    // (?approved shows a saved scope instead of the defaults).
+    if (url.pathname === '/mail-picker' || url.pathname === '/dashboard/dispositions') {
+      return new Response(renderMailPickerPreview(url.searchParams.has('approved')), {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      });
+    }
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'models', 'first-install', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'first-install', 'gmail-scope-pending', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
@@ -567,7 +712,8 @@ if (import.meta.main) {
   },
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-  console.log('  states: /models /first-install /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  states: /models /first-install /gmail-scope-pending /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
 }

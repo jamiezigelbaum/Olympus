@@ -7145,6 +7145,147 @@ function closeSqliteStore(db, options = {}) {
   db.close();
 }
 
+// src/core/sender-rules.ts
+function validDomain(raw) {
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
+  }
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
+}
+function senderAddress2(from) {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
+    return;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
+    return;
+  if (scanned.angleOpens === 1) {
+    const open3 = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open3 + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open3 + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  const text = from.slice(0, MAX_FROM_HEADER_CHARS);
+  const found = [];
+  for (let at = text.indexOf("@");at >= 0; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text.length && DOMAIN_CHAR.test(text[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text.slice(at + 1, end));
+    if (domain)
+      found.push({ address: `${text.slice(start, at).toLowerCase()}@${domain}`, domain });
+  }
+  return found;
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
+}
+function senderMatchesRule(from, rule) {
+  const normalized = rule.trim().toLowerCase();
+  if (!normalized.includes("@"))
+    return false;
+  const sender = senderAddress2(from);
+  return sender !== undefined && addressMatches(sender, normalized);
+}
+function ownerSenderRuleMatches(from, value, raises) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized)
+    return false;
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
+  const sender = senderAddress2(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+}
+var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
+var init_sender_rules = __esm(() => {
+  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+  DOMAIN_CHAR = /[a-z0-9.-]/i;
+});
+
 // src/workers/classification/tier-classifier.ts
 function tierRank(tier) {
   return TIER_RANK[tier];
@@ -7447,7 +7588,7 @@ function ownerRuleMatches(rule, signals, provider) {
     case "label":
       return (signals.labels ?? []).some((label) => label.trim().toLowerCase() === value);
     case "sender":
-      return (signals.sender ?? "").trim().toLowerCase().includes(value);
+      return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
   }
 }
 function detectorReasons(signals) {
@@ -7485,6 +7626,7 @@ var TIER_CLASSIFIER_VERSION = "2026-09-23.p1a", TIER_KEYS, TIER_RANK, UNDECIDED_
 var init_tier_classifier = __esm(() => {
   init_sensitivity_map();
   init_engine();
+  init_sender_rules();
   TIER_KEYS = ["public", "private", "secure", "secrets"];
   TIER_RANK = {
     public: 0,
@@ -8680,7 +8822,8 @@ function normalizeClassificationOptions(options) {
   return {
     baselineTrustTier: options.baselineTrustTier ?? "S3",
     baselineTrustDomain: options.baselineTrustDomain ?? "internal",
-    ...options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}
+    ...options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {},
+    ...options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}
   };
 }
 function classifyConnectorStoreItem(item, classification, placement, storeTrustDomain) {
@@ -8689,6 +8832,12 @@ function classifyConnectorStoreItem(item, classification, placement, storeTrustD
   const classified = classifyItemTier(classificationInputFromRawItem(item), {
     ...classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}
   });
+  if (classified.tier === "S5") {
+    return buildSourceSensitivity({ trustTier: "S5", trustDomain: "secure_local" });
+  }
+  if (classification.ownerRules?.some((rule) => (rule.tier === "secure" || rule.tier === "secrets") && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
+    return buildSourceSensitivity({ trustTier: "S4", trustDomain: "secure_local" });
+  }
   if (classified.decidedBy === "sensitivity_map") {
     return buildSourceSensitivity({
       trustTier: classified.tier,
@@ -8709,6 +8858,14 @@ function classifyConnectorStoreItem(item, classification, placement, storeTrustD
 }
 function trustTierRank(tier) {
   return SOURCE_TRUST_TIERS.indexOf(tier);
+}
+function placementSignalsFromRawItem(item) {
+  const sender = metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
+  const labels = item.metadata["labels"];
+  return {
+    ...sender ? { sender } : {},
+    ...Array.isArray(labels) ? { labels: labels.filter((label) => typeof label === "string") } : {}
+  };
 }
 function classificationInputFromRawItem(item) {
   const subject = metadataString(item.metadata, "subject");
@@ -10681,6 +10838,19 @@ var init_local_index = __esm(() => {
           sourceTextReturned: false
         }
       };
+    }
+    itemStoredContent(identity) {
+      const row = this.db.query(`
+      SELECT authored_at, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      if (!row || row.tombstoned === 1)
+        return;
+      return { chunkCount: row.chunk_count, ...row.authored_at ? { authoredAt: row.authored_at } : {} };
     }
     itemPresence(identity) {
       const row = this.db.query(`
@@ -15271,6 +15441,32 @@ var init_privacy_language = __esm(() => {
   };
 });
 
+// src/core/source-scope-approval.ts
+var init_source_scope_approval = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+});
+
+// src/core/mail-source-scope.ts
+function gmailAfterBound(input) {
+  const cutoffSeconds = input.contentAfterMs !== undefined ? Math.floor(input.contentAfterMs / 1000) - 1 : undefined;
+  const watermarkSeconds = input.watermarkMs !== undefined ? Math.floor(input.watermarkMs / 1000) : undefined;
+  const seconds = cutoffSeconds === undefined ? watermarkSeconds : watermarkSeconds === undefined ? cutoffSeconds : Math.max(cutoffSeconds, watermarkSeconds);
+  return seconds !== undefined && seconds > 0 ? `after:${seconds}` : undefined;
+}
+function gmailBeforeBound(contentAfterMs) {
+  return `before:${Math.floor(contentAfterMs / 1000)}`;
+}
+var GMAIL_SCOPE_SENDER_SAMPLE = 100, GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+var init_mail_source_scope = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_source_scope_approval();
+  GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -15338,6 +15534,8 @@ class GoogleGmailSourceConnector {
   apiBaseUrl;
   defaultMaxMessages;
   query;
+  scope;
+  now;
   requestBudget;
   provenance;
   maxRetries;
@@ -15351,6 +15549,7 @@ class GoogleGmailSourceConnector {
   attachmentsNotIngested = 0;
   itemsSkippedOtp = 0;
   itemsSkippedCategory = 0;
+  itemsSkippedStored = 0;
   ingestFilterOptions;
   itemsByLocalId = new Map;
   constructor(options = {}) {
@@ -15370,7 +15569,19 @@ class GoogleGmailSourceConnector {
     this.maxRetries = options.maxRetries;
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
-    this.ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    this.scope = options.scope;
+    this.now = options.now ?? (() => Date.now());
+    const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
+    this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
+    if (this.scope?.skippedLabelIds?.length) {
+      this.ingestFilterOptions = {
+        ...this.ingestFilterOptions,
+        skipCategories: [
+          ...this.ingestFilterOptions.skipCategories ?? ["CATEGORY_PROMOTIONS"],
+          ...this.scope.skippedLabelIds
+        ]
+      };
+    }
   }
   async authenticate() {
     await this.clientForRequest();
@@ -15379,15 +15590,23 @@ class GoogleGmailSourceConnector {
     const client = await this.clientForRequest();
     let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
-    const watermarkMs = resume.watermarkMs;
-    const query = this.queryForWatermark(watermarkMs);
-    let highWaterMs = resume.highWaterMs;
-    let pageToken = resume.pageToken;
+    const cutoffMs = this.scope?.contentAfterMs;
+    const metadataLeg = resume.phase === "metadata" && cutoffMs !== undefined;
+    const staleLeg = resume.phase === "metadata" && !metadataLeg;
+    const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
+    const query = metadataLeg ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
+    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
+    const nowMs = this.now();
+    const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
+    let pageToken = staleLeg ? undefined : resume.pageToken;
     const requestedPageTokens = new Set;
-    while (remaining > 0) {
+    let listPages = 0;
+    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken)
         assertNewProviderPage2(requestedPageTokens, pageToken);
       this.providerRequests += 1;
+      listPages += 1;
       const page = await client.listMessages({
         maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
         ...pageToken ? { pageToken } : {},
@@ -15396,21 +15615,41 @@ class GoogleGmailSourceConnector {
       const listed = page.messages.filter((message) => message.id);
       const items = [];
       let messagesExamined = 0;
+      let messagesFetched = 0;
       for (const message of listed) {
-        if (messagesExamined >= remaining)
+        if (messagesFetched >= remaining)
           break;
         messagesExamined += 1;
+        const stored = this.scope?.storedItem?.(message.id);
+        if (stored && (metadataLeg || stored.hasContent)) {
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        messagesFetched += 1;
         this.providerRequests += 1;
-        const item = rawItemFromGmailMessage(await client.getMessage(message.id), this.account);
+        const fetched = await client.getMessage(message.id, metadataLeg ? { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
+        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
+        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
+        if (metadataLeg && !beforeCutoff)
+          continue;
+        if (beforeCutoff && stored) {
+          this.itemsSkippedStored += 1;
+          continue;
+        }
+        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
         this.attachmentsNotIngested += metadataCount(item.metadata, "attachmentsNotIngested");
         const internalDateMs = internalDateNumber(item.metadata);
-        if (internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
-          highWaterMs = internalDateMs;
+        if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
+          highWaterMs = Math.min(internalDateMs, nowMs);
         }
         const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
         const from = metadataString2(item.metadata, "from");
+        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
+          this.itemsSkippedCategory += 1;
+          continue;
+        }
         const body = item.content.kind === "text" ? item.content.text : metadataString2(item.metadata, "snippet");
         const skip = classifyEmailIngestSkip({
           ...subject !== undefined ? { subject } : {},
@@ -15428,22 +15667,36 @@ class GoogleGmailSourceConnector {
         this.itemsByLocalId.set(item.identity.localItemId, item);
         items.push(item);
       }
-      remaining -= messagesExamined;
+      remaining -= messagesFetched;
       pageToken = page.nextPageToken;
       const pageTruncated = messagesExamined < listed.length;
-      const done = !pageToken && !pageTruncated;
-      const promoted = highWaterMs ?? watermarkMs;
-      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : encodeGmailCursor({
+      const legDone = !pageToken && !pageTruncated;
+      const enterMetadataLeg = legDone && splitsAtCutoff;
+      const done = legDone && !enterMetadataLeg;
+      const promoted = promotedWatermark({
+        highWaterMs,
+        watermarkMs,
+        ...this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {},
+        ...cutoffMs !== undefined ? { cutoffMs } : {},
+        nowMs
+      });
+      const nextCursor = done ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {}) : enterMetadataLeg ? encodeGmailCursor({
+        phase: "metadata",
+        ...highWaterMs !== undefined ? { highWaterMs } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
+      }) : encodeGmailCursor({
         ...watermarkMs !== undefined ? { watermarkMs } : {},
         ...highWaterMs !== undefined ? { highWaterMs } : {},
-        ...pageToken ? { pageToken } : {}
+        ...pageToken ? { pageToken } : {},
+        ...metadataLeg ? { phase: "metadata" } : {},
+        ...startedMs !== undefined ? { startedMs } : {}
       });
       yield {
         items,
         ...nextCursor ? { nextCursor } : {},
         done
       };
-      if (done || !pageToken || items.length === 0)
+      if (done || !pageToken || items.length === 0 && messagesFetched > 0 || pageTruncated)
         break;
     }
   }
@@ -15463,11 +15716,15 @@ class GoogleGmailSourceConnector {
       attachmentBytesDeclared: this.attachmentBytesDeclared,
       attachmentsNotIngested: this.attachmentsNotIngested,
       itemsSkippedOtp: this.itemsSkippedOtp,
-      itemsSkippedCategory: this.itemsSkippedCategory
+      itemsSkippedCategory: this.itemsSkippedCategory,
+      itemsSkippedStored: this.itemsSkippedStored
     };
   }
   requestBudgetStatus() {
     return this.requestBudget?.status();
+  }
+  async apiClientForTooling() {
+    return this.clientForRequest();
   }
   classificationSignals(item) {
     const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
@@ -15507,10 +15764,20 @@ class GoogleGmailSourceConnector {
     });
   }
   queryForWatermark(watermarkMs) {
+    if (this.scope) {
+      return this.scopedQuery(gmailAfterBound({ contentAfterMs: this.scope.contentAfterMs, watermarkMs }));
+    }
     if (watermarkMs === undefined)
       return this.query;
     const after = `after:${Math.floor(watermarkMs / 1000)}`;
     return this.query ? `${after} (${this.query})` : after;
+  }
+  metadataLegQuery(cutoffMs) {
+    return this.scopedQuery(gmailBeforeBound(cutoffMs));
+  }
+  scopedQuery(bound) {
+    const parts = [bound, this.scope?.baseQuery, this.query ? `(${this.query})` : undefined].filter((part) => Boolean(part?.trim()));
+    return parts.length > 0 ? parts.join(" ") : undefined;
   }
 }
 function budgetedGmailApiClient(inner, budget, provenance) {
@@ -15519,14 +15786,37 @@ function budgetedGmailApiClient(inner, budget, provenance) {
       budget.reserve(provenance);
       return inner.listMessages(request);
     },
-    getMessage(id) {
+    getMessage(id, options) {
       budget.reserve(provenance);
-      return inner.getMessage(id);
-    }
+      return inner.getMessage(id, options);
+    },
+    ...inner.listLabels ? {
+      listLabels() {
+        budget.reserve(provenance);
+        return inner.listLabels();
+      }
+    } : {},
+    ...inner.getLabel ? {
+      getLabel(id) {
+        budget.reserve(provenance);
+        return inner.getLabel(id);
+      }
+    } : {}
   };
 }
+function promotedWatermark(input) {
+  const candidates = [
+    input.highWaterMs,
+    input.watermarkMs,
+    input.floorMs,
+    input.cutoffMs !== undefined ? input.cutoffMs - 1000 : undefined
+  ].filter((value) => value !== undefined && Number.isFinite(value));
+  if (candidates.length === 0)
+    return;
+  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
+}
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -15541,13 +15831,18 @@ function decodeGmailCursor(value) {
     const parsed = JSON.parse(Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), "base64url").toString("utf8"));
     const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
     const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
+    const startedMs = decodeCursorEpochMs(parsed.startedMs);
     if (parsed.pageToken !== undefined && (typeof parsed.pageToken !== "string" || !parsed.pageToken.trim() || parsed.pageToken.length > MAX_GMAIL_CURSOR_LENGTH)) {
       throw new Error("invalid");
     }
+    if (parsed.phase !== undefined && parsed.phase !== "metadata")
+      throw new Error("invalid");
     return {
       ...watermarkMs !== undefined ? { watermarkMs } : {},
       ...highWaterMs !== undefined ? { highWaterMs } : {},
-      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {}
+      ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
+      ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
+      ...startedMs !== undefined ? { startedMs } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");
@@ -15614,13 +15909,25 @@ class RestGmailApiClient {
         id: stringValue2(item.id),
         threadId: stringValue2(item.threadId)
       })).filter((item) => item.id) : [],
-      ...optionalStringProp2(record, "nextPageToken")
+      ...optionalStringProp2(record, "nextPageToken"),
+      ...typeof record.resultSizeEstimate === "number" && Number.isFinite(record.resultSizeEstimate) ? { resultSizeEstimate: Math.max(0, Math.floor(record.resultSizeEstimate)) } : {}
     };
   }
-  async getMessage(id) {
-    const params = new URLSearchParams({ format: "full" });
+  async getMessage(id, options = {}) {
+    const params = new URLSearchParams({ format: options.format ?? "full" });
+    if (options.format === "metadata") {
+      for (const header of options.metadataHeaders ?? [])
+        params.append("metadataHeaders", header);
+    }
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
+  }
+  async listLabels() {
+    const record = asRecord5(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord5(item, "Gmail label"))).filter((label) => label.id) : [];
+  }
+  async getLabel(id) {
+    return gmailLabelFromJson(asRecord5(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
   }
   async getJson(path) {
     let attempt = 0;
@@ -15661,12 +15968,23 @@ function gmailRetryDelayMs(response, attempt) {
   }
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5000);
 }
-function rawItemFromGmailMessage(message, account) {
+function gmailLabelFromJson(record) {
+  const type = record.type === "system" || record.type === "user" ? record.type : undefined;
+  return {
+    id: stringValue2(record.id),
+    name: stringValue2(record.name),
+    ...type ? { type } : {},
+    ...typeof record.messagesTotal === "number" && Number.isFinite(record.messagesTotal) ? { messagesTotal: Math.max(0, Math.floor(record.messagesTotal)) } : {}
+  };
+}
+function rawItemFromGmailMessage(message, account, options = {}) {
   const headers = headersFromPart(message.payload);
   const subject = headers.get("subject") ?? "(no subject)";
-  const from = headers.get("from") ?? "";
+  const rawFrom = headers.get("from") ?? "";
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
   const date = parsedDate(headers.get("date")) ?? internalDateIso(message.internalDate);
-  const text = extractMessageText(message);
+  const metadataOnly = options.metadataOnly === true;
+  const text = metadataOnly ? "" : extractMessageText(message);
   const attachments = gmailAttachmentInventory(message.payload);
   const fetchedAt = new Date().toISOString();
   return {
@@ -15680,7 +15998,7 @@ function rawItemFromGmailMessage(message, account) {
       ...message.historyId ? { sourceVersion: message.historyId } : {}
     },
     mimeType: "message/rfc822",
-    content: text.trim() ? { kind: "text", text } : { kind: "metadata_only" },
+    content: !metadataOnly && text.trim() ? { kind: "text", text } : { kind: "metadata_only" },
     metadata: Object.freeze({
       title: subject,
       subject,
@@ -15688,13 +16006,14 @@ function rawItemFromGmailMessage(message, account) {
       ...date ? { authoredAt: date } : {},
       ...message.internalDate ? { internalDate: message.internalDate } : {},
       ...message.historyId ? { historyId: message.historyId } : {},
-      ...message.snippet ? { snippet: message.snippet } : {},
+      ...message.snippet && !metadataOnly ? { snippet: message.snippet } : {},
+      ...metadataOnly ? { mailScopeContent: "metadata_only" } : {},
       labels: message.labelIds ?? [],
       attachmentCount: attachments.count,
       attachmentBytesDeclared: attachments.bytes,
       attachmentsNotIngested: attachments.count,
       locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
-      contentHash: hashString4(`${message.historyId ?? ""}:${text}`)
+      contentHash: hashString4(`${message.historyId ?? ""}:${metadataOnly ? "metadata_only" : text}`)
     }),
     fetchedAt
   };
@@ -15805,12 +16124,15 @@ function safeProviderDetail2(value) {
 function hashString4(value) {
   return createHash9("sha256").update(value).digest("hex");
 }
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000;
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
 var init_gmail = __esm(() => {
+  init_mail_source_scope();
+  init_sender_rules();
   init_credential_broker();
   init_ingest_filter();
   init_classification();
   init_request_budget();
+  GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Date"];
 });
 
 // src/workers/google-connectors/corpora.ts
@@ -16317,12 +16639,14 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
+var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_connector_store();
   init_embeddings();
   init_classification();
   init_gmail();
   init_gmail_live_control();
+  GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 });
 
 // src/workers/google-connectors/drive-live-control.ts
@@ -17802,6 +18126,9 @@ var TIER_NAMES = {
 // src/workers/dashboard/index.ts
 init_vocabulary();
 
+// src/workers/email-source/index.ts
+init_mail_source_scope();
+
 // src/core/dashboard-launch.ts
 import { createHash as createHash10, randomBytes as randomBytes2 } from "node:crypto";
 var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
@@ -18200,6 +18527,7 @@ init_source_ingestion_exclusions();
 
 // src/workers/source-dispositions.ts
 init_operation_error();
+init_mail_source_scope();
 init_source_ingestion_exclusions();
 var NOT_EDITABLE_BY_PATH_REASON = "This source names folders by identity rather than by path, " + "so the folder tree cannot edit its rules.";
 
@@ -19461,13 +19789,22 @@ init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
 
-// src/core/source-scope-approval.ts
-init_atomic_file();
-init_file_lease();
-init_operation_error();
-
 // src/workers/source-scope-runtime.ts
+init_source_scope_approval();
 init_connected_handles();
+init_mail_source_scope();
+
+// src/workers/google-connectors/gmail-scope-browser.ts
+init_mail_source_scope();
+init_gmail();
+init_request_budget();
+var GMAIL_PICKER_DAILY_REQUEST_BUDGET = 4 * GMAIL_SCOPE_BROWSE_MAX_REQUESTS;
+var SKIPPABLE_SYSTEM_LABELS = new Set(["SENT", "CHAT"]);
+
+// src/workers/email-source/server.ts
+init_request_budget();
+init_gmail();
+init_mail_source_scope();
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();

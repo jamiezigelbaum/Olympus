@@ -223,7 +223,7 @@ export function dashboardSourceProgress(
       || source.scope_selection.ingestion_enabled === false);
   if (scopeInactive) {
     const stateWords = source.scope_selection!.status === 'scope_pending'
-      ? 'Waiting · choose folders to start'
+      ? `Waiting · choose ${source.scope_selection!.kind === 'mail' ? 'mail' : 'folders'} to start`
       : 'Waiting · ingestion is off';
     return {
       phases: bare.map((phase) => ({

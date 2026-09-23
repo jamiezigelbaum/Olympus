@@ -183,6 +183,14 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
   internalEmbeddingProvider?: SourceEmbeddingProvider;
   secureEmbeddingProvider?: SourceEmbeddingProvider;
   config?: GmailLiveSyncConfig;
+  /**
+   * The mail scope approval this lane's cursor is bound to, the same way the
+   * Drive lane binds to its folder scope: the store cursor and the scheduler
+   * checkpoint are keyed to it, so a new revision (or a reconnected account)
+   * starts a fresh traversal under the new query instead of resuming the old
+   * one's watermark. The compiled query itself rides `scope`.
+   */
+  scopeApproval?: { generation: string; revision: string };
 }
 
 export function createGmailConnectorStoreSyncHandler(
@@ -191,12 +199,32 @@ export function createGmailConnectorStoreSyncHandler(
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
+  const connectorId = gmailCursorConnectorId(account, options.scopeApproval);
+  const scopeTag = options.scopeApproval ? connectorId.slice(GMAIL_SCOPED_CONNECTOR_PREFIX.length) : undefined;
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error('Gmail secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
-  const classification = gmailConnectorStoreClassification(
-    options.sensitivityMap ?? loadGoogleSensitivityMap(env),
-  );
+  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
+  const ownerRules = options.scope?.ownerTierRules ?? [];
+  const classification = gmailConnectorStoreClassification(sensitivityMap, ownerRules);
+  // The recorded four-tier decision sees the same owner rules, so the ledger
+  // names the rule (metadata:owner_rule:sender:<id>:force) as the reason.
+  const tierClassification = {
+    ...(sensitivityMap ? { sensitivityMap } : {}),
+    ...(ownerRules.length > 0 ? { rules: ownerRules } : {}),
+  };
+  // Under a scope, mail either store already holds is never re-observed: a
+  // re-read could only swap a stored body for a metadata-only row or re-tier
+  // an item whose vectors exist, and both would discard existing chunks and
+  // embeddings (owner rule: nothing throws away existing embeddings).
+  const storedItem = (providerItemId: string) => {
+    const identity = { family: 'email' as const, provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
+    const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)]
+      .filter((copy): copy is NonNullable<typeof copy> => copy !== undefined);
+    if (copies.length === 0) return undefined;
+    return { hasContent: copies.some((copy) => copy.chunkCount > 0) };
+  };
+  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
   const buildConnector = (overrides: {
     maxMessages?: number;
     query?: string;
@@ -204,6 +232,7 @@ export function createGmailConnectorStoreSyncHandler(
   } = {}) =>
     new GoogleGmailSourceConnector({
       ...options,
+      ...(scope ? { scope } : {}),
       ...(overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {}),
       ...(overrides.query ? { query: overrides.query } : {}),
       // Stated last and unconditionally, so it is a property of THIS run and
@@ -222,10 +251,11 @@ export function createGmailConnectorStoreSyncHandler(
     // One provider traversal, shared with the second store. The two stores
     // differ only in the trust domain the spine accepts, so the second listing
     // pass was pure duplicate provider cost.
-    const traversal = sharedTraversal(input.connector);
+    const traversal = sharedTraversal(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
+      tierClassification,
       ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
       ...(input.cursor ? { cursor: input.cursor } : {}),
       ...(input.reconcile
@@ -279,9 +309,9 @@ export function createGmailConnectorStoreSyncHandler(
     async pull(request: GmailStorePullRequest = {}): Promise<GmailConnectorStoreTaskOutcome> {
       const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
       const warnings: string[] = [];
-      const resume = decodeCheckpoint(request.checkpoint);
+      const resume = decodeCheckpoint(request.checkpoint, scopeTag);
       const headStoreCursor = options.internalStore
-        .lastCompletedSyncRun(GMAIL_PROVIDER)?.cursor;
+        .lastCompletedSyncRun(connectorId)?.cursor;
       let headResume = resume.head ?? (isGmailConnectorCursor(headStoreCursor) ? headStoreCursor : undefined);
       if (resume.headRejected) warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
@@ -317,7 +347,10 @@ export function createGmailConnectorStoreSyncHandler(
         traversal: connector.traversalStatus(),
         usage: connector.requestBudgetStatus(),
         resumed: headResume !== undefined,
-        checkpoint: encodeCheckpoint({ ...(headCheckpoint ? { head: headCheckpoint } : {}) }),
+        checkpoint: encodeCheckpoint({
+          ...(headCheckpoint ? { head: headCheckpoint } : {}),
+          ...(scopeTag ? { scope: scopeTag } : {}),
+        }),
         warnings,
       });
     },
@@ -388,12 +421,12 @@ async function runStore(input: {
  * recording is faithful even when the store stops early on its own maxItems
  * bound, because the second store applies the same bound to the same pages.
  */
-function sharedTraversal(connector: SourceConnector): SourceConnector {
+function sharedTraversal(connector: SourceConnector, connectorId: string): SourceConnector {
   const pages: SourceConnectorListPage[] = [];
   let recorded = false;
   let failed = false;
   return {
-    id: connector.id,
+    id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
@@ -426,6 +459,28 @@ function sharedTraversal(connector: SourceConnector): SourceConnector {
 
 interface GmailCheckpointEnvelope {
   head?: string;
+  /** Digest of the mail scope approval the head cursor was walked under. */
+  scope?: string;
+}
+
+const GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
+
+/**
+ * The store's sync-run key. Unscoped lanes keep the provider id; a scoped lane
+ * keys its cursor to the approval, exactly as the Drive lane does, so the
+ * store row a new revision falls back to is its own and never the previous
+ * scope's watermark.
+ */
+function gmailCursorConnectorId(
+  account: string,
+  scope: { generation: string; revision: string } | undefined,
+): string {
+  if (!scope) return GMAIL_PROVIDER;
+  const digest = createHash('sha256')
+    .update(`${account}\u0000${scope.generation}\u0000${scope.revision}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest}`;
 }
 
 interface DecodedGmailCheckpoint extends GmailCheckpointEnvelope {
@@ -445,22 +500,28 @@ function encodeCheckpoint(envelope: GmailCheckpointEnvelope): string | null {
  * Validate the provider cursor while accepting the previous two-field envelope
  * long enough to preserve its `head` member across the repository cutover.
  */
-function decodeCheckpoint(value: string | undefined): DecodedGmailCheckpoint {
+function decodeCheckpoint(value: string | undefined, scopeTag?: string): DecodedGmailCheckpoint {
   const trimmed = value?.trim();
   if (!trimmed) return {};
   if (trimmed.length > MAX_CHECKPOINT_CHARS || !trimmed.startsWith(CHECKPOINT_PREFIX)) {
-    // A bare provider cursor from before the envelope existed remains valid.
-    if (isGmailConnectorCursor(trimmed)) return { head: trimmed };
+    // A bare provider cursor from before the envelope existed remains valid,
+    // but only for an unscoped lane: it was walked under no approval.
+    if (isGmailConnectorCursor(trimmed)) return scopeTag ? {} : { head: trimmed };
     return { headRejected: true };
   }
-  let parsed: { head?: unknown };
+  let parsed: { head?: unknown; scope?: unknown };
   try {
     parsed = JSON.parse(
       Buffer.from(trimmed.slice(CHECKPOINT_PREFIX.length), 'base64url').toString('utf8'),
-    ) as { head?: unknown };
+    ) as { head?: unknown; scope?: unknown };
   } catch {
     return { headRejected: true };
   }
+  // A checkpoint walked under another scope revision (or none) is not this
+  // traversal's resume point. Not a rejection: a changed scope starts over by
+  // design, so it carries no warning.
+  const checkpointScope = typeof parsed.scope === 'string' ? parsed.scope : undefined;
+  if (checkpointScope !== scopeTag) return {};
   const head = typeof parsed.head === 'string' ? parsed.head : undefined;
   return {
     ...(head !== undefined && isGmailConnectorCursor(head) ? { head } : {}),

@@ -22,6 +22,20 @@ export const OLYMPUS_DASHBOARD_VIEWS = [
 export type OlympusDashboardView = typeof OLYMPUS_DASHBOARD_VIEWS[number];
 
 export type OlympusFolderScopeSourceId = 'google_drive.docs' | 'dropbox.files';
+/** The mail source whose scope is a time window, categories, labels and sender rules. */
+export type OlympusMailScopeSourceId = 'gmail.email';
+
+export type OlympusMailScopeWindow = '6m' | '1y' | '2y' | '5y' | 'all';
+export type OlympusMailScopeCategory = 'primary' | 'social' | 'promotions' | 'updates' | 'forums';
+
+/** The owner's mail scope choices, as the picker edits and submits them. */
+export interface OlympusMailScopeDraft {
+  window: OlympusMailScopeWindow;
+  skipped_categories: OlympusMailScopeCategory[];
+  skipped_labels: Array<{ id: string; name: string }>;
+  always_private_senders: string[];
+  skip_senders: string[];
+}
 
 /** Opaque provider folder identity. Names are returned only by an explicit browser request. */
 export interface OlympusFolderScopeNode {
@@ -153,6 +167,20 @@ export type OlympusDashboardControlParams =
       whole_account: boolean;
       /** Must be true when whole_account is true; ignored otherwise. */
       explicit_whole_account_confirmation: boolean;
+    }
+  | {
+      /** Read-only: labels, categories, sender suggestions and the estimate for a draft. */
+      action: 'browse_mail_scope';
+      source_id: OlympusMailScopeSourceId;
+      draft: OlympusMailScopeDraft;
+    }
+  | {
+      /** The only action that turns a connected mailbox into an ingestion lane. */
+      action: 'approve_mail_scope_and_start';
+      source_id: OlympusMailScopeSourceId;
+      account_generation: string;
+      expected_scope_revision: string;
+      scope: OlympusMailScopeDraft;
     }
   | {
       action: 'set_embedding_priority';

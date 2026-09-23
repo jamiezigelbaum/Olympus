@@ -31,6 +31,7 @@ import { dirname } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type {
   RawItem,
+  SourceClassificationSignals,
   SourceConnector,
   SourceConnectorListOptions,
   SourceConnectorListPage,
@@ -50,7 +51,7 @@ import {
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import { TierLedger, tierLedgerPathForStore } from '../classification/tier-ledger.ts';
-import { classifyContentTier } from '../classification/tier-classifier.ts';
+import { classifyContentTier, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -704,6 +705,14 @@ export interface ConnectorStoreClassificationOptions {
   baselineTrustTier?: SourceTrustTier;
   baselineTrustDomain?: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
+  /**
+   * Owner tier rules this lane's placement honours. Only RAISING rules
+   * (Private, Secrets) move placement: an item a rule makes Private is placed
+   * in the secure_local store, never in a store that embeds with a cloud
+   * model. The same rules go to the recorded decision (tierClassification),
+   * so the ledger names the rule as the reason.
+   */
+  ownerRules?: readonly OwnerTierRule[];
 }
 
 export interface ConnectorStoreFullSnapshotScope {
@@ -2192,6 +2201,30 @@ export class LocalConnectorStore {
         sourceTextReturned: false,
       },
     };
+  }
+
+  /**
+   * Whether an ACTIVE copy of this item is held, how many chunks it has (0
+   * for a metadata-only row) and when it was authored. Lets a connector leave
+   * held material untouched instead of re-observing it in a way that would
+   * replace its body or re-tier it. Undefined when absent or tombstoned.
+   */
+  itemStoredContent(identity: SourceItemIdentity): { chunkCount: number; authoredAt?: string } | undefined {
+    const row = this.db.query(`
+      SELECT authored_at, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { authored_at: string | null; tombstoned: number; chunk_count: number } | null;
+    if (!row || row.tombstoned === 1) return undefined;
+    return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
   itemPresence(identity: SourceItemIdentity): ConnectorStoreItemPresence {
@@ -8122,6 +8155,7 @@ interface NormalizedConnectorStoreClassification {
   baselineTrustTier: SourceTrustTier;
   baselineTrustDomain: SourceTrustDomain;
   sensitivityMap?: SensitivityMap;
+  ownerRules?: readonly OwnerTierRule[];
 }
 
 function normalizeClassificationOptions(
@@ -8132,6 +8166,7 @@ function normalizeClassificationOptions(
     baselineTrustTier: options.baselineTrustTier ?? 'S3',
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
     ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
+    ...(options.ownerRules?.length ? { ownerRules: [...options.ownerRules] } : {}),
   };
 }
 
@@ -8175,6 +8210,18 @@ function classifyConnectorStoreItem(
   const classified = classifyItemTier(classificationInputFromRawItem(item), {
     ...(classification.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : {}),
   });
+  // The S5 floor outranks every rule: a secret is tombstoned, never placed.
+  if (classified.tier === 'S5') {
+    return buildSourceSensitivity({ trustTier: 'S5', trustDomain: 'secure_local' });
+  }
+  // A raising owner rule (e.g. the mail scope's "always Private" senders)
+  // places the item in the secure_local store, through the same matcher the
+  // recorded decision uses. Never a lowering: that is phase P1b's routing.
+  if (classification.ownerRules?.some((rule) =>
+    (rule.tier === 'secure' || rule.tier === 'secrets')
+    && ownerRuleMatches(rule, placementSignalsFromRawItem(item), item.identity.provider))) {
+    return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+  }
   if (classified.decidedBy === 'sensitivity_map') {
     return buildSourceSensitivity({
       trustTier: classified.tier,
@@ -8207,6 +8254,16 @@ function classifyConnectorStoreItem(
 /** Ordinal position in the declared tier ladder; `S4+` sorts above `S4`. */
 function trustTierRank(tier: SourceTrustTier): number {
   return SOURCE_TRUST_TIERS.indexOf(tier);
+}
+
+/** The name-level facts an owner rule can match, read from the stored item. */
+function placementSignalsFromRawItem(item: RawItem): SourceClassificationSignals {
+  const sender = metadataString(item.metadata, 'sender') ?? metadataString(item.metadata, 'from');
+  const labels = item.metadata['labels'];
+  return {
+    ...(sender ? { sender } : {}),
+    ...(Array.isArray(labels) ? { labels: labels.filter((label): label is string => typeof label === 'string') } : {}),
+  };
 }
 
 function classificationInputFromRawItem(item: RawItem): ClassifyItemTierInput {

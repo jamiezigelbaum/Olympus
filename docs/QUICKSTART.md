@@ -459,6 +459,32 @@ the listing; the loading indicator stays visible while requests are in flight.
 Unselected folders stay out. Entire-account ingestion requires an explicit
 selection and confirmation; a default configuration is not permission.
 
+Gmail works the same way: **Connect** only connects the mailbox, and the card
+reads Waiting, *waiting for mail selection*, until you open **Choose mail** and
+press **Save scope and start**. Nothing is read before that, not even
+metadata. The picker offers how far back Olympus stores the body of your mail
+(the last 2 years by default; for older mail only the subject, sender, date and
+labels are stored, never the body), which Gmail categories and labels to skip
+(Promotions and Social are skipped by default), and "always Private" and "skip"
+sender lists seeded from a header-only sample of your recent mail. New mail from
+a skipped sender is never read. New mail from an always-Private sender is
+classified Private (S4): it is stored only in Gmail's secure_local store and
+embedded only by your private model, never by a cloud model. Mail Olympus
+already holds is never removed, re-read or re-tiered by a scope change, so its
+existing chunks and embeddings are kept. Before anything runs it shows an
+estimate: Gmail's approximate message counts and an upper bound on embedding
+cost (there is no sync-time estimate); opening the
+picker spends at most 108 Gmail API requests, charged to the picker's own
+allowance of 432 requests a day, never to the sync lane's budget. Saving a
+changed scope starts a fresh traversal under the new query that skips mail
+already held; saving an unchanged scope does nothing. The approval is stored in
+`mail-source-scopes.json` beside the connected-handle registry.
+
+Operators can still narrow Gmail with the hidden
+`OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting (Gmail search syntax). It is an
+override on top of the approved scope, never a replacement: the lane ANDs it
+with the picker's query, so it can only read less.
+
 All seven declared sources use the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or

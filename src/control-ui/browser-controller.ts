@@ -6,6 +6,7 @@ import type {
   OlympusFolderScopeBrowseResult,
   OlympusFolderScopeNode,
   OlympusFolderScopeSourceId,
+  OlympusMailScopeDraft,
   OlympusSourceDispositionState,
 } from '../control-ui-contract.ts';
 
@@ -1064,6 +1065,248 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     }
   }
 
+  // Mail scope (Gmail). Same contract as the folder picker above: nothing
+  // loads from the provider except on an explicit browse, nothing starts
+  // before the owner presses Save, and a changed account or revision makes
+  // the draft invalid rather than silently saving over someone else's scope.
+  type MailDraftState = {
+    generation: string;
+    revision: string;
+    loaded: boolean;
+    loadAttempted: boolean;
+    loading: boolean;
+    busy: boolean;
+    invalid: boolean;
+    edited: boolean;
+  };
+  const mailDrafts = new Map<HTMLFormElement, MailDraftState>();
+
+  function mailState(form: HTMLFormElement): MailDraftState {
+    let state = mailDrafts.get(form);
+    if (!state) {
+      state = {
+        generation: form.dataset.accountGeneration || '', revision: form.dataset.scopeRevision || '',
+        loaded: false, loadAttempted: false, loading: false, busy: false, invalid: false, edited: false,
+      };
+      mailDrafts.set(form, state);
+    }
+    return state;
+  }
+
+  function mailAllowed(form: HTMLFormElement, state: MailDraftState): boolean {
+    return canWrite && form.dataset.connected === 'true' && !state.busy && !state.invalid;
+  }
+
+  function mailLines(form: HTMLFormElement, selector: string): string[] {
+    const value = form.querySelector<HTMLTextAreaElement>(selector)?.value || '';
+    return value.split(/[\n,]+/).map((line) => line.trim()).filter((line) => line !== '');
+  }
+
+  function mailSavedSkippedLabels(form: HTMLFormElement): Array<{ id: string; name: string }> {
+    try {
+      const parsed = JSON.parse(form.dataset.mailSkippedLabels || '[]') as unknown;
+      return Array.isArray(parsed)
+        ? parsed.filter((entry): entry is { id: string; name: string } => !!entry && typeof entry === 'object'
+          && typeof (entry as { id?: unknown }).id === 'string' && typeof (entry as { name?: unknown }).name === 'string')
+        : [];
+    } catch { return []; }
+  }
+
+  function readMailDraft(form: HTMLFormElement): OlympusMailScopeDraft {
+    const windowInput = form.querySelector<HTMLInputElement>('[data-mail-window]:checked');
+    const windowValue = windowInput?.value;
+    const labelInputs = Array.from(form.querySelectorAll<HTMLInputElement>('[data-mail-label]'));
+    // Before labels load, the saved skips stand; afterwards the checkboxes do.
+    const skippedLabels = labelInputs.length > 0
+      ? labelInputs.filter((input) => !input.checked).map((input) => ({ id: input.value, name: input.dataset.mailLabelName || input.value }))
+      : mailSavedSkippedLabels(form);
+    return {
+      window: windowValue === '6m' || windowValue === '1y' || windowValue === '5y' || windowValue === 'all' ? windowValue : '2y',
+      skipped_categories: Array.from(form.querySelectorAll<HTMLInputElement>('[data-mail-category]'))
+        .filter((input) => !input.checked)
+        .map((input) => input.value)
+        .filter((value): value is OlympusMailScopeDraft['skipped_categories'][number] =>
+          value === 'primary' || value === 'social' || value === 'promotions' || value === 'updates' || value === 'forums'),
+      skipped_labels: skippedLabels,
+      always_private_senders: mailLines(form, '[data-mail-private-senders]'),
+      skip_senders: mailLines(form, '[data-mail-skip-senders]'),
+    };
+  }
+
+  function mailSummaryText(draft: OlympusMailScopeDraft): string {
+    const windows: Record<string, string> = { '6m': 'last 6 months', '1y': 'last year', '2y': 'last 2 years', '5y': 'last 5 years', all: 'everything' };
+    const skipped = draft.skipped_categories.length + draft.skipped_labels.length;
+    return `Full content: ${windows[draft.window] || draft.window}. ${skipped} ${skipped === 1 ? 'category or label' : 'categories and labels'} skipped.`
+      + ` ${draft.always_private_senders.length} always Private, ${draft.skip_senders.length} skipped ${draft.skip_senders.length === 1 ? 'sender' : 'senders'}.`;
+  }
+
+  function mailControls(form: HTMLFormElement, state: MailDraftState): void {
+    const allowed = mailAllowed(form, state);
+    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input,textarea,button').forEach((control) => {
+      control.disabled = !allowed;
+    });
+    const start = form.querySelector<HTMLButtonElement>('[data-mail-start]');
+    if (start) start.disabled = !allowed || !state.loaded || state.loading || !state.generation || !state.revision;
+    const summary = form.querySelector('[data-mail-summary]');
+    if (summary) summary.textContent = mailSummaryText(readMailDraft(form));
+  }
+
+  function mailCount(value: unknown): string {
+    return typeof value === 'number' && Number.isFinite(value) ? Math.round(value).toLocaleString('en-US') : '—';
+  }
+
+  function renderMailSummary(form: HTMLFormElement, summary: Record<string, unknown>): void {
+    const skipped = new Set(readMailDraft(form).skipped_labels.map((label) => label.id));
+    const labelsSlot = form.querySelector<HTMLElement>('[data-mail-labels]');
+    const labels = Array.isArray(summary.labels) ? summary.labels as Array<Record<string, unknown>> : [];
+    if (labelsSlot) {
+      labelsSlot.replaceChildren();
+      if (labels.length === 0) {
+        const empty = labelsSlot.ownerDocument.createElement('p');
+        empty.className = 'mail-scope-help'; empty.textContent = 'This mailbox has no labels of its own.';
+        labelsSlot.append(empty);
+      }
+      for (const label of labels) {
+        if (typeof label.id !== 'string' || typeof label.name !== 'string') continue;
+        const row = labelsSlot.ownerDocument.createElement('label');
+        row.className = 'mail-scope-option'; row.setAttribute('role', 'listitem');
+        const input = labelsSlot.ownerDocument.createElement('input');
+        input.type = 'checkbox'; input.value = label.id; input.dataset.mailLabel = '';
+        input.dataset.mailLabelName = label.name; input.checked = !skipped.has(label.id);
+        const text = labelsSlot.ownerDocument.createElement('span');
+        text.textContent = label.id === 'SENT' ? 'Sent' : label.name;
+        row.append(input, text); labelsSlot.append(row);
+      }
+    }
+    const categories = Array.isArray(summary.categories) ? summary.categories as Array<Record<string, unknown>> : [];
+    for (const category of categories) {
+      const slot = form.querySelector(`[data-mail-category-count="${String(category.category)}"]`);
+      if (slot) slot.textContent = typeof category.messages_total === 'number' ? ` · ${mailCount(category.messages_total)} in mailbox` : '';
+    }
+    const suggestions = Array.isArray(summary.sender_suggestions) ? summary.sender_suggestions as Array<Record<string, unknown>> : [];
+    const box = form.querySelector<HTMLElement>('[data-mail-suggestions]');
+    const list = form.querySelector<HTMLElement>('[data-mail-suggestion-list]');
+    if (box && list) {
+      list.replaceChildren();
+      for (const suggestion of suggestions) {
+        if (typeof suggestion.sender !== 'string') continue;
+        const item = list.ownerDocument.createElement('li');
+        const sender = list.ownerDocument.createElement('span'); sender.className = 'sender'; sender.textContent = suggestion.sender;
+        const count = list.ownerDocument.createElement('span'); count.className = 'count';
+        count.textContent = `${mailCount(suggestion.sample_messages)} of ${mailCount(summary.sample_size)}`;
+        const makePrivate = list.ownerDocument.createElement('button');
+        makePrivate.type = 'button'; makePrivate.textContent = 'Always Private';
+        makePrivate.dataset.mailSuggest = 'private'; makePrivate.dataset.sender = suggestion.sender;
+        const skip = list.ownerDocument.createElement('button');
+        skip.type = 'button'; skip.textContent = 'Skip';
+        skip.dataset.mailSuggest = 'skip'; skip.dataset.sender = suggestion.sender;
+        item.append(sender, count, makePrivate, skip); list.append(item);
+      }
+      box.hidden = list.childElementCount === 0;
+    }
+    const estimate = summary.estimate && typeof summary.estimate === 'object' ? summary.estimate as Record<string, unknown> : {};
+    const put = (key: string, text: string): void => {
+      const slot = form.querySelector(`[data-mail-estimate="${key}"]`); if (slot) slot.textContent = text;
+    };
+    put('content_messages', `~${mailCount(estimate.content_messages)}`);
+    put('metadata_messages', `~${mailCount(estimate.metadata_messages)}`);
+    put('embedding_cost_usd', typeof estimate.embedding_cost_usd === 'number'
+      ? `≤ $${estimate.embedding_cost_usd.toFixed(2)}` : '—');
+  }
+
+  async function browseMail(form: HTMLFormElement): Promise<void> {
+    const state = mailState(form);
+    if (!mailAllowed(form, state) || state.loading) return;
+    state.loading = true; state.loadAttempted = true; mailControls(form, state);
+    scopeMessage(form, 'Reading labels, counts and a sample of senders from Gmail…');
+    try {
+      const result = await options.transport.control({
+        action: 'browse_mail_scope', source_id: 'gmail.email', draft: readMailDraft(form),
+      });
+      if (disposed || options.signal.aborted || !root.contains(form)) return;
+      if (result.status === 401 || result.status === 403) {
+        canWrite = false; scopeMessage(form, 'Write access expired. Reconnect before reading your mailbox.'); return;
+      }
+      const body = result.body;
+      const summary = body.summary && typeof body.summary === 'object' ? body.summary as Record<string, unknown> : undefined;
+      if (result.status < 200 || result.status >= 300 || body.ok !== true || !summary
+        || typeof body.account_generation !== 'string' || typeof body.scope_revision !== 'string') {
+        const error = body.error;
+        const message = error && typeof error === 'object' ? (error as Record<string, unknown>).message : undefined;
+        scopeMessage(form, typeof message === 'string' ? message : 'Could not read the mailbox. Check the connection and reopen this picker.');
+        return;
+      }
+      if (state.loaded && (state.generation !== body.account_generation || state.revision !== body.scope_revision)) {
+        state.invalid = true;
+        scopeMessage(form, 'The mailbox or saved scope changed. Reopen this picker before saving.'); return;
+      }
+      state.generation = body.account_generation; state.revision = body.scope_revision; state.loaded = true;
+      renderMailSummary(form, summary);
+      scopeMessage(form, 'Nothing has been read yet. Review the estimate, then save and start.');
+    } catch {
+      if (!disposed && root.contains(form)) scopeMessage(form, 'Reading the mailbox failed. Your choices are still here; retry when the connection is ready.');
+    } finally {
+      state.loading = false;
+      if (!disposed && root.contains(form)) mailControls(form, state);
+    }
+  }
+
+  async function approveMail(form: HTMLFormElement): Promise<void> {
+    const state = mailState(form);
+    if (!mailAllowed(form, state) || !state.loaded || !state.generation || !state.revision) {
+      scopeMessage(form, 'Wait for the estimate to load before saving.'); return;
+    }
+    state.busy = true; mailControls(form, state); scopeMessage(form, 'Saving your approved mail scope…');
+    try {
+      const result = await options.transport.control({
+        action: 'approve_mail_scope_and_start', source_id: 'gmail.email',
+        account_generation: state.generation, expected_scope_revision: state.revision, scope: readMailDraft(form),
+      });
+      if (disposed || options.signal.aborted || !root.contains(form)) return;
+      if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
+        if (result.status === 401 || result.status === 403) canWrite = false;
+        if (result.status === 409) state.invalid = true;
+        const error = result.body.error;
+        const message = error && typeof error === 'object' ? (error as Record<string, unknown>).message : undefined;
+        scopeMessage(form, typeof message === 'string' ? message : 'Scope was not activated. Your choices are still here.'); return;
+      }
+      state.edited = false;
+      scopeMessage(form, 'Scope saved. Opening Gmail…');
+      options.navigate('/dashboard?source=gmail.email');
+    } catch {
+      if (!disposed && root.contains(form)) scopeMessage(form, 'Could not confirm the result. Reopen the picker to check the saved scope before retrying.');
+    } finally {
+      state.busy = false;
+      if (!disposed && root.contains(form)) mailControls(form, state);
+    }
+  }
+
+  function mailClick(target: Element): boolean {
+    const form = target.closest<HTMLFormElement>('form[data-mail-scope-source]');
+    if (!form || !root.contains(form)) return false;
+    const state = mailState(form);
+    if (!mailAllowed(form, state)) return true;
+    if (target.closest('[data-mail-refresh]')) { void browseMail(form); return true; }
+    if (target.closest('[data-mail-cancel]')) {
+      form.reset(); state.edited = false;
+      // Labels re-render from the saved skips on the next browse.
+      form.querySelector('[data-mail-labels]')?.querySelectorAll<HTMLInputElement>('[data-mail-label]').forEach((input) => {
+        input.checked = !mailSavedSkippedLabels(form).some((label) => label.id === input.value);
+      });
+      mailControls(form, state); scopeMessage(form, 'Changes cancelled.'); return true;
+    }
+    const suggest = target.closest<HTMLElement>('[data-mail-suggest]');
+    if (suggest?.dataset.sender) {
+      const area = form.querySelector<HTMLTextAreaElement>(suggest.dataset.mailSuggest === 'skip' ? '[data-mail-skip-senders]' : '[data-mail-private-senders]');
+      if (area && !mailLines(form, suggest.dataset.mailSuggest === 'skip' ? '[data-mail-skip-senders]' : '[data-mail-private-senders]').includes(suggest.dataset.sender)) {
+        area.value = `${area.value.trim()}${area.value.trim() ? '\n' : ''}${suggest.dataset.sender}`;
+        state.edited = true; mailControls(form, state);
+      }
+      return true;
+    }
+    return false;
+  }
+
   function scopeClick(target: Element): boolean {
     const form = target.closest<HTMLFormElement>('form[data-folder-scope-source]');
     if (!form || !root.contains(form)) return false;
@@ -1165,6 +1408,12 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       if (presented && !form.closest<HTMLElement>('[data-scope-panel]')?.hidden
         && !draft.loadAttempted && scopeAllowed(form, draft)) void browseScope(form, []);
     });
+    root.querySelectorAll<HTMLFormElement>('form[data-mail-scope-source]').forEach((form) => {
+      const state = mailState(form);
+      mailControls(form, state);
+      if (presented && !form.closest<HTMLElement>('[data-scope-panel]')?.hidden
+        && !state.loadAttempted && mailAllowed(form, state)) void browseMail(form);
+    });
     if (appliedCanWrite === canWrite) return;
     appliedCanWrite = canWrite;
     root.querySelectorAll<HTMLButtonElement>('form[data-dispositions-source] button[type="submit"]')
@@ -1263,6 +1512,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       }
     }
     if (scopeClick(target)) return;
+    if (mailClick(target)) return;
     const row = target.closest<HTMLElement>('.folder-row');
     if (row) {
       selectFolder(row);
@@ -1309,6 +1559,11 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   }
 
   function onInput(event: Event): void {
+    const mailForm = event.target instanceof Element ? event.target.closest<HTMLFormElement>('form[data-mail-scope-source]') : null;
+    if (mailForm && root.contains(mailForm)) {
+      const state = mailState(mailForm);
+      state.edited = true; mailControls(mailForm, state); return;
+    }
     if (event.target instanceof HTMLInputElement && root.contains(event.target)) {
       const form = event.target.closest<HTMLFormElement>('form[data-folder-scope-source]');
       if (form && event.target.matches('[data-scope-search]')) { renderScopeNodes(form, scopeDraft(form)); return; }
@@ -1335,6 +1590,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form)) return;
     if (form.hasAttribute('data-folder-scope-source')) { event.preventDefault(); void approveScope(form); return; }
+    if (form.hasAttribute('data-mail-scope-source')) { event.preventDefault(); void approveMail(form); return; }
     if (!form.hasAttribute('data-dispositions-source')) return;
     event.preventDefault();
     void save(form);
@@ -1351,13 +1607,17 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
   }
 
   async function refreshNow(force: boolean): Promise<void> {
-    if (disposed || inFlight || options.signal.aborted || (!force && (!presented || dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy)))) return;
+    // A loaded picker holds the owner's unsaved choices and a spent provider
+    // read; the background poll never replaces it.
+    const pickerOpen = (): boolean => Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy)
+      || Array.from(mailDrafts.values()).some((state) => state.loaded || state.loading || state.busy || state.edited);
+    if (disposed || inFlight || options.signal.aborted || (!force && (!presented || dirty || pickerOpen()))) return;
     inFlight = true;
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted) return;
       canWrite = result.can_write;
-      if (!force && (dirty || Array.from(scopeDrafts.values()).some((draft) => draft.loaded || draft.busy))) {
+      if (!force && (dirty || pickerOpen())) {
         applyWriteCapability();
         return;
       }
@@ -1397,6 +1657,7 @@ export function mountDispositionsController(options: OlympusBrowserControllerOpt
       else root.innerHTML = result.body;
       dirty = false;
       scopeDrafts.clear();
+      mailDrafts.clear();
       if (activeScopeSource) showScopePanel(activeScopeSource);
       signature = result.signature;
       appliedCanWrite = undefined;

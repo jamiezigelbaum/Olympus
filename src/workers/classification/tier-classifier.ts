@@ -36,6 +36,7 @@ import {
   detectSensitiveContent,
   namesLookPossiblyPrivate,
 } from './engine.ts';
+import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 export const TIER_CLASSIFIER_VERSION = '2026-09-23.p1a';
@@ -628,7 +629,11 @@ function mostSensitive(rules: readonly OwnerTierRule[]): OwnerTierRule | undefin
   );
 }
 
-function ownerRuleMatches(
+/**
+ * Whether an owner rule applies to an item's signals. Exported so a lane's
+ * store placement honours exactly the rules the recorded decision does.
+ */
+export function ownerRuleMatches(
   rule: OwnerTierRule,
   signals: SourceClassificationSignals,
   provider: string | undefined,
@@ -645,7 +650,10 @@ function ownerRuleMatches(
     case 'label':
       return (signals.labels ?? []).some((label) => label.trim().toLowerCase() === value);
     case 'sender':
-      return (signals.sender ?? '').trim().toLowerCase().includes(value);
+      // The one sender matcher (core/sender-rules.ts): addresses and @domain
+      // rules on the sender's own address with a label boundary; a bare
+      // fragment by substring only when the rule raises the tier.
+      return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank('private'));
   }
 }
 

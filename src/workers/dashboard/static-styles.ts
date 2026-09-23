@@ -310,7 +310,40 @@ export const DISPOSITIONS_CSS = `
       .scope-review li { overflow-wrap: anywhere; margin: 5px 0; }
       [data-folder-scope-source] button:disabled { opacity: .4; cursor: not-allowed; }
       .warn-note { margin: 10px 14px; background: var(--warn-bg); border-color: var(--warn-line); color: var(--t2); }
+      /* Mail scope picker: the same Finder frame, with form groups where the
+         folder tree sits and the estimate where the inspector sits. */
+      .mail-scope-main { grid-column: 2; grid-row: 1; min-width: 0; border-right: 1px solid var(--line2); padding: 6px 0; }
+      .mail-scope-group { border: 0; border-bottom: 1px solid var(--line2); margin: 0; padding: 12px 16px 14px; display: grid; gap: 8px; }
+      .mail-scope-group:last-child { border-bottom: 0; }
+      .mail-scope-group legend { float: left; width: 100%; padding: 0; color: var(--t1); font-size: 13px; font-weight: 600; }
+      .mail-scope-help { color: var(--t4); font-size: 11.5px; }
+      .mail-scope-options { display: flex; flex-wrap: wrap; gap: 6px; }
+      .mail-scope-option { display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t2); font-size: 12.5px; cursor: pointer; }
+      .mail-scope-option:has(input:checked) { border-color: var(--link-line); background: var(--panel2); color: var(--t1); }
+      .mail-scope-option input { width: auto; margin: 2px 0 0; padding: 0; }
+      .mail-scope-option span { display: grid; gap: 1px; }
+      .mail-scope-option small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-labels { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; }
+      .mail-scope-senders { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .mail-scope-senders label { display: grid; gap: 4px; color: var(--t2); font-size: 12.5px; }
+      .mail-scope-senders small { color: var(--t4); font-size: 10.5px; }
+      .mail-scope-senders textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--t1); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 7px 9px; }
+      .mail-scope-suggestions ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+      .mail-scope-suggestions li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--t2); font-size: 12px; }
+      .mail-scope-suggestions li:hover { background: rgba(255,255,255,.035); }
+      .mail-scope-suggestions .sender { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mail-scope-suggestions .count { color: var(--t4); font-variant-numeric: tabular-nums; font-size: 11px; }
+      .mail-scope-suggestions button { padding: 3px 9px; font-size: 11px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 5px; }
+      .mail-scope-estimate { display: grid; align-content: start; gap: 10px; }
+      .mail-scope-figures { margin: 0; display: grid; gap: 8px; }
+      .mail-scope-figures div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line2); padding-bottom: 6px; }
+      .mail-scope-figures dt { color: var(--t3); font-size: 12px; }
+      .mail-scope-figures dd { margin: 0; color: var(--t1); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; }
+      .mail-scope-estimate button { justify-self: start; padding: 6px 12px; font-size: 12px; color: var(--t2); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      [data-mail-scope-source] [hidden] { display: none !important; }
+      [data-mail-scope-source] button:disabled, [data-mail-scope-source] input:disabled, [data-mail-scope-source] textarea:disabled { opacity: .45; cursor: not-allowed; }
       @media (max-width: 860px) {
+        .mail-scope-senders { grid-template-columns: 1fr; }
         .finder-window { grid-template-columns: 130px minmax(300px, 1fr); }
         .finder-inspector { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--line2); }
         .finder-footer { grid-row: 3; }

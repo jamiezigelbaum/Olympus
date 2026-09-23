@@ -48,8 +48,19 @@ import {
 import { OperationError } from '../core/operation-error.ts';
 import { DASHBOARD_THEME_CSS } from './dashboard/theme.ts';
 import { dashboardPageSignature } from './dashboard/components.ts';
-import type { OlympusDashboardReadResult, OlympusFolderScopeSourceId, OlympusSourceScopeStatus, OlympusSourceScopeSelection } from '../control-ui-contract.ts';
+import type {
+  OlympusDashboardReadResult,
+  OlympusFolderScopeSourceId,
+  OlympusMailScopeDraft,
+  OlympusMailScopeSourceId,
+  OlympusSourceScopeStatus,
+  OlympusSourceScopeSelection,
+} from '../control-ui-contract.ts';
 import { mountDispositionsController } from '../control-ui/browser-controller.ts';
+import {
+  GMAIL_SCOPE_BROWSE_MAX_REQUESTS,
+  GMAIL_SCOPE_SENDER_SAMPLE,
+} from '../core/mail-source-scope.ts';
 import {
   defaultSourceIngestionExclusionsPath,
   parseSourceIngestionExclusions,
@@ -116,8 +127,16 @@ export interface SourceDispositionsSourceView {
 }
 
 export interface SourceFolderScopeSummary {
-  source_id: OlympusFolderScopeSourceId;
+  /** Folder sources choose folders; the mail source chooses a window, categories, labels and senders. */
+  kind?: 'folders' | 'mail';
+  source_id: OlympusFolderScopeSourceId | OlympusMailScopeSourceId;
   disposition_source_id: string;
+  /** Mail only: whether the approved scope starts ingestion. */
+  ingestion_enabled?: boolean;
+  /** Mail only: the saved choices, or the defaults while nothing is saved. */
+  mail_scope?: OlympusMailScopeDraft;
+  /** Mail only: the saved full-content cutoff (ISO timestamp). */
+  content_after?: string;
   label: string;
   connected: boolean;
   status: OlympusSourceScopeStatus;
@@ -499,12 +518,13 @@ export function renderSourceDispositionsHtml(
 ): string {
   const body = renderSourceDispositionsFragment(view, options?.selectedSourceId);
   const csrfToken = escapeScriptJson(JSON.stringify(options?.csrfToken ?? ''));
+  const mailSelected = view.folder_scopes?.find((source) => source.source_id === options?.selectedSourceId)?.kind === 'mail';
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Olympus — Choose folders</title>
+    <title>Olympus — ${mailSelected ? 'Choose mail' : 'Choose folders'}</title>
     <style>${DASHBOARD_THEME_CSS}\n${DASHBOARD_NAV_CSS}\n${DISPOSITIONS_CSS}</style>
   </head>
   <body>
@@ -520,8 +540,26 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
   const selected = scopes.find((source) => source.source_id === selectedSourceId)
     ?? locations[0] ?? scopes[0];
   const scopedSources = new Set((view.folder_scopes ?? []).map((source) => source.disposition_source_id));
-  const sources = (view.folder_scopes ?? []).map((source) => renderFolderScopeSource(source, locations, source === selected)).join('')
+  const sources = (view.folder_scopes ?? []).map((source) => source.kind === 'mail'
+    ? renderMailScopeSource(source, locations, source === selected)
+    : renderFolderScopeSource(source, locations, source === selected)).join('')
     + view.sources.filter((source) => !scopedSources.has(source.source_id)).map(renderDispositionSource).join('');
+  if (selected?.kind === 'mail') {
+    return `<main class="picker-page">
+      ${renderDashboardNav('home')}
+      <header class="picker-header">
+        <p class="eyebrow">Olympus / Sources</p>
+        <h1>Choose mail</h1>
+        <p>Connecting Gmail does not start indexing. Choose how far back Olympus stores the body of your mail,
+        which categories and labels it skips, and which senders are always Private or never read, then press
+        <strong>Save scope and start</strong>. For mail older than the window only the subject, sender, date and
+        labels are stored — the body is never stored — so it stays findable, and you can widen the window later.
+        Mail Olympus already holds is never removed or re-read when you change these choices.</p>
+      </header>
+      ${sources}
+      <p class="action-message" id="save-message" role="status" aria-live="polite"></p>
+    </main>`;
+  }
   return `<main class="picker-page">
       ${renderDashboardNav('home')}
       <header class="picker-header">
@@ -538,6 +576,140 @@ export function renderSourceDispositionsFragment(view: SourceDispositionsView, s
     </main>`;
 }
 
+/**
+ * The Locations sidebar. Folder sources switch in place; the mail source and
+ * the folder sources have different page headings, so crossing between the
+ * two kinds is a real navigation rather than an in-place panel switch.
+ */
+function renderScopeLocations(locations: readonly SourceFolderScopeSummary[], current: SourceFolderScopeSummary): string {
+  return locations.map((location) => {
+    const here = location.source_id === current.source_id;
+    const sameKind = (location.kind === 'mail') === (current.kind === 'mail');
+    return `<a class="location${here ? ' selected' : ''}" href="/dashboard/dispositions?source_id=${encodeURIComponent(location.source_id)}"`
+      + `${sameKind ? ` data-scope-switch="${escapeHtml(location.source_id)}"` : ''}${here ? ' aria-current="page"' : ''}>`
+      + `<span class="folder-icon">${location.kind === 'mail' ? '✉' : '◆'}</span><span>${escapeHtml(location.label)}</span></a>`;
+  }).join('');
+}
+
+/**
+ * The mail scope panel. Everything the owner chooses is a plain form control
+ * rendered from the saved scope (or the defaults), so the page is readable
+ * before Gmail answers; labels, sender suggestions and the estimate arrive
+ * only from an explicit browse, never from the background poll.
+ */
+function renderMailScopeSource(source: SourceFolderScopeSummary, locations: readonly SourceFolderScopeSummary[], selected: boolean): string {
+  const unavailable = !source.connected || Boolean(source.error);
+  const draft = source.mail_scope ?? {
+    window: '2y' as const,
+    skipped_categories: ['promotions', 'social'] as OlympusMailScopeDraft['skipped_categories'],
+    skipped_labels: [],
+    always_private_senders: [],
+    skip_senders: [],
+  };
+  const disabled = unavailable ? ' disabled' : '';
+  const windows: Array<[OlympusMailScopeDraft['window'], string, string]> = [
+    ['6m', 'Last 6 months', ''],
+    ['1y', 'Last year', ''],
+    ['2y', 'Last 2 years', 'Recommended'],
+    ['5y', 'Last 5 years', ''],
+    ['all', 'Everything', 'Nothing is metadata-only'],
+  ];
+  const categories: Array<[OlympusMailScopeDraft['skipped_categories'][number], string, string]> = [
+    ['primary', 'Primary', 'Personal mail'],
+    ['updates', 'Updates', 'Receipts, statements, confirmations'],
+    ['forums', 'Forums', 'Mailing lists and groups'],
+    ['social', 'Social', 'Social network notifications'],
+    ['promotions', 'Promotions', 'Marketing and offers'],
+  ];
+  const skipped = new Set(draft.skipped_categories);
+  const status = source.connected
+    ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection'
+    : 'Disconnected';
+  return `<section class="source-dispositions" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
+    <p class="scope-back"><a href="/dashboard?source=${encodeURIComponent(source.source_id)}">← Back to ${escapeHtml(source.label)}</a></p>
+    <form data-mail-scope-source="${escapeHtml(source.source_id)}"
+      data-connected="${source.connected}" data-account-generation="${escapeHtml(source.account_generation ?? '')}"
+      data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
+      data-mail-skipped-labels="${escapeHtml(JSON.stringify(draft.skipped_labels))}">
+      <div class="finder-window mail-scope-window">
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${renderScopeLocations(locations, source)}
+          <p class="scope-connection">${status}</p>
+          ${source.content_after && source.status === 'approved'
+            ? `<p class="scope-connection">Full content since ${escapeHtml(source.content_after.slice(0, 10))}</p>`
+            : ''}
+        </aside>
+        <section class="finder-main mail-scope-main">
+          ${source.error
+            ? `<p class="scope-browser-note">${escapeHtml(source.error)}</p>`
+            : source.connected
+              ? ''
+              : `<p class="scope-browser-note">Connect Gmail first, then return here to choose which mail Olympus may use. Connecting will not start ingestion.</p>
+          <a href="/dashboard?source=${encodeURIComponent(source.source_id)}">Connect ${escapeHtml(source.label)} →</a>`}
+          <fieldset class="mail-scope-group">
+            <legend>Store the body of mail from</legend>
+            <p class="mail-scope-help">For older mail only the subject, sender, date and labels are stored; its body is never stored.</p>
+            <div class="mail-scope-options">${windows.map(([value, label, hint]) => `
+              <label class="mail-scope-option"><input type="radio" name="mail-window" value="${value}" data-mail-window${draft.window === value ? ' checked' : ''}${disabled}>
+                <span>${escapeHtml(label)}${hint ? `<small>${escapeHtml(hint)}</small>` : ''}</span></label>`).join('')}
+            </div>
+          </fieldset>
+          <fieldset class="mail-scope-group">
+            <legend>Gmail categories</legend>
+            <p class="mail-scope-help">Checked categories are read. Promotions and Social are skipped by default.</p>
+            <div class="mail-scope-options">${categories.map(([value, label, hint]) => `
+              <label class="mail-scope-option"><input type="checkbox" value="${value}" data-mail-category${skipped.has(value) ? '' : ' checked'}${disabled}>
+                <span>${escapeHtml(label)}<small>${escapeHtml(hint)}<span data-mail-category-count="${value}"></span></small></span></label>`).join('')}
+            </div>
+          </fieldset>
+          <fieldset class="mail-scope-group">
+            <legend>Labels</legend>
+            <p class="mail-scope-help">Checked labels are read. Uncheck a label to skip all mail carrying it.</p>
+            <div class="mail-scope-labels" data-mail-labels role="list" aria-label="Gmail labels">
+              <p class="mail-scope-help" data-mail-labels-empty>${source.connected ? 'Labels load from Gmail when you open this page.' : 'Labels appear once Gmail is connected.'}</p>
+            </div>
+          </fieldset>
+          <fieldset class="mail-scope-group">
+            <legend>Senders</legend>
+            <div class="mail-scope-senders">
+              <label>Always Private <small>One address or @domain per line. New mail from these senders is classified Private: stored only in the private store and embedded only by your private model, never in the cloud. Mail Olympus already holds keeps its current tier.</small>
+                <textarea rows="4" data-mail-private-senders spellcheck="false"${disabled}>${escapeHtml(draft.always_private_senders.join('\n'))}</textarea></label>
+              <label>Skip <small>One address or @domain per line. Their new mail is never read. Mail already held is not removed.</small>
+                <textarea rows="4" data-mail-skip-senders spellcheck="false"${disabled}>${escapeHtml(draft.skip_senders.join('\n'))}</textarea></label>
+            </div>
+            <div class="mail-scope-suggestions" data-mail-suggestions hidden>
+              <p class="mail-scope-help">Frequent senders in a sample of your recent mail:</p>
+              <ul data-mail-suggestion-list></ul>
+            </div>
+          </fieldset>
+        </section>
+        <aside class="finder-inspector mail-scope-estimate" aria-label="Estimate">
+          <h3>Estimate</h3>
+          <p class="mail-scope-help">Message counts are Gmail's own approximate counts. Nothing has been read yet.</p>
+          <dl class="mail-scope-figures">
+            <div><dt>Body stored</dt><dd data-mail-estimate="content_messages">—</dd></div>
+            <div><dt>Metadata only</dt><dd data-mail-estimate="metadata_messages">—</dd></div>
+            <div><dt>Embedding cost, at most</dt><dd data-mail-estimate="embedding_cost_usd">—</dd></div>
+          </dl>
+          <p class="inspector-note">Counts are approximate (Gmail's estimate). The embedding cost is an upper bound at an assumed cloud price; Private mail embeds on your private model.</p>
+          <button type="button" class="secondary" data-mail-refresh${disabled}>Update estimate</button>
+          <p class="inspector-note">Loading this page spends at most ${GMAIL_SCOPE_BROWSE_MAX_REQUESTS} Gmail requests (labels, counts, and one sender sample of ${GMAIL_SCOPE_SENDER_SAMPLE} messages read by header only).</p>
+        </aside>
+        <footer class="finder-footer"><span data-mail-summary>${escapeHtml(mailDraftSummary(draft))}</span>
+          <span class="footer-actions"><button type="button" class="secondary" data-mail-cancel${disabled}>Cancel changes</button>
+            <button type="submit" data-mail-start disabled>Save scope and start</button></span></footer>
+      </div>
+      <p class="action-message" data-scope-message role="status" aria-live="polite">Nothing starts until you confirm.</p>
+    </form>
+  </section>`;
+}
+
+function mailDraftSummary(draft: OlympusMailScopeDraft): string {
+  const window = { '6m': 'last 6 months', '1y': 'last year', '2y': 'last 2 years', '5y': 'last 5 years', all: 'everything' }[draft.window];
+  const skipped = draft.skipped_categories.length + draft.skipped_labels.length;
+  return `Full content: ${window}. ${skipped} ${skipped === 1 ? 'category or label' : 'categories and labels'} skipped.`
+    + ` ${draft.always_private_senders.length} always Private, ${draft.skip_senders.length} skipped ${draft.skip_senders.length === 1 ? 'sender' : 'senders'}.`;
+}
+
 function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: readonly SourceFolderScopeSummary[], selected: boolean): string {
   const unavailable = !source.connected || Boolean(source.error);
   return `<section class="source-dispositions" data-scope-panel="${escapeHtml(source.source_id)}"${selected ? '' : ' hidden'}>
@@ -547,7 +719,7 @@ function renderFolderScopeSource(source: SourceFolderScopeSummary, locations: re
       data-scope-revision="${escapeHtml(source.scope_revision ?? '')}"
       data-scope-selections="${escapeHtml(JSON.stringify(source.selections ?? []))}">
       <div class="finder-window">
-        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${locations.map((location) => `<a class="location${location.source_id === source.source_id ? ' selected' : ''}" href="/dashboard/dispositions?source_id=${encodeURIComponent(location.source_id)}" data-scope-switch="${escapeHtml(location.source_id)}"${location.source_id === source.source_id ? ' aria-current="page"' : ''}><span class="folder-icon">◆</span><span>${escapeHtml(location.label)}</span></a>`).join('')}
+        <aside class="finder-sidebar"><p class="sidebar-label">Locations</p>${renderScopeLocations(locations, source)}
           <p class="scope-connection">${source.connected ? source.status === 'approved' ? 'Scope approved' : 'Waiting for your selection' : 'Disconnected'}</p>
         </aside>
         <section class="finder-main">
@@ -627,7 +799,8 @@ function standaloneSourceDispositionsControllerScript(csrfTokenJson: string): st
             return Object.assign({}, body, { status: response.status });
           },
           async control(params) {
-            if (params.action !== 'save_dispositions' && params.action !== 'approve_source_scope_and_start') {
+            if (params.action !== 'save_dispositions' && params.action !== 'approve_source_scope_and_start'
+              && params.action !== 'browse_mail_scope' && params.action !== 'approve_mail_scope_and_start') {
               return { status: 400, body: { error: { message: 'Unsupported picker action.' } } };
             }
             var response = await fetch('/dashboard/dispositions', {

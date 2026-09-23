@@ -20,6 +20,18 @@ import type { DropboxContentScope } from './dropbox-files/connector.ts';
 import type { SourceEmbeddingProvider } from './source-index/embeddings.ts';
 import type { SourceSchedulerSource } from './source-scheduler.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
+import {
+  approveMailSourceScope,
+  assertMailSourceScopeApproved,
+  compileGmailMailScope,
+  defaultMailSourceScopeStatePath,
+  mailScopeOwnerTierRules,
+  readMailSourceScopeApproval,
+  type MailScopeSelection,
+  type MailSourceScopeApprovalSnapshot,
+  type MailSourceScopeId,
+} from '../core/mail-source-scope.ts';
+import type { GmailConnectorScope } from './google-connectors/gmail.ts';
 
 export interface FileSourceScopePolicyRef {
   sourceId: FileSourceScopeId;
@@ -27,19 +39,86 @@ export interface FileSourceScopePolicyRef {
   revision: string;
 }
 
+export interface MailSourceScopePolicyRef {
+  sourceId: MailSourceScopeId;
+  accountGeneration: string;
+  revision: string;
+}
+
+/** Any approval a lane can be bound to: a folder scope or a mail scope. */
+export type SourceScopePolicyRef = FileSourceScopePolicyRef | MailSourceScopePolicyRef;
+
+/**
+ * The one scope authority for every scope-gated source. Folder sources
+ * (Drive, Dropbox) and the mail source (Gmail) share the grant generation,
+ * revision, pending state and the scheduler/embedding binding below; each
+ * keeps its own state file.
+ */
 export class FileSourceScopeAuthority {
   readonly registryPath: string;
   readonly statePath: string;
+  readonly mailStatePath: string;
   private readonly readRegistry: () => ConnectedHandleRegistry;
+  private readonly mailPinnedHandle: () => string | undefined;
 
   constructor(options: {
     registryPath?: string;
     statePath?: string;
+    mailStatePath?: string;
     readRegistry?: () => ConnectedHandleRegistry;
+    /** The handle the Gmail lane is pinned to, when more than one is registered. */
+    mailPinnedHandle?: () => string | undefined;
   } = {}) {
     this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
     this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
+    this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
     this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+    this.mailPinnedHandle = options.mailPinnedHandle ?? (() => undefined);
+  }
+
+  mailSnapshot(): MailSourceScopeApprovalSnapshot {
+    try {
+      return readMailSourceScopeApproval(this.mailInput());
+    } catch {
+      return { sourceId: 'gmail.email', status: 'scope_pending', revision: 'unreadable', reason: 'malformed' };
+    }
+  }
+
+  approveMail(input: {
+    accountGeneration: string;
+    expectedRevision: string;
+    scope: Omit<MailScopeSelection, 'contentAfter'>;
+  }): MailSourceScopeApprovalSnapshot {
+    return approveMailSourceScope({ ...this.mailInput(), ...input });
+  }
+
+  mailPolicyRef(): MailSourceScopePolicyRef | undefined {
+    const snapshot = this.mailSnapshot();
+    if (snapshot.status !== 'approved' || !snapshot.accountGeneration) return undefined;
+    return { sourceId: 'gmail.email', accountGeneration: snapshot.accountGeneration, revision: snapshot.revision };
+  }
+
+  assertCurrentMail(ref: MailSourceScopePolicyRef): ReturnType<typeof assertMailSourceScopeApproved> {
+    return assertMailSourceScopeApproved({
+      ...this.mailInput(),
+      expectedAccountGeneration: ref.accountGeneration,
+      expectedRevision: ref.revision,
+    });
+  }
+
+  /** Throws unless the approval `ref` names is still the current one. */
+  assertRefCurrent(ref: SourceScopePolicyRef): void {
+    if (ref.sourceId === 'gmail.email') this.assertCurrentMail(ref);
+    else this.assertCurrent(ref);
+  }
+
+  private mailInput(): { registry: ConnectedHandleRegistry; statePath: string; pinnedHandle?: string } {
+    const pinnedHandle = this.mailPinnedHandle()?.trim();
+    return {
+      registry: this.readRegistry(),
+      statePath: this.mailStatePath,
+      ...(pinnedHandle ? { pinnedHandle } : {}),
+    };
   }
 
   snapshot(sourceId: FileSourceScopeId): FileSourceScopeApprovalSnapshot {
@@ -278,21 +357,40 @@ function normalizeDropboxScopePath(path: string): string {
 export function scopeBoundEmbeddingProvider(
   provider: SourceEmbeddingProvider,
   authority: FileSourceScopeAuthority,
-  ref: FileSourceScopePolicyRef,
+  ref: SourceScopePolicyRef,
 ): SourceEmbeddingProvider {
   return {
     ...provider,
     async embed(inputs, options) {
-      authority.assertCurrent(ref);
+      authority.assertRefCurrent(ref);
       return provider.embed(inputs, options);
     },
+  };
+}
+
+/**
+ * The approved mail scope as the Gmail connector's query binding. The
+ * operator's hidden OLYMPUS_SOURCE_INDEX_GMAIL_QUERY override is not folded in
+ * here: the connector reads it and ANDs it with this.
+ */
+export function gmailConnectorScopeFromApproval(approval: { mailScope: MailScopeSelection }): GmailConnectorScope {
+  const compiled = compileGmailMailScope(approval.mailScope);
+  return {
+    ...(compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {}),
+    ...(compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {}),
+    skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
+    ...(compiled.skippedLabelIds.length > 0 ? { skippedLabelIds: compiled.skippedLabelIds } : {}),
+    ...(approval.mailScope.skipSenders.length > 0 ? { skipSenders: approval.mailScope.skipSenders } : {}),
+    ...(approval.mailScope.alwaysPrivateSenders.length > 0
+      ? { ownerTierRules: mailScopeOwnerTierRules(approval.mailScope) }
+      : {}),
   };
 }
 
 export function scopeBoundSchedulerSource(input: {
   source: SourceSchedulerSource;
   authority: FileSourceScopeAuthority;
-  ref: FileSourceScopePolicyRef;
+  ref: SourceScopePolicyRef;
 }): SourceSchedulerSource {
   const suffix = input.ref.revision.replaceAll('-', '').slice(0, 16);
   return {
@@ -301,7 +399,7 @@ export function scopeBoundSchedulerSource(input: {
       ...task,
       id: `${task.id}:scope:${suffix}`,
       async run(context) {
-        input.authority.assertCurrent(input.ref);
+        input.authority.assertRefCurrent(input.ref);
         return task.run(context);
       },
     })),

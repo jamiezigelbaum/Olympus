@@ -7,6 +7,7 @@ import {
   type OlympusDashboardControlResult,
   type OlympusDashboardOAuthSource,
   type OlympusFolderScopeBrowseResult,
+  type OlympusMailScopeDraft,
   type OlympusFolderScopeNode,
   type OlympusSourceScopeSelection,
   type OlympusDashboardReadParams,
@@ -297,6 +298,24 @@ export function parseDashboardReadParams(value: unknown): OlympusDashboardReadPa
 export function parseDashboardControlParams(value: unknown): OlympusDashboardControlParams {
   const outer = recordValue(value);
   const action = outer.action;
+  if (action === 'browse_mail_scope') {
+    const record = exactRecord(outer, ['action', 'source_id', 'draft']);
+    return {
+      action,
+      source_id: enumValue(record.source_id, ['gmail.email'] as const, 'source_id'),
+      draft: parseMailScopeDraftParam(record.draft),
+    };
+  }
+  if (action === 'approve_mail_scope_and_start') {
+    const record = exactRecord(outer, ['action', 'source_id', 'account_generation', 'expected_scope_revision', 'scope']);
+    return {
+      action,
+      source_id: enumValue(record.source_id, ['gmail.email'] as const, 'source_id'),
+      account_generation: boundedString(record.account_generation, 128, 'account_generation', false),
+      expected_scope_revision: boundedString(record.expected_scope_revision, 256, 'expected_scope_revision', false),
+      scope: parseMailScopeDraftParam(record.scope),
+    };
+  }
   if (action === 'browse_folder_scope') {
     const record = exactRecord(outer, ['action', 'source_id', 'parent_key', 'cursor']);
     const parentKey = optionalBoundedString(record.parent_key, 4_096, 'parent_key', false);
@@ -678,6 +697,22 @@ function dashboardControlWorkerRequest(params: OlympusDashboardControlParams): {
           explicit_whole_account_confirmation: params.explicit_whole_account_confirmation,
         },
       };
+    case 'browse_mail_scope':
+      return {
+        path: '/dashboard/dispositions',
+        body: { action: params.action, source_id: params.source_id, draft: params.draft },
+      };
+    case 'approve_mail_scope_and_start':
+      return {
+        path: '/dashboard/dispositions',
+        body: {
+          action: params.action,
+          source_id: params.source_id,
+          account_generation: params.account_generation,
+          expected_scope_revision: params.expected_scope_revision,
+          scope: params.scope,
+        },
+      };
     case 'set_embedding_priority':
       return { path: '/dashboard/embedding-priority', body: { on: params.on } };
     case 'disconnect':
@@ -729,6 +764,33 @@ function parseDashboardReadResult(value: unknown, expectedCanWrite: boolean): Ol
     ...(record.scope_browser === undefined
       ? {}
       : { scope_browser: parseFolderScopeBrowseResult(record.scope_browser) }),
+  };
+}
+
+/** Shape-only; the worker re-validates every sender, label and window before saving. */
+function parseMailScopeDraftParam(value: unknown): OlympusMailScopeDraft {
+  const record = exactRecord(value, ['window', 'skipped_categories', 'skipped_labels', 'always_private_senders', 'skip_senders']);
+  const list = (entries: unknown, max: number, field: string): unknown[] => {
+    if (!Array.isArray(entries) || entries.length > max) {
+      throw new DashboardGatewayInvalidRequestError(`${field} must be an array of at most ${max} entries.`);
+    }
+    return entries;
+  };
+  return {
+    window: enumValue(record.window, ['6m', '1y', '2y', '5y', 'all'] as const, 'window'),
+    skipped_categories: list(record.skipped_categories, 5, 'skipped_categories').map((category) =>
+      enumValue(category, ['primary', 'social', 'promotions', 'updates', 'forums'] as const, 'skipped_categories[]')),
+    skipped_labels: list(record.skipped_labels, 500, 'skipped_labels').map((entry) => {
+      const label = exactRecord(entry, ['id', 'name']);
+      return {
+        id: boundedString(label.id, 256, 'skipped_labels[].id', false),
+        name: boundedString(label.name, 256, 'skipped_labels[].name', false),
+      };
+    }),
+    always_private_senders: list(record.always_private_senders, 500, 'always_private_senders')
+      .map((sender) => boundedString(sender, 320, 'always_private_senders[]', false)),
+    skip_senders: list(record.skip_senders, 500, 'skip_senders')
+      .map((sender) => boundedString(sender, 320, 'skip_senders[]', false)),
   };
 }
 
