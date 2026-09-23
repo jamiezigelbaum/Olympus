@@ -963,6 +963,38 @@ export class TierLedger {
   }
 
   /**
+   * A move to Secrets: hide every copy at once and make Secrets the item's
+   * tiers. The caller then tombstones each store copy (vectors deleted, the
+   * one mandatory deletion) and calls `removeCopies`.
+   */
+  flipToSecrets(
+    identity: TierLedgerIdentity,
+    options: { expectedGeneration: number; reasons?: readonly string[] },
+  ): { record: TierLedgerRecord; copies: TierCopy[] } {
+    const now = this.now().toISOString();
+    let copies: TierCopy[] = [];
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration) {
+        throw new TierLedgerGenerationConflictError();
+      }
+      if (!existing.routed) throw new Error('A move needs copy rows; adopt the legacy placement first.');
+      copies = this.copies(identity);
+      const generation = existing.generation + 1;
+      this.supersedeCurrentCopies(identity, generation, now);
+      this.flipTiers(identity, existing, {
+        metadataTier: 'secrets',
+        contentTier: 'secrets',
+        generation,
+        decidedBy: 'secret_detector',
+        reasons: options.reasons ?? existing.reasons,
+        decidedAt: now,
+      });
+    })();
+    return { record: this.getCurrent(identity)!, copies };
+  }
+
+  /**
    * Forget every copy row of an item: its provider deleted it, or it became
    * Secrets. The caller tombstones the store rows first; the item stays
    * `routed`, so a later reappearance is routed again rather than treated as
@@ -988,12 +1020,14 @@ export class TierLedger {
   /** Items with a copy in this store in the given state, for status counts. */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held',
+    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer',
     limit = 100_000,
   ): TierLedgerIdentity[] {
     const where = filter === 'held'
       ? `copy_state = 'current' AND embed_hold = 1`
-      : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
+      : filter === 'metadata_layer'
+        ? `copy_state = 'current' AND layers = 'metadata'`
+        : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
     return (this.db.query(`
       SELECT provider, account_scope, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}

@@ -2084,9 +2084,9 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): { hidden: number[]; held: number[]; moving: number } {
+  private tierHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; moving: number } {
     const ledger = this.visibilityLedger();
-    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], moving: 0 };
+    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return { hidden: [], held: [], metadataLayer: [], moving: 0 };
     const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string }>): number[] => {
       const lookup = this.db.query(`
         SELECT item_pk FROM items
@@ -2106,6 +2106,10 @@ export class LocalConnectorStore {
         ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
       ]),
       held: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held')),
+      // A copy that serves only the names keeps any chunks it already had
+      // (e.g. kept vectors after a split move) but never serves, counts or
+      // embeds them.
+      metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
@@ -2299,6 +2303,12 @@ export class LocalConnectorStore {
       trustTier: SourceTrustTier;
       syncConnectorId: string;
       vectorProvider?: ConnectorStoreEmbeddingAuthorityIdentity;
+      /**
+       * `metadata`: write the row only and leave any chunks the store already
+       * holds for the item untouched (kept, never served: the ledger layer
+       * hides them). Default `both`.
+       */
+      layers?: 'metadata' | 'content' | 'both';
     },
   ): ConnectorStoreItemCopyImportSummary {
     const sensitivity = buildSourceSensitivity({ trustTier: options.trustTier, trustDomain: this.trustDomain });
@@ -2363,7 +2373,8 @@ export class LocalConnectorStore {
         content_hash: string;
         embedding_input_hash: string | null;
       }>;
-      const unchanged = existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
+      const namesOnly = options.layers === 'metadata';
+      const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
         const current = existing[index];
         return current?.chunk_index === chunk.chunkIndex
           && current.bounded_text === chunk.boundedText
@@ -2383,9 +2394,9 @@ export class LocalConnectorStore {
         }
       }
       this.refreshFtsForItem(itemPk);
-      const chunksKept = unchanged ? copy.chunks.length : 0;
+      const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
 
-      const provider = options.vectorProvider;
+      const provider = namesOnly ? undefined : options.vectorProvider;
       if (!provider) return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: 'no_provider' };
       const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
       if (!minted
@@ -7354,7 +7365,7 @@ export class LocalConnectorStore {
     // embedded, and items pending classification are held back until their
     // tier is final (design section 4.2). Legacy items are never held.
     const tierExcluded = this.tierHiddenItemPks();
-    const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held];
+    const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     const tierFilter = excludedPks.length > 0
       ? ` AND i.item_pk NOT IN (${excludedPks.map(() => '?').join(', ')})`
       : '';
@@ -7734,6 +7745,9 @@ export class LocalConnectorStore {
     const heldNotIn = tier.held.length > 0
       ? `AND i.item_pk NOT IN (${tier.held.map(() => '?').join(', ')})`
       : '';
+    const namesOnlyNotIn = tier.metadataLayer.length > 0
+      ? `AND i.item_pk NOT IN (${tier.metadataLayer.map(() => '?').join(', ')})`
+      : '';
     const itemWhere = `${scope?.itemsAllowed === false ? 'AND 0' : ''}
       ${accountScope ? 'AND i.account_scope = ?' : ''}
       ${itemFilters.sql}
@@ -7741,11 +7755,12 @@ export class LocalConnectorStore {
     const contentWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
       ${accountScope ? 'AND i.account_scope = ?' : ''}
       ${contentFilters.sql}
-      ${hiddenNotIn}`;
+      ${hiddenNotIn}
+      ${namesOnlyNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
     const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...tier.hidden];
-    const contentParams = [...(accountScope ? [accountScope] : []), ...contentFilters.params, ...tier.hidden];
+    const contentParams = [...(accountScope ? [accountScope] : []), ...contentFilters.params, ...tier.hidden, ...tier.metadataLayer];
     const parityParams = [...contentParams, ...tier.held];
     const counts = this.db.query(`
       SELECT
@@ -7862,7 +7877,8 @@ export class LocalConnectorStore {
       ...parityParams,
       ...contentParams,
     ) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
-    const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0
+    const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
+      || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
           pendingClassificationItems: tier.held.length,
           supersededChunks: tier.hidden.length > 0
@@ -9523,6 +9539,11 @@ export function tierRowVisible(
   if (!copies || copies.length === 0) return true;
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current');
   return copyServingLayer(here, layer) !== undefined;
+}
+
+/** The text the store would chunk for an item, exactly as the store reads it. */
+export function connectorStoreItemText(item: RawItem): string | undefined {
+  return textFromRawItem(item);
 }
 
 function textFromRawItem(item: RawItem): string | undefined {

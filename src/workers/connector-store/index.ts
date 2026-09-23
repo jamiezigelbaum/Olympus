@@ -4,6 +4,8 @@ export {
   ConnectorStoreMetadataOnlyViolationError,
   LocalConnectorStore,
   connectorStoreItemPlacement,
+  connectorStoreItemText,
+  tierRowVisible,
   // The store's own chunking recipe, namespaced for outside callers. Anything
   // that has to predict what the store will write about a piece of text runs
   // these rather than keeping a copy in step by hand.
@@ -76,6 +78,13 @@ export {
   type ConnectorStoreOwnedSearchFacetRefreshRecord,
   type ConnectorStoreOwnedSearchFacetRefreshSummary,
   type ConnectorStoreStatus,
+  type ConnectorStoreTierStatus,
+  type ConnectorStoreTierRoute,
+  type ConnectorStoreTierRouteInput,
+  type ConnectorStoreTierRouting,
+  type ConnectorStoreItemCopy,
+  type ConnectorStoreItemCopyImportSummary,
+  type ConnectorStoreEmbeddingAuthoritySnapshot,
   type ConnectorStoreSyncOptions,
   type ConnectorStoreSyncRun,
   type ConnectorStoreSyncSummary,
