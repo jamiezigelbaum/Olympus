@@ -19,7 +19,9 @@
 import {
   compileGmailMailScope,
   estimateMailScope,
+  GMAIL_SCOPE_BROWSE_MAX_REQUESTS,
   GMAIL_SCOPE_CATEGORIES,
+  GMAIL_SCOPE_SENDER_SAMPLE,
   GMAIL_SCOPE_CATEGORY_LABEL_IDS,
   GMAIL_SCOPE_CATEGORY_LABELS,
   mailScopeContentAfter,
@@ -35,8 +37,7 @@ import {
 } from './gmail.ts';
 import type { GoogleDailyRequestBudget } from './request-budget.ts';
 
-export const GMAIL_SCOPE_SENDER_SAMPLE = 100;
-export const GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + GMAIL_SCOPE_CATEGORIES.length + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+export { GMAIL_SCOPE_BROWSE_MAX_REQUESTS, GMAIL_SCOPE_SENDER_SAMPLE };
 const MAX_LISTED_LABELS = 500;
 const MAX_SENDER_SUGGESTIONS = 12;
 /** Skippable system labels. Inbox, spam, trash and drafts are not offered. */

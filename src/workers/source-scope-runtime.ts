@@ -24,19 +24,13 @@ import {
   approveMailSourceScope,
   assertMailSourceScopeApproved,
   compileGmailMailScope,
-  defaultMailScopeSelection,
   defaultMailSourceScopeStatePath,
-  GMAIL_SCOPE_CATEGORIES,
-  isGmailScopeCategory,
-  isMailScopeWindow,
   readMailSourceScopeApproval,
   type MailScopeSelection,
   type MailSourceScopeApprovalSnapshot,
   type MailSourceScopeId,
 } from '../core/mail-source-scope.ts';
 import type { GmailConnectorScope } from './google-connectors/gmail.ts';
-import type { OlympusMailScopeDraft } from '../control-ui-contract.ts';
-import { OperationError } from '../core/operation-error.ts';
 
 export interface FileSourceScopePolicyRef {
   sourceId: FileSourceScopeId;
@@ -384,65 +378,6 @@ export function gmailConnectorScopeFromApproval(approval: { mailScope: MailScope
     ...(compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {}),
     ...(compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {}),
     skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
-  };
-}
-
-/** The picker's view of a saved scope, or of the defaults when none is saved. */
-export function mailScopeDraftView(scope: MailScopeSelection | undefined): OlympusMailScopeDraft {
-  const source = scope ?? defaultMailScopeSelection();
-  return {
-    window: source.window,
-    skipped_categories: [...source.skippedCategories],
-    skipped_labels: source.skippedLabels.map((label) => ({ id: label.id, name: label.name })),
-    always_private_senders: [...source.alwaysPrivateSenders],
-    skip_senders: [...source.skipSenders],
-  };
-}
-
-export function mailScopeFromDraft(draft: OlympusMailScopeDraft): Omit<MailScopeSelection, 'contentAfter'> {
-  return {
-    window: draft.window,
-    skippedCategories: [...draft.skipped_categories],
-    skippedLabels: draft.skipped_labels.map((label) => ({ id: label.id, name: label.name })),
-    alwaysPrivateSenders: [...draft.always_private_senders],
-    skipSenders: [...draft.skip_senders],
-  };
-}
-
-/**
- * Untrusted request JSON to a draft. Shape only; the approval re-validates
- * every value (senders, categories, window) before anything is written.
- */
-export function parseMailScopeDraft(value: unknown): OlympusMailScopeDraft {
-  const invalid = (message: string): never => {
-    throw new OperationError('invalid_request', message);
-  };
-  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('The mail scope draft must be an object.');
-  const record = value as Record<string, unknown>;
-  if (!isMailScopeWindow(record.window)) invalid('Choose a valid mail time window.');
-  const strings = (field: string, max: number): string[] => {
-    const list = record[field];
-    if (!Array.isArray(list) || list.length > max || list.some((entry) => typeof entry !== 'string' || entry.length > 320)) {
-      invalid(`${field} must be a list of at most ${max} strings.`);
-    }
-    return list as string[];
-  };
-  const categories = strings('skipped_categories', GMAIL_SCOPE_CATEGORIES.length);
-  if (categories.some((category) => !isGmailScopeCategory(category))) invalid('Every skipped category must be a Gmail category.');
-  const labels = record.skipped_labels;
-  if (!Array.isArray(labels) || labels.length > 500) invalid('skipped_labels must be a list of at most 500 labels.');
-  return {
-    window: record.window as OlympusMailScopeDraft['window'],
-    skipped_categories: categories as OlympusMailScopeDraft['skipped_categories'],
-    skipped_labels: (labels as unknown[]).map((label) => {
-      const entry = label && typeof label === 'object' && !Array.isArray(label) ? label as Record<string, unknown> : {};
-      if (typeof entry.id !== 'string' || typeof entry.name !== 'string' || entry.id.length > 256 || entry.name.length > 256) {
-        return invalid('Every skipped label needs its Gmail id and name.');
-      }
-      return { id: entry.id, name: entry.name };
-    }),
-    always_private_senders: strings('always_private_senders', 500),
-    skip_senders: strings('skip_senders', 500),
   };
 }
 

@@ -268,12 +268,10 @@ import {
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
-  mailScopeDraftView,
-  mailScopeFromDraft,
   type FileSourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import { createGmailMailScopeBrowser } from '../google-connectors/gmail-scope-browser.ts';
-import { MAIL_SCOPE_WINDOW_LABELS } from '../../core/mail-source-scope.ts';
+import { MAIL_SCOPE_WINDOW_LABELS, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
 import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
 import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';

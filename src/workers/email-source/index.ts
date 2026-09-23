@@ -149,7 +149,7 @@ import {
   type OlympusSourceScopeSelection,
   type OlympusDashboardReadParams,
 } from '../../control-ui-contract.ts';
-import { parseMailScopeDraft } from '../source-scope-runtime.ts';
+import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
