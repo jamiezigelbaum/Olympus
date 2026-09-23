@@ -167,7 +167,7 @@ function renderEntry(entry: EmbeddingLedgerEntry, now: Date): string {
   pushFact(facts, 'Endpoint', entry.endpoint);
   pushFact(facts, 'Scope', embeddingLedgerScopeText(entry.scope));
   pushFact(facts, 'Why', entry.why);
-  const approval = EMBEDDING_LEDGER_APPROVAL_TEXT[entry.approved_by];
+  const approval = EMBEDDING_LEDGER_APPROVAL_TEXT[entry.approved_by] ?? '';
   const status = EMBEDDING_LEDGER_STATUS_TEXT[entry.status];
   return `
         <div class="ledgerentry">

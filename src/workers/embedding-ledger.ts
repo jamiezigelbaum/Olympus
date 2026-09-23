@@ -38,6 +38,7 @@
 import { homedir } from 'node:os';
 import { chmod, mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
 
 /** Override for the ledger file. Everything else derives from XDG_DATA_HOME. */
 export const EMBEDDING_LEDGER_PATH_ENV = 'OLYMPUS_EMBEDDING_LEDGER_PATH';
@@ -60,13 +61,31 @@ export type EmbeddingLedgerKind =
 /**
  * Who agreed to this.
  *
- * `jamie` is the ONLY value that means approved, and it means approved IN
- * ADVANCE — that is the owner's rule, and a retrospective blessing is a `note`
- * entry of its own rather than a rewrite of the original. `system-automatic`
- * means a machine did it with no human in the loop. `unattributed-historical`
- * means it happened and the record of who decided it does not exist.
+ * The owner-approval value (`EMBEDDING_LEDGER_OWNER_APPROVAL`) is the ONLY
+ * value that means approved, and it means approved IN ADVANCE — that is the
+ * owner's rule, and a retrospective blessing is a `note` entry of its own
+ * rather than a rewrite of the original. `system-automatic` means a machine did
+ * it with no human in the loop. `unattributed-historical` means it happened and
+ * the record of who decided it does not exist.
  */
-export type EmbeddingLedgerApprovedBy = 'jamie' | 'system-automatic' | 'unattributed-historical';
+export type EmbeddingLedgerOwnerApproval = 'jamie' | 'owner';
+export type EmbeddingLedgerApprovedBy = EmbeddingLedgerOwnerApproval | 'system-automatic' | 'unattributed-historical';
+
+/**
+ * The one `approved_by` value that means "the owner approved this in advance".
+ * Code that records or checks an owner approval uses this constant, never a
+ * literal, so the approval vocabulary stays defined in exactly one place.
+ *
+ * A source checkout keeps the value its live ledger has always carried
+ * (append-only history is never rewritten). The public package, whose bytes
+ * may name no person, spells it `owner`. Each build has exactly one approval
+ * value; the other one reads as an unknown line there, skipped and counted.
+ */
+export const EMBEDDING_LEDGER_OWNER_APPROVAL: EmbeddingLedgerOwnerApproval = PUBLIC_RUNTIME_BUILD ? 'owner' : 'jamie';
+
+export function isOwnerApprovedEmbeddingLedgerEntry(entry: Pick<EmbeddingLedgerEntry, 'approved_by'>): boolean {
+  return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
+}
 
 /** Where this event has got to. `n/a` is for events that are not work. */
 export type EmbeddingLedgerStatus = 'pending' | 'in_progress' | 'complete' | 'n/a';
@@ -350,8 +369,8 @@ export const EMBEDDING_LEDGER_KIND_TEXT: Record<EmbeddingLedgerKind, string> = {
  * than labels because "system-automatic" on its own reads like a category, and
  * the reader needs to understand it means nobody agreed to this.
  */
-export const EMBEDDING_LEDGER_APPROVAL_TEXT: Record<EmbeddingLedgerApprovedBy, string> = {
-  jamie: 'Approved in advance by the owner',
+export const EMBEDDING_LEDGER_APPROVAL_TEXT: Readonly<Partial<Record<EmbeddingLedgerApprovedBy, string>>> = {
+  [EMBEDDING_LEDGER_OWNER_APPROVAL]: 'Approved in advance by the owner',
   'system-automatic': 'Not approved — the system did this on its own',
   'unattributed-historical': 'Not approved — no decision is on record',
 };
@@ -411,7 +430,7 @@ const LANE_ENABLEMENT_CORPORA = ['dropbox', 'readwise', 'x-bookmarks'] as const;
  * recorded. The approximate total lives in the sentence, in words, qualified —
  * where an estimate can be honest.
  */
-export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = [
+export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = PUBLIC_RUNTIME_BUILD ? [] : [
   {
     entry_id: 'backfill-2026-08-20-endpoint-retarget',
     recorded_at: '2026-08-20T02:42:00.000Z',
@@ -473,7 +492,7 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = [
     why: 'The owner researched the alternatives himself and concluded the current model is the right '
       + 'one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an '
       + 'embedding change could happen without anyone deciding to make one.',
-    approved_by: 'jamie',
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
   },
   {
@@ -498,7 +517,7 @@ export const EMBEDDING_LEDGER_BACKFILL: readonly EmbeddingLedgerEntry[] = [
       + 'model it already stores vectors under, and no existing vector is invalidated — the lanes '
       + 'only fill in chunks that have none. The owner approved this in advance, which is the rule '
       + '2026-08-20 produced.',
-    approved_by: 'jamie',
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: 'complete',
   },
 ];
