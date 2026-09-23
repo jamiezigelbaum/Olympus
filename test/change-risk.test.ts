@@ -98,6 +98,19 @@ describe('change risk', () => {
     expect(classifyChange(entryPoints, config).criticalFiles).toEqual([...entryPoints].sort());
   });
 
+  test('source-answer trust routing and the trust model it implements are critical', () => {
+    // Which evidence a source answer searches, which analyst may read it, and
+    // what is released from it is security/trust routing, not ordinary
+    // product behavior; a path-only classifier must see it.
+    const trustRouting = [
+      'docs/TRUST_MODEL.md',
+      'src/workers/email-source/server.ts',
+      'src/workers/source-index/analyst-answer.ts',
+      'src/workers/source-index/analyst-pool.ts',
+    ];
+    expect(classifyChange(trustRouting, config).criticalFiles).toEqual([...trustRouting].sort());
+  });
+
   test('rejects a stale configuration schema instead of guessing', () => {
     const stale = { ...config, schemaVersion: 1 } as unknown as ChangeRiskConfig;
     expect(() => classifyChange(['AGENTS.md'], stale)).toThrow(/Unsupported change-risk configuration/);
