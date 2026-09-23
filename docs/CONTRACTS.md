@@ -461,6 +461,19 @@ see both change logs.
   `classificationSignals`; the shared tier classifier decides and the tier
   ledger records. EvidencePack and Analyst shapes are unchanged. Full entry and
   migration note under "Compatibility and change rule" above.
+- 2026-09-23 (four-tier P1b, no version change): per-tier stores. Items are
+  routed by their recorded tiers into `public_safe.*`, `internal.*` and
+  `secure_local.*` stores governed by one tier ledger per source, and every
+  tier is searched. Two build-detail fields ride BESIDE the pack, by the
+  2026-08-20 precedent: `EvidencePackBuildDetail.secretLocations` (where a
+  matching Secret lives: source, locator, a scanned title, finding kinds; never
+  content) and `EvidencePackBuildDetail.classificationCoverage` (counts of
+  searched items whose tier is not final). Neither enters the pack, so no
+  model reads them, and the routing to the private analyst is unchanged in
+  shape. The router gains an optional `visibilityGate` over one query's hits.
+  None of these is reachable from the three contract types, so the
+  fingerprint is unchanged (`bun run contracts:check`); no stored data
+  migrates.
 - 2026-09-23 (v1.1.0): `EvidenceCoverage` gains optional `matchCounts`, per
   searched corpus: matched items, how many carry readable content, whether the
   count hit its probe ceiling, and how many are in the evidence. Source answers

@@ -609,7 +609,10 @@ During install, do not write Public/Personal categories into the map: a
 schemaVersion 1 map is raise-only guidance. It may raise matching items to
 Private or Secrets, never downgrade them. (A schemaVersion 2 map may also name
 Public and Personal categories; the tier classifier records them as lowering
-guidance that any raise still beats. Write one only when the operator asks.)
+guidance that any raise still beats. Write one only when the operator asks.
+Lower on a sender only for authenticated or low-stakes senders: a From
+address can be spoofed, so a forged sender must never be able to pull real
+mail down a tier.)
 Validate it before continuing:
 
 ```bash

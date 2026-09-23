@@ -419,6 +419,24 @@ Rules:
   the bulk release approval gate applies to every explicit `secure_local`
   request.
 
+- Per-tier stores (four-tier phase P1b; design
+  [per-item-four-tier-classification.md](design/per-item-four-tier-classification.md)).
+  Gmail, Google Drive and Telegram each keep one store per trust domain
+  (`public_safe.*` created only on first need, `internal.*`, `secure_local.*`)
+  and ONE tier ledger, beside the source's `secure_local` store, that decides
+  which copy of an item is visible. A NEW item judged from text Olympus
+  actually read is routed by its recorded tiers: its names to the metadata
+  tier's store and its body to the content tier's (a chat message is kept
+  whole, in the more private). An item whose tier is still pending is stored
+  Private, searchable by keyword and not embedded until final. A Secret is
+  stored nowhere; only its location (source, locator, a scanned title, finding
+  kinds) is kept, in the source's secret-locations index, and returned beside
+  answers, never to a model. A copy a move leaves behind is superseded: kept,
+  never searched, served, counted or exported; cloud vectors of an item raised
+  to Private are kept that way, hidden, until the owner approves a purge.
+  Everything stored before P1b stays exactly where it is until the
+  owner-approved migration.
+
 Current email implication: until Olympus has row/chunk sensitivity
 classification for the local Gmail index, treat the entire email index as
 local/private and cloud-embedding-ineligible.
