@@ -110,8 +110,9 @@ describe('tier ledger copies (P1b)', () => {
     expect(visible()).toEqual([SECURE.corpusId]);
     expect(store.copies(ITEM).find((copy) => copy.corpusId === INTERNAL.corpusId)?.state).toBe('staged');
 
-    expect(() => store.completeMove(ITEM, { expectedGeneration: 7 })).toThrow(TierLedgerGenerationConflictError);
-    const flipped = store.completeMove(ITEM, { expectedGeneration: 1 });
+    const internalWhole = [{ ...INTERNAL, layers: 'both' as const }];
+    expect(() => store.completeMove(ITEM, { expectedGeneration: 7, destination: internalWhole })).toThrow(TierLedgerGenerationConflictError);
+    const flipped = store.completeMove(ITEM, { expectedGeneration: 1, destination: internalWhole });
     expect(flipped).toMatchObject({ generation: 2, state: 'current', contentTier: 'private', previousContentTier: 'secure' });
     expect(visible()).toEqual([INTERNAL.corpusId]);
     expect(store.copies(ITEM).find((copy) => copy.corpusId === SECURE.corpusId)).toMatchObject({ state: 'superseded', supersededByGeneration: 2 });
@@ -133,26 +134,42 @@ describe('tier ledger copies (P1b)', () => {
       hideSource: true,
     });
     expect(store.copies(ITEM).filter((copy) => copy.state === 'current')).toEqual([]);
-    store.completeMove(ITEM, { expectedGeneration: 1 });
+    store.completeMove(ITEM, { expectedGeneration: 1, destination: [{ ...SECURE, layers: 'both' }] });
     expect(store.copies(ITEM).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId)).toEqual([SECURE.corpusId]);
     // The Personal copy (and its cloud vectors) is kept, hidden: owner ruling.
     expect(store.copies(ITEM).find((copy) => copy.corpusId === INTERNAL.corpusId)?.state).toBe('superseded');
     store.close();
   });
 
-  test('a destination the item is already current in is refused', () => {
+  test('a split raise re-layers the source copy in place, and rollback restores its layers', () => {
     const store = ledger();
     store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
-    expect(() => store.stageMove(ITEM, {
+    const split = [{ ...INTERNAL, layers: 'metadata' as const }, { ...SECURE, layers: 'content' as const }];
+    store.stageMove(ITEM, {
       expectedGeneration: 1,
-      target: { metadataTier: 'private', contentTier: 'private' },
-      destination: [{ ...INTERNAL, layers: 'both' }],
-      hideSource: false,
-    })).toThrow(/not current in/);
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: split,
+      hideSource: true,
+    });
+    // Only the new store is staged; the Personal copy is hidden, not replaced.
+    expect(store.copies(ITEM).map((copy) => [copy.corpusId, copy.state, copy.layers])).toEqual([
+      [INTERNAL.corpusId, 'superseded', 'both'],
+      [SECURE.corpusId, 'staged', 'content'],
+    ]);
+    store.completeMove(ITEM, { expectedGeneration: 1, destination: split });
+    expect(store.copies(ITEM).map((copy) => [copy.corpusId, copy.state, copy.layers, copy.previousLayers])).toEqual([
+      [INTERNAL.corpusId, 'current', 'metadata', 'both'],
+      [SECURE.corpusId, 'current', 'content', null],
+    ]);
+    store.rollbackMove(ITEM, { expectedGeneration: 2 });
+    expect(store.copies(ITEM).map((copy) => [copy.corpusId, copy.state, copy.layers])).toEqual([
+      [INTERNAL.corpusId, 'current', 'both'],
+      [SECURE.corpusId, 'superseded', 'content'],
+    ]);
     store.close();
   });
 
-  test('Secrets drop every copy and return where they were', () => {
+  test('Secrets hide every copy at once; the caller removes the rows after tombstoning', () => {
     const store = ledger();
     store.recordRoutedPlacement(ITEM, decision(), whole(PUBLIC));
     const secret = store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secrets', decidedBy: 'secret_detector' }), {
@@ -161,6 +178,8 @@ describe('tier ledger copies (P1b)', () => {
     });
     expect(secret.outcome).toBe('secrets');
     expect(secret.previousCopies.map((copy) => copy.corpusId)).toEqual([PUBLIC.corpusId]);
+    expect(store.copies(ITEM)).toEqual([expect.objectContaining({ corpusId: PUBLIC.corpusId, state: 'superseded' })]);
+    expect(store.removeCopies(ITEM)).toHaveLength(1);
     expect(store.copies(ITEM)).toEqual([]);
     expect(store.isRouted(ITEM)).toBe(true);
     store.close();

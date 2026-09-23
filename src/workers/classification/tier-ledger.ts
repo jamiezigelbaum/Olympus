@@ -105,6 +105,11 @@ export interface TierCopy {
   generation: number;
   /** The generation whose flip superseded this copy; null unless superseded. */
   supersededByGeneration: number | null;
+  /**
+   * Set when the last flip kept this copy but changed which layers it serves
+   * (e.g. `both` -> `metadata` on a split raise), so a rollback can restore it.
+   */
+  previousLayers: TierCopyLayers | null;
   updatedAt: string;
 }
 
@@ -139,7 +144,10 @@ export type TierRoutedOutcome =
   | 'queued_move'
   /** Already mid-move: the move owns the row. */
   | 'held_moving'
-  /** Secrets: every copy is dropped from the ledger (the stores tombstone them). */
+  /**
+   * Secrets: every copy is superseded (hidden) at once; the caller tombstones
+   * the store copies and then removes the rows.
+   */
   | 'secrets';
 
 export interface TierLedgerOptions {
@@ -693,7 +701,10 @@ export class TierLedger {
           this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
         }
         if (secrets) {
-          this.deleteCopies(identity);
+          // Hidden now; the caller tombstones every store copy, then calls
+          // removeCopies. Deleting the rows first would make the still-active
+          // store rows read as legacy (visible) in between.
+          this.supersedeCurrentCopies(identity, generation, decidedAt);
           outcome = 'secrets';
           return;
         }
@@ -763,9 +774,14 @@ export class TierLedger {
 
   /**
    * Move step 1: mark the item mid-move and stage the destination copies,
-   * which are never searched. The source copies stay current, except on a
-   * RAISE (`hideSource`), where they are superseded first so the item is
-   * briefly unsearchable instead of briefly visible in the lower tier.
+   * which are never searched.
+   *
+   * `destination` is the item's full placement after the move. A store the
+   * item already has a source copy in is NOT staged: the flip re-layers that
+   * copy in place (the move writes whatever data it lacks first). Every other
+   * destination is staged. The source copies stay current, except on a RAISE
+   * (`hideSource`), where they are superseded first so the item is briefly
+   * unsearchable instead of briefly visible in the lower tier.
    */
   stageMove(
     identity: TierLedgerIdentity,
@@ -779,6 +795,7 @@ export class TierLedger {
   ): TierLedgerRecord {
     assertTier(options.target.metadataTier);
     assertTier(options.target.contentTier);
+    if (options.destination.length === 0) throw new Error('A move needs at least one destination copy.');
     for (const copy of options.destination) assertCopyPlan(copy);
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -792,66 +809,91 @@ export class TierLedger {
           || existing.targetContentTier !== options.target.contentTier)) {
         throw new TierLedgerGenerationConflictError('The item is already moving toward different tiers.');
       }
-      const copies = this.copies(identity);
-      for (const destination of options.destination) {
-        const clash = copies.find((copy) => copy.corpusId === destination.corpusId);
-        if (clash?.state === 'current') {
-          throw new Error('A move destination must be a store the item is not current in.');
-        }
-      }
+      const nextGeneration = existing.generation + 1;
+      const sources = this.moveSources(identity, nextGeneration);
       this.db.query(`
         UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
         WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       `).run(options.target.metadataTier, options.target.contentTier, identity.provider, identity.accountScope, identity.providerItemId);
-      if (options.hideSource) this.supersedeCurrentCopies(identity, existing.generation + 1, now);
-      for (const destination of options.destination) {
+      if (options.hideSource) this.supersedeCurrentCopies(identity, nextGeneration, now);
+      const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
+      for (const destination of staged) {
+        // A stale superseded copy in the destination store is replaced: the
+        // move rewrites that store's row, so the old row stops being "kept".
         this.db.query(`
           DELETE FROM tier_copies
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
         `).run(identity.provider, identity.accountScope, identity.providerItemId, destination.corpusId);
       }
-      this.insertCopies(
-        identity,
-        { copies: options.destination, embedHold: options.embedHold === true },
-        'staged',
-        existing.generation + 1,
-        now,
-      );
+      this.insertCopies(identity, { copies: staged, embedHold: options.embedHold === true }, 'staged', nextGeneration, now);
     })();
     return this.getCurrent(identity)!;
   }
 
   /**
-   * Move step 2, the flip: in ONE write the staged copies become current, the
-   * previous current copies become superseded, and the target tiers become
-   * the item's tiers. Compare-and-swap on the generation.
+   * The copies a move starts from: current ones, plus the ones a hide-first
+   * raise superseded for this very move.
+   */
+  private moveSources(identity: TierLedgerIdentity, moveGeneration: number): TierCopy[] {
+    return this.copies(identity).filter((copy) => copy.state === 'current'
+      || (copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration));
+  }
+
+  /**
+   * Move step 2, the flip: in ONE write every copy in `destination` becomes
+   * current with its planned layers, every other source copy becomes
+   * superseded, and the target tiers become the item's tiers.
+   * Compare-and-swap on the generation.
    */
   completeMove(
     identity: TierLedgerIdentity,
-    options: { expectedGeneration: number; decidedBy?: TierDecidedBy | 'rollback' | 'move'; reasons?: readonly string[] },
+    options: {
+      expectedGeneration: number;
+      destination: readonly TierCopyPlan[];
+      decidedBy?: TierDecidedBy | 'move';
+      reasons?: readonly string[];
+    },
   ): TierLedgerRecord {
+    for (const copy of options.destination) assertCopyPlan(copy);
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== 'moving') {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== 'moving'
+        || existing.targetMetadataTier === null || existing.targetContentTier === null) {
         throw new TierLedgerGenerationConflictError();
       }
-      const copies = this.copies(identity);
-      if (!copies.some((copy) => copy.state === 'staged')) {
-        throw new Error('A move completes only once its destination copies are staged.');
-      }
       const generation = existing.generation + 1;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND copy_state = 'current'
-      `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId);
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'current', generation = ?, superseded_by_generation = NULL, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId);
+      const copies = this.copies(identity);
+      const sources = this.moveSources(identity, generation);
+      for (const planned of options.destination) {
+        const row = copies.find((copy) => copy.corpusId === planned.corpusId);
+        if (!row) throw new Error('A move completes only once every destination copy is staged or kept.');
+        if (row.state === 'staged') {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
+              superseded_by_generation = NULL, previous_layers = NULL, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, now, identity.provider, identity.accountScope, identity.providerItemId, planned.corpusId);
+        } else if (sources.some((source) => source.corpusId === planned.corpusId)) {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
+              superseded_by_generation = NULL, previous_layers = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, row.layers, now, identity.provider, identity.accountScope, identity.providerItemId, planned.corpusId);
+        } else {
+          throw new Error('A move destination must be staged or be one of the item\'s source copies.');
+        }
+      }
+      for (const source of sources) {
+        if (options.destination.some((planned) => planned.corpusId === source.corpusId)) continue;
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, previous_layers = NULL, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId, source.corpusId);
+      }
       this.flipTiers(identity, existing, {
-        metadataTier: existing.targetMetadataTier!,
-        contentTier: existing.targetContentTier!,
+        metadataTier: existing.targetMetadataTier,
+        contentTier: existing.targetContentTier,
         generation,
         decidedBy: options.decidedBy ?? 'move',
         reasons: options.reasons ?? existing.reasons,
@@ -863,8 +905,9 @@ export class TierLedger {
 
   /**
    * Rollback is a ledger flip: the copies the last flip superseded become
-   * current again and the copies it made current become superseded. No store
-   * is written and nothing is re-embedded.
+   * current again, re-layered copies get their old layers back, and the copies
+   * the flip made current become superseded. No store is written and nothing
+   * is re-embedded.
    */
   rollbackMove(identity: TierLedgerIdentity, options: { expectedGeneration: number }): TierLedgerRecord {
     const now = this.now().toISOString();
@@ -874,14 +917,28 @@ export class TierLedger {
         || existing.previousMetadataTier === null || existing.previousContentTier === null) {
         throw new TierLedgerGenerationConflictError();
       }
+      const flipGeneration = existing.generation;
       const copies = this.copies(identity);
-      const restore = copies.filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === existing.generation);
-      if (restore.length === 0) throw new Error('Nothing to roll back to: the last flip superseded no copy.');
-      const generation = existing.generation + 1;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND copy_state = 'current'
-      `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId);
+      const restore = copies.filter((copy) => copy.state === 'superseded' && copy.supersededByGeneration === flipGeneration);
+      const relayered = copies.filter((copy) => copy.state === 'current' && copy.generation === flipGeneration && copy.previousLayers !== null);
+      if (restore.length === 0 && relayered.length === 0) {
+        throw new Error('Nothing to roll back to: the last flip superseded or re-layered no copy.');
+      }
+      const generation = flipGeneration + 1;
+      for (const copy of copies) {
+        if (copy.state !== 'current' || copy.generation !== flipGeneration) continue;
+        if (copy.previousLayers !== null) {
+          this.db.query(`
+            UPDATE tier_copies SET layers = ?, previous_layers = NULL, generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(copy.previousLayers, generation, now, identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId);
+        } else {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(generation, now, identity.provider, identity.accountScope, identity.providerItemId, copy.corpusId);
+        }
+      }
       for (const copy of restore) {
         this.db.query(`
           UPDATE tier_copies SET copy_state = 'current', generation = ?, superseded_by_generation = NULL, updated_at = ?
@@ -1128,6 +1185,7 @@ interface TierCopyRow {
   embed_hold: number;
   generation: number;
   superseded_by_generation: number | null;
+  previous_layers: TierCopyLayers | null;
   updated_at: string;
 }
 
@@ -1140,6 +1198,7 @@ function copyFromRow(row: TierCopyRow): TierCopy {
     embedHold: row.embed_hold === 1,
     generation: row.generation,
     supersededByGeneration: row.superseded_by_generation,
+    previousLayers: row.previous_layers,
     updatedAt: row.updated_at,
   };
 }
@@ -1378,6 +1437,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
             embed_hold INTEGER NOT NULL DEFAULT 0 CHECK (embed_hold IN (0, 1)),
             generation INTEGER NOT NULL CHECK (generation >= 1),
             superseded_by_generation INTEGER,
+            previous_layers TEXT CHECK (previous_layers IS NULL OR previous_layers IN ('metadata', 'content', 'both')),
             updated_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, provider_item_id, corpus_id)
           );
