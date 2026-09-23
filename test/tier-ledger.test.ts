@@ -118,7 +118,7 @@ describe('tier ledger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-'));
     try {
       const dbPath = tierLedgerPathForStore(join(dir, 'some-store.sqlite'));
-      expect(dbPath).toBe(join(dir, 'tier-ledger.sqlite'));
+      expect(dbPath).toBe(join(dir, 'some-store.tier-ledger.sqlite'));
       const store = new TierLedger({ dbPath });
       store.recordDecision(ITEM, classifyItemTiers({
         signals: { title: 'zebracorn medical invoice', path: '/zebracorn/tax.pdf', sender: 'zebracorn@example.com' },

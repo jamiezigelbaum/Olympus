@@ -13,20 +13,22 @@
 
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import {
   TIER_KEYS,
+  maxTier,
+  type ContentTierDecision,
   type ItemTierOverride,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
 } from './tier-classifier.ts';
+import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
-export const TIER_LEDGER_SQLITE_STORE_ID = 'olympus_tier_ledger';
+export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
 export const TIER_LEDGER_SCHEMA_VERSION = 1;
-export const TIER_LEDGER_FILE_NAME = 'tier-ledger.sqlite';
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
@@ -64,6 +66,12 @@ export interface TierLedgerRecord {
    */
   storedTrustDomain: SourceTrustDomain | null;
   storedTrustTier: SourceTrustTier | null;
+  /** Whether the content tier was decided from the item's text (or by an owner override). */
+  contentRead: boolean;
+  metadataPending: boolean;
+  contentPending: boolean;
+  metadataForced: boolean;
+  metadataFlagged: boolean;
   decidedAt: string;
 }
 
@@ -81,17 +89,6 @@ export class TierLedgerGenerationConflictError extends Error {
   }
 }
 
-/**
- * Where a store's ledger lives when none is configured: beside the store's own
- * database, so every default store under the shared Olympus data directory
- * shares one ledger, and a test's temporary store keeps its ledger in its own
- * temporary directory. `:memory:` stores get an in-memory ledger.
- */
-export function tierLedgerPathForStore(storeDbPath: string): string {
-  if (storeDbPath === ':memory:') return ':memory:';
-  return join(dirname(storeDbPath), TIER_LEDGER_FILE_NAME);
-}
-
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
@@ -100,21 +97,33 @@ export class TierLedger {
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
-    const fresh = this.dbPath !== ':memory:' && !existsSync(this.dbPath);
-    if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true });
-    this.db = new Database(this.dbPath, { create: true });
+    const onDisk = this.dbPath !== ':memory:';
+    if (onDisk) mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    // Owner-only from the first byte: the umask covers the database and the
+    // -wal/-shm files SQLite creates later; the chmod below repairs any file
+    // left group- or world-readable by a crash before an earlier chmod.
+    const previousUmask = onDisk ? process.umask(0o077) : undefined;
+    let db: Database | undefined;
     try {
-      this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
-      runSqliteMigrations(this.db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
-      if (fresh) chmodSync(this.dbPath, 0o600);
+      db = new Database(this.dbPath, { create: true });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      this.db.close();
+      db?.close();
       throw error;
+    } finally {
+      if (previousUmask !== undefined) process.umask(previousUmask);
     }
+    this.db = db;
   }
 
   close(): void {
-    this.db.close();
+    try {
+      if (this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
+    } finally {
+      this.db.close();
+    }
   }
 
   /**
@@ -125,93 +134,166 @@ export class TierLedger {
    * - A changed decision with the same tiers updates reasons/state in place.
    * - A changed TIER bumps the generation and keeps the previous tiers.
    * - A row mid-move is left alone: the move owns it until `flip`.
+   * - A decision made WITHOUT reading the text never replaces or lowers a
+   *   content tier: over a content tier decided from text it keeps that tier
+   *   (raised to the new metadata tier if the names now demand more), and over
+   *   an unread one it only ever raises.
    */
   recordDecision(
     identity: TierLedgerIdentity,
     decision: TierDecision,
     stored?: TierLedgerStoredPlacement,
   ): { outcome: TierLedgerRecordOutcome; record: TierLedgerRecord } {
-    const decidedAt = this.now().toISOString();
-    const reasonsJson = JSON.stringify(decision.reasons);
     let outcome: TierLedgerRecordOutcome = 'unchanged';
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing) {
-        this.db.query(`
-          INSERT INTO tier_items (
-            provider, account_scope, provider_item_id, family,
-            metadata_tier, content_tier, generation, decided_by, reasons_json,
-            engine_version, map_revision, model_id,
-            previous_metadata_tier, previous_content_tier, state,
-            target_metadata_tier, target_content_tier,
-            stored_trust_domain, stored_trust_tier, decided_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?)
-        `).run(
-          identity.provider,
-          identity.accountScope,
-          identity.providerItemId,
-          identity.family ?? 'unknown',
-          decision.metadataTier,
-          decision.contentTier,
-          decision.decidedBy,
-          reasonsJson,
-          decision.engineVersion,
-          decision.mapRevision,
-          decision.state,
-          stored?.trustDomain ?? null,
-          stored?.trustTier ?? null,
-          decidedAt,
-        );
-        this.appendHistory(identity, 1, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
-        outcome = 'inserted';
+      if (existing?.state === 'moving') {
+        outcome = 'held_moving';
         return;
       }
+      outcome = this.writeRow(identity, effectiveRow(existing, decision), stored, existing);
+    })();
+    return { outcome, record: this.getCurrent(identity)! };
+  }
+
+  /**
+   * Record a content decision made when an item's text was finally read (the
+   * shared extraction factory). Only the content half changes; the metadata
+   * decision recorded at listing stays. Returns undefined when no metadata
+   * decision exists yet: there is nothing to start pass 2 from.
+   */
+  recordContentDecision(
+    identity: TierLedgerIdentity,
+    content: ContentTierDecision,
+    stored?: TierLedgerStoredPlacement,
+  ): { outcome: TierLedgerRecordOutcome; record: TierLedgerRecord } | undefined {
+    let outcome: TierLedgerRecordOutcome | undefined;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing) return;
       if (existing.state === 'moving') {
         outcome = 'held_moving';
         return;
       }
-      const tiersChanged = existing.metadataTier !== decision.metadataTier
-        || existing.contentTier !== decision.contentTier;
-      const detailChanged = JSON.stringify(existing.reasons) !== reasonsJson
-        || existing.decidedBy !== decision.decidedBy
-        || existing.state !== decision.state
-        || existing.engineVersion !== decision.engineVersion
-        || existing.mapRevision !== decision.mapRevision
-        || (stored !== undefined
-          && (existing.storedTrustDomain !== stored.trustDomain || existing.storedTrustTier !== stored.trustTier));
-      if (!tiersChanged && !detailChanged) return;
-      const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+      if (existing.decidedBy === 'override') {
+        outcome = 'unchanged';
+        return;
+      }
+      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith('content:'));
+      const contentTier = maxTier(content.contentTier, existing.metadataTier);
+      const next: EffectiveRow = {
+        metadataTier: existing.metadataTier,
+        contentTier,
+        decidedBy: content.decidedBy,
+        reasons: [...metadataReasons, ...content.reasons],
+        engineVersion: content.engineVersion,
+        mapRevision: content.mapRevision,
+        contentRead: true,
+        metadataPending: existing.metadataPending,
+        contentPending: content.contentPending,
+        metadataForced: existing.metadataForced,
+        metadataFlagged: existing.metadataFlagged,
+      };
+      outcome = this.writeRow(identity, next, stored, existing);
+    })();
+    return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
+  }
+
+  private writeRow(
+    identity: TierLedgerIdentity,
+    next: EffectiveRow,
+    stored: TierLedgerStoredPlacement | undefined,
+    existing: TierLedgerRecord | undefined,
+  ): TierLedgerRecordOutcome {
+    const decidedAt = this.now().toISOString();
+    const reasonsJson = JSON.stringify(next.reasons);
+    const state: TierLedgerState = next.metadataPending || next.contentPending ? 'pending' : 'current';
+    const flags = [
+      next.contentRead ? 1 : 0,
+      next.metadataPending ? 1 : 0,
+      next.contentPending ? 1 : 0,
+      next.metadataForced ? 1 : 0,
+      next.metadataFlagged ? 1 : 0,
+    ];
+    if (!existing) {
       this.db.query(`
-        UPDATE tier_items SET
-          metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
-          engine_version = ?, map_revision = ?,
-          previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
-          stored_trust_domain = COALESCE(?, stored_trust_domain),
-          stored_trust_tier = COALESCE(?, stored_trust_tier),
-          decided_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        INSERT INTO tier_items (
+          provider, account_scope, provider_item_id, family,
+          metadata_tier, content_tier, generation, decided_by, reasons_json,
+          engine_version, map_revision, model_id,
+          previous_metadata_tier, previous_content_tier, state,
+          target_metadata_tier, target_content_tier,
+          stored_trust_domain, stored_trust_tier,
+          content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+          decided_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        decision.metadataTier,
-        decision.contentTier,
-        generation,
-        decision.decidedBy,
-        reasonsJson,
-        decision.engineVersion,
-        decision.mapRevision,
-        tiersChanged ? existing.metadataTier : existing.previousMetadataTier,
-        tiersChanged ? existing.contentTier : existing.previousContentTier,
-        decision.state,
-        stored?.trustDomain ?? null,
-        stored?.trustTier ?? null,
-        decidedAt,
         identity.provider,
         identity.accountScope,
         identity.providerItemId,
+        identity.family ?? 'unknown',
+        next.metadataTier,
+        next.contentTier,
+        next.decidedBy,
+        reasonsJson,
+        next.engineVersion,
+        next.mapRevision,
+        state,
+        stored?.trustDomain ?? null,
+        stored?.trustTier ?? null,
+        ...flags,
+        decidedAt,
       );
-      this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
-      outcome = 'updated';
-    })();
-    return { outcome, record: this.getCurrent(identity)! };
+      this.appendHistory(identity, 1, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
+      return 'inserted';
+    }
+    const tiersChanged = existing.metadataTier !== next.metadataTier
+      || existing.contentTier !== next.contentTier;
+    const detailChanged = JSON.stringify(existing.reasons) !== reasonsJson
+      || existing.decidedBy !== next.decidedBy
+      || existing.state !== state
+      || existing.engineVersion !== next.engineVersion
+      || existing.mapRevision !== next.mapRevision
+      || existing.contentRead !== next.contentRead
+      || existing.metadataPending !== next.metadataPending
+      || existing.contentPending !== next.contentPending
+      || existing.metadataForced !== next.metadataForced
+      || existing.metadataFlagged !== next.metadataFlagged
+      || (stored !== undefined
+        && (existing.storedTrustDomain !== stored.trustDomain || existing.storedTrustTier !== stored.trustTier));
+    if (!tiersChanged && !detailChanged) return 'unchanged';
+    const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+    this.db.query(`
+      UPDATE tier_items SET
+        metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+        engine_version = ?, map_revision = ?,
+        previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+        stored_trust_domain = COALESCE(?, stored_trust_domain),
+        stored_trust_tier = COALESCE(?, stored_trust_tier),
+        content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+        decided_at = ?
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).run(
+      next.metadataTier,
+      next.contentTier,
+      generation,
+      next.decidedBy,
+      reasonsJson,
+      next.engineVersion,
+      next.mapRevision,
+      tiersChanged ? existing.metadataTier : existing.previousMetadataTier,
+      tiersChanged ? existing.contentTier : existing.previousContentTier,
+      state,
+      stored?.trustDomain ?? null,
+      stored?.trustTier ?? null,
+      ...flags,
+      decidedAt,
+      identity.provider,
+      identity.accountScope,
+      identity.providerItemId,
+    );
+    this.appendHistory(identity, generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
+    return 'updated';
   }
 
   getCurrent(identity: TierLedgerIdentity): TierLedgerRecord | undefined {
@@ -432,6 +514,11 @@ interface TierItemRow {
   target_content_tier: TierKey | null;
   stored_trust_domain: SourceTrustDomain | null;
   stored_trust_tier: SourceTrustTier | null;
+  content_read: number;
+  metadata_pending: number;
+  content_pending: number;
+  metadata_forced: number;
+  metadata_flagged: number;
   decided_at: string;
 }
 
@@ -456,8 +543,70 @@ function recordFromRow(row: TierItemRow): TierLedgerRecord {
     targetContentTier: row.target_content_tier,
     storedTrustDomain: row.stored_trust_domain,
     storedTrustTier: row.stored_trust_tier,
+    contentRead: row.content_read === 1,
+    metadataPending: row.metadata_pending === 1,
+    contentPending: row.content_pending === 1,
+    metadataForced: row.metadata_forced === 1,
+    metadataFlagged: row.metadata_flagged === 1,
     decidedAt: row.decided_at,
   };
+}
+
+interface EffectiveRow {
+  metadataTier: TierKey;
+  contentTier: TierKey;
+  decidedBy: string;
+  reasons: string[];
+  engineVersion: string;
+  mapRevision: string;
+  contentRead: boolean;
+  metadataPending: boolean;
+  contentPending: boolean;
+  metadataForced: boolean;
+  metadataFlagged: boolean;
+}
+
+/**
+ * Merge a fresh classifier decision with the stored row. A decision that did
+ * not read the text says nothing about the content, so it can raise the
+ * content tier (content is at least the metadata tier) but never replace or
+ * lower one.
+ */
+function effectiveRow(existing: TierLedgerRecord | undefined, decision: TierDecision): EffectiveRow {
+  const fresh: EffectiveRow = {
+    metadataTier: decision.metadataTier,
+    contentTier: decision.contentTier,
+    decidedBy: decision.decidedBy,
+    reasons: decision.reasons,
+    engineVersion: decision.engineVersion,
+    mapRevision: decision.mapRevision,
+    contentRead: decision.contentRead,
+    metadataPending: decision.metadataPending,
+    contentPending: decision.contentPending,
+    metadataForced: decision.metadataForced,
+    metadataFlagged: decision.metadataFlagged,
+  };
+  if (!existing || decision.contentRead) return fresh;
+  if (existing.contentRead) {
+    const metadataReasons = decision.reasons.filter((reason) => !reason.startsWith('content:'));
+    const contentReasons = existing.reasons.filter((reason) => reason.startsWith('content:'));
+    return {
+      ...fresh,
+      contentTier: maxTier(existing.contentTier, decision.metadataTier),
+      decidedBy: existing.decidedBy,
+      reasons: [...metadataReasons, ...contentReasons],
+      contentRead: true,
+      contentPending: existing.contentPending,
+    };
+  }
+  return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+
+/** Owner-only permissions on the ledger and its SQLite sidecars. */
+function restrictLedgerFiles(dbPath: string): void {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(path)) chmodSync(path, 0o600);
+  }
 }
 
 function assertTier(tier: string): asserts tier is TierKey {
@@ -495,6 +644,11 @@ function tierLedgerMigrations(): SqliteMigration[] {
             target_content_tier TEXT CHECK (target_content_tier IS NULL OR target_content_tier ${TIER_CHECK}),
             stored_trust_domain TEXT,
             stored_trust_tier TEXT,
+            content_read INTEGER NOT NULL DEFAULT 0 CHECK (content_read IN (0, 1)),
+            metadata_pending INTEGER NOT NULL DEFAULT 0 CHECK (metadata_pending IN (0, 1)),
+            content_pending INTEGER NOT NULL DEFAULT 0 CHECK (content_pending IN (0, 1)),
+            metadata_forced INTEGER NOT NULL DEFAULT 0 CHECK (metadata_forced IN (0, 1)),
+            metadata_flagged INTEGER NOT NULL DEFAULT 0 CHECK (metadata_flagged IN (0, 1)),
             decided_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, provider_item_id)
           );

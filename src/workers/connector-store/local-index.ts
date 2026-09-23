@@ -50,6 +50,7 @@ import {
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import { TierLedger, tierLedgerPathForStore } from '../classification/tier-ledger.ts';
+import { classifyContentTier } from '../classification/tier-classifier.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -361,7 +362,7 @@ export interface LocalConnectorStoreOptions {
   exclusions?: SourceExclusionMatcher;
   /**
    * Where this store records each item's four-tier decision. Omitted: a
-   * shared ledger beside the store's database (tier-ledger.sqlite), opened on
+   * ledger co-located with this store (`<store>.tier-ledger.sqlite`), opened on
    * first use. `null` records nothing. Read-only stores never record.
    */
   tierLedger?: TierLedger | null;
@@ -1867,11 +1868,12 @@ export class LocalConnectorStore {
   }
 
   close(): void {
-    if (this.tierLedgerOwned === true) {
-      this.tierLedgerHandle?.close();
+    try {
+      if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+    } finally {
       this.tierLedgerHandle = undefined;
+      closeSqliteStore(this.db);
     }
-    closeSqliteStore(this.db);
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */
@@ -1882,6 +1884,43 @@ export class LocalConnectorStore {
       this.tierLedgerOwned = true;
     }
     return this.tierLedgerHandle;
+  }
+
+  /**
+   * Record the content decision for an item whose text arrived after it was
+   * listed (the shared extraction factory). Pass 2 starts from the metadata
+   * decision already in the ledger and can only raise it. Like every ledger
+   * write in phase P1a it is best-effort and changes nothing about storage:
+   * it returns false when there was nothing to record or the ledger failed.
+   */
+  recordExtractedContentTier(
+    item: RawItem,
+    text: string,
+    tierClassification?: ConnectorStoreTierClassification,
+  ): boolean {
+    try {
+      const ledger = this.tierLedger();
+      if (!ledger) return false;
+      const existing = ledger.getCurrent(item.identity);
+      if (!existing) return false;
+      const override = ledger.getOverride(item.identity);
+      const content = classifyContentTier(
+        {
+          text,
+          metadataTier: existing.metadataTier,
+          metadataForced: existing.metadataForced,
+          metadataFlagged: existing.metadataFlagged,
+        },
+        {
+          ...(tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {}),
+          ...(override ? { override } : {}),
+        },
+      );
+      return ledger.recordContentDecision(item.identity, content) !== undefined;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -8094,6 +8133,20 @@ function normalizeClassificationOptions(
     baselineTrustDomain: options.baselineTrustDomain ?? 'internal',
     ...(options.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),
   };
+}
+
+/**
+ * The placement a sync applies to one item: the shared classification policy
+ * when one is supplied, otherwise the lane's declared placement. Exported for
+ * the per-lane parity tests against the retired connector classify().
+ */
+export function connectorStoreItemPlacement(
+  item: RawItem,
+  classification: ConnectorStoreClassificationOptions | undefined,
+  placement: ConnectorStorePlacement | undefined,
+  storeTrustDomain: SourceTrustDomain,
+): SourceSensitivity {
+  return classifyConnectorStoreItem(item, normalizeClassificationOptions(classification), placement, storeTrustDomain);
 }
 
 function classifyConnectorStoreItem(

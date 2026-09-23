@@ -36,7 +36,10 @@ import type { TierLedger } from '../classification/tier-ledger.ts';
  * old fixed answer is now declared by the lane that owns the store.
  *
  * - `trustTier` / `trustDomain`: where an ordinary item rests. Defaults to the
- *   store's own domain at that domain's default tier.
+ *   store's own domain at that domain's default tier. A lane whose items must
+ *   only ever be Private (WhatsApp, Apple Messages, Dropbox) DECLARES
+ *   secure_local rather than inheriting the store's domain, so wiring it to a
+ *   less private store is refused item by item, fail closed.
  * - `secretsInContent`: an item whose textual body carries a secret finding
  *   is stored as S5, which the store tombstones (location only). This is the
  *   exact rule the file connector's classify() applied, on the same text.

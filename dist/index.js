@@ -7439,7 +7439,6 @@ var init_tier_classifier = __esm(() => {
     judge: () => ({ verdict: "undecided" })
   });
 });
-
 // src/workers/classification/tier-ledger.ts
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
@@ -7625,6 +7624,7 @@ var init_local_index = __esm(() => {
   init_sqlite_migrations();
   init_engine();
   init_tier_ledger();
+  init_tier_classifier();
   init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();

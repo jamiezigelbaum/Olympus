@@ -128,7 +128,7 @@ describe('raises beat lowers', () => {
   });
 
   test('among lowering signals the most sensitive target wins', () => {
-    const decision = classify({ path: '/blog/family/post.md', sharing: 'public_link' }, BENIGN, {
+    const decision = classify({ path: '/family/post.md', sharing: 'public_link' }, BENIGN, {
       sensitivityMap: mapV2([{ id: 'family', tier: 'private', pathPatterns: ['/family/'] }]),
     });
     expect(decision.metadataTier).toBe('private');
@@ -310,10 +310,11 @@ describe('sniffer seam', () => {
 
     let asked = 0;
     const spy: TierSniffer = { id: 'spy', judge: () => { asked += 1; return { verdict: 'undecided' }; } };
-    const mapped = classify({ title: 'therapy invoices' }, undefined, {
+    const mapped = classify({ title: 'therapy invoices', path: '/household/therapy invoices.pdf' }, BENIGN, {
       sniffer: spy,
-      sensitivityMap: mapV2([{ id: 'therapy', tier: 'private', keywords: ['therapy'] }]),
+      sensitivityMap: mapV2([{ id: 'household', tier: 'private', pathPatterns: ['/household/'] }]),
     });
+    expect(mapped.metadataPending).toBe(false);
     expect(mapped.state).toBe('current');
     expect(asked).toBe(0);
   });

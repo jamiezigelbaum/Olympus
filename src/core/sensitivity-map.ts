@@ -266,24 +266,89 @@ export interface SensitivityMapTierMatch {
 }
 
 /**
- * Every category the input matches, with the tier it targets — raising AND
- * lowering. The shared tier classifier decides what a match means; this only
- * reports it. Category ids are the owner's own configuration, not item content.
+ * What the tier classifier hands the map. Names are kept apart on purpose:
+ * `path`, `folderKeys` and `sender` are the item's real structured fields;
+ * `title` is a display name. Lowering categories may only match the
+ * structured fields.
+ */
+export interface SensitivityMapTierMatchInput {
+  title?: string;
+  text?: string;
+  path?: string;
+  folderKeys?: readonly string[];
+  sender?: string;
+}
+
+/**
+ * Every category the input matches, with the tier it targets.
+ *
+ * Raising categories (Private, Secrets) keep the forgiving v1 semantics:
+ * substring matches over the title and text, the sender, and the path joined
+ * with the title. A wider haystack can only make an item more private.
+ *
+ * Lowering categories (Public, Personal) are held to the opposite standard,
+ * because a false match there loosens a tier:
+ * - keywords never lower (they match free text and display names);
+ * - a path pattern matches only the real path, anchored at the start and
+ *   ending on a segment boundary, or equals one of the item's folder keys;
+ * - a sender pattern matches only the sender's address exactly, or its domain
+ *   at a label boundary (`example.com` matches `a@example.com` and
+ *   `a@mail.example.com`, never `a@notexample.com`).
+ *
+ * Category ids are the owner's own configuration, not item content.
  */
 export function matchSensitivityMapTiers(
   map: SensitivityMap | undefined,
-  input: SensitivityMapMatchInput,
+  input: SensitivityMapTierMatchInput,
 ): SensitivityMapTierMatch[] {
   if (!map) return [];
-  const textHaystack = [input.subject, input.title, input.text]
+  const textHaystack = [input.title, input.text]
     .map((part) => part?.trim().toLowerCase())
     .filter((part): part is string => Boolean(part))
     .join('\n');
   const sender = input.sender?.trim().toLowerCase() ?? '';
-  const path = input.path?.trim().toLowerCase() ?? '';
+  const realPath = input.path?.trim().toLowerCase() ?? '';
+  const raisePath = [realPath, input.title?.trim().toLowerCase() ?? '']
+    .filter(Boolean)
+    .join('\n');
+  const folderKeys = (input.folderKeys ?? []).map((key) => key.trim().toLowerCase()).filter(Boolean);
+  const address = senderAddress(sender);
   return map.categories
-    .filter((category) => categoryMatches(category, { textHaystack, sender, path }))
+    .filter((category) => (isRaisingSensitivityTier(category.targetTierName)
+      ? categoryMatches(category, { textHaystack, sender, path: raisePath })
+      : loweringCategoryMatches(category, { realPath, folderKeys, address })))
     .map((category) => ({ categoryId: category.id, tierName: category.targetTierName }));
+}
+
+function loweringCategoryMatches(
+  category: SensitivityMapCategory,
+  input: { realPath: string; folderKeys: readonly string[]; address: string | undefined },
+): boolean {
+  const pathHit = category.match.pathPatterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase();
+    if (!pattern) return false;
+    if (input.folderKeys.includes(pattern)) return true;
+    if (!input.realPath) return false;
+    const prefix = pattern.endsWith('/') ? pattern : `${pattern}/`;
+    return input.realPath === pattern.replace(/\/+$/, '') || input.realPath.startsWith(prefix);
+  });
+  if (pathHit) return true;
+  const address = input.address;
+  if (!address) return false;
+  return category.match.senderPatterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase().replace(/^@/, '');
+    if (!pattern) return false;
+    if (pattern.includes('@')) return address === pattern;
+    const domain = address.slice(address.lastIndexOf('@') + 1);
+    return domain === pattern || domain.endsWith(`.${pattern}`);
+  });
+}
+
+/** The bare address inside `Name <addr>`, or the field itself when it is one. */
+function senderAddress(sender: string): string | undefined {
+  const bracketed = /<([^<>\s]+@[^<>\s]+)>/.exec(sender)?.[1];
+  const candidate = (bracketed ?? sender).trim();
+  return /^[^\s@]+@[^\s@]+$/.test(candidate) ? candidate : undefined;
 }
 
 /**

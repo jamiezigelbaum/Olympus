@@ -236,9 +236,9 @@ describe('sensitivity map schemaVersion 2', () => {
     });
     expect(parsed.schemaVersion).toBe(2);
     expect(parsed.categories.map((category) => category.targetTierName)).toEqual(['secure', 'public', 'private']);
+    // Keywords never lower: free text and display names cannot loosen a tier.
     expect(matchSensitivityMapTiers(parsed, { text: 'my conference talk and therapy notes' })).toEqual([
       { categoryId: 'therapy', tierName: 'secure' },
-      { categoryId: 'published-talks', tierName: 'public' },
     ]);
   });
 
@@ -260,5 +260,35 @@ describe('sensitivity map schemaVersion 2', () => {
       ...base,
       categories: [lowering('public', 'published-talks', 'conference talk')],
     })).toThrow(/schemaVersion 1 map is raise-only/);
+  });
+
+  test('lowering categories match only the real path (anchored), folder keys, or an exact sender', () => {
+    const base = validMap();
+    const target = USER_FACING_TIER_MAPPING.public;
+    const parsed = parseSensitivityMap({
+      ...base,
+      schemaVersion: 2,
+      categories: [{
+        id: 'blog',
+        label: 'blog',
+        targetTierName: 'public',
+        targetTrustTier: target.targetTrustTier,
+        targetTrustDomain: target.targetTrustDomain,
+        examples: ['posts'],
+        match: { keywords: [], senderPatterns: ['example.com'], pathPatterns: ['/blog/'] },
+      }],
+    });
+    const hit = [{ categoryId: 'blog', tierName: 'public' as const }];
+    expect(matchSensitivityMapTiers(parsed, { path: '/blog/2026/post.md' })).toEqual(hit);
+    expect(matchSensitivityMapTiers(parsed, { path: '/blog' })).toEqual(hit);
+    expect(matchSensitivityMapTiers(parsed, { folderKeys: ['/blog/'] })).toEqual(hit);
+    expect(matchSensitivityMapTiers(parsed, { sender: 'Ann <ann@example.com>' })).toEqual(hit);
+    expect(matchSensitivityMapTiers(parsed, { sender: 'ann@news.example.com' })).toEqual(hit);
+    // Never a substring of a title, a deeper path segment, or a look-alike domain.
+    expect(matchSensitivityMapTiers(parsed, { title: 'Re: see /blog/ draft' })).toEqual([]);
+    expect(matchSensitivityMapTiers(parsed, { path: '/private/blog/notes.md' })).toEqual([]);
+    expect(matchSensitivityMapTiers(parsed, { path: '/blogging/notes.md' })).toEqual([]);
+    expect(matchSensitivityMapTiers(parsed, { sender: 'mallory@notexample.com' })).toEqual([]);
+    expect(matchSensitivityMapTiers(parsed, { sender: 'Example.com Team' })).toEqual([]);
   });
 });

@@ -6679,11 +6679,47 @@ function matchSensitivityMap(map, input) {
 function matchSensitivityMapTiers(map, input) {
   if (!map)
     return [];
-  const textHaystack = [input.subject, input.title, input.text].map((part) => part?.trim().toLowerCase()).filter((part) => Boolean(part)).join(`
+  const textHaystack = [input.title, input.text].map((part) => part?.trim().toLowerCase()).filter((part) => Boolean(part)).join(`
 `);
   const sender = input.sender?.trim().toLowerCase() ?? "";
-  const path = input.path?.trim().toLowerCase() ?? "";
-  return map.categories.filter((category) => categoryMatches(category, { textHaystack, sender, path })).map((category) => ({ categoryId: category.id, tierName: category.targetTierName }));
+  const realPath = input.path?.trim().toLowerCase() ?? "";
+  const raisePath = [realPath, input.title?.trim().toLowerCase() ?? ""].filter(Boolean).join(`
+`);
+  const folderKeys = (input.folderKeys ?? []).map((key) => key.trim().toLowerCase()).filter(Boolean);
+  const address = senderAddress(sender);
+  return map.categories.filter((category) => isRaisingSensitivityTier(category.targetTierName) ? categoryMatches(category, { textHaystack, sender, path: raisePath }) : loweringCategoryMatches(category, { realPath, folderKeys, address })).map((category) => ({ categoryId: category.id, tierName: category.targetTierName }));
+}
+function loweringCategoryMatches(category, input) {
+  const pathHit = category.match.pathPatterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase();
+    if (!pattern)
+      return false;
+    if (input.folderKeys.includes(pattern))
+      return true;
+    if (!input.realPath)
+      return false;
+    const prefix = pattern.endsWith("/") ? pattern : `${pattern}/`;
+    return input.realPath === pattern.replace(/\/+$/, "") || input.realPath.startsWith(prefix);
+  });
+  if (pathHit)
+    return true;
+  const address = input.address;
+  if (!address)
+    return false;
+  return category.match.senderPatterns.some((raw) => {
+    const pattern = raw.trim().toLowerCase().replace(/^@/, "");
+    if (!pattern)
+      return false;
+    if (pattern.includes("@"))
+      return address === pattern;
+    const domain = address.slice(address.lastIndexOf("@") + 1);
+    return domain === pattern || domain.endsWith(`.${pattern}`);
+  });
+}
+function senderAddress(sender) {
+  const bracketed = /<([^<>\s]+@[^<>\s]+)>/.exec(sender)?.[1];
+  const candidate = (bracketed ?? sender).trim();
+  return /^[^\s@]+@[^\s@]+$/.test(candidate) ? candidate : undefined;
 }
 function sensitivityMapRevision(map) {
   if (!map)
@@ -7103,6 +7139,9 @@ var init_engine = __esm(() => {
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
+function maxTier(a, b) {
+  return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
+}
 function classifyItemTiers(input, options = {}) {
   const signals = input.signals;
   const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
@@ -7120,7 +7159,11 @@ function classifyItemTiers(input, options = {}) {
       decidedBy: "override",
       reasons: [`override:item:${options.override.tier}`],
       state: "current",
-      contentRead: text !== undefined
+      contentRead: true,
+      metadataPending: false,
+      contentPending: false,
+      metadataForced: true,
+      metadataFlagged: false
     };
   }
   const secretsCleared = options.override?.kind === "not_secret";
@@ -7137,14 +7180,55 @@ function classifyItemTiers(input, options = {}) {
     secretsCleared,
     sniffer
   });
+  const contentRead = text !== undefined || metadata.tier === "secrets";
+  const contentPending = content.pending || !contentRead;
   return {
     ...base,
     metadataTier: metadata.tier,
     contentTier: content.tier,
     decidedBy: content.decidedBy,
     reasons: [...clearedReason, ...metadata.reasons, ...content.reasons],
-    state: metadata.pending || content.pending ? "pending" : "current",
-    contentRead: text !== undefined
+    state: metadata.pending || contentPending ? "pending" : "current",
+    contentRead,
+    metadataPending: metadata.pending,
+    contentPending,
+    metadataForced: metadata.forced,
+    metadataFlagged: metadata.flags.length > 0
+  };
+}
+function classifyContentTier(input, options = {}) {
+  const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
+  const base = {
+    engineVersion: TIER_CLASSIFIER_VERSION,
+    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    snifferId: sniffer.id
+  };
+  if (options.override?.kind === "tier") {
+    return { ...base, contentTier: options.override.tier, decidedBy: "override", reasons: [`override:item:${options.override.tier}`], contentPending: false };
+  }
+  const text = input.text.trim() ? input.text : undefined;
+  const content = contentPass({
+    signals: {},
+    text,
+    matchInput: {},
+    metadata: {
+      tier: input.metadataTier,
+      decidedBy: "default",
+      reasons: [],
+      pending: false,
+      forced: input.metadataForced,
+      flags: input.metadataFlagged ? ["names:recorded"] : []
+    },
+    options,
+    secretsCleared: options.override?.kind === "not_secret",
+    sniffer
+  });
+  return {
+    ...base,
+    contentTier: content.tier,
+    decidedBy: content.decidedBy,
+    reasons: content.reasons,
+    contentPending: content.pending || text === undefined
   };
 }
 function metadataPass(args) {
@@ -7168,44 +7252,44 @@ function metadataPass(args) {
   let resting = { tier: "private", decidedBy: "default", reason: "metadata:default:personal" };
   let restingIsConfigured = false;
   const matchedRules = (options.rules ?? []).filter((rule) => ownerRuleMatches(rule, signals, args.provider));
-  const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === "force"));
-  if (forceRule) {
+  const floorReason = signals.floor ? `metadata:floor:${slug(signals.floor.basis)}` : undefined;
+  const forced = (tier, decidedBy, reason) => {
+    const floor = signals.floor;
+    const flooredTier = floor && tierRank(floor.tier) > tierRank(tier) ? floor.tier : tier;
     return {
-      tier: forceRule.tier,
-      decidedBy: "owner_rule",
-      reasons: [`metadata:owner_rule:${forceRule.match.kind}:${forceRule.id}:force`],
+      tier: flooredTier,
+      decidedBy: flooredTier === tier ? decidedBy : "source_floor",
+      reasons: flooredTier === tier ? [reason] : [reason, floorReason],
       pending: false,
       forced: true,
       flags: []
     };
+  };
+  const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === "force"));
+  if (forceRule) {
+    return forced(forceRule.tier, "owner_rule", `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`);
   }
   const priorRule = mostSensitive(matchedRules.filter((rule) => rule.strength === "prior"));
   if (signals.prior?.strength === "force" && !priorRule) {
-    return {
-      tier: signals.prior.tier === "secrets" ? "secure" : signals.prior.tier,
-      decidedBy: "source_prior",
-      reasons: [`metadata:prior:${signals.prior.basis}:force`],
-      pending: false,
-      forced: true,
-      flags: []
-    };
+    return forced(signals.prior.tier === "secrets" ? "secure" : signals.prior.tier, "source_prior", `metadata:prior:${slug(signals.prior.basis)}:force`);
   }
   if (priorRule) {
-    resting = { tier: priorRule.tier, decidedBy: "owner_rule", reason: `metadata:owner_rule:${priorRule.match.kind}:${priorRule.id}:prior` };
+    resting = { tier: priorRule.tier, decidedBy: "owner_rule", reason: `metadata:owner_rule:${priorRule.match.kind}:${slug(priorRule.id)}:prior` };
     restingIsConfigured = true;
   } else if (signals.prior) {
-    resting = { tier: signals.prior.tier, decidedBy: "source_prior", reason: `metadata:prior:${signals.prior.basis}` };
+    resting = { tier: signals.prior.tier, decidedBy: "source_prior", reason: `metadata:prior:${slug(signals.prior.basis)}` };
     restingIsConfigured = true;
   }
   if (resting.tier === "secrets")
     resting = { ...resting, tier: "secure" };
   if (signals.floor) {
-    raises.push({ tier: signals.floor.tier, decidedBy: "source_floor", reason: `metadata:floor:${signals.floor.basis}` });
+    raises.push({ tier: signals.floor.tier, decidedBy: "source_floor", reason: floorReason });
   }
   const mapMatches = matchSensitivityMapTiers(options.sensitivityMap, {
-    ...args.matchInput.title ? { title: args.matchInput.title } : {},
-    ...args.matchInput.sender ? { sender: args.matchInput.sender } : {},
-    ...args.matchInput.path ? { path: args.matchInput.path } : {}
+    ...signals.title?.trim() ? { title: signals.title } : {},
+    ...signals.sender?.trim() ? { sender: signals.sender } : {},
+    ...signals.path?.trim() ? { path: signals.path } : {},
+    ...signals.folderKeys && signals.folderKeys.length > 0 ? { folderKeys: signals.folderKeys } : {}
   });
   for (const match of mapMatches) {
     const verdict = {
@@ -7222,7 +7306,8 @@ function metadataPass(args) {
     lowers.push({ tier: "public", decidedBy: "public_evidence", reason: `metadata:evidence:${signals.sharing}` });
   }
   let decided = resolveVerdicts(resting, raises, lowers, restingIsConfigured);
-  const flags = mapMatches.length > 0 ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  const ownerSaidPersonal = mapMatches.some((match) => match.tierName === "private");
+  const flags = ownerSaidPersonal ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({ pass: "metadata", flags });
@@ -7282,6 +7367,8 @@ function contentPass(args) {
   }
   const mapMatches = matchSensitivityMapTiers(args.options.sensitivityMap, { text });
   for (const match of mapMatches) {
+    if (!isRaisingSensitivityTier(match.tierName))
+      continue;
     if (tierRank(match.tierName) <= tierRank(decided.tier))
       continue;
     decided = maxVerdict(decided, {
@@ -7381,7 +7468,10 @@ function namesOf(signals) {
   ].filter((part) => typeof part === "string" && part.trim().length > 0).join(`
 `);
 }
-var TIER_CLASSIFIER_VERSION = "2026-09-23.p1a", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER;
+function slug(value) {
+  return SLUG.test(value) ? value : "invalid";
+}
+var TIER_CLASSIFIER_VERSION = "2026-09-23.p1a", TIER_KEYS, TIER_RANK, UNDECIDED_TIER_SNIFFER, SLUG;
 var init_tier_classifier = __esm(() => {
   init_sensitivity_map();
   init_engine();
@@ -7396,17 +7486,22 @@ var init_tier_classifier = __esm(() => {
     id: "undecided",
     judge: () => ({ verdict: "undecided" })
   });
+  SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
+
+// src/workers/classification/tier-ledger-path.ts
+function tierLedgerPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${TIER_LEDGER_FILE_SUFFIX}`;
+}
+var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite";
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
 import { chmodSync as chmodSync2, existsSync as existsSync6, mkdirSync as mkdirSync6 } from "node:fs";
-import { dirname as dirname7, join as join6 } from "node:path";
-function tierLedgerPathForStore(storeDbPath) {
-  if (storeDbPath === ":memory:")
-    return ":memory:";
-  return join6(dirname7(storeDbPath), TIER_LEDGER_FILE_NAME);
-}
+import { dirname as dirname7 } from "node:path";
 
 class TierLedger {
   dbPath;
@@ -7415,67 +7510,124 @@ class TierLedger {
   constructor(options) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
-    const fresh = this.dbPath !== ":memory:" && !existsSync6(this.dbPath);
-    if (this.dbPath !== ":memory:")
-      mkdirSync6(dirname7(this.dbPath), { recursive: true });
-    this.db = new Database(this.dbPath, { create: true });
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync6(dirname7(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
     try {
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(this.db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
-      if (fresh)
-        chmodSync2(this.dbPath, 384);
+      db = new Database(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      if (onDisk)
+        restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      this.db.close();
+      db?.close();
       throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
     }
+    this.db = db;
   }
   close() {
-    this.db.close();
+    try {
+      if (this.dbPath !== ":memory:")
+        restrictLedgerFiles(this.dbPath);
+    } finally {
+      this.db.close();
+    }
   }
   recordDecision(identity, decision, stored) {
-    const decidedAt = this.now().toISOString();
-    const reasonsJson = JSON.stringify(decision.reasons);
     let outcome = "unchanged";
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing) {
-        this.db.query(`
-          INSERT INTO tier_items (
-            provider, account_scope, provider_item_id, family,
-            metadata_tier, content_tier, generation, decided_by, reasons_json,
-            engine_version, map_revision, model_id,
-            previous_metadata_tier, previous_content_tier, state,
-            target_metadata_tier, target_content_tier,
-            stored_trust_domain, stored_trust_tier, decided_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?)
-        `).run(identity.provider, identity.accountScope, identity.providerItemId, identity.family ?? "unknown", decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decision.state, stored?.trustDomain ?? null, stored?.trustTier ?? null, decidedAt);
-        this.appendHistory(identity, 1, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
-        outcome = "inserted";
+      if (existing?.state === "moving") {
+        outcome = "held_moving";
         return;
       }
+      outcome = this.writeRow(identity, effectiveRow(existing, decision), stored, existing);
+    })();
+    return { outcome, record: this.getCurrent(identity) };
+  }
+  recordContentDecision(identity, content, stored) {
+    let outcome;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing)
+        return;
       if (existing.state === "moving") {
         outcome = "held_moving";
         return;
       }
-      const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
-      const detailChanged = JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision || stored !== undefined && (existing.storedTrustDomain !== stored.trustDomain || existing.storedTrustTier !== stored.trustTier);
-      if (!tiersChanged && !detailChanged)
+      if (existing.decidedBy === "override") {
+        outcome = "unchanged";
         return;
-      const generation = tiersChanged ? existing.generation + 1 : existing.generation;
-      this.db.query(`
-        UPDATE tier_items SET
-          metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
-          engine_version = ?, map_revision = ?,
-          previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
-          stored_trust_domain = COALESCE(?, stored_trust_domain),
-          stored_trust_tier = COALESCE(?, stored_trust_tier),
-          decided_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(decision.metadataTier, decision.contentTier, generation, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, decision.state, stored?.trustDomain ?? null, stored?.trustTier ?? null, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
-      this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
-      outcome = "updated";
+      }
+      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith("content:"));
+      const contentTier = maxTier(content.contentTier, existing.metadataTier);
+      const next = {
+        metadataTier: existing.metadataTier,
+        contentTier,
+        decidedBy: content.decidedBy,
+        reasons: [...metadataReasons, ...content.reasons],
+        engineVersion: content.engineVersion,
+        mapRevision: content.mapRevision,
+        contentRead: true,
+        metadataPending: existing.metadataPending,
+        contentPending: content.contentPending,
+        metadataForced: existing.metadataForced,
+        metadataFlagged: existing.metadataFlagged
+      };
+      outcome = this.writeRow(identity, next, stored, existing);
     })();
-    return { outcome, record: this.getCurrent(identity) };
+    return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
+  }
+  writeRow(identity, next, stored, existing) {
+    const decidedAt = this.now().toISOString();
+    const reasonsJson = JSON.stringify(next.reasons);
+    const state = next.metadataPending || next.contentPending ? "pending" : "current";
+    const flags = [
+      next.contentRead ? 1 : 0,
+      next.metadataPending ? 1 : 0,
+      next.contentPending ? 1 : 0,
+      next.metadataForced ? 1 : 0,
+      next.metadataFlagged ? 1 : 0
+    ];
+    if (!existing) {
+      this.db.query(`
+        INSERT INTO tier_items (
+          provider, account_scope, provider_item_id, family,
+          metadata_tier, content_tier, generation, decided_by, reasons_json,
+          engine_version, map_revision, model_id,
+          previous_metadata_tier, previous_content_tier, state,
+          target_metadata_tier, target_content_tier,
+          stored_trust_domain, stored_trust_tier,
+          content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+          decided_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(identity.provider, identity.accountScope, identity.providerItemId, identity.family ?? "unknown", next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt);
+      this.appendHistory(identity, 1, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
+      return "inserted";
+    }
+    const tiersChanged = existing.metadataTier !== next.metadataTier || existing.contentTier !== next.contentTier;
+    const detailChanged = JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== next.decidedBy || existing.state !== state || existing.engineVersion !== next.engineVersion || existing.mapRevision !== next.mapRevision || existing.contentRead !== next.contentRead || existing.metadataPending !== next.metadataPending || existing.contentPending !== next.contentPending || existing.metadataForced !== next.metadataForced || existing.metadataFlagged !== next.metadataFlagged || stored !== undefined && (existing.storedTrustDomain !== stored.trustDomain || existing.storedTrustTier !== stored.trustTier);
+    if (!tiersChanged && !detailChanged)
+      return "unchanged";
+    const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+    this.db.query(`
+      UPDATE tier_items SET
+        metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+        engine_version = ?, map_revision = ?,
+        previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+        stored_trust_domain = COALESCE(?, stored_trust_domain),
+        stored_trust_tier = COALESCE(?, stored_trust_tier),
+        content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+        decided_at = ?
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).run(next.metadataTier, next.contentTier, generation, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+    this.appendHistory(identity, generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
+    return "updated";
   }
   getCurrent(identity) {
     return this.readRow(identity);
@@ -7631,8 +7783,49 @@ function recordFromRow(row) {
     targetContentTier: row.target_content_tier,
     storedTrustDomain: row.stored_trust_domain,
     storedTrustTier: row.stored_trust_tier,
+    contentRead: row.content_read === 1,
+    metadataPending: row.metadata_pending === 1,
+    contentPending: row.content_pending === 1,
+    metadataForced: row.metadata_forced === 1,
+    metadataFlagged: row.metadata_flagged === 1,
     decidedAt: row.decided_at
   };
+}
+function effectiveRow(existing, decision) {
+  const fresh = {
+    metadataTier: decision.metadataTier,
+    contentTier: decision.contentTier,
+    decidedBy: decision.decidedBy,
+    reasons: decision.reasons,
+    engineVersion: decision.engineVersion,
+    mapRevision: decision.mapRevision,
+    contentRead: decision.contentRead,
+    metadataPending: decision.metadataPending,
+    contentPending: decision.contentPending,
+    metadataForced: decision.metadataForced,
+    metadataFlagged: decision.metadataFlagged
+  };
+  if (!existing || decision.contentRead)
+    return fresh;
+  if (existing.contentRead) {
+    const metadataReasons = decision.reasons.filter((reason) => !reason.startsWith("content:"));
+    const contentReasons = existing.reasons.filter((reason) => reason.startsWith("content:"));
+    return {
+      ...fresh,
+      contentTier: maxTier(existing.contentTier, decision.metadataTier),
+      decidedBy: existing.decidedBy,
+      reasons: [...metadataReasons, ...contentReasons],
+      contentRead: true,
+      contentPending: existing.contentPending
+    };
+  }
+  return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+function restrictLedgerFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync6(path))
+      chmodSync2(path, 384);
+  }
 }
 function assertTier(tier) {
   if (!TIER_KEYS.includes(tier)) {
@@ -7666,6 +7859,11 @@ function tierLedgerMigrations() {
             target_content_tier TEXT CHECK (target_content_tier IS NULL OR target_content_tier ${TIER_CHECK}),
             stored_trust_domain TEXT,
             stored_trust_tier TEXT,
+            content_read INTEGER NOT NULL DEFAULT 0 CHECK (content_read IN (0, 1)),
+            metadata_pending INTEGER NOT NULL DEFAULT 0 CHECK (metadata_pending IN (0, 1)),
+            content_pending INTEGER NOT NULL DEFAULT 0 CHECK (content_pending IN (0, 1)),
+            metadata_forced INTEGER NOT NULL DEFAULT 0 CHECK (metadata_forced IN (0, 1)),
+            metadata_flagged INTEGER NOT NULL DEFAULT 0 CHECK (metadata_flagged IN (0, 1)),
             decided_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, provider_item_id)
           );
@@ -7697,7 +7895,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_SCHEMA_VERSION = 1, TIER_LEDGER_FILE_NAME = "tier-ledger.sqlite", TierLedgerGenerationConflictError, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 1, TierLedgerGenerationConflictError, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -10123,6 +10321,7 @@ var init_local_index = __esm(() => {
   init_sqlite_migrations();
   init_engine();
   init_tier_ledger();
+  init_tier_classifier();
   init_tier_placement();
   init_source_ingestion_exclusions();
   init_fts();
@@ -10252,11 +10451,13 @@ var init_local_index = __esm(() => {
       }
     }
     close() {
-      if (this.tierLedgerOwned === true) {
-        this.tierLedgerHandle?.close();
+      try {
+        if (this.tierLedgerOwned === true)
+          this.tierLedgerHandle?.close();
+      } finally {
         this.tierLedgerHandle = undefined;
+        closeSqliteStore(this.db);
       }
-      closeSqliteStore(this.db);
     }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
@@ -10266,6 +10467,30 @@ var init_local_index = __esm(() => {
         this.tierLedgerOwned = true;
       }
       return this.tierLedgerHandle;
+    }
+    recordExtractedContentTier(item, text, tierClassification) {
+      try {
+        const ledger = this.tierLedger();
+        if (!ledger)
+          return false;
+        const existing = ledger.getCurrent(item.identity);
+        if (!existing)
+          return false;
+        const override = ledger.getOverride(item.identity);
+        const content = classifyContentTier({
+          text,
+          metadataTier: existing.metadataTier,
+          metadataForced: existing.metadataForced,
+          metadataFlagged: existing.metadataFlagged
+        }, {
+          ...tierClassification?.sensitivityMap ? { sensitivityMap: tierClassification.sensitivityMap } : {},
+          ...tierClassification?.sniffer ? { sniffer: tierClassification.sniffer } : {},
+          ...override ? { override } : {}
+        });
+        return ledger.recordContentDecision(item.identity, content) !== undefined;
+      } catch {
+        return false;
+      }
     }
     recordTierDecision(connector, item, stored, tierClassification, run) {
       if (run.ledgerFailed)
@@ -13667,13 +13892,13 @@ var init_corpus_adapter = __esm(() => {
 
 // src/workers/dropbox-files/connector-store.ts
 import { homedir as homedir6 } from "node:os";
-import { join as join7 } from "node:path";
+import { join as join6 } from "node:path";
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join7(homedir6(), ".local", "share");
-  return join7(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join6(homedir6(), ".local", "share");
+  return join6(dataHome, "openclaw", "olympus", "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT, POLICY_ADMITTED;
 var init_connector_store2 = __esm(() => {
@@ -13788,7 +14013,7 @@ function optionalString3(value) {
 }
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join8 } from "node:path";
+import { join as join7 } from "node:path";
 import { pathToFileURL } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -13834,7 +14059,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join8(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join7(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -14429,7 +14654,7 @@ var init_request_budget = __esm(() => {
 // src/workers/google-connectors/drive.ts
 import { createHash as createHash8 } from "node:crypto";
 import { homedir as homedir7 } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join8 } from "node:path";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -14820,8 +15045,8 @@ function defaultGoogleDriveConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join9(homedir7(), ".local", "share");
-  return join9(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join8(homedir7(), ".local", "share");
+  return join8(dataHome, "openclaw", "olympus", "google-drive-connector-store.sqlite");
 }
 
 class RestGoogleDriveApiClient {
@@ -15100,7 +15325,7 @@ var init_ingest_filter = __esm(() => {
 // src/workers/google-connectors/gmail.ts
 import { createHash as createHash9 } from "node:crypto";
 import { homedir as homedir10 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join11 } from "node:path";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -15351,8 +15576,8 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir10(), ".local", "share");
-  return join12(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join11(homedir10(), ".local", "share");
+  return join11(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
 
 class RestGmailApiClient {
@@ -15606,13 +15831,13 @@ var init_corpus_adapter2 = __esm(() => {
 
 // src/workers/readwise/connector.ts
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname10, join as join13 } from "node:path";
+import { dirname as dirname10, join as join12 } from "node:path";
 function defaultReadwiseConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir11(), ".local", "share");
-  return join13(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join12(homedir11(), ".local", "share");
+  return join12(dataHome, "openclaw", "olympus", "readwise-connector-store.sqlite");
 }
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
@@ -15715,13 +15940,13 @@ var init_folder_facets = __esm(() => {
 
 // src/workers/x-bookmarks/connector.ts
 import { homedir as homedir12 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join13 } from "node:path";
 function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join14(homedir12(), ".local", "share");
-  return join14(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join13(homedir12(), ".local", "share");
+  return join13(dataHome, "openclaw", "olympus", "x-bookmarks-connector-store.sqlite");
 }
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
@@ -15816,12 +16041,12 @@ var init_x_bookmarks = __esm(() => {
 
 // src/workers/telegram-messages/corpus-adapter.ts
 import { homedir as homedir13 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join14 } from "node:path";
 function defaultInternalTelegramConnectorStoreDbPath(env = process.env) {
-  return join15(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
+  return join14(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-internal-connector-store.sqlite");
 }
 function defaultProtectedTelegramConnectorStoreDbPath(env = process.env) {
-  return join15(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
+  return join14(env.HOME?.trim() || homedir13(), ".local", "share", "openclaw", "olympus", "telegram-protected-connector-store.sqlite");
 }
 var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
@@ -16714,17 +16939,21 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 // src/workers/whatsapp/store-sync.ts
 init_connector_store();
 import { homedir as homedir8 } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join9 } from "node:path";
 // src/workers/whatsapp/reaction-index.ts
 init_reactions();
 
 // src/workers/whatsapp/store-sync.ts
+var WHATSAPP_STORE_PLACEMENT = Object.freeze({
+  trustTier: "S4",
+  trustDomain: "secure_local"
+});
 function defaultWhatsAppStateDir(env = process.env) {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join10(env.HOME?.trim() || homedir8(), ".local", "share");
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join10(dataHome, "olympus", "whatsapp-live");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join9(env.HOME?.trim() || homedir8(), ".local", "share");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join9(dataHome, "olympus", "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join10(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join9(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 
 // src/workers/file-extraction/job-store.ts
@@ -16857,7 +17086,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname9, isAbsolute as isAbsolute2, join as join11 } from "node:path";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join10 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -16867,8 +17096,8 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir9(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute2(configuredRoot) ? configuredRoot : join11(homeDir, ".cache");
-  return join11(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute2(configuredRoot) ? configuredRoot : join10(homeDir, ".cache");
+  return join10(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -17696,14 +17925,14 @@ var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 // src/workers/embedding-ledger.ts
 import { homedir as homedir14 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname11, join as join16 } from "node:path";
+import { dirname as dirname11, join as join15 } from "node:path";
 var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
     return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join16(homedir14(), ".local", "share");
-  return join16(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
+  const dataHome = env.XDG_DATA_HOME?.trim() || join15(homedir14(), ".local", "share");
+  return join15(dataHome, "openclaw", "olympus", "embedding-ledger.jsonl");
 }
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}

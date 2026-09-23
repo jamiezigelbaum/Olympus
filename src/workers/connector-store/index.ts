@@ -3,6 +3,7 @@ export {
   ConnectorStoreLocatorIdentityIndexNotReadyError,
   ConnectorStoreMetadataOnlyViolationError,
   LocalConnectorStore,
+  connectorStoreItemPlacement,
   // The store's own chunking recipe, namespaced for outside callers. Anything
   // that has to predict what the store will write about a piece of text runs
   // these rather than keeping a copy in step by hand.

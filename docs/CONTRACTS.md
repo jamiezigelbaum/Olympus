@@ -90,7 +90,6 @@ interface SourceClassificationSignals {
 
 Tier keys use the schema-v1 stored names: `public` (Public), `private`
 (Personal), `secure` (Private), `secrets` (Secrets).
-```
 
 `SourceConnectorListPage` is a union, not a record, and the reason is
 load-bearing:
@@ -324,16 +323,26 @@ section consolidates and supersedes all other policy wording.
   source facts (floor, prior, sharing, names, sender, recipients, labels,
   conversation kind) and the shared tier classifier decides a metadata tier
   (Personal by default) and a content tier (only ever raised). Decisions and
-  content-free reasons are recorded in a new local tier ledger
-  (`tier-ledger.sqlite` beside the stores). EvidencePack and Analyst shapes are
-  unchanged.
+  content-free reasons are recorded in a new local tier ledger, one per
+  connector store and co-located with it (`<store>.tier-ledger.sqlite`), so data
+  export/delete reach it wherever the store lives. A decision made without
+  reading the text never replaces or lowers a content tier decided from text;
+  text that arrives later (the extraction factory) records its own content
+  decision. EvidencePack and Analyst shapes are unchanged.
   **Migration note.** No stored data migrates in this version. Each store lane
   declares the placement its connector's `classify()` returned (Readwise and X
   S1/internal; Dropbox S4/secure_local raised to S5 on a secret in the body;
   Gmail and Drive keep the shared raise-only classification policy; Telegram,
   WhatsApp, Apple Messages, Roam and Reflect keep their store's domain), so
-  every item, chunk and vector stays byte-identical and nothing is re-embedded
-  (`test/tier-p1a-storage-unchanged.test.ts`). A third-party connector migrates
+  existing placement is preserved. For declared-placement lanes the stored
+  items, chunks and vectors are byte-identical with and without the ledger and
+  nothing is re-embedded (`test/tier-p1a-storage-unchanged.test.ts`, with
+  per-lane parity against the retired classify() answers in
+  `test/tier-p1a-review-fixes.test.ts`). Gmail and Drive keep the shared
+  raise-only classification policy unchanged; their re-fetch path no longer
+  calls the connector's own classify() and uses that same shared policy, whose
+  input differs slightly (the listing text rather than the snippet), so there
+  the guarantee is "the existing policy, unchanged", not byte identity. A third-party connector migrates
   by deleting `classify()`, adding `classificationSignals()` with the facts it
   knows, and passing its old answer as the lane's `placement`. Moving items to
   their recorded tier is phase P1b and runs only as owner-approved batches

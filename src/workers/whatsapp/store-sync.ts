@@ -2,6 +2,7 @@
 // work stays in the thin whatsmeow bridge; this module only hands captured
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,6 +19,16 @@ export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
 export const WHATSAPP_LIVE_CORPUS_ID = 'secure_local.whatsapp.messages';
 export const WHATSAPP_PERSONAL_ACCOUNT_SCOPE = 'personal';
 export const WHATSAPP_PRODUCT_CONNECTOR_ID = 'whatsapp_product_spool';
+
+/**
+ * Chat history is stored S4/secure_local, declared rather than inherited from
+ * the store, so wiring this lane to any other store is refused item by item
+ * (fail closed) exactly as the retired connector classify() made it.
+ */
+export const WHATSAPP_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
+  trustTier: 'S4',
+  trustDomain: 'secure_local',
+});
 export const WHATSAPP_EXTRACTION_SCOPE_KEY = 'whatsapp.personal.messages';
 export const WHATSAPP_MALFORMED_SPOOL_WARNING = 'whatsapp_malformed_spool_lines';
 export const WHATSAPP_UNRESOLVED_REACTIONS_WARNING = 'whatsapp_unresolved_reaction_targets';
@@ -149,6 +160,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
       );
       const maxItems = request.max_items ?? options.maxItems;
       const run = await options.store.syncFromConnector(connector, {
+        placement: WHATSAPP_STORE_PLACEMENT,
         ...(cursor ? { cursor } : {}),
         ...(maxItems !== undefined ? { maxItems } : {}),
         fetchContent: true,

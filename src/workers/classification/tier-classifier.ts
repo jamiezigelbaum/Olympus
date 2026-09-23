@@ -26,6 +26,7 @@ import type {
   SourceClassificationTier,
 } from '../../core/contracts.ts';
 import {
+  isRaisingSensitivityTier,
   matchSensitivityMapTiers,
   sensitivityMapRevision,
   type SensitivityMap,
@@ -147,15 +148,32 @@ export type TierDecisionState = 'pending' | 'current';
 
 export interface TierDecision {
   metadataTier: TierKey;
+  /**
+   * The content tier. When `contentRead` is false this is only the floor the
+   * metadata implies (content is at least the metadata tier), NOT a decision
+   * about the text; the ledger never lets it replace or lower a content tier
+   * that was decided from text.
+   */
   contentTier: TierKey;
   /** Which step settled the content tier (the layer that governs the text). */
   decidedBy: TierDecidedBy;
   /** Content-free reason codes, metadata reasons first. */
   reasons: string[];
-  /** `pending` while a sniffer question is unanswered. */
+  /**
+   * `pending` while any question is open: an unanswered sniffer question, or
+   * content that has not been read yet.
+   */
   state: TierDecisionState;
-  /** Whether pass 2 read any text. */
+  /** Whether pass 2 read any text. An override counts as a content decision. */
   contentRead: boolean;
+  /** A name-level sniffer question is unanswered. */
+  metadataPending: boolean;
+  /** The content tier is not final: unread, or an excerpt question is unanswered. */
+  contentPending: boolean;
+  /** A force rule or force prior fixed the tier; content may then rise only to Secrets. */
+  metadataForced: boolean;
+  /** Pass 1 flagged the names as possibly private (the content pass asks the sniffer too). */
+  metadataFlagged: boolean;
   engineVersion: string;
   mapRevision: string;
   snifferId: string;
@@ -198,7 +216,12 @@ export function classifyItemTiers(
       decidedBy: 'override',
       reasons: [`override:item:${options.override.tier}`],
       state: 'current',
-      contentRead: text !== undefined,
+      // The owner decided the content; nothing about the text can change it.
+      contentRead: true,
+      metadataPending: false,
+      contentPending: false,
+      metadataForced: true,
+      metadataFlagged: false,
     };
   }
   const secretsCleared = options.override?.kind === 'not_secret';
@@ -221,14 +244,83 @@ export function classifyItemTiers(
     sniffer,
   });
 
+  const contentRead = text !== undefined || metadata.tier === 'secrets';
+  const contentPending = content.pending || !contentRead;
   return {
     ...base,
     metadataTier: metadata.tier,
     contentTier: content.tier,
     decidedBy: content.decidedBy,
     reasons: [...clearedReason, ...metadata.reasons, ...content.reasons],
-    state: metadata.pending || content.pending ? 'pending' : 'current',
-    contentRead: text !== undefined,
+    state: metadata.pending || contentPending ? 'pending' : 'current',
+    contentRead,
+    metadataPending: metadata.pending,
+    contentPending,
+    metadataForced: metadata.forced,
+    metadataFlagged: metadata.flags.length > 0,
+  };
+}
+
+/**
+ * Pass 2 alone, for a lane whose text arrives after the item was listed (the
+ * shared extraction factory). It starts from the metadata decision already
+ * recorded in the ledger and can only raise it. Names are not available here,
+ * so the detectors read the text alone; the listing-time decision already
+ * covered the names.
+ */
+export interface ContentTierInput {
+  text: string;
+  metadataTier: TierKey;
+  metadataForced: boolean;
+  metadataFlagged: boolean;
+}
+
+export interface ContentTierDecision {
+  contentTier: TierKey;
+  decidedBy: TierDecidedBy;
+  reasons: string[];
+  contentPending: boolean;
+  engineVersion: string;
+  mapRevision: string;
+  snifferId: string;
+}
+
+export function classifyContentTier(
+  input: ContentTierInput,
+  options: Omit<TierClassificationOptions, 'rules'> = {},
+): ContentTierDecision {
+  const sniffer = options.sniffer ?? UNDECIDED_TIER_SNIFFER;
+  const base = {
+    engineVersion: TIER_CLASSIFIER_VERSION,
+    mapRevision: sensitivityMapRevision(options.sensitivityMap),
+    snifferId: sniffer.id,
+  };
+  if (options.override?.kind === 'tier') {
+    return { ...base, contentTier: options.override.tier, decidedBy: 'override', reasons: [`override:item:${options.override.tier}`], contentPending: false };
+  }
+  const text = input.text.trim() ? input.text : undefined;
+  const content = contentPass({
+    signals: {},
+    text,
+    matchInput: {},
+    metadata: {
+      tier: input.metadataTier,
+      decidedBy: 'default',
+      reasons: [],
+      pending: false,
+      forced: input.metadataForced,
+      flags: input.metadataFlagged ? ['names:recorded'] : [],
+    },
+    options,
+    secretsCleared: options.override?.kind === 'not_secret',
+    sniffer,
+  });
+  return {
+    ...base,
+    contentTier: content.tier,
+    decidedBy: content.decidedBy,
+    reasons: content.reasons,
+    contentPending: content.pending || text === undefined,
   };
 }
 
@@ -276,36 +368,42 @@ function metadataPass(args: {
 
   // [3] Owner rules. force beats prior; among equals the most sensitive wins.
   const matchedRules = (options.rules ?? []).filter((rule) => ownerRuleMatches(rule, signals, args.provider));
-  const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === 'force'));
-  if (forceRule) {
+  // A provider floor is a fact, not a preference: it applies AFTER a force
+  // rule or force prior, so neither can lower an item below it (a Telegram
+  // Secret Chat stays Private under a force-Public rule).
+  const floorReason = signals.floor ? `metadata:floor:${slug(signals.floor.basis)}` : undefined;
+  const forced = (tier: TierKey, decidedBy: TierDecidedBy, reason: string): PassResult => {
+    const floor = signals.floor;
+    const flooredTier = floor && tierRank(floor.tier) > tierRank(tier) ? floor.tier : tier;
     return {
-      tier: forceRule.tier,
-      decidedBy: 'owner_rule',
-      reasons: [`metadata:owner_rule:${forceRule.match.kind}:${forceRule.id}:force`],
+      tier: flooredTier,
+      decidedBy: flooredTier === tier ? decidedBy : 'source_floor',
+      reasons: flooredTier === tier ? [reason] : [reason, floorReason!],
       pending: false,
       forced: true,
       flags: [],
     };
+  };
+  const forceRule = mostSensitive(matchedRules.filter((rule) => rule.strength === 'force'));
+  if (forceRule) {
+    return forced(forceRule.tier, 'owner_rule', `metadata:owner_rule:${forceRule.match.kind}:${slug(forceRule.id)}:force`);
   }
   const priorRule = mostSensitive(matchedRules.filter((rule) => rule.strength === 'prior'));
 
   // A source-level force prior behaves like a force rule.
   if (signals.prior?.strength === 'force' && !priorRule) {
-    return {
-      tier: signals.prior.tier === 'secrets' ? 'secure' : signals.prior.tier,
-      decidedBy: 'source_prior',
-      reasons: [`metadata:prior:${signals.prior.basis}:force`],
-      pending: false,
-      forced: true,
-      flags: [],
-    };
+    return forced(
+      signals.prior.tier === 'secrets' ? 'secure' : signals.prior.tier,
+      'source_prior',
+      `metadata:prior:${slug(signals.prior.basis)}:force`,
+    );
   }
 
   if (priorRule) {
-    resting = { tier: priorRule.tier, decidedBy: 'owner_rule', reason: `metadata:owner_rule:${priorRule.match.kind}:${priorRule.id}:prior` };
+    resting = { tier: priorRule.tier, decidedBy: 'owner_rule', reason: `metadata:owner_rule:${priorRule.match.kind}:${slug(priorRule.id)}:prior` };
     restingIsConfigured = true;
   } else if (signals.prior) {
-    resting = { tier: signals.prior.tier, decidedBy: 'source_prior', reason: `metadata:prior:${signals.prior.basis}` };
+    resting = { tier: signals.prior.tier, decidedBy: 'source_prior', reason: `metadata:prior:${slug(signals.prior.basis)}` };
     restingIsConfigured = true;
   }
   // A configured Secrets resting tier is honoured as Private for the NAMES:
@@ -314,14 +412,17 @@ function metadataPass(args: {
 
   // [4] Source floor (a provider fact): always a raise.
   if (signals.floor) {
-    raises.push({ tier: signals.floor.tier, decidedBy: 'source_floor', reason: `metadata:floor:${signals.floor.basis}` });
+    raises.push({ tier: signals.floor.tier, decidedBy: 'source_floor', reason: floorReason! });
   }
 
   // [5] Sensitivity map v2 on the names. Raising and lowering categories.
+  // Raising categories see the title; lowering categories see only the real
+  // path, folder keys and sender (sensitivity-map.ts, matchSensitivityMapTiers).
   const mapMatches = matchSensitivityMapTiers(options.sensitivityMap, {
-    ...(args.matchInput.title ? { title: args.matchInput.title } : {}),
-    ...(args.matchInput.sender ? { sender: args.matchInput.sender } : {}),
-    ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
+    ...(signals.title?.trim() ? { title: signals.title } : {}),
+    ...(signals.sender?.trim() ? { sender: signals.sender } : {}),
+    ...(signals.path?.trim() ? { path: signals.path } : {}),
+    ...(signals.folderKeys && signals.folderKeys.length > 0 ? { folderKeys: signals.folderKeys } : {}),
   });
   for (const match of mapMatches) {
     const verdict: Verdict = {
@@ -340,9 +441,12 @@ function metadataPass(args: {
 
   let decided = resolveVerdicts(resting, raises, lowers, restingIsConfigured);
 
-  // [7] Sniffer, only when names look possibly private, nothing already made
-  // the names Private, and no owner map category already spoke for them.
-  const flags = mapMatches.length > 0 ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
+  // [7] Sniffer, only when names look possibly private and nothing already
+  // made them Private. Only an owner PERSONAL-target category answers the
+  // sniffer's question for it; a Public-target match (say a broad /work/
+  // folder) never silences a possibly-private name inside it.
+  const ownerSaidPersonal = mapMatches.some((match) => match.tierName === 'private');
+  const flags = ownerSaidPersonal ? [] : namesLookPossiblyPrivate(names).map((family) => `names:${family}`);
   let pending = false;
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({ pass: 'metadata', flags });
@@ -428,6 +532,8 @@ function contentPass(args: {
   // category is ignored here.
   const mapMatches = matchSensitivityMapTiers(args.options.sensitivityMap, { text });
   for (const match of mapMatches) {
+    // Content only raises: a lowering category never applies to the text.
+    if (!isRaisingSensitivityTier(match.tierName)) continue;
     if (tierRank(match.tierName) <= tierRank(decided.tier)) continue;
     decided = maxVerdict(decided, {
       tier: match.tierName,
@@ -584,4 +690,15 @@ function namesOf(signals: SourceClassificationSignals): string {
     ...(signals.folderKeys ?? []),
     ...(signals.labels ?? []),
   ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0).join('\n');
+}
+
+const SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
+
+/**
+ * Basis codes and rule ids are configuration, and they end up inside reason
+ * codes. Anything that is not a short slug (a path, a name, free text) is
+ * refused into the reason as `invalid` rather than copied.
+ */
+function slug(value: string): string {
+  return SLUG.test(value) ? value : 'invalid';
 }

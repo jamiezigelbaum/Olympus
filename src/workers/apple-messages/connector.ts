@@ -28,6 +28,7 @@
 // classify() is unconditional: personal messages are S4/secure_local, period.
 // No content scan may upgrade-or-downgrade its way around that.
 
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { Database } from 'bun:sqlite';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -206,6 +207,16 @@ export function createAppleMessagesSourceConnector(
     },
   };
 }
+
+/**
+ * Where an Apple Messages lane must store items: S4/secure_local, declared so
+ * a lane wired to a non-secure store is refused (fail closed). No lane mounts
+ * this source today.
+ */
+export const APPLE_MESSAGES_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
+  trustTier: 'S4',
+  trustDomain: 'secure_local',
+});
 
 function rawItemFromMessageRow(row: AppleMessageRow, account: string, fetchedAt: string): RawItem {
   const text = messageBodyText(row);

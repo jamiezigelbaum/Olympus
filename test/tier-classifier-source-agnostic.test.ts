@@ -12,25 +12,46 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 const MODULES = [
   'src/workers/classification/tier-classifier.ts',
   'src/workers/classification/tier-ledger.ts',
+  'src/workers/classification/tier-ledger-path.ts',
   'src/workers/connector-store/tier-placement.ts',
   'src/core/classification-signals.ts',
 ];
 
+// Everything these modules may import. A new import has to be added here on
+// purpose, so a per-source constant cannot arrive through an import.
+const IMPORT_ALLOWLIST = new Set([
+  'node:fs',
+  'node:path',
+  'bun:sqlite',
+  '../../core/contracts.ts',
+  '../../core/sensitivity-map.ts',
+  '../../core/source-index/types.ts',
+  '../../core/sqlite-migrations.ts',
+  '../classification/engine.ts',
+  '../classification/tier-classifier.ts',
+  '../classification/tier-ledger.ts',
+  './contracts.ts',
+  './engine.ts',
+  './source-index/types.ts',
+  './tier-classifier.ts',
+  './tier-ledger-path.ts',
+]);
+
 const SOURCE_NAMES = [
   'gmail',
   'google',
-  'drive',
+  'gdrive',
   'dropbox',
   'readwise',
   'telegram',
   'whatsapp',
-  'apple_messages',
+  'apple',
   'imessage',
   'roam',
   'reflect',
   'twitter',
-  'x',
   'x_bookmarks',
+  'xbookmarks',
   'slack',
   'notion',
 ];
@@ -43,16 +64,28 @@ function codeWithoutComments(source: string): string {
 
 describe('tier classification is source-agnostic', () => {
   for (const modulePath of MODULES) {
-    test(`${modulePath} names no source in code`, () => {
-      const code = codeWithoutComments(readFileSync(join(import.meta.dir, '..', modulePath), 'utf8')).toLowerCase();
+    test(`${modulePath} names no source anywhere in code and imports only allowlisted modules`, () => {
+      const raw = readFileSync(join(import.meta.dir, '..', modulePath), 'utf8');
+      // The one sanctioned comparison: an owner rule that names a source is
+      // matched against the item's provider as opaque data the owner wrote.
+      const code = codeWithoutComments(raw).toLowerCase()
+        .replace('rule.source !== undefined && rule.source !== provider', '');
       for (const name of SOURCE_NAMES) {
-        // A string literal equal to, or starting with, a source name is a
-        // branch on that source (or a table keyed by it).
-        const hit = code.match(new RegExp(`['"\`]${name}(?:[._:'"\`])`));
+        // Identifiers, string literals, template literals, regex literals and
+        // prefixes alike ("gmail_", "dropboxpath").
+        const hit = code.match(new RegExp(`(?<![a-z0-9])${name}`));
         expect(hit?.[0]).toBeUndefined();
       }
-      expect(code).not.toContain('identity.provider ===');
-      expect(code).not.toContain('connector.id ===');
+      // The one-letter X provider id only as a quoted literal or a prefix of one.
+      expect(code.match(/['"\`]x(?:[._:'"\`])/)?.[0]).toBeUndefined();
+      // No comparison against the item's provider, connector or family.
+      expect(code.match(/(?:provider|connector\.id|\.family)\s*[!=]==?/)?.[0]).toBeUndefined();
+      expect(code.match(/[!=]==?\s*(?:\w+\.)?(?:provider|family)\b/)?.[0]).toBeUndefined();
+      expect(code).not.toContain('switch (input.provider');
+      expect(code).not.toContain('switch (item.identity.provider');
+
+      const imports = [...raw.matchAll(/(?:^|\n)\s*(?:import|export)[^'";]*?from\s*['"]([^'"]+)['"]/g)].map((match) => match[1]!);
+      for (const specifier of imports) expect(`${modulePath} -> ${specifier}:${IMPORT_ALLOWLIST.has(specifier)}`).toBe(`${modulePath} -> ${specifier}:true`);
     });
   }
 

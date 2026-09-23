@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_STORE_PLACEMENT } from '../src/workers/dropbox-files/connector-store.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -167,14 +167,17 @@ describe('P1a: every item gets a recorded decision; storage and embeddings do no
     await syncAndEmbed(store);
     store.close();
 
-    const ledger = new TierLedger({ dbPath: join(dir, 'tier-ledger.sqlite') });
-    const row = (id: string) => ledger.getCurrent({ provider: 'fixture', accountScope: ACCOUNT, providerItemId: id })!;
-    expect(row('benign')).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', storedTrustDomain: 'secure_local', storedTrustTier: 'S4' });
-    expect(row('health')).toMatchObject({ metadataTier: 'private', contentTier: 'secure', state: 'pending', storedTrustTier: 'S4' });
-    expect(row('public')).toMatchObject({ metadataTier: 'public', contentTier: 'public', storedTrustTier: 'S4' });
-    expect(row('secret')).toMatchObject({ contentTier: 'secrets', storedTrustTier: 'S5' });
-    expect(ledger.listPending().map((pending) => pending.providerItemId)).toEqual(['health']);
-    ledger.close();
+    const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(join(dir, 'store.sqlite')) });
+    try {
+      const row = (id: string) => ledger.getCurrent({ provider: 'fixture', accountScope: ACCOUNT, providerItemId: id })!;
+      expect(row('benign')).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', storedTrustDomain: 'secure_local', storedTrustTier: 'S4' });
+      expect(row('health')).toMatchObject({ metadataTier: 'private', contentTier: 'secure', state: 'pending', storedTrustTier: 'S4' });
+      expect(row('public')).toMatchObject({ metadataTier: 'public', contentTier: 'public', storedTrustTier: 'S4' });
+      expect(row('secret')).toMatchObject({ contentTier: 'secrets', storedTrustTier: 'S5' });
+      expect(ledger.listPending().map((pending) => pending.providerItemId)).toEqual(['health']);
+    } finally {
+      ledger.close();
+    }
   });
 
   test('re-syncing a store that predates the ledger rewrites nothing and never re-embeds or invalidates', async () => {
@@ -190,23 +193,26 @@ describe('P1a: every item gets a recorded decision; storage and embeddings do no
       'invalidateEmbeddingModelCurrency',
     );
     try {
-      embedCalls = 0;
-      const upgraded = openStore(dbPath);
-      await syncAndEmbed(upgraded);
-      await syncAndEmbed(upgraded);
-      upgraded.close();
-      expect(invalidate).not.toHaveBeenCalled();
-      expect(embedCalls).toBe(0);
+        embedCalls = 0;
+        const upgraded = openStore(dbPath);
+        await syncAndEmbed(upgraded);
+        await syncAndEmbed(upgraded);
+        upgraded.close();
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(embedCalls).toBe(0);
     } finally {
       invalidate.mockRestore();
     }
     const after = snapshot(dbPath);
     expect(after).toEqual(before);
 
-    const ledger = new TierLedger({ dbPath: join(dir, 'tier-ledger.sqlite') });
-    expect(ledger.counts().items).toBe(ITEMS.length);
-    // The second recording pass saw the same decisions and wrote nothing new.
-    expect(ledger.history({ provider: 'fixture', accountScope: ACCOUNT, providerItemId: 'benign' })).toHaveLength(1);
-    ledger.close();
+    const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(join(dir, 'store.sqlite')) });
+    try {
+      expect(ledger.counts().items).toBe(ITEMS.length);
+      // The second recording pass saw the same decisions and wrote nothing new.
+      expect(ledger.history({ provider: 'fixture', accountScope: ACCOUNT, providerItemId: 'benign' })).toHaveLength(1);
+    } finally {
+      ledger.close();
+    }
   });
 });
