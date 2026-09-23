@@ -13855,6 +13855,7 @@ init_source_ingestion_ledger();
 init_source_dashboard();
 init_ingestion_throughput();
 init_public_source_capabilities();
+init_source_corpus_registry();
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.";
 var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
@@ -13868,6 +13869,8 @@ var INGESTION_STUCK_WARNING_HOURS = 24;
 var INGESTION_STUCK_ERROR_HOURS = 72;
 var INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 var CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
+var ON_DEMAND_TIER_CORPORA = createSourceCorpusRegistry().list().filter((corpus) => corpus.createdOnDemand === true);
+var ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => corpus.corpusId));
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
@@ -14236,6 +14239,8 @@ async function sourceIndexStatusCheck(deps) {
   for (const entry of corpora) {
     const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
+    if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true)
+      continue;
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
       continue;
@@ -14826,14 +14831,20 @@ function connectedLaneEnvFlagProblem(env, envFlag, defaultOffWhenAbsent) {
 function connectedSourceCorpusIds(deps) {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const corpusIds = new Set;
+  const sourceIds = new Set;
   for (const handle of registry.handles) {
     if (handle.backendState?.status === "reauth_required")
       continue;
     for (const lane of CONNECTED_SOURCE_LANES) {
       if (lane.provider === handle.provider && handle.allowedCapabilities.includes(lane.capability)) {
         corpusIds.add(lane.corpusId);
+        sourceIds.add(lane.sourceId);
       }
     }
+  }
+  for (const corpus of ON_DEMAND_TIER_CORPORA) {
+    if (sourceIds.has(corpus.sourceId))
+      corpusIds.add(corpus.corpusId);
   }
   return corpusIds;
 }

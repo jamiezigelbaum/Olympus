@@ -50,6 +50,7 @@ import {
   V0_4_PUBLIC_SOURCE_CAPABILITIES,
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
+import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -100,6 +101,15 @@ const INGESTION_STUCK_WARNING_HOURS = 24;
 const INGESTION_STUCK_ERROR_HOURS = 72;
 const INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 const CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
+
+/**
+ * Per-tier stores created on first need (design per-item-four-tier-
+ * classification.md, section 3.2): a source's Public or Personal store, or a
+ * lazily created Private one. They belong to their source's lane, so they are
+ * connected exactly when it is; one that does not exist yet is skipped.
+ */
+const ON_DEMAND_TIER_CORPORA = createSourceCorpusRegistry().list().filter((corpus) => corpus.createdOnDemand === true);
+const ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => corpus.corpusId));
 
 export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   // Every check below reads the environment the worker actually runs with, not
@@ -610,6 +620,8 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   for (const entry of corpora) {
     const corpus = asRecord(entry);
     const corpusId = typeof corpus.corpus_id === 'string' ? corpus.corpus_id : 'unknown_corpus';
+    // A per-tier store its set has not created yet: nothing to judge.
+    if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true) continue;
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
       continue;
@@ -1286,13 +1298,19 @@ function connectedLaneEnvFlagProblem(
 function connectedSourceCorpusIds(deps: DoctorDeps): Set<string> {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const corpusIds = new Set<string>();
+  const sourceIds = new Set<string>();
   for (const handle of registry.handles) {
     if (handle.backendState?.status === 'reauth_required') continue;
     for (const lane of CONNECTED_SOURCE_LANES) {
       if (lane.provider === handle.provider && handle.allowedCapabilities.includes(lane.capability)) {
         corpusIds.add(lane.corpusId);
+        sourceIds.add(lane.sourceId);
       }
     }
+  }
+  // A connected source's per-tier stores are connected with it.
+  for (const corpus of ON_DEMAND_TIER_CORPORA) {
+    if (sourceIds.has(corpus.sourceId)) corpusIds.add(corpus.corpusId);
   }
   return corpusIds;
 }
