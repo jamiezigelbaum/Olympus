@@ -32,6 +32,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { existsSync } from 'node:fs';
 import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
 import {
   buildSourceSensitivity,
@@ -439,6 +440,46 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
       },
     ],
   });
+}
+
+/**
+ * A per-tier store whose file is created only when its first item is routed
+ * there: opened once, on demand or at boot when the file already exists.
+ */
+export interface OnDemandTierStore {
+  readonly corpusId: string;
+  readonly dbPath: string;
+  open(): LocalConnectorStore;
+  exists(): boolean;
+  /** The open store, when it has been opened. Never creates one. */
+  current(): LocalConnectorStore | undefined;
+}
+
+export function onDemandTierStore(options: {
+  create: () => LocalConnectorStore;
+  corpusId: string;
+  dbPath: string;
+  /** Told once, when the store opens (a runtime registers it for reads). */
+  onOpened?: (store: LocalConnectorStore) => void;
+}): OnDemandTierStore {
+  let opened: LocalConnectorStore | undefined;
+  return {
+    corpusId: options.corpusId,
+    dbPath: options.dbPath,
+    open() {
+      if (opened) return opened;
+      const store = options.create();
+      if (store.corpusId !== options.corpusId) {
+        store.close();
+        throw new Error('An on-demand tier store opened with the wrong corpus.');
+      }
+      opened = store;
+      options.onOpened?.(store);
+      return store;
+    },
+    exists: () => opened !== undefined || (options.dbPath !== ':memory:' && existsSync(options.dbPath)),
+    current: () => opened,
+  };
 }
 
 /** The counts a lane receipt gains from its tier set. All optional. */

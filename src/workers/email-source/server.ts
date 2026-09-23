@@ -110,11 +110,15 @@ import {
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
   defaultGmailConnectorStoreDbPath,
+  defaultGmailPublicConnectorStoreDbPath,
   defaultGmailSecureConnectorStoreDbPath,
   defaultGoogleDriveConnectorStoreDbPath,
+  defaultGoogleDrivePublicConnectorStoreDbPath,
   googleDriveIngestionExclusionMatcher,
   defineGoogleDriveDocsCorpus,
   defaultGoogleDriveSecureConnectorStoreDbPath,
+  GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+  GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
   type GoogleDriveConnectorStoreSyncHandler,
 } from '../google-connectors/index.ts';
 import {
@@ -185,6 +189,10 @@ import {
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
+import { onDemandTierStore, type OnDemandTierStore } from '../connector-store/tiered-store-set.ts';
+import { createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
 import {
@@ -1721,6 +1729,56 @@ export async function main(): Promise<void> {
           : {}),
       })
     : undefined;
+  // Tiered store sets (P1b). Every lane with per-tier stores registers here:
+  // its set ledger (the secure store's own co-located ledger) is the one
+  // visibility authority for its stores, bound to every leg at boot so no
+  // reader ever consults a different ledger; its secret-locations index sits
+  // beside the same store.
+  const tierLanes: Array<{
+    ledger: TierLedger;
+    corpusIds: Set<string>;
+    secrets?: SecretLocationsIndex;
+    publicStore?: OnDemandTierStore;
+  }> = [];
+  let registerTierLegStore: (store: LocalConnectorStore, siblingCorpusId: string) => void = () => {
+    throw new Error('A tier store opened before the source runtime finished wiring its stores.');
+  };
+  const tierLane = (input: {
+    internal: LocalConnectorStore;
+    secure: LocalConnectorStore;
+    publicStore?: OnDemandTierStore;
+  }) => {
+    const ledger = input.secure.tierLedger();
+    if (!ledger) return undefined;
+    input.internal.useTierLedger(ledger);
+    let secrets: SecretLocationsIndex | undefined;
+    try {
+      secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(input.secure.dbPath) });
+    } catch (error) {
+      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error instanceof Error ? error.name : 'error'}`);
+    }
+    const lane = {
+      ledger,
+      corpusIds: new Set([
+        input.internal.corpusId,
+        input.secure.corpusId,
+        ...(input.publicStore ? [input.publicStore.corpusId] : []),
+      ]),
+      ...(secrets ? { secrets } : {}),
+      ...(input.publicStore ? { publicStore: input.publicStore } : {}),
+    };
+    tierLanes.push(lane);
+    return lane;
+  };
+  const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+    ledger: lane.ledger,
+    corpusIds: lane.corpusIds,
+  })));
+  const onDemandCorpusAbsent = (corpusId: string): boolean => {
+    const lane = tierLanes.find((candidate) => candidate.publicStore?.corpusId === corpusId);
+    if (lane) return lane.publicStore!.current() === undefined;
+    return sourceCorpusRegistry.list().some((corpus) => corpus.corpusId === corpusId && corpus.createdOnDemand === true);
+  };
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
   const telegramConnectorAccountScope = telegramMessagesAccount ?? TELEGRAM_PERSONAL_ACCOUNT_SCOPE;
   const readwiseConnectorStoreLane = sourceIndexLaneStorageDecision(
@@ -1771,6 +1829,26 @@ export async function main(): Promise<void> {
       trustDomain: 'secure_local',
     })
     : undefined;
+  // Per-tier stores (design per-item-four-tier-classification.md, 3.2): the
+  // lane's two stores plus a Public store created only when a message is
+  // routed there, all governed by ONE ledger — the secure store's own.
+  const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore
+    ? tierLane({
+        internal: gmailInternalConnectorStore,
+        secure: gmailSecureConnectorStore,
+        publicStore: onDemandTierStore({
+          corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+          dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+          create: () => new LocalConnectorStore({
+            dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+            corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+            family: 'email',
+            trustDomain: 'public_safe',
+          }),
+          onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID),
+        }),
+      })
+    : undefined;
   // Exactly one Drive day counter per runtime, durable across restart.
   // Constructing it before the stores also keeps an invalid budget env from
   // creating the store files at all.
@@ -1802,6 +1880,26 @@ export async function main(): Promise<void> {
       trustDomain: 'secure_local',
       ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
     })
+    : undefined;
+  // The Public Drive store carries the same exclusion gate and the same
+  // approved-scope read filter as its siblings (connectorStoreReadScope).
+  const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
+    ? tierLane({
+        internal: googleDriveInternalConnectorStore,
+        secure: googleDriveSecureConnectorStore,
+        publicStore: onDemandTierStore({
+          corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+          dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+          create: () => new LocalConnectorStore({
+            dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+            corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+            family: 'file',
+            trustDomain: 'public_safe',
+            ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
+          }),
+          onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID),
+        }),
+      })
     : undefined;
   // Dropbox product state. One corpus, secure_local only: Dropbox has never
   // had an internal band. Provider sync, generic extraction, local embeddings,
@@ -1860,10 +1958,14 @@ export async function main(): Promise<void> {
   const telegramConnectorStores = telegramConnectorStoreLane.enabled
     ? createTelegramConnectorStores(process.env)
     : undefined;
+  const telegramTierLane = telegramConnectorStores
+    ? tierLane({ internal: telegramConnectorStores.internal, secure: telegramConnectorStores.secureLocal })
+    : undefined;
   const telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined = telegramConnectorStores
     ? createTelegramConnectorStoreSyncHandler({
         stores: telegramConnectorStores,
         env: process.env,
+        ...(telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}),
       })
     : undefined;
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(
@@ -2123,6 +2225,7 @@ export async function main(): Promise<void> {
     const sourceId = store === dropboxConnectorStore
       ? 'dropbox.files' as const
       : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
+        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
         ? 'google_drive.docs' as const
         : undefined;
     if (!sourceId) return { allowed: true, contentAllowed: true };
@@ -2201,6 +2304,25 @@ export async function main(): Promise<void> {
     fullyDefinedCorpusIds.add(store.corpusId);
   }
   const retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability> = {};
+  // A Public store the tier set opens (at boot when its file exists, or when
+  // its first item is routed there) is served exactly like its internal
+  // sibling: same account scope, principal and cloud embedding identity.
+  registerTierLegStore = (store, siblingCorpusId) => {
+    if (!connectorStores.includes(store)) connectorStores.push(store);
+    const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
+    if (accountScope) connectorStoreAccountScopes.set(store.corpusId, accountScope);
+    const principal = connectorStorePrincipals.get(siblingCorpusId);
+    if (principal) connectorStorePrincipals.set(store.corpusId, principal);
+    const provider = connectorStoreEmbeddingProviders.get(siblingCorpusId) ?? sourceIndexEmbeddingProvider;
+    if (provider && !connectorStoreEmbeddingProviders.has(store.corpusId)) {
+      registerConnectorStoreEmbeddingLane({
+        store,
+        provider,
+        providers: connectorStoreEmbeddingProviders,
+        retrievalAvailability,
+      });
+    }
+  };
   // Every constructed canonical store gets its embedding and retrieval lane.
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
@@ -2243,6 +2365,11 @@ export async function main(): Promise<void> {
       sourceIndexAccount?.trim() || 'personal',
     );
   }
+  // A Public store that already exists from an earlier run is served from
+  // boot; one that does not is created by its tier set on first need.
+  for (const lane of tierLanes) {
+    if (lane.publicStore?.exists()) lane.publicStore.open();
+  }
   // No handle, no handler. The stores and the budget exist at boot whatever the
   // registry says, so without this guard an enabled lane would build a sync
   // handler that falls back to the connector's default credential handle and
@@ -2266,6 +2393,8 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      ...(gmailTierLane?.publicStore ? { publicStore: gmailTierLane.publicStore } : {}),
+      ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
       // A fresh provider traversal is a bounded, resumable history walk.
       // Legacy replay is explicit one-time convergence tooling and is never
       // auto-wired into the product server.
@@ -2299,6 +2428,8 @@ export async function main(): Promise<void> {
         internalStore: googleDriveInternalConnectorStore,
         secureStore: googleDriveSecureConnectorStore,
         requestBudget: googleDriveRequestBudget,
+        ...(googleDriveTierLane?.publicStore ? { publicStore: googleDriveTierLane.publicStore } : {}),
+        ...(googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {}),
         scope: createScopeBoundGoogleDriveContentScope({ authority: fileSourceScopeAuthority, ref: scopeRef }),
         // The same gate the stores hold, handed to the traversal so an excluded
         // file is refused before its content is downloaded rather than after.
@@ -2543,8 +2674,21 @@ export async function main(): Promise<void> {
           };
           return {
             registry: buildSourceIndexCorpusRegistry(
-              sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions),
+              sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
+                .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
             ),
+            visibilityGate: tierVisibilityGate,
+            secretLocations: (query: string) => tierLanes.flatMap((lane) => lane.secrets?.search(query, { limit: 5 }) ?? []),
+            classificationCoverage: (searchedCorpora: readonly string[]) => searchedCorpora.flatMap((corpusId) => {
+              const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
+              if (!lane) return [];
+              try {
+                const held = lane.ledger.corpusCopyCounts(corpusId).held;
+                return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
+              } catch {
+                return [];
+              }
+            }),
             adapters: {
               ...Object.fromEntries(
                 readConnectorStores
@@ -2595,7 +2739,8 @@ export async function main(): Promise<void> {
     : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
-      corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions),
+      corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
+        .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,
       retrievalAvailability,
@@ -3275,6 +3420,15 @@ export async function main(): Promise<void> {
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
     ...(connectorStores.length > 0 ? { connectorStores } : {}),
+    ...(tierLanes.length > 0
+      ? {
+          connectorStoreTierSiblings: (corpusId: string) => [
+            ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
+          ].filter((sibling) => sibling !== corpusId),
+          sourceIndexVisibilityGate: tierVisibilityGate,
+          secretLocationSearch: (query: string) => tierLanes.flatMap((lane) => lane.secrets?.search(query, { limit: 5 }) ?? []),
+        }
+      : {}),
     ...(connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {}),
     ...(connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {}),
     ...(connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {}),
