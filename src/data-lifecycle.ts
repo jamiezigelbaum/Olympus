@@ -1,4 +1,9 @@
-import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './workers/classification/tier-ledger-path.ts';
+import {
+  SECRET_LOCATIONS_SQLITE_STORE_ID,
+  TIER_LEDGER_SQLITE_STORE_ID,
+  secretLocationsPathForStore,
+  tierLedgerPathForStore,
+} from './workers/classification/tier-ledger-path.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -29,8 +34,10 @@ import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-polic
 import { defaultDropboxConnectorStoreDbPath } from './workers/dropbox-files/index.ts';
 import {
   defaultGmailConnectorStoreDbPath,
+  defaultGmailPublicConnectorStoreDbPath,
   defaultGmailSecureConnectorStoreDbPath,
   defaultGoogleDriveConnectorStoreDbPath,
+  defaultGoogleDrivePublicConnectorStoreDbPath,
   defaultGoogleDriveSecureConnectorStoreDbPath,
 } from './workers/google-connectors/index.ts';
 import {
@@ -201,9 +208,12 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       legacySqliteStoreId: 'email-index',
       sqlitePath: (context) =>
         legacySourceIndexPath(envForContext(context), 'OLYMPUS_EMAIL_INDEX_DB_PATH', 'email-index.sqlite'),
+      // The secure store's co-located tier ledger is the set ledger for all
+      // three stores, and its secret-locations index sits beside it too.
       connectorStorePaths: (context) => [
         defaultGmailConnectorStoreDbPath(envForContext(context)),
         defaultGmailSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGmailPublicConnectorStoreDbPath(envForContext(context)),
       ],
     },
     {
@@ -232,6 +242,7 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       connectorStorePaths: (context) => [
         defaultGoogleDriveConnectorStoreDbPath(envForContext(context)),
         defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGoogleDrivePublicConnectorStoreDbPath(envForContext(context)),
       ],
     },
     {
@@ -764,6 +775,12 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       ...(storePath === ':memory:'
         ? []
         : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context)),
+      // A tiered store set keeps its secret-locations index (location only:
+      // identity, locator, a scanned title, finding kinds) beside its
+      // secure_local store, like the set ledger, so it goes with its source.
+      ...(storePath === ':memory:'
+        ? []
+        : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context)),
     ]),
     ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,

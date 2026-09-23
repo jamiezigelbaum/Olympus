@@ -19,15 +19,16 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 
-export const SECRET_LOCATIONS_SQLITE_STORE_ID = 'olympus_secret_locations';
+import { SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsPathForStore } from './tier-ledger-path.ts';
+
+export { SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsPathForStore };
 export const SECRET_LOCATIONS_SCHEMA_VERSION = 1;
-export const SECRET_LOCATIONS_FILE_NAME = 'secret-locations.sqlite';
 
 export type SecretLocationIdentity = Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>;
 
@@ -61,11 +62,6 @@ export interface SecretLocationMatch {
   title: string | null;
   findingKinds: string[];
   detectedAt: string;
-}
-
-export function secretLocationsPathForLedger(tierLedgerDbPath: string): string {
-  if (tierLedgerDbPath === ':memory:') return ':memory:';
-  return join(dirname(tierLedgerDbPath), SECRET_LOCATIONS_FILE_NAME);
 }
 
 export class SecretLocationsIndex {
