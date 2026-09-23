@@ -441,6 +441,44 @@ describe('runDoctor', () => {
     expect(sourceIndex.hint).toBeDefined();
   });
 
+  test('reports an approved tier migration in progress instead of a parity failure, and only for its stores', async () => {
+    const migration = {
+      plan_id: 'tm-0123456789abcdef',
+      state: 'running',
+      in_progress: true,
+      approval_entry_id: 'tier-migration-approval:tm-0123456789abcdef:abc',
+      proposed: 10,
+      batches: [],
+      corpora: ['internal.email'],
+      chunks_to_embed: 100,
+      purged: false,
+    };
+    const statusWith = (tierMigration: unknown) => fakeWorkerFetch({
+      '/v1/health': { status: 'ok', configured: true },
+      '/v1/source/index/status': {
+        kind: 'source_index_status',
+        corpora: [corpusReport('internal.email', { family: 'email', counts: { chunks: 200, embedded_chunks: 100 } })],
+        ...(tierMigration ? { tier_migration: tierMigration } : {}),
+      },
+    }).fetchImpl;
+    const run = async (fetchImpl: typeof fetch) => checkByName((await runDoctor(doctorDeps({
+      config: enabledEmailConfig(),
+      delphi: healthyDelphi(),
+      fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('gmail')] },
+    }))).checks, 'source_index_status');
+
+    const inProgress = await run(statusWith(migration));
+    expect(inProgress.ok).toBe(true);
+    expect(inProgress.detail).toContain(
+      'internal.email: migration in progress (running, approved, ledger entry tier-migration-approval:tm-0123456789abcdef:abc)',
+    );
+    // A plan that is only planned (no approval) or covers other stores excuses nothing.
+    expect((await run(statusWith({ ...migration, approval_entry_id: undefined }))).ok).toBe(false);
+    expect((await run(statusWith({ ...migration, corpora: ['secure_local.dropbox.files'] }))).ok).toBe(false);
+    expect((await run(statusWith({ ...migration, in_progress: false }))).ok).toBe(false);
+  });
+
   test('flags embedding lag on a non-Dropbox connector-store corpus', async () => {
     const { fetchImpl } = fakeWorkerFetch({
       '/v1/health': { status: 'ok', configured: true },

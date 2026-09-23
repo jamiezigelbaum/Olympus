@@ -605,6 +605,8 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const summaries: string[] = [];
   const informational: string[] = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
+  const migration = approvedTierMigrationInProgress(status.tier_migration);
+  const migrationCorpora = new Set(migration?.corpora ?? []);
 
   for (const entry of corpora) {
     const corpus = asRecord(entry);
@@ -641,7 +643,15 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
           : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
-      problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      // An owner-approved tier migration moves chunks into stores whose own
+      // model embeds them afterwards: that lag is the approved work, not a
+      // parity failure.
+      if (migration && migrationCorpora.has(corpusId)) {
+        informational.push(`${corpusId}: migration in progress (${migration.state}, approved, ledger entry `
+          + `${migration.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks is expected`);
+      } else {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      }
     }
   }
 
@@ -662,6 +672,28 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     name,
     ok: true,
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? '' : 's'}.${summary}${info}`,
+  };
+}
+
+/**
+ * The worker's tier-migration summary, when an owner-APPROVED plan is in
+ * progress (a ledger approval entry is named). Anything else — no plan, a plan
+ * only planned, a finished one — returns undefined, so parity is judged as usual.
+ */
+function approvedTierMigrationInProgress(
+  value: unknown,
+): { state: string; approvalEntryId: string; corpora: string[] } | undefined {
+  const migration = asRecord(value);
+  if (migration.in_progress !== true) return undefined;
+  const approvalEntryId = typeof migration.approval_entry_id === 'string' ? migration.approval_entry_id : undefined;
+  if (!approvalEntryId) return undefined;
+  const corpora = Array.isArray(migration.corpora)
+    ? migration.corpora.filter((corpus): corpus is string => typeof corpus === 'string')
+    : [];
+  return {
+    state: typeof migration.state === 'string' ? migration.state : 'approved',
+    approvalEntryId,
+    corpora,
   };
 }
 

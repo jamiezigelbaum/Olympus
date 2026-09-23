@@ -38,7 +38,8 @@ import {
 } from '../src/workers/classification/tier-migration.ts';
 import { openTierMigrationLanes, type TierMigrationLaneSpec } from '../src/workers/classification/tier-migration-lanes.ts';
 import { runTierMigrateCommand } from '../src/workers/classification/tier-migration-cli.ts';
-import { LocalConnectorStore, syncAndEmbedFromConnector } from '../src/workers/connector-store/index.ts';
+import { LocalConnectorStore, defineConnectorCorpus, syncAndEmbedFromConnector } from '../src/workers/connector-store/index.ts';
+import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import type { TierMoveEmbeddingIdentity } from '../src/workers/connector-store/tier-move.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
@@ -742,6 +743,42 @@ describe('tier migration M2-M6', () => {
     const ran = await runTierMigrateCommand(['run', '--plan', planId, '--batch', 'folder:/Files'], cli);
     expect(ran).toMatchObject({ kind: 'olympus_tier_migration_run', state: 'done', moved: 2, secrets_hidden: 1 });
     expect(await runTierMigrateCommand(['rollback', '--batch', String(ran['batch_id'])], cli)).toMatchObject({ rolled_back: 3 });
+  });
+});
+
+describe('tier migration status', () => {
+  test('status publishes per-tier counts, Secret locations, superseded chunks and the migration state', async () => {
+    const context = await rehearsal();
+    const plan = await planAndApprove(context);
+    const write = lanes(context, 'write');
+    await runTierMigration({
+      planId: plan.planId,
+      lanes: write.lanes,
+      inputs: context.inputs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      selector: 'source:rehearsal.files',
+    });
+    const stores = write.lanes[0]!.set.openStores();
+    const handler = createSourceIndexStatusHandler({
+      corpusDefinitions: stores.map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
+      connectorStores: stores,
+      tierMigration: () => tierMigrationStatusSummary(context.paths.statePath),
+    });
+    const status = await handler.status({});
+    expect(status.tier_migration).toMatchObject({
+      plan_id: plan.planId,
+      state: 'approved',
+      in_progress: true,
+      approval_entry_id: `tier-migration-approval:${plan.planId}:${plan.countsSha256}`,
+    });
+    const counts = (corpusId: string) => (status.corpora.find((corpus) => corpus.corpus_id === corpusId) as { counts: Record<string, number> }).counts;
+    // Private files: therapy (text), medical (whole); the garden and keys copies are superseded (kept, uncounted).
+    expect(counts(FILE_CORPORA.secure_local)).toMatchObject({ indexed_items: 2, secret_locations: 1 });
+    expect(counts(FILE_CORPORA.secure_local)['superseded_chunks']).toBeGreaterThan(0);
+    // Personal files: garden (whole) and therapy's names.
+    expect(counts(FILE_CORPORA.internal)).toMatchObject({ indexed_items: 2 });
+    expect(JSON.stringify(status.tier_migration)).not.toContain('/Files');
   });
 });
 
