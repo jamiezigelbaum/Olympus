@@ -459,6 +459,26 @@ the listing; the loading indicator stays visible while requests are in flight.
 Unselected folders stay out. Entire-account ingestion requires an explicit
 selection and confirmation; a default configuration is not permission.
 
+Gmail works the same way: **Connect** only connects the mailbox, and the card
+reads Waiting, *waiting for mail selection*, until you open **Choose mail** and
+press **Save scope and start**. Nothing is read before that, not even
+metadata. The picker offers how far back mail is read in full (the last 2 years
+by default; older mail is indexed by subject, sender, date and labels only, with
+no body), which Gmail categories and labels to skip (Promotions and Social are
+skipped by default), and "always Private" and "skip" sender lists seeded from a
+header-only sample of your recent mail. Skipped senders are never read; the
+always-Private list is saved as owner tier rules that per-item classification
+applies once it ships. Before anything runs it shows an
+estimate of the message count, first-read time and embedding cost; opening the
+picker spends at most 108 Gmail API requests. Saving a changed scope starts a
+fresh traversal under the new query. The approval is stored in
+`mail-source-scopes.json` beside the connected-handle registry.
+
+Operators can still narrow Gmail with the hidden
+`OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting (Gmail search syntax). It is an
+override on top of the approved scope, never a replacement: the lane ANDs it
+with the picker's query, so it can only read less.
+
 All seven declared sources use the canonical connector-store runtime. Each
 chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or
