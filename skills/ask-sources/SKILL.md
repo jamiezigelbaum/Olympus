@@ -132,7 +132,10 @@ Good calling-assistant request shape:
 - set `include_internal` to true
 - leave `include_secure_local` unset; Private corpora are searched when the
   runtime policy approves a private analyst for them
-- use a small `max_results` for exploratory searches
+- leave `max_results` unset for broad questions ("what do I have about X?"):
+  the answer is built from a budgeted pack of up to 24 passages across every
+  matching source, and the answer reports per-source match counts. Set a
+  smaller `max_results` only for a narrow lookup
 
 For a request to rank the most prolific posters in one ordinary/internal
 Telegram chat:
@@ -186,9 +189,9 @@ Good calling-assistant request shape:
 - use `source_index_search` with `corpus_id: internal.x.bookmarks` when the
   user wants result cards, bookmark passages, provenance, folder signals,
   or diagnostics
-- leave `retrieval_mode` unset for the normal adaptive answer path; Olympus
-  starts with keyword retrieval and retries with hybrid only when the keyword
-  evidence pack is empty/thin. Set `retrieval_mode: keyword` or `hybrid` only
+- leave `retrieval_mode` unset for the normal answer path; Olympus runs
+  hybrid retrieval when the corpus has current embeddings and keyword
+  otherwise. Set `retrieval_mode: keyword` or `hybrid` only
   when deliberately forcing a diagnostic path. Do not set `retrieval_mode:
   hybrid` just because a query is broad or conceptual.
 

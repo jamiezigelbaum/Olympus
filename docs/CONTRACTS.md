@@ -115,6 +115,11 @@ interface EvidencePack {
     searchedCorpora: string[];
     skippedCorpora: { corpusId: string; reason: string }[];
     extractionGaps: string[];        // "3 scanned PDFs not OCR'd", "images deferred"
+    matchCounts?: {                  // v1.1.0: breadth beyond the bounded evidence
+      corpusId: string; family: SourceFamily;
+      matchedItems: number; contentMatchedItems: number;
+      atLeast: boolean; inEvidence: number;
+    }[];
   };
   builtAt: string;
 }
@@ -129,6 +134,11 @@ Notes:
 - Local content providers may upgrade sensitivity, but they must never downgrade
   the trust domain routed by the corpus registry. A `secure_local` hit cannot
   become `internal` just because a provider misclassified the fetched content.
+- **Evidence is a bounded selection; `matchCounts` is the breadth.** The pack
+  holds the best passages that fit its budget, and `matchCounts` says how many
+  items each searched corpus matched (a lower bound when `atLeast`), so the
+  Analyst can report "23 emails and 6 files match" instead of mistaking the
+  slice for the whole. Counts only: no titles, paths, or identifiers.
 - **`facts` are a cache, not the answer.** Structured extractions are useful
   inputs to the analyst. They must never become the only answer path — that is
   how the previous design slid back into per-question parsers.
@@ -391,6 +401,14 @@ previously frozen shapes without a runtime or data migration.
 
 ## Change log
 
+- 2026-09-23 (v1.1.0): `EvidenceCoverage` gains optional `matchCounts`, per
+  searched corpus: matched items, how many carry readable content, whether the
+  count hit its probe ceiling, and how many are in the evidence. Source answers
+  now size evidence by a character budget (24 candidates sharing 40,000 passage
+  characters by default) rather than three slots, so the pack is a larger but
+  still bounded selection, and the Analyst needs the breadth to describe it
+  honestly. Additive and optional: producers that omit it and consumers that
+  ignore it are unchanged; no stored data migrates.
 - 2026-07-28: `SourceChunkIdentity` gains an optional `span` (offset citation
   coordinates). Additive and optional; none of the three frozen interfaces
   changed shape. Recorded here because the member is reachable from

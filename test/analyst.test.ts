@@ -55,6 +55,7 @@ function pack(
       searchedCorpora: coverage?.searchedCorpora ?? ['internal.dropbox.files'],
       skippedCorpora: coverage?.skippedCorpora ?? [],
       extractionGaps: coverage?.extractionGaps ?? [],
+      ...(coverage?.matchCounts ? { matchCounts: coverage.matchCounts } : {}),
     },
     builtAt: '2026-05-28T00:00:00.000Z',
   };
@@ -107,6 +108,34 @@ describe('Analyst capability', () => {
     expect(result.unanswered).toEqual([]);
     expect(result.escalation).toBeUndefined();
     expect(calls).toHaveLength(1);
+  });
+
+  test('gives the model per-source match breadth beside the bounded evidence', async () => {
+    const { model, calls } = fakeModel(JSON.stringify({
+      answer: 'Many items match; the most relevant is the seminar reader.',
+      citations: [{ evidence: 1, claim: 'seminar reader' }],
+      unanswered: [],
+      sufficient: true,
+    }));
+    await createAnalyst(model).analyze(
+      pack('What do I have about integral theory?', [
+        candidate('pdf-a', ['Integral theory maps four quadrants.'], { title: 'seminar-reader.pdf' }),
+      ], {
+        searchedCorpora: ['secure_local.dropbox.files', 'internal.gmail.messages'],
+        matchCounts: [
+          { corpusId: 'secure_local.dropbox.files', family: 'file', matchedItems: 32, contentMatchedItems: 2, atLeast: false, inEvidence: 1 },
+          { corpusId: 'internal.gmail.messages', family: 'email', matchedItems: 50, contentMatchedItems: 50, atLeast: true, inEvidence: 0 },
+          { corpusId: 'internal.fake.empty', family: 'note', matchedItems: 0, contentMatchedItems: 0, atLeast: false, inEvidence: 0 },
+        ],
+      }),
+      { localOnly: false },
+    );
+    expect(calls[0]!.prompt).toContain(
+      'matches: secure_local.dropbox.files (file) 32 items, 2 with readable content, 1 in evidence, '
+      + 'internal.gmail.messages (email) 50+ items, 0 in evidence',
+    );
+    expect(calls[0]!.prompt).not.toContain('internal.fake.empty (note)');
+    expect(calls[0]!.system).toContain('Never present the number of evidence candidates as the total.');
   });
 
   test('requires the one-pass Analyst to account for every requested item', async () => {

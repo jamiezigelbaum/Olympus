@@ -121,6 +121,8 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   queryPlanner?: (question: string) => Promise<readonly string[]>;
   defaultMaxResults?: number;
   maxCharsPerCandidate?: number;
+  // Total passage characters across the evidence pack; see DEFAULT_EVIDENCE_CHAR_BUDGET.
+  evidenceCharBudget?: number;
   // Per-lane retrieval deadline for the fan-out. Its own quantity, like the two
   // analyst bounds below: it governs how long ONE corpus may take to answer,
   // not how long the whole answer may take. Absent, the router uses its
@@ -196,7 +198,20 @@ export interface SourceAnswerSelfHealResult {
   healed: boolean;
 }
 
-const DEFAULT_MAX_RESULTS = 3;
+// Evidence is sized by a character budget, not a handful of slots. A broad
+// question ("what do I have on X?") routinely matches dozens of emails, a
+// message, and a folder of documents; three candidates could show one item per
+// source at best and hid the rest. Up to 24 items share a 40,000-character
+// passage budget (about 10k tokens): 24 items get ~1,650 chars each (their best
+// two or three passages), 3 items keep the old 3,000-char ceiling. With
+// per-candidate metadata and the system prompt the analyst prompt stays near
+// 55k chars (about 14k tokens) — inside every analyst lane in use: the
+// OpenClaw infer lane's 100,000-byte argv ceiling with room for multi-byte
+// text, Venice's model contexts, and a local Argus context. A caller's
+// max_results still asks for fewer, up to MAX_EVIDENCE_CANDIDATES.
+const DEFAULT_MAX_RESULTS = 24;
+const MAX_EVIDENCE_CANDIDATES = 48;
+const DEFAULT_EVIDENCE_CHAR_BUDGET = 40_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
 const TEMPORAL_INTENT_MIN_RESULTS = 8;
 const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
@@ -318,10 +333,14 @@ export function createAnalystSourceIndexAnswerHandler(
       // silently drops it before temporal ordering runs (2026-07-05).
       // Explicit max_results from the caller is always respected.
       const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
-      const maxResults = request.max_results
-        ?? (hasTemporalIntent(`${question} ${request.query ?? ''}`)
-          ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS)
-          : configuredMaxResults);
+      const maxResults = Math.min(
+        MAX_EVIDENCE_CANDIDATES,
+        request.max_results
+          ?? (hasTemporalIntent(`${question} ${request.query ?? ''}`)
+            ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS)
+            : configuredMaxResults),
+      );
+      const evidenceCharBudget = options.evidenceCharBudget ?? DEFAULT_EVIDENCE_CHAR_BUDGET;
       const evidencePackStartedAt = Date.now();
       const buildDetail = (
         activeLanes: AnalystAnswerLanes,
@@ -342,6 +361,7 @@ export function createAnalystSourceIndexAnswerHandler(
           adapters: activeLanes.adapters,
           contentProviders: activeLanes.contentProviders,
           maxCharsPerCandidate,
+          evidenceCharBudget,
           ...(options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}),
         }));
       const initialAttempt = request.selected_items?.length
