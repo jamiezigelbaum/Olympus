@@ -16,8 +16,12 @@ export interface InstalledStoreTierClassification {
 }
 
 export interface InstalledTierClassificationProvider {
-  /** Inputs for decisions recorded in the ledger at `ledgerPath`. Never throws. */
-  forLedger(ledgerPath: string, laneMap?: SensitivityMap): InstalledStoreTierClassification;
+  /**
+   * Inputs for decisions recorded in the ledger at `ledgerPath`: the owner's
+   * map and rules file as they are NOW (re-read when edited) and the sniffer.
+   * Never throws.
+   */
+  forLedger(ledgerPath: string): InstalledStoreTierClassification;
 }
 
 let registered: InstalledTierClassificationProvider | undefined;

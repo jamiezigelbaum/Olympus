@@ -78,24 +78,27 @@ export interface ConnectorStoreTierClassification {
 /**
  * The classification inputs for one sync. With the installed inputs
  * configured (the worker), a lane's own inputs are merged into them: the
- * lane's map wins, the lane's rules (the mail scope's always-Private senders,
- * say) apply alongside the owner's rules file, and the installed sniffer
- * answers unless the lane brought one. Unconfigured, the lane's inputs (or
- * its map alone) are used as they are. Never throws.
+ * owner's map as the file is NOW (re-read when edited, so every lane sees an
+ * edit at its next pass) replaces a copy the lane loaded at start, the lane's
+ * rules (the mail scope's always-Private senders, WhatsApp's chat rules)
+ * apply alongside the owner's rules file (also re-read when edited), and the
+ * installed sniffer answers unless the lane brought one. Unconfigured, the
+ * lane's inputs (or its map alone) are used as they are. Never throws.
  */
 export function resolveStoreTierClassification(
   explicit: ConnectorStoreTierClassification | undefined,
   ledgerPath: string,
   laneMap: SensitivityMap | undefined,
 ): ConnectorStoreTierClassification | undefined {
-  const map = explicit?.sensitivityMap ?? laneMap;
-  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath, map);
+  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
   if (!installed) return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
   if (installed.unavailableReason || !explicit) return installed;
   if (explicit.unavailableReason) return explicit;
   const rules = [...(explicit.rules ?? []), ...(installed.rules ?? [])];
   const sniffer = explicit.sniffer ?? installed.sniffer;
-  const sensitivityMap = explicit.sensitivityMap ?? installed.sensitivityMap;
+  // The owner's map as it is now wins over a copy a lane loaded at start,
+  // so an edit takes effect at the next pass on every lane.
+  const sensitivityMap = installed.sensitivityMap;
   return {
     ...(sensitivityMap ? { sensitivityMap } : {}),
     ...(rules.length > 0 ? { rules } : {}),

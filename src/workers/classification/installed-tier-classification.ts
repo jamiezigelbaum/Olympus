@@ -18,7 +18,7 @@
 
 import { statSync } from 'node:fs';
 import {
-  loadSensitivityMap,
+  loadOwnerSensitivityMap,
   resolveSensitivityMapPath,
   type SensitivityMap,
 } from '../../core/sensitivity-map.ts';
@@ -65,10 +65,10 @@ export class InstalledTierClassification implements InstalledTierClassificationP
    * store's own, or a tiered store set's). The sniffer's cache and queue sit
    * beside that ledger. Never throws.
    */
-  forLedger(ledgerPath: string, laneMap?: SensitivityMap): InstalledStoreTierClassification {
+  forLedger(ledgerPath: string): InstalledStoreTierClassification {
     const rules = this.currentRules();
     if (rules === undefined) return { unavailableReason: 'tier_rules_invalid' };
-    const sensitivityMap = laneMap ?? this.currentMap();
+    const sensitivityMap = this.currentMap();
     let sniffer: TierSniffer | undefined;
     if (this.lane && ledgerPath !== ':memory:') {
       try {
@@ -109,7 +109,9 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   private currentMap(): SensitivityMap | undefined {
     const stamp = fileStamp(resolveSensitivityMapPath({ env: this.env }));
     if (stamp !== this.mapStamp) {
-      this.map = loadSensitivityMap({ env: this.env, allowMissing: true, ignoreInvalid: true });
+      // The one owner-map loader (core/sensitivity-map.ts), re-run only when
+      // the file's stamp changes: every lane sees an edit at its next pass.
+      this.map = loadOwnerSensitivityMap(this.env);
       this.mapStamp = stamp;
     }
     return this.map;
