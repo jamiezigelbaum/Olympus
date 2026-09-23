@@ -4348,7 +4348,7 @@ class EnvCredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv2(this.env, oauth2.refreshTokenEnvNames ?? []);
     if (!clientId)
       throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === "reauth_required" || !refreshToken) {
+    if (storedState?.status === "reauth_required" || this.registryHandleReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError("credential_reauth_required", `Credential handle ${definition.handle} requires OAuth reauthorization.`, { handle: definition.handle, capability });
     }
     await commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
@@ -4557,6 +4557,16 @@ class EnvCredentialBroker {
       untilMs: this.now().getTime() + this.oauth2RefreshFailureBackoffMs,
       error
     });
+  }
+  registryHandleReauthRequired(definition) {
+    if (this.connectedHandleRegistryPath) {
+      try {
+        const handle = readConnectedHandleRegistry(this.connectedHandleRegistryPath).handles.find((candidate) => candidate.handle === definition.handle);
+        if (handle)
+          return handle.backendState?.status === "reauth_required";
+      } catch {}
+    }
+    return definition.backendState?.status === "reauth_required";
   }
   markRegistryHandleReauthRequired(handle, now) {
     if (!this.connectedHandleRegistryPath)
@@ -5738,7 +5748,7 @@ var init_credential_broker = __esm(() => {
     }
   };
   TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
-  REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the refresh token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
+  REFRESH_TOKEN_REJECTED_DETAIL = /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 });
 
 // src/workers/credential-broker/connected-handles.ts

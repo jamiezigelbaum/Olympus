@@ -1287,7 +1287,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     const refreshTokenPinnedInEnv = !!firstNonEmptyEnv(this.env, oauth2.refreshTokenEnvNames ?? []);
 
     if (!clientId) throw missingCredentialError(definition.handle, capability);
-    if (storedState?.status === 'reauth_required' || !refreshToken) {
+    if (storedState?.status === 'reauth_required' || this.registryHandleReauthRequired(definition) || !refreshToken) {
       throw new CredentialBrokerError(
         'credential_reauth_required',
         `Credential handle ${definition.handle} requires OAuth reauthorization.`,
@@ -1644,6 +1644,29 @@ export class EnvCredentialBroker implements CredentialBroker {
       untilMs: this.now().getTime() + this.oauth2RefreshFailureBackoffMs,
       error,
     });
+  }
+
+  /**
+   * Whether the connected-handle registry already records this handle as dead.
+   *
+   * Installs run without a broker state path, so the registry mark is the only
+   * durable record of a refused refresh token. Read live rather than from the
+   * definition snapshot taken at construction: long-lived brokers would
+   * otherwise keep re-presenting a token the provider has already refused
+   * (x.bookmarks.personal, 2026-09-22: 1,600+ refusals over 59h). A reconnect
+   * rewrites the registry entry without the mark, which is what clears it.
+   */
+  private registryHandleReauthRequired(definition: EnvCredentialHandleDefinition): boolean {
+    if (this.connectedHandleRegistryPath) {
+      try {
+        const handle = readConnectedHandleRegistry(this.connectedHandleRegistryPath).handles
+          .find((candidate) => candidate.handle === definition.handle);
+        if (handle) return handle.backendState?.status === 'reauth_required';
+      } catch {
+        // An unreadable registry is not evidence of a dead grant.
+      }
+    }
+    return (definition.backendState as { status?: unknown } | undefined)?.status === 'reauth_required';
   }
 
   private markRegistryHandleReauthRequired(handle: string, now: Date): void {
@@ -2386,8 +2409,10 @@ class OAuth2TokenEndpointError extends Error {
  * test exists for X, which rejects a spent refresh token as a generic
  * `invalid_request` -- indistinguishable by code from a malformed call, so it was
  * retried as a transient fault for two days while the handle was simply dead
- * (x.bookmarks.personal, 2026-07-28). Only a description that names the refresh
- * token counts: a request that really is malformed names something else, and
+ * (x.bookmarks.personal, 2026-07-28). X has also answered with "the token"
+ * rather than "the refresh token" (2026-09-22, 59h of retries); on this lane the
+ * refresh token is the only token presented, so both wordings count. Only a
+ * description that names the token counts: a request that really is malformed names something else, and
  * mistaking one for the other would latch a healthy handle into reauth.
  *
  * The permanent client refusals join them for the same reason they are terminal
@@ -2414,7 +2439,7 @@ function isTerminalOAuthRefreshError(error: unknown): error is OAuth2TokenEndpoi
 const TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
 
 const REFRESH_TOKEN_REJECTED_DETAIL =
-  /(?:value passed for the refresh token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
+  /(?:value passed for the (?:refresh )?token was invalid|refresh[ _-]?token(?: was| is| has been)? (?:invalid|expired|revoked|not valid)|(?:invalid|expired|revoked|unknown) refresh[ _-]?token)/i;
 
 function missingCredentialError(handle: string, capability?: string): CredentialBrokerError {
   return new CredentialBrokerError(
