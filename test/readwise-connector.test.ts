@@ -95,11 +95,8 @@ describe('Readwise thin connector and canonical store', () => {
         documentId: 'book-42',
       },
     });
-    expect(connector.classify(highlight!)).toMatchObject({
-      trustTier: 'S1',
-      trustDomain: 'internal',
-      localOnly: false,
-    });
+    expect(connector.classificationSignals(highlight!).prior).toBeUndefined();
+    expect(connector.classificationSignals(highlight!).sharing).toBeUndefined();
     expect(await connector.fetchItem(highlight!.identity.localItemId)).toBe(highlight!);
     expect(connector.requestBudgetStatus()).toEqual({
       utcDay: '2026-07-26',

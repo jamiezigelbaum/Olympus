@@ -3,7 +3,7 @@
 // completeness, fetch, and classification; this module converts its bounded
 // acquisition into stable RawItems for the shared connector store.
 
-import type { ConnectorStorePlacement } from '../connector-store/tier-placement.ts';
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -87,7 +87,7 @@ export function createXBookmarksSourceConnector(
  * Where X bookmarks rest in the existing store: S1/internal, the placement the
  * retired connector classify() returned for every bookmark.
  */
-export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacement = Object.freeze({
+export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
   trustTier: 'S1',
   trustDomain: 'internal',
 });

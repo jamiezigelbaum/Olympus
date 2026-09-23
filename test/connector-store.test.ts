@@ -32,7 +32,7 @@ import {
   type SourceTrustTier,
 } from '../src/core/source-index/types.ts';
 import {
-  LocalConnectorStore,
+  LocalConnectorStore as BaseLocalConnectorStore,
   connectorStoreCurrentEmbeddingModelId,
   connectorStoreCurrentEmbeddingRows,
   connectorStoreQualificationFingerprint,
@@ -49,6 +49,35 @@ import type {
 
 const CORPUS_ID = 'secure_local.fake.files';
 const ACCOUNT = 'personal';
+
+// --- Per-item placement for the fake lane -------------------------------------
+//
+// SourceConnector 2.0.0 took placement away from connectors. Many tests here
+// exercise the spine's cross-domain demotion and rejection paths, which need a
+// lane whose existing stores place items one by one. The fake lane declares
+// that placement itself, keyed by the spec that created each item (the most
+// recently created spec for an item wins, as each test syncs right after
+// building its connector). Items no fake spec created take the store default.
+const fakeSpecPlacements = new Map<string, { trustTier: SourceTrustTier; trustDomain: SourceTrustDomain }>();
+
+class LocalConnectorStore extends BaseLocalConnectorStore {
+  override syncFromConnector(
+    connector: SourceConnector,
+    options?: Parameters<BaseLocalConnectorStore['syncFromConnector']>[1],
+  ): ReturnType<BaseLocalConnectorStore['syncFromConnector']> {
+    if (options?.placement || options?.classification) return super.syncFromConnector(connector, options);
+    const storeDomain = this.trustDomain;
+    return super.syncFromConnector(connector, {
+      ...options,
+      placement: (item: RawItem) => {
+        const spec = fakeSpecPlacements.get(item.identity.localItemId);
+        return spec
+          ? buildSourceSensitivity(spec)
+          : buildSourceSensitivity({ trustTier: storeDomain === 'internal' ? 'S3' : 'S4', trustDomain: storeDomain });
+      },
+    });
+  }
+}
 
 // --- In-memory fake SourceConnector -----------------------------------------
 
@@ -90,7 +119,13 @@ function createFakeConnector(
   const connectorId = options.connectorId ?? 'fake';
   const specsById = new Map<string, FakeItemSpec>();
   for (const page of pages) {
-    for (const spec of page) specsById.set(spec.id, spec);
+    for (const spec of page) {
+      specsById.set(spec.id, spec);
+      fakeSpecPlacements.set(`${accountScope}:${spec.id}`, {
+        trustTier: spec.trustTier ?? 'S4',
+        trustDomain: spec.trustDomain ?? 'secure_local',
+      });
+    }
   }
 
   const listedRawItem = (spec: FakeItemSpec): RawItem => ({
@@ -151,12 +186,8 @@ function createFakeConnector(
           : { kind: 'metadata_only' as const };
       return { ...listed, content };
     },
-    classify(item: RawItem) {
-      const spec = specsById.get(item.identity.providerItemId);
-      return buildSourceSensitivity({
-        trustTier: spec?.trustTier ?? 'S4',
-        trustDomain: spec?.trustDomain ?? 'secure_local',
-      });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -282,10 +313,8 @@ function createGoogleFixtureConnector(
       if (!found) throw new Error(`missing fixture item ${localItemId}`);
       return found;
     },
-    classify() {
-      // Deliberately too broad: the test proves the shared sync classifier,
-      // not the connector default, controls item routing when configured.
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -324,8 +353,8 @@ function createChatConnector(items: readonly RawItem[]): SourceConnector {
       if (!found) throw new Error(`missing chat item ${localItemId}`);
       return found;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -488,14 +517,14 @@ describe('LocalConnectorStore sync', () => {
     let timerObservedByItem33 = false;
     const connector: SourceConnector = {
       ...base,
-      classify(item) {
+      classificationSignals(item) {
         if (item.identity.providerItemId === 'id:yield-1') {
           setTimeout(() => { timerFired = true; }, 0);
         }
         if (item.identity.providerItemId === 'id:yield-33') {
           timerObservedByItem33 = timerFired;
         }
-        return base.classify(item);
+        return base.classificationSignals(item);
       },
     };
     const store = newStore();
@@ -1980,7 +2009,7 @@ describe('LocalConnectorStore sync', () => {
         })();
       },
       async fetchItem(): Promise<RawItem> { throw new Error('unused'); },
-      classify: () => buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'secure_local' }),
+      classificationSignals: () => ({}),
     };
     await expect(store.syncFromConnector(smuggled)).rejects.toThrow(/connector_page_invariant/);
     store.close();
@@ -2497,8 +2526,8 @@ describe('createConnectorStoreCorpusAdapter', () => {
         if (!found) throw new Error(`no item ${localItemId}`);
         return found;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+      classificationSignals() {
+        return {};
       },
     };
     await store.syncFromConnector(connector, { fetchContent: true });
@@ -2713,8 +2742,8 @@ describe('LocalConnectorStore embeddings', () => {
         if (!found) throw new Error('missing cap fixture item');
         return found;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+      classificationSignals() {
+        return {};
       },
     };
     const directory = mkdtempSync(join(tmpdir(), 'olympus-connector-real-embed-cap-'));

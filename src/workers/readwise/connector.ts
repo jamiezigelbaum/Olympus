@@ -1,4 +1,4 @@
-import type { ConnectorStorePlacement } from '../connector-store/tier-placement.ts';
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -471,7 +471,7 @@ export function createReadwiseSourceConnector(
  * classification of the saved/read relationship (source-family posture). This
  * is the placement the retired connector classify() returned for every item.
  */
-export const READWISE_STORE_PLACEMENT: ConnectorStorePlacement = Object.freeze({
+export const READWISE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
   trustTier: 'S1',
   trustDomain: 'internal',
 });

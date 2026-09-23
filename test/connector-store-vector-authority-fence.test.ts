@@ -27,7 +27,7 @@ function connector(): SourceConnector {
       return (async function* () { yield { items: [item()], done: true }; })();
     },
     async fetchItem() { return item(); },
-    classify() { return buildSourceSensitivity({ trustDomain: 'secure_local', trustTier: 'S4' }); },
+    classificationSignals() { return {}; },
   };
 }
 

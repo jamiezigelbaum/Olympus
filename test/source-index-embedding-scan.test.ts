@@ -155,8 +155,8 @@ function createScanConnector(
       if (!item) throw new Error(`no item ${localItemId}`);
       return rawItem(item);
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

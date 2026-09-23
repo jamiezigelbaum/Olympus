@@ -63,7 +63,9 @@ describe('X bookmarks thin connector', () => {
       },
     });
     expect(page.items[0]?.identity.providerConversationId).toBeUndefined();
-    expect(live.classify(page.items[0]!)).toMatchObject({ trustTier: 'S1', trustDomain: 'internal' });
+    // A bookmark is the owner's saving of a post, not a publication by the
+    // owner, so it carries no Public evidence.
+    expect(live.classificationSignals(page.items[0]!).sharing).toBeUndefined();
   });
 
   test('real connector owns the rich overlap-aware head listing', async () => {

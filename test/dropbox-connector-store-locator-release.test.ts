@@ -911,8 +911,8 @@ function dropboxFixtureConnector(specs: readonly FixtureSpec[]): SourceConnector
       if (!item) throw new Error(`missing Dropbox locator fixture ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

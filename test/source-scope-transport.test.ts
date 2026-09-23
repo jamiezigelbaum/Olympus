@@ -127,7 +127,7 @@ test.each([false, true])('metadata-only worker searches stay isolated with mixed
   await store.syncFromConnector({
     id: 'scope-transport-fixture', family: 'file', async authenticate() {},
     async *listItems() { yield { items: mixed ? [raw, full] : [raw], done: true }; }, async fetchItem(id) { return id === full.identity.localItemId ? full : raw; },
-    classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
+    classificationSignals() { return {}; },
   }, { fetchContent: true, sourceScopeObservation: () => ({ accountGeneration: generation, scopeRevision: revision }) });
   const selected = { sourceId: 'dropbox.files' as const, status: 'approved' as const, accountGeneration: generation, revision, selections: [{ key: '/work', state: 'metadata_only' as const }, ...(mixed ? [{ key: '/full', state: 'ingest' as const }] : [])], wholeAccount: false };
   const metadataScope = fileSourceScopeMetadataFilters(selected);
@@ -268,7 +268,7 @@ async function scopedEmbeddingStore(bodies: string[]): Promise<LocalConnectorSto
     async authenticate() {},
     async *listItems() { yield { items, done: true }; },
     async fetchItem(localItemId) { return items.find((item) => item.identity.localItemId === localItemId)!; },
-    classify() { return { trustTier: 'S4', trustDomain: 'secure_local', cloudEmbeddingEligible: false, localOnly: true }; },
+    classificationSignals() { return {}; },
   };
   await store.syncFromConnector(connector, {
     fetchContent: true,

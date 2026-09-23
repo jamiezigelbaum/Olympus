@@ -41,11 +41,21 @@ import type { TierLedger } from '../classification/tier-ledger.ts';
  *   is stored as S5, which the store tombstones (location only). This is the
  *   exact rule the file connector's classify() applied, on the same text.
  */
-export interface ConnectorStorePlacement {
+export interface ConnectorStorePlacementRule {
   trustTier?: SourceTrustTier;
   trustDomain?: SourceTrustDomain;
   secretsInContent?: boolean;
 }
+
+/**
+ * A declared rule, or — for a lane whose existing store set needs a per-item
+ * answer that no rule expresses — a store-owned function of the ITEM. The
+ * function never sees the connector and never the tier decision; it is the
+ * lane's own placement, kept only until phase P1b routes by the decision.
+ */
+export type ConnectorStorePlacement =
+  | ConnectorStorePlacementRule
+  | ((item: RawItem) => SourceSensitivity);
 
 /**
  * Classifier configuration for recording tier decisions. Owner rules and the
@@ -73,6 +83,7 @@ export function placeInExistingStore(
   placement: ConnectorStorePlacement | undefined,
   storeTrustDomain: SourceTrustDomain,
 ): SourceSensitivity {
+  if (typeof placement === 'function') return placement(item);
   const trustDomain = placement?.trustDomain ?? storeTrustDomain;
   const trustTier = placement?.trustTier ?? defaultStoreTrustTier(trustDomain);
   if (placement?.secretsInContent === true) {

@@ -180,8 +180,8 @@ function createWhatsAppFixtureConnector(messages: readonly WhatsAppMessageSpec[]
       if (!item) throw new Error(`missing WhatsApp fixture item ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -347,8 +347,8 @@ describe('analyst-backed source_answer handler', () => {
       async fetchItem() {
         return item;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' });
+      classificationSignals() {
+        return {};
       },
     };
     const embeddingProvider: SourceEmbeddingProvider = {

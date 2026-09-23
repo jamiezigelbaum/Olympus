@@ -466,8 +466,8 @@ function longDocConnector(text: string): SourceConnector {
     async fetchItem(): Promise<RawItem> {
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

@@ -819,8 +819,8 @@ function fileConnector(items: readonly RawItem[]): SourceConnector {
       if (!item) throw new Error(`Missing fixture item ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -1118,8 +1118,8 @@ function whatsappConnector(items: readonly RawItem[]): SourceConnector {
       if (!item) throw new Error(`Missing fixture item ${localItemId}`);
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' });
+    classificationSignals() {
+      return {};
     },
   };
 }

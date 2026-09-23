@@ -60,8 +60,8 @@ function connector(items: readonly RawItem[]): SourceConnector {
       if (!found) throw new Error(`no such item ${localItemId}`);
       return found;
     },
-    classify(): ReturnType<SourceConnector['classify']> {
-      return buildSourceSensitivity({ trustDomain: 'secure_local', trustTier: 'S4' });
+    classificationSignals() {
+      return {};
     },
   };
 }

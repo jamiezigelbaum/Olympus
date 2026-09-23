@@ -12,11 +12,12 @@ import type {
   SourceConnector,
   SourceConnectorListPage,
 } from '../src/core/contracts.ts';
-import { buildSourceSensitivity, type SourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
 const ACCOUNT = 'personal';
-const SECRET_TEXT = 'AWS_SECRET_ACCESS_KEY=uniquesecrettoken';
+const SECRET_TEXT = 'aws key AKIAUNIQUESECRET1234 uniquesecrettoken';
+// The file lane's declared placement: S4, raised to S5 when the body carries a secret.
+const PLACEMENT = { secretsInContent: true } as const;
 const PLAIN_TEXT = 'ordinary notes about the quarterly uniqueplaintoken review';
 
 interface FileSpec {
@@ -73,12 +74,8 @@ function connector(specs: readonly FileSpec[]): SourceConnector {
       if (!spec) throw new Error(`no such item ${localItemId}`);
       return fetchedItem(spec);
     },
-    classify(item: RawItem): SourceSensitivity {
-      const text = item.content.kind === 'text' ? item.content.text : '';
-      return buildSourceSensitivity({
-        trustDomain: 'secure_local',
-        trustTier: text.includes('SECRET_ACCESS_KEY') ? 'S5' : 'S4',
-      });
+    classificationSignals() {
+      return {};
     },
   };
 }
@@ -88,7 +85,7 @@ describe('S5 revealed by a fetched body', () => {
     const store = newStore();
     const summary = await store.syncFromConnector(
       connector([{ id: 'id:keys', body: SECRET_TEXT }, { id: 'id:notes', body: PLAIN_TEXT }]),
-      { fetchContent: true },
+      { fetchContent: true, placement: PLACEMENT },
     );
 
     expect(summary.itemsTombstoned).toBe(1);
@@ -110,12 +107,13 @@ describe('S5 revealed by a fetched body', () => {
     const store = newStore();
     await store.syncFromConnector(connector([{ id: 'id:keys', body: PLAIN_TEXT }]), {
       fetchContent: true,
+      placement: PLACEMENT,
     });
     expect(store.searchItems('uniqueplaintoken', 10)).toHaveLength(1);
 
     const summary = await store.syncFromConnector(
       connector([{ id: 'id:keys', body: SECRET_TEXT }]),
-      { fetchContent: true },
+      { fetchContent: true, placement: PLACEMENT },
     );
 
     expect(summary.itemsTombstoned).toBe(1);

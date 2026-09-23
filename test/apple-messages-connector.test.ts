@@ -407,22 +407,20 @@ describe('Apple Messages SourceConnector (Contract 1)', () => {
     await expect(mainConnector().fetchItem('personal:guid-never-existed')).rejects.toThrow(/not found/);
   });
 
-  test('classify is ALWAYS S4/secure_local, for every content kind', async () => {
+  test('signals publish the Private resting prior for every content kind, and never a tier', async () => {
     const connector = mainConnector();
     const items = await listAll(connector);
-    const expected = {
-      trustTier: 'S4',
-      trustDomain: 'secure_local',
-      localOnly: true,
-      cloudEmbeddingEligible: false,
-    } as const;
+    const prior = { tier: 'secure', strength: 'prior', basis: 'source_default:trust_domain:secure_local' } as const;
 
-    expect(connector.classify(itemByGuid(items, 'guid-inbound-nanos'))).toEqual(expected);
-    expect(connector.classify(itemByGuid(items, 'guid-attachment-only'))).toEqual(expected);
+    expect(connector.classificationSignals(itemByGuid(items, 'guid-inbound-nanos')).prior).toEqual(prior);
+    expect(connector.classificationSignals(itemByGuid(items, 'guid-attachment-only')).prior).toEqual(prior);
     const secretLooking: RawItem = {
       ...itemByGuid(items, 'guid-inbound-nanos'),
       content: { kind: 'text', text: 'my aws key is AKIAABCDEFGHIJKLMNOP' },
     };
-    expect(connector.classify(secretLooking)).toEqual(expected);
+    // Signals are source facts: content never changes them.
+    expect(connector.classificationSignals(secretLooking)).toEqual(
+      connector.classificationSignals(itemByGuid(items, 'guid-inbound-nanos')),
+    );
   });
 });

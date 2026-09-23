@@ -97,7 +97,7 @@ function createConnector(
       if (!found) throw new Error(`no such item: ${localItemId}`);
       return found;
     },
-    classify: () => sensitivity,
+    classificationSignals: () => ({}),
   };
 }
 

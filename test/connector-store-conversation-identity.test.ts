@@ -530,8 +530,8 @@ function conversationConnector(items: readonly RawItem[]): SourceConnector {
       if (!item) throw new Error('missing synthetic conversation fixture');
       return item;
     },
-    classify() {
-      return buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
+    classificationSignals() {
+      return {};
     },
   };
 }

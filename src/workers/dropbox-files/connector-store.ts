@@ -4,7 +4,7 @@
 // domain `secure_local`. Unlike Drive there is no internal twin: the Dropbox
 // corpus has never had an internal band.
 
-import type { ConnectorStorePlacement } from '../connector-store/tier-placement.ts';
+import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -59,7 +59,7 @@ export const DROPBOX_CONNECTOR_STORE_DB_PATH_ENV =
  * raised to S5 — tombstoned, location only — when the textual body carries a
  * secret. Exactly the rule the retired connector classify() applied.
  */
-export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacement = Object.freeze({
+export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freeze({
   trustTier: 'S4',
   trustDomain: 'secure_local',
   secretsInContent: true,

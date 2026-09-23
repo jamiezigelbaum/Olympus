@@ -251,27 +251,25 @@ describe('Reflect SourceConnector (Contract 1)', () => {
     await expect(connector.fetchItem('personal:note-missing')).rejects.toThrow(/note-missing.*not found/);
   });
 
-  test('classify defaults to the S4/secure_local floor', async () => {
+  test('signals publish the configured secure_local domain as a Private prior by default', async () => {
     const connector = connectorFor(SNAKE_EXPORT);
     const [item] = await allItems(connector);
 
-    expect(connector.classify(item as RawItem)).toEqual({
-      trustTier: 'S4',
-      trustDomain: 'secure_local',
-      localOnly: true,
-      cloudEmbeddingEligible: false,
+    expect(connector.classificationSignals(item as RawItem).prior).toEqual({
+      tier: 'secure',
+      strength: 'prior',
+      basis: 'source_config:trust_domain:secure_local',
     });
   });
 
-  test('classify honors the configured internal trust domain', async () => {
+  test('signals honor the configured internal trust domain as a Personal prior', async () => {
     const connector = connectorFor(SNAKE_EXPORT, 'internal');
     const [item] = await allItems(connector);
 
-    expect(connector.classify(item as RawItem)).toEqual({
-      trustTier: 'S3',
-      trustDomain: 'internal',
-      localOnly: false,
-      cloudEmbeddingEligible: false,
+    expect(connector.classificationSignals(item as RawItem).prior).toEqual({
+      tier: 'private',
+      strength: 'prior',
+      basis: 'source_config:trust_domain:internal',
     });
   });
 

@@ -379,8 +379,8 @@ describe('config-driven source corpus registry', () => {
       async fetchItem() {
         return rawItem;
       },
-      classify() {
-        return buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' });
+      classificationSignals() {
+        return {};
       },
     };
 

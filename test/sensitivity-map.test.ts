@@ -138,7 +138,7 @@ describe('sensitivity map schema', () => {
   });
 
   test('rejects wrong schema version', () => {
-    expect(() => parseSensitivityMap(validMap({ schemaVersion: 2 }))).toThrow(/schemaVersion must be 1/);
+    expect(() => parseSensitivityMap(validMap({ schemaVersion: 3 }))).toThrow(/schemaVersion must be 1 or 2/);
   });
 
   test('rejects unstable or duplicate category ids', () => {
