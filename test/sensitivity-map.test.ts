@@ -62,9 +62,10 @@ describe('sensitivity map schema', () => {
   });
   test('the current installation guide writes Private categories with the compatible stored key', () => {
     const guide = readFileSync(join(import.meta.dir, '..', 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const sample = guide.match(/```json\n(\{\n  "schemaVersion": 1,\n  "userFacingTiers":[\s\S]*?)\n```/);
+    const sample = guide.match(/```json\n(\{\n  "schemaVersion": 2,\n  "userFacingTiers":[\s\S]*?)\n```/);
     expect(sample).not.toBeNull();
     const parsed = parseSensitivityMap(JSON.parse(sample![1]!));
+    expect(parsed.schemaVersion).toBe(2);
     expect(parsed.categories[0]!.targetTierName).toBe('secure');
     expect(parsed.categories[0]!.targetTrustTier).toBe('S4');
     expect(guide).toContain('**Personal** — ordinary personal and work life');

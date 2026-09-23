@@ -53,9 +53,11 @@ mailbox.
 
 ## How it works
 
-Every item you ingest is classified as Public, Personal, Private, or Secrets
-(internally S0-S5), and every tier
-routes only to the model lanes your sovereignty policy allows:
+Every item you ingest is judged on its own as Public, Personal, Private, or
+Secrets (internally S0-S5): its names are Personal unless something raises
+them, and its content is raised to Private or Secrets on evidence. Each tier
+has its own index and routes only to the model lanes your sovereignty policy
+allows:
 
 ```mermaid
 flowchart LR
@@ -102,10 +104,17 @@ fork:
 | **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
-“Private cloud only” describes **secure-data handling**: Venice answers secure
-questions and secure search uses local keywords. Gemini still supplies
-embeddings for public and ordinary-private content. Secure content never goes
-to Gemini.
+“Private cloud only” describes **Private-data handling**: Venice answers
+Private questions, and Private search is keyword-only by default. Venice
+Private embeddings for Private content are available but switched on only
+with the owner's explicit, advance approval. Gemini still supplies embeddings
+for Public and Personal content, and Private content never goes to Gemini. Public and Personal
+questions use OpenClaw's own configured default model.
+
+One question searches every tier. When it finds Private evidence, the private
+lane your posture approved answers it and your agent receives only the checked,
+cited answer. Secrets are never searched by content: Olympus can tell you where
+one lives, never what it says.
 
 Some rules are not configurable, by design: secure content never routes to
 ordinary cloud models, secrets are denied to every lane, and an
@@ -114,8 +123,9 @@ exhausted policy chain refuses rather than silently downgrading.
 ## Get started
 
 **You need** OpenClaw `2026.7.1+` on a Node release OpenClaw itself supports
-(`>=22.22.3 <23`, `>=24.15.0 <25`, or `>=25.9.0` — its installer refuses any
-other), plus [Bun](https://bun.sh) `1.2+`. macOS or Linux.
+(`>=24.16.0 <25` or `>=26.1.0` for OpenClaw 2026.9.5; check
+`npm view openclaw engines` — its installer refuses any other), plus
+[Bun](https://bun.sh) `1.2+`. macOS or Linux.
 
 Paste this into OpenClaw, or another agent with a terminal:
 
@@ -138,11 +148,13 @@ consent it cannot prompt for. Omit the flag on `2026.7.1`, which does not
 define it.
 
 The agent checks prerequisites, installs the plugin, helps you describe your
-data as a sensitivity map, asks for your privacy posture, connects your keys
-without logging them, and verifies worker and plugin activation. That completes
-base installation. Then you can choose a source in the dashboard or leave
-Olympus ready for later; no source is selected for you. Once your chosen source
-is ready, the agent checks a first answer and its citations.
+data as a sensitivity map, asks for your privacy posture and your approval of
+the private classifier, verifies the worker, restarts the gateway, and hands
+you the dashboard. You paste your model keys into its **Models** section
+yourself; the agent never collects them. That completes base installation.
+Then you can choose a source in the dashboard or leave Olympus ready for
+later; no source is selected for you. Once your chosen source is ready, the
+agent checks a first answer and its citations.
 
 Prefer to drive it yourself? Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)**,
 starting with the automatic download and existing-install checks. Its install
@@ -159,8 +171,8 @@ OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
 ```
 
 Continue the quickstart to describe your data, choose a privacy posture,
-connect model credentials, and verify base activation before optional source
-setup and the first cited answer. The CLI lives inside the
+connect model credentials, and verify base activation before choosing your
+sources in the dashboard and checking the first cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
 This candidate artifact includes native Control UI support. On OpenClaw
@@ -172,14 +184,15 @@ and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
 your signed-in OpenClaw permissions; its worker token stays on the server.
 The standalone `olympus dashboard` command remains available for older hosts,
 when custom plugin UI is off, and for direct access when needed. See the
-[dashboard guide](docs/QUICKSTART.md#5-optionally-connect-a-source).
+[dashboard guide](docs/QUICKSTART.md#5-open-your-dashboard-and-connect-sources).
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It explains the separate Private and Public/Personal routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.
-Choose how to supply each key: paste it yourself from your password manager's
-website into a supported local field or silent terminal input, or authorize an
+In the dashboard you paste each key into its **Models** card. For a headless
+setup, choose how to supply each key: paste it yourself from your password
+manager's website into the silent terminal input, or authorize an
 exact named-item read through an already authenticated manager CLI. The manual
 route needs no password-manager desktop app or CLI; a 1Password `op://`
 reference needs authenticated `op` access for an agent fetch.
@@ -189,12 +202,6 @@ Olympus artifact includes native Control UI support and Custom plugin UI is
 enabled. Host version alone is not proof of support. Otherwise the quickstart
 uses the retained standalone dashboard; it explains the different authentication
 requirements for each route.
-
-Choose how to supply each key: paste it yourself from your password manager's
-website into a supported local field or silent terminal input, or authorize an
-exact named-item read through an already authenticated manager CLI. The manual
-route needs no password-manager desktop app or CLI; a 1Password `op://`
-reference needs authenticated `op` access for an agent fetch.
 
 ## Supported sources
 
@@ -274,6 +281,8 @@ flowchart LR
 | `olympus dashboard --no-open` | generates an unused opening link for an agent to hand to you |
 | `olympus dashboard token` | advanced compatibility access to the worker bearer; never share it in chat |
 | `olympus source answer "…"` | ask across your sources from the terminal |
+| `olympus tier explain\|set\|rules\|classifier …` | why an item has its tier, owner overrides and rules, and the private classifier's approval |
+| `olympus tier migrate plan\|approve\|run\|rollback\|purge\|status` | moves an existing install's items into per-item tiers, each step owner-approved after a dry-run plan |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |
 | `olympus serve` | MCP stdio server for non-OpenClaw agents |

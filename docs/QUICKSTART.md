@@ -1,6 +1,7 @@
 # Olympus Quickstart
 
-Install Olympus, then optionally connect a source and verify a cited answer.
+Install Olympus, connect the sources you want it to answer from, and verify a
+cited answer.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
@@ -8,9 +9,10 @@ on macOS or Linux. An agent with terminal access can obtain the pilot package
 and guide you through setup automatically; no file or checksum-receipt handoff
 is needed. You can also follow the steps below manually.
 
-OpenClaw itself runs only on Node `>=22.22.3 <23`, `>=24.15.0 <25`, or
-`>=25.9.0` — its npm `preinstall` script exits non-zero on anything else. Check
-`node --version` before blaming an install failure on Olympus.
+OpenClaw 2026.9.5 itself runs only on Node `>=24.16.0 <25` or `>=26.1.0` —
+its npm `preinstall` script exits non-zero on anything else, and the range
+moves between releases (`npm view openclaw engines` shows the current one).
+Check `node --version` before blaming an install failure on Olympus.
 
 If `bun --version` says `command not found`, check `~/.bun/bin/bun --version`
 before reinstalling anything — Bun's installer puts the binary there and wires
@@ -152,12 +154,18 @@ change it. Setting it yourself first means it never has to.
 
 The installer-agent flow asks this conversationally: "Tell me about your data
 — what do you want your assistant to know about, and what are your privacy
-concerns?" For the hand path, write only Private/Secrets categories in this
-phase. Public/Personal entries are not accepted yet because the map is
-raise-only guidance: it may raise matching items to Private or Secrets, never
-downgrade them. The stored keys keep their legacy names — `secure` is Private,
-and the legacy `private` key means Personal — so sensitive Private data is
-written with `"targetTierName": "secure"`, never `"private"`.
+concerns?" The dashboard does not edit the map; its Sensitivity page shows the
+saved categories read-only. Write the map as `"schemaVersion": 2`. Olympus
+judges each item's names (Personal unless raised) and its content (raised to
+Private or Secrets on evidence), and the map feeds both. Private and Secrets
+categories raise matching items. Public and Personal categories are lowering
+guidance that any raise still beats, and they never lower content. They
+match only on a path pattern or a sender, never a keyword; Personal is the
+default, so a Personal category is rarely useful. A schemaVersion 1 map
+still loads and stays raise-only guidance. The stored keys keep their legacy
+names — `secure` is Private, and the legacy `private` key means Personal — so
+sensitive Private data is written with `"targetTierName": "secure"`, never
+`"private"`.
 
 ```bash
 olympus setup --preset private-cloud-only --cloud-lane subscription --yes
@@ -206,6 +214,25 @@ than stored; rotate it at the provider for one without.
 For `local-first` and `local-only`, start your local OpenAI-compatible model
 server before relying on Private source answers.
 
+Then decide on the private classifier. For items whose names look possibly
+private, Olympus asks a private model — your local model, or Venice Private on
+`private-cloud-only` — whether they are Personal or Private, one item at a
+time. It sends the title, folder path and folder names, labels and sender,
+and, when the content itself looks sensitive, a short excerpt of up to the
+first 1,200 characters of text; never anything that looks like a secret. It
+never uses an ordinary cloud model, and it does nothing until you approve the
+exact model:
+
+```bash
+olympus tier classifier status
+olympus tier classifier approve --why "<your reason>"
+```
+
+Without approval those items stay Private and are found only by keyword
+search meanwhile. `no-sensitive` has no classifier lane and nothing to
+approve; if `status` reports any other refusal, the policy names a model the
+classifier may not use, and it stays off.
+
 On `no-sensitive`, setup and doctor still list the Private corpora as configured
 and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
 gap the preset promises, not a misconfiguration.
@@ -243,8 +270,10 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
   sees Private data.
   Turning Private data off is
   always an explicit preset choice, never a silent default.
-- **Your cloud lane** — by default Olympus reasons through your existing
-  OpenClaw subscription (no API key needed). API-key providers are the
+- **Your cloud lane** — by default Olympus answers Public and Personal
+  questions with OpenClaw's own configured default model and auth, through
+  `openclaw infer` (no model name or extra key needed); setup adds the
+  `openclaw` directory to the worker's PATH. API-key providers are the
   alternative.
 - **A worker auth token** — generated for you, stored in
   `~/.config/olympus/worker.env` (owner-only permissions).
@@ -319,6 +348,11 @@ or `olympus doctor` action for that source.
 
 ## 4. Validate and restart the gateway
 
+This restart is required on every install, even when olympus already shows
+as loaded or its tools already answer: those can come from the host's
+automatic reload before setup wrote your configuration. The restart loads the
+plugin against the configuration you approved.
+
 Before this restart, select and prepare the dashboard described in Step 5.
 If the artifact supports native Control UI, handle its Labs opt-in and Gateway
 origin now through the authorized configuration workflow. On the tested Air,
@@ -378,10 +412,11 @@ If the line is not there because the log rotated since the last restart,
 the other two checks stand on their own — do not restart again just to
 produce it.
 
-## 5. Open your dashboard and optionally connect sources
+## 5. Open your dashboard and connect sources
 
 Installation ends with a working, clickable Olympus dashboard link from your
-agent. Connecting a source is optional; providing that link is not. The agent
+agent. Sources are what make Olympus useful, and you choose which ones in the
+dashboard, so that link is required. The agent
 must resolve the address for your browser and verify dashboard access, rather
 than giving you a host-only localhost URL or another terminal command.
 
@@ -406,7 +441,7 @@ reload. The native page uses your signed-in permissions and
 keeps the worker bearer on the server, so no worker-token paste is needed.
 Native OAuth also needs `gateway.publicOrigin` to name the Gateway's HTTPS or
 localhost/loopback origin; follow the managed change procedure to configure it.
-See the [agent guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
+See the [agent guide](../INSTALL_FOR_AGENTS.md#step-6--finish-installation-dashboard-handoff).
 
 If the artifact lacks that integration, or you choose direct access, use the
 standalone dashboard. A declared native UI that fails to load needs diagnosis;
@@ -435,23 +470,25 @@ Choose the source you want now; the source roster is not an all-seven checklist.
 health → cited-answer readiness journey. Other sources can be added later.
 Every blocked or degraded source names the next supported action.
 Each connected source shows its canonical sync and coverage state, and eligible
-cards have a **Sync now** button for an immediate run. Dropbox starts from a
-neutral account-root metadata listing until you install a narrower
-operator-approved ingestion policy.
+cards have a **Sync now** button for an immediate run. Every source judges
+each new item on its own and stores it in its tier's index; `olympus tier
+explain <locator>` shows why an item has its tier, and `olympus tier set` or
+`olympus tier rules` change it.
 
 Standalone control requests retain their signed HttpOnly session, same-origin,
 and CSRF checks. The opening link authorizes the browser; it does not connect a
 source or start ingestion by itself.
 
 Connect only the source you chose, using its dashboard card and the
-[per-source guide](../INSTALL_FOR_AGENTS.md#step-6--optional-source-setup).
+[per-source guide](../INSTALL_FOR_AGENTS.md#step-6--finish-installation-dashboard-handoff).
 Google's packaged shared pilot client requests Gmail or Drive scopes only when
 you choose that source; Gmail is not required for installation. X uses your own
 developer application, with plan availability and possible cost shown before
 consent. v0.4 supports one connected account per provider.
 
-For Drive and Dropbox, **Connect** only connects the account. Open **Choose
-folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
+For Drive and Dropbox, **Connect** only connects the account, and the card
+reads Waiting, *waiting for folder selection*, until you save a scope. Open
+**Choose folders**, use the Finder-style inspector's **Full ingestion**, **Metadata
 only**, and **No ingestion** choices, then explicitly **Save scope and start**.
 The folder browser lists names without indexing or reading file contents.
 Folder names load automatically when Choose folders opens. Update refreshes
@@ -509,7 +546,7 @@ printf '%s' "$READWISE_TOKEN" | olympus connect readwise --api-key-stdin
 
 Tokens use the supported local secret store. Never paste secrets into chat or
 invent storage commands; use the selected password-manager method and the
-[documented stdin flow](../INSTALL_FOR_AGENTS.md#step-3--prerequisites-and-secrets).
+[documented stdin flow](../INSTALL_FOR_AGENTS.md#headless-credential-fallback--only-when-explicitly-chosen).
 
 </details>
 
@@ -542,7 +579,13 @@ In your OpenClaw chat, for example:
 > *"Using the source I just connected, what did I commit to this week?"*
 
 Your agent calls `source_answer` and gets back a cited, privacy-gated answer —
-never raw documents, never content from a tier you didn't approve.
+never raw documents, never content from a tier you didn't approve. Private
+sources are searched by default when your posture approves a private model;
+that model answers from them and only its checked answer comes back. On
+`no-sensitive` the answer says Private sources were not searched. Answers
+report how many items matched per source, not just how many were quoted. If
+the ordinary lane fails, the error names why (for example missing auth for
+OpenClaw's default model, or `openclaw` not found on the worker PATH).
 
 Or from the terminal:
 

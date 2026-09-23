@@ -86,10 +86,66 @@ describe('pilot installation entry points', () => {
     expect(section).toContain('Skipped');
     expect(section).toContain('key being present');
     expect(section).toContain('keep source Connect unopened');
-    expect(document).toContain('Connecting sources is optional;');
-    expect(document).toContain('the dashboard handoff is required');
+    expect(document).toContain('Sources are the point of');
+    expect(document).toContain('dashboard\nhandoff that lets them choose is required');
     expect(document).toContain('/plugin?plugin=olympus&id=dashboard');
-    expect(document).toContain('**Background** to monitor syncing, extraction, and embeddings');
-    expect(document).toContain('Come back here if you have any');
+    expect(document).toContain('> Olympus is as useful as the sources you give it.');
+    expect(document).toContain('**Background** shows syncing, extraction, and embeddings');
+    expect(document).toContain('Come back here if');
+  });
+
+  test('the agent guide leaves model keys to the dashboard in the browser flow', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step3 = document.slice(
+      document.indexOf('## Step 3 — Model setup in the dashboard'),
+      document.indexOf('### Headless credential fallback'),
+    );
+    expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
+    expect(step3).toContain("not through OpenClaw's own secret prompt or store");
+    expect(document).toContain('Gemini API key (source embeddings, all presets; headless fallback only)');
+    expect(document).toContain('report\nit as "finished in the dashboard\'s Models section" and continue');
+  });
+
+  test('the agent guide requires the gateway restart and gates the private classifier', () => {
+    const document = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
+    const step5 = document.slice(
+      document.indexOf('## Step 5 — Validate, then restart the gateway'),
+      document.indexOf('## Step 6 — Finish installation'),
+    );
+    expect(step5).toContain('**This restart is required on every OpenClaw install. Do not skip it and do\nnot tell the operator "no restart needed."**');
+    const gate = document.slice(
+      document.indexOf('### Privacy classifier approval — its own consent gate'),
+      document.indexOf('## Step 4 — Verify the worker'),
+    );
+    // The browser flow skips the headless fallback, so its own instruction must
+    // send the agent to the gate before Steps 4-5, and the fallback must not
+    // claim the gate as headless-only.
+    const browserFlow = document.slice(
+      document.indexOf('For the normal browser flow,'),
+      document.indexOf('### Headless credential fallback'),
+    );
+    expect(browserFlow).toContain('(#privacy-classifier-approval--its-own-consent-gate)');
+    expect(browserFlow.indexOf('privacy classifier approval')).toBeLessThan(browserFlow.indexOf('Steps 4–5'));
+    expect(document).toContain('the privacy classifier approval\nafter it applies to everyone');
+    expect(document.indexOf('### Privacy classifier approval')).toBeLessThan(document.indexOf('## Step 4 — Verify the worker'));
+    expect(gate).toContain('olympus tier classifier status');
+    for (const refusal of ['standard_cloud', 'unsupported_provider', 'outside_private_policy', 'no_private_lane']) {
+      expect(gate).toContain(refusal);
+    }
+    expect(gate.replace(/>\s*/g, '').replace(/\s+/g, ' ')).toContain('labels and sender');
+    expect(gate).toContain('olympus tier classifier approve --why');
+    expect(gate).toContain('never an ordinary cloud model');
+    expect(gate).toContain('A no is a complete answer; record nothing.');
+    expect(document).toContain('- **Privacy classifier approval** (end of Step 3)');
+  });
+
+  test('entry points state the OpenClaw Node range, not a stale one', () => {
+    for (const path of ['README.md', 'INSTALL_FOR_AGENTS.md', 'docs/QUICKSTART.md']) {
+      const document = readFileSync(join(ROOT, path), 'utf8');
+      expect(document).toContain('>=24.16.0 <25');
+      expect(document).toContain('npm view openclaw engines');
+      expect(document).not.toContain('24.15.0');
+      expect(document).not.toContain('22.22.3');
+    }
   });
 });

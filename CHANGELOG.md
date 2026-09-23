@@ -1,11 +1,67 @@
 # Changelog
 
-## Unreleased
+## 0.4.0-beta.4 - 2026-09-23
 
-- The cloud analyst (`openclaw-infer`) now uses OpenClaw's configured default
-  model unless a profile names one; shipped presets no longer pin
-  `openai/gpt-5.5`. Its failures carry a bounded, evidence-free reason, and
-  setup records the `openclaw` directory on the worker PATH.
+Every item from every source is now judged on its own into Public, Personal,
+Private or Secrets. This release also carries the fixes from the 2026-09-23
+first-time install.
+
+- **Per-item tiers (#77, #78, #80).** Each item gets a names tier (Personal
+  unless something raises it) and a content tier (raised to Private or Secrets
+  on evidence). Every source stores new items in per-tier indexes, and one
+  question searches all of them. A Secret is kept only as its location (source,
+  path or title, kind), never as text or vectors. The sensitivity map
+  schemaVersion 2 can target all four tiers; lowering categories match only a
+  path or a sender, never a keyword, and any raise beats them. Version 1 maps
+  still load and stay raise-only. `SourceConnector` is now 2.0.0: connectors
+  report facts and a shared classifier decides.
+- **Privacy classifier (#79).** For items whose names or text look possibly
+  private, a local model or Venice Private (never an ordinary cloud model)
+  decides Personal or Private, one item at a time. It sees names, labels and
+  sender, and sometimes an excerpt of up to 1,200 characters, never anything
+  the secret detector caught. **It does nothing until the owner approves the
+  exact model with `olympus tier classifier approve`**; until then flagged items
+  stay Private and are found only by keyword. Owner rules live in
+  `~/.olympus/tier-rules.json`, with `olympus tier set|explain|rules`.
+- **Existing installs (#81, #82).** Items stored before this release stay where
+  they are until the owner migrates them. `olympus tier migrate plan` is a dry
+  run with counts, cost and time. `approve`, `run`, `rollback` and `purge` are
+  separate owner steps; nothing migrates by itself. A run is held to each
+  destination store's approved chunks and cost, a Secrets row is never rolled
+  back, and doctor excuses a stopped migration's lag for 7 days
+  (`OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS`). Status, doctor and the source
+  page show pending-classification, superseded-chunk and Secrets-location
+  counts.
+- **Gmail scope picker (#76).** Gmail waits for **Choose mail** before reading
+  anything: the body of the last 2 years by default (older mail keeps headers
+  only), Promotions and Social skipped, and "always Private" and "skip" senders,
+  with an estimate before it starts.
+- **Answers (#73, #74).** Private sources are searched by default when the
+  posture approves a private analyst, which answers from them; only its checked
+  answer is released. Answers use a larger evidence budget, prefer readable
+  content over bare file names, and report how many items matched per source.
+- **Cloud analyst (#71).** The cloud analyst (`openclaw-infer`) uses OpenClaw's
+  configured default model unless a profile names one; shipped presets no
+  longer pin `openai/gpt-5.5`. Its failures carry a bounded, evidence-free
+  reason, and setup puts the `openclaw` directory on the worker PATH.
+- **Worker token and Readwise (#70).** The plugin reads the worker token on
+  each request, so a token written after the plugin loaded no longer causes
+  401s. Readwise connected after boot syncs without a worker restart.
+- **Dashboard (#69).** Sources waiting for a folder or mail choice read
+  Waiting, ready models shrink to one row, and the Google unverified-app note
+  sits inside the Gmail and Drive connect sheets.
+- **Install guide.** Model keys go into the dashboard's Models cards, never
+  through the agent; the gateway restart is required on every install; the
+  classifier approval is its own owner-consent step; the Node range follows
+  OpenClaw 2026.9.5 (`>=24.16.0 <25` or `>=26.1.0`).
+
+Limits:
+
+- The held-out answer eval was not run for this release. The classification
+  eval passes its gates with a stand-in classifier; the real-model run has not
+  been done.
+- On `private-cloud-only`, Private search stays keyword-only unless the owner
+  approves Venice Private embeddings.
 - Upgrade note: an existing `~/.olympus/sovereignty.json` keeps the model it
   was written with, and setup does not overwrite it without `--force`. If its
   `cloud-openclaw-infer` profile says `"model": "openai/gpt-5.5"` and this
