@@ -101,6 +101,7 @@ const SOURCE_INDEX_SEARCH_PARAMS = {
   attachment_type: { type: 'string', enum: ['image', 'video', 'audio', 'file', 'link', 'other'], description: 'Optional Telegram attachment type filter.' },
   max_results: { type: 'number', description: 'Max hits; worker-capped.' },
   include_locators: { type: 'boolean', description: 'Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes.' },
+  all_tiers: { type: 'boolean', description: 'Default true: also search the source\'s other tier corpora. false searches only corpus_id.' },
 } satisfies Record<string, ParamDef>;
 
 const SOURCE_ANSWER_PARAMS = {
@@ -398,7 +399,9 @@ export const operations: Operation[] = [
       const attachmentType = optionalAttachmentType(params.attachment_type);
       const maxResults = optionalNumber(params.max_results, 'max_results');
       const includeLocators = optionalBoolean(params.include_locators, 'include_locators');
+      const allTiers = optionalBoolean(params.all_tiers, 'all_tiers');
       return ctx.email.sourceIndexSearch({
+        ...(allTiers !== undefined ? { allTiers } : {}),
         query,
         corpusId,
         ...(retrievalMode !== undefined ? { retrievalMode } : {}),

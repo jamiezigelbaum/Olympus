@@ -2584,7 +2584,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false) return undefined;
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
-                record,
+                // A sibling tier is searched under its own corpus id.
+                store === connectorStore ? record : { ...record, corpus_id: store.corpusId },
                 store,
                 connectorStoreAccountScopes.get(store.corpusId),
                 store.family === 'chat'
@@ -2653,7 +2654,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // caller pinned this one corpus with `all_tiers: false`. A sibling
             // that does not exist yet (an on-demand Public store) or whose
             // scope is not approved is simply not searched.
-            const siblings = record.all_tiers === false
+            // An explicit trust_domain is a single-corpus consistency check,
+            // so it pins the search as `all_tiers: false` does.
+            const siblings = record.all_tiers === false || record.trust_domain !== undefined
               ? []
               : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? [])
                 .flatMap((siblingCorpusId) => {

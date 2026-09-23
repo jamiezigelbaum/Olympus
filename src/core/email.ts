@@ -176,11 +176,14 @@ export interface SourceIndexSearchOptions {
   attachmentType?: SourceIndexSearchAttachmentType;
   maxResults?: number;
   includeLocators?: boolean;
+  /** Default true: also search the source's other tier corpora (P1b). */
+  allTiers?: boolean;
 }
 
 export interface SourceIndexAnswerResult {
   answer: string;
   evidence: unknown[];
+  secret_locations?: SourceSecretLocation[];
   audit: {
     searched_corpora: string[];
     skipped_corpora: unknown[];
@@ -258,12 +261,23 @@ export interface SourceIndexStatusResult {
   };
 }
 
+/** Where a Secret lives: location only (design section 2.3). */
+export interface SourceSecretLocation {
+  source: string;
+  locator?: string;
+  title?: string;
+  finding_kinds: string[];
+}
+
 export interface SourceIndexSearchResult {
   kind: 'source_index_search';
   corpus_id: SourceIndexSearchCorpusId;
   retrieval_source: 'local_index';
   hits: unknown[];
+  secret_locations?: SourceSecretLocation[];
   audit: {
+    /** Present when the search covered the source's other tier corpora too. */
+    searched_corpora?: string[];
     request_id: string;
     retrieval_source: 'local_index';
     queries_attempted: number;
@@ -532,6 +546,7 @@ export class EmailClient {
         ...(options.attachmentType ? { attachment_type: options.attachmentType } : {}),
         ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
         ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
+        ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
       }),
     });
 
@@ -920,7 +935,37 @@ function parseSourceIndexAnswerResult(value: Record<string, unknown>): SourceInd
     },
     ...(value.internal_context !== undefined ? { internal_context: value.internal_context } : {}),
     ...(value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {}),
+    ...(parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations)! } : {}),
   };
+}
+
+/**
+ * Secret locations ride beside an answer or a search (design section 2.3):
+ * where a Secret lives, never what it says. Anything beyond a source, a
+ * locator, a title and finding kinds is refused rather than passed on.
+ */
+function parseSecretLocations(value: unknown): SourceSecretLocation[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new OperationError('email_error', 'secret_locations must be an array.');
+  }
+  return value.map((entry) => {
+    const record = asRecord(entry);
+    const allowed = new Set(['source', 'locator', 'title', 'finding_kinds']);
+    const extra = Object.keys(record).filter((key) => !allowed.has(key));
+    if (extra.length > 0 || typeof record.source !== 'string' || !Array.isArray(record.finding_kinds)
+      || (record.locator !== undefined && typeof record.locator !== 'string')
+      || (record.title !== undefined && typeof record.title !== 'string')
+      || record.finding_kinds.some((kind) => typeof kind !== 'string')) {
+      throw new OperationError('email_error', 'secret_locations entries carry location only.');
+    }
+    return {
+      source: record.source,
+      ...(typeof record.locator === 'string' ? { locator: record.locator } : {}),
+      ...(typeof record.title === 'string' ? { title: record.title } : {}),
+      finding_kinds: record.finding_kinds as string[],
+    };
+  });
 }
 
 function parseSourceAnswerSelfHealAudit(
@@ -1173,12 +1218,18 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   if (locatorsExposed && validateDropboxLocatorPayloads(value.hits) === 0) {
     throw new OperationError('email_error', 'source index locator policy requires at least one released locator.');
   }
+  const secretLocations = parseSecretLocations(value.secret_locations);
+  const searchedCorpora = Array.isArray(audit.searched_corpora)
+    ? audit.searched_corpora.filter((corpus): corpus is string => typeof corpus === 'string')
+    : undefined;
   return {
     kind: 'source_index_search',
     corpus_id: corpusId,
     retrieval_source: 'local_index',
     hits: value.hits,
+    ...(secretLocations ? { secret_locations: secretLocations } : {}),
     audit: {
+      ...(searchedCorpora ? { searched_corpora: searchedCorpora } : {}),
       request_id: requiredString(audit.request_id, 'audit.request_id'),
       retrieval_source: 'local_index',
       queries_attempted: requiredNumber(audit.queries_attempted, 'audit.queries_attempted'),
