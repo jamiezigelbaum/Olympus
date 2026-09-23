@@ -65,7 +65,7 @@ export interface SourceAnswerSelectedItem {
   updated_at?: string;
 }
 
-/** Where a matched Secret lives. Location only (design section 2.3). */
+// Where a matched Secret lives. Location only (design section 2.3).
 export interface SourceIndexAnswerSecretLocation {
   source: string;
   locator?: string;
@@ -81,7 +81,7 @@ export interface SourceIndexAnswerClassificationCoverage {
 export interface SourceIndexAnswerResult {
   answer: string;
   evidence: SourceIndexAnswerEvidence[];
-  /** Present only when Secrets matched the question: where they are, never what they say. */
+  // Present only when Secrets matched the question: where they are, never what they say.
   secret_locations?: SourceIndexAnswerSecretLocation[];
   audit: {
     searched_corpora: string[];

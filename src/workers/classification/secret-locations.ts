@@ -74,6 +74,7 @@ export class SecretLocationsIndex {
     this.now = options.now ?? (() => new Date());
     if (options.readOnly === true) {
       this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       return;
     }
     const onDisk = this.dbPath !== ':memory:';

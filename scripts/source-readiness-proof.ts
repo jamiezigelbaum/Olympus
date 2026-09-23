@@ -10,9 +10,15 @@ import {
 
 export type SourceReadinessStatus = 'ready' | 'watch' | 'attention';
 
-export const DEFAULT_REGISTERED_SOURCE_CORPORA = createSourceCorpusRegistry(
-  defaultSourceCorpusRegistryConfig(),
-).ids('status') satisfies SourceIndexStatusCorpusId[];
+// A per-tier store created on demand (a Public store no item has been routed
+// to yet) is not expected to exist; it joins the proof once status reports it.
+export const DEFAULT_REGISTERED_SOURCE_CORPORA = expectedStatusCorpusIds(
+  createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig()),
+) satisfies SourceIndexStatusCorpusId[];
+
+function expectedStatusCorpusIds(registry: ReturnType<typeof createSourceCorpusRegistry>): string[] {
+  return registry.list('status').filter((corpus) => corpus.createdOnDemand !== true).map((corpus) => corpus.corpusId);
+}
 
 export interface SourceReadinessProofReport {
   kind: 'source_readiness_proof';
@@ -110,7 +116,7 @@ export async function runSourceReadinessProof(
   const config = options.client ? undefined : loadConfig();
   const client = options.client ?? new EmailClient(config!, createEmailTransport(config!));
   const corpusIds = config
-    ? createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('status')
+    ? expectedStatusCorpusIds(createSourceCorpusRegistry(config.sourceIndex.corpusRegistry))
     : DEFAULT_REGISTERED_SOURCE_CORPORA;
   let corpora: SourceReadinessCorpusProof[];
   try {

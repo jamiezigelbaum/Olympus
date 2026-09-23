@@ -150,7 +150,7 @@ export interface BuildEvidencePackInput {
   // caller that knows its own wall-clock budget can set one rather than reach
   // for a process-wide env var (see RouteSourceIndexSearchOptions.laneTimeoutMs).
   laneTimeoutMs?: number;
-  /** See SourceIndexVisibilityGate: one tier-ledger snapshot over every routed run's hits. */
+  // See SourceIndexVisibilityGate: one tier-ledger snapshot over every routed run's hits.
   visibilityGate?: SourceIndexVisibilityGate;
   /**
    * Location-only lookup of Secrets matching the question (design section
@@ -158,12 +158,12 @@ export interface BuildEvidencePackInput {
    * enter the pack, so no model ever sees them.
    */
   secretLocations?: (query: string) => readonly SecretLocationNote[];
-  /** Counts of items still pending classification in the searched corpora. */
+  // Counts of items still pending classification in the searched corpora.
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
   now?: () => Date;
 }
 
-/** Where a Secret lives. Location only: never content. */
+// Where a Secret lives. Location only: never content.
 export interface SecretLocationNote {
   source: string;
   locator: string | null;
@@ -171,7 +171,7 @@ export interface SecretLocationNote {
   findingKinds: readonly string[];
 }
 
-/** Items stored and keyword-searchable but not yet final (not embedded). */
+// Items stored and keyword-searchable but not yet final (not embedded).
 export interface ClassificationCoverageNote {
   corpusId: string;
   pendingClassificationItems: number;
@@ -229,9 +229,17 @@ export async function buildEvidencePackDetailed(
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
     : await runRoutedSearches(input);
+  // A build can fan out more than once (the literal query plus planner
+  // expansions), and each routed run judged its hits against its own ledger
+  // snapshot. One more pass over the merged hits puts the whole pack on ONE
+  // snapshot, so a move that flipped between two runs cannot put both copies
+  // of an item in the pack.
+  const visibleHits = input.visibilityGate && !input.selectedItems?.length
+    ? input.visibilityGate(routed.hits)
+    : routed.hits;
   const routedHits = input.selectedItems?.length
     ? routed.hits
-    : orderHitsForTemporalIntent(routed.hits, input);
+    : orderHitsForTemporalIntent(visibleHits, input);
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
