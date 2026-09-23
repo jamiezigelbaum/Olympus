@@ -120,7 +120,12 @@ export type SourceIndexSkippedCorpusReason =
   | 'corpus_not_allowed'
   | 'cloud_query_not_allowed'
   | 'no_adapter'
-  | 'lane_timeout';
+  | 'lane_timeout'
+  // Set by the answer handler, not the router: secure_local was left out by
+  // default because no private analyst route is approved, or because the
+  // request is bulk-shaped and did not opt in.
+  | 'no_private_analyst_route'
+  | 'bulk_secure_local_release_requires_approval';
 
 export interface SourceIndexRoutedSearchResponse {
   hits: readonly SourceIndexRoutedSearchHit[];

@@ -162,12 +162,32 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
     localOnly: boolean;
     requestedProvider: SourceAnswerAnalystProvider;
   }) => SovereigntyAnalystRouteStep[] | SovereigntyAnalystRoutePlan;
+  // Whether the active sovereignty policy approves a private analyst route
+  // (Argus: a local model or Venice Private, per preset) for secure_local
+  // evidence under this request's provider constraint. When it does, a
+  // request that does not decide include_secure_local searches secure_local
+  // too, and that evidence is answered only through the approved route; the
+  // caller still receives only the OPSEC-scanned derived answer and citations.
+  // Absent, secure_local stays opt-in (the pre-sovereignty wiring).
+  secureLocalAnalystRoute?: (input: {
+    requestedProvider: SourceAnswerAnalystProvider;
+  }) => SecureLocalAnalystRouteStatus;
   secureAnalystPool?: SecureAnalystPoolStateOptions & {
     sloMs?: number;
     reserveMs?: number;
     lastLegTimeoutMs?: number;
   };
 }
+
+export type SecureLocalAnalystRouteStatus =
+  | { approved: true }
+  | { approved: false; reason: string };
+
+// Why a request that did not decide include_secure_local still left
+// secure_local out. Each becomes the corpus skip reason and a coverage note.
+type SecureLocalDefaultExclusion =
+  | 'no_private_analyst_route'
+  | 'bulk_secure_local_release_requires_approval';
 
 export interface SourceAnswerSelfHealResult {
   audit: SourceIndexAnswerSelfHealAudit;
@@ -217,14 +237,19 @@ export function createAnalystSourceIndexAnswerHandler(
         : request;
       const lanes = options.lanes(retrievalRequest);
       const laneSetupMs = Date.now() - laneSetupStartedAt;
-      const includeSecureLocal = request.include_secure_local
-        ?? requestExplicitlyTargetsSecureLocal(request, lanes.registry);
+      const requestedAnalystProviderForGate =
+        request.analyst_provider ?? (request.analyst_model?.trim() ? 'venice' : 'default');
+      const secureLocalChoice = secureLocalInclusion(
+        request,
+        lanes.registry,
+        requestedAnalystProviderForGate,
+        options.secureLocalAnalystRoute,
+      );
+      const includeSecureLocal = secureLocalChoice.include;
 
       const allowedTrustDomains: SourceTrustDomain[] = ['public_safe'];
       if (includeInternal) allowedTrustDomains.push('internal');
       if (includeSecureLocal) allowedTrustDomains.push('secure_local');
-      const requestedAnalystProviderForGate =
-        request.analyst_provider ?? (request.analyst_model?.trim() ? 'venice' : 'default');
       const requestedCorpusIds = sourceAnswerCorpusIds(request);
       const bulkGateStartedAt = Date.now();
       const bulkSecureLocalScope = secureLocalApprovalScopeForBulkRequest(
@@ -349,6 +374,9 @@ export function createAnalystSourceIndexAnswerHandler(
           };
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
+      }
+      if (secureLocalChoice.exclusion) {
+        detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       const pack = detail.pack;
       assertEvidencePackModelEligible(pack);
@@ -523,6 +551,90 @@ export function sourceAnswerCorpusIds(request: SourceIndexAnswerRequest): string
     ids.map((id) => id.trim()).filter(Boolean).map((id) => canonicalSourceCorpusId(id)),
   )];
   return unique.length > 0 ? unique : undefined;
+}
+
+// The caller decides first: include_secure_local true or false, or a request
+// that targets secure_local material (a secure corpus, scope, selected item,
+// or the words). Otherwise secure_local is searched by default exactly when
+// the sovereignty policy approves a private analyst route for it, because
+// private material is supposed to show up in answers, reasoned over by Argus
+// and released only as scanned derivatives. Two defaults still leave it out:
+// no approved route (for example the no-sensitive preset, or a standard-cloud
+// analyst request, which may never see secure evidence), and a bulk-shaped
+// request, where searching secure_local would trip the bulk release approval
+// gate for an answer the caller never asked to include private material in.
+// An explicit include keeps that gate exactly as before.
+function secureLocalInclusion(
+  request: SourceIndexAnswerRequest,
+  registry: SourceIndexCorpusRegistry,
+  requestedProvider: SourceAnswerAnalystProvider,
+  routeStatus: AnalystSourceIndexAnswerHandlerOptions['secureLocalAnalystRoute'],
+): { include: boolean; exclusion?: SecureLocalDefaultExclusion } {
+  if (request.include_secure_local !== undefined) return { include: request.include_secure_local };
+  if (requestExplicitlyTargetsSecureLocal(request, registry)) return { include: true };
+  if (!routeStatus) return { include: false };
+  const route: SecureLocalAnalystRouteStatus = requestedProvider === 'cloud'
+    ? { approved: false, reason: 'standard_cloud_analyst_requested' }
+    : routeStatus({ requestedProvider });
+  if (!route.approved) return { include: false, exclusion: 'no_private_analyst_route' };
+  if (isBulkSecureLocalReleaseRequest(request)) {
+    return { include: false, exclusion: 'bulk_secure_local_release_requires_approval' };
+  }
+  return { include: true };
+}
+
+// The router reports a default-excluded secure corpus as
+// trust_domain_not_allowed, which reads like a scoping decision the caller
+// made. Name the real reason, in the audit and in the Analyst's coverage line.
+function withSecureLocalExclusionReason(
+  detail: EvidencePackBuildDetail,
+  exclusion: SecureLocalDefaultExclusion,
+): EvidencePackBuildDetail {
+  const secureCorpora = new Set(detail.skippedCorpora
+    .filter((skip) => skip.trustDomain === 'secure_local' && skip.reason === 'trust_domain_not_allowed')
+    .map((skip) => skip.corpusId));
+  if (secureCorpora.size === 0) return detail;
+  return {
+    ...detail,
+    skippedCorpora: detail.skippedCorpora.map((skip) => (
+      secureCorpora.has(skip.corpusId) && skip.reason === 'trust_domain_not_allowed'
+        ? { ...skip, reason: exclusion }
+        : skip
+    )),
+    pack: {
+      ...detail.pack,
+      coverage: {
+        ...detail.pack.coverage,
+        skippedCorpora: detail.pack.coverage.skippedCorpora.map((skip) => (
+          secureCorpora.has(skip.corpusId) && skip.reason === 'trust_domain_not_allowed'
+            ? { ...skip, reason: exclusion }
+            : skip
+        )),
+      },
+    },
+  };
+}
+
+function secureLocalExclusionCoverageNotes(detail: EvidencePackBuildDetail): string[] {
+  const corpora = (reason: SecureLocalDefaultExclusion) => [...new Set(detail.skippedCorpora
+    .filter((skip) => skip.reason === reason)
+    .map((skip) => skip.corpusId))].sort();
+  const notes: string[] = [];
+  const noRoute = corpora('no_private_analyst_route');
+  if (noRoute.length > 0) {
+    notes.push(
+      `Private sources were not searched (${noRoute.join(', ')}): the active sovereignty policy `
+      + 'approves no private analyst for them under this request.',
+    );
+  }
+  const bulk = corpora('bulk_secure_local_release_requires_approval');
+  if (bulk.length > 0) {
+    notes.push(
+      `Private sources were not searched for this bulk request (${bulk.join(', ')}); `
+      + 'ask again with include_secure_local set to true to request release approval.',
+    );
+  }
+  return notes;
 }
 
 function requestExplicitlyTargetsSecureLocal(
@@ -1443,6 +1555,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
       ...(releasedEvidenceCount === 0
         ? corpusReadabilityCoverageNotes(input.detail)
         : []),
+      ...secureLocalExclusionCoverageNotes(input.detail),
     ],
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';

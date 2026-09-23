@@ -55,7 +55,8 @@ describe('source skill runtime context', () => {
     expect(skill).toContain('preserve the citation markers returned');
     expect(skill).toContain('concrete query built from those titles');
     expect(skill).toContain('Do not fan out into unbounded');
-    expect(skill).toContain('Omit `corpus_id` on that first private ask');
+    expect(skill).toContain('Omit `corpus_id` so Olympus can search every eligible corpus in one pass');
+    expect(skill).toContain('leave `include_secure_local` unset');
     expect(skill).toContain('Do not infer Dropbox from legal, financial, medical, tax');
     expect(skill).toContain('For email, Gmail, Google Mail');
     expect(skill).toContain('Do not use `bash`, shell commands, local files, raw databases');
@@ -66,7 +67,7 @@ describe('source skill runtime context', () => {
     expect(skill).toContain('tools are unavailable, fail clearly');
     expect(resolver).toContain('| User asks to search Telegram, X/Twitter bookmarks, saved/bookmarked tweets/posts, Readwise, Drive/Docs, Dropbox, or another Olympus-indexed source | `skills/ask-sources/SKILL.md` |');
     expect(resolver).toContain('| User asks to search, summarize, inspect, or answer questions about Gmail/email | `skills/ask-sources/SKILL.md` |');
-    expect(resolver).toContain('use one `source_answer` call with');
+    expect(resolver).toContain('use one `source_answer` call and omit');
     expect(resolver).toContain('Do not route legal, financial');
     expect(resolver).toContain('do not fall back to raw shell');
   });

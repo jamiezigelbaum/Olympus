@@ -34,11 +34,14 @@ Use Olympus source tools, not raw stores.
 - `source_answer` is the default calling-assistant-facing path for answering from indexed
   sources. It returns bounded answer text, safe provenance, policy, and audit
   metadata.
-- Use one unified `source_answer` call for ordinary source questions. Set
-  `include_secure_local: true` when the user asks for private/personal
-  material or the likely evidence may live in private email, Dropbox files, or
-  protected Telegram. Omit `corpus_id` on that first private ask so Olympus can
-  search all eligible private corpora in one pass.
+- Use one unified `source_answer` call for ordinary source questions and
+  leave `include_secure_local` unset. Olympus searches Private (secure-local)
+  corpora by default whenever the sovereignty policy approves a private
+  analyst (Argus: a local model or Venice Private) for them; Argus reasons over
+  that evidence and you receive only the OPSEC-scanned answer and citations,
+  never raw Private text. When the policy approves no private analyst,
+  Olympus leaves Private corpora out and says so in the coverage notes.
+  Omit `corpus_id` so Olympus can search every eligible corpus in one pass.
 - Name `corpus_id` or `corpus_ids` only to intentionally force-narrow because
   the user named a source, a prior result selected a source, or a diagnostic
   requires it. Do not infer Dropbox from legal, financial, medical, tax, or
@@ -86,10 +89,12 @@ Use Olympus source tools, not raw stores.
   behind each other and the later ones time out or fail with worker errors
   for no real reason. Wait for each answer before issuing the next. Slow is
   acceptable; a lost answer is not.
-- For S0-S3/internal or public-safe questions, keep `include_secure_local:false`
-  unless the user asks for private/personal material or provides a secure-local
-  corpus, approved scope, or selected item. This keeps routine internal answers
-  on the cloud-eligible source-answer path.
+- Set `include_secure_local: false` only when the user asks to keep Private
+  material out of an answer. Set `include_secure_local: true` only to insist on
+  Private material, for example to request release approval for a bulk
+  request: a bulk-shaped request ("export all...") that does not opt in
+  answers without Private corpora and says so, and an explicit opt-in keeps
+  the bulk release approval gate.
 - `source_index_status` is for aggregate/source readiness checks. It is not a
   source browser. For an ordinary/internal chat whose exact conversation id is
   known, it can also return content-free sender counts with
@@ -122,8 +127,8 @@ Good calling-assistant request shape:
 - set `corpus_id` to `internal.telegram.messages` when the user is clearly
   asking about ordinary approved Telegram content
 - set `include_internal` to true
-- keep `include_secure_local` false unless the user has explicitly asked for a
-  secure-local/private lane and the runtime policy allows it
+- leave `include_secure_local` unset; Private corpora are searched when the
+  runtime policy approves a private analyst for them
 - use a small `max_results` for exploratory searches
 
 For a request to rank the most prolific posters in one ordinary/internal

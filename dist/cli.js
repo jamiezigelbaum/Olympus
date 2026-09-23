@@ -21904,13 +21904,14 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const retrievalRequest = request.retrieval_mode === undefined ? { ...request, retrieval_mode: "hybrid" } : request;
       const lanes = options.lanes(retrievalRequest);
       const laneSetupMs = Date.now() - laneSetupStartedAt;
-      const includeSecureLocal = request.include_secure_local ?? requestExplicitlyTargetsSecureLocal(request, lanes.registry);
+      const requestedAnalystProviderForGate = request.analyst_provider ?? (request.analyst_model?.trim() ? "venice" : "default");
+      const secureLocalChoice = secureLocalInclusion(request, lanes.registry, requestedAnalystProviderForGate, options.secureLocalAnalystRoute);
+      const includeSecureLocal = secureLocalChoice.include;
       const allowedTrustDomains = ["public_safe"];
       if (includeInternal)
         allowedTrustDomains.push("internal");
       if (includeSecureLocal)
         allowedTrustDomains.push("secure_local");
-      const requestedAnalystProviderForGate = request.analyst_provider ?? (request.analyst_model?.trim() ? "venice" : "default");
       const requestedCorpusIds = sourceAnswerCorpusIds(request);
       const bulkGateStartedAt = Date.now();
       const bulkSecureLocalScope = secureLocalApprovalScopeForBulkRequest(request, includeSecureLocal, lanes.registry);
@@ -22009,6 +22010,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
           };
           evidencePackMs += Date.now() - rebuildStartedAt;
         }
+      }
+      if (secureLocalChoice.exclusion) {
+        detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       const pack = detail.pack;
       assertEvidencePackModelEligible(pack);
@@ -22121,6 +22125,50 @@ function sourceAnswerCorpusIds(request) {
     ids.unshift(request.corpus_id);
   const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean).map((id) => canonicalSourceCorpusId(id)))];
   return unique.length > 0 ? unique : undefined;
+}
+function secureLocalInclusion(request, registry, requestedProvider, routeStatus) {
+  if (request.include_secure_local !== undefined)
+    return { include: request.include_secure_local };
+  if (requestExplicitlyTargetsSecureLocal(request, registry))
+    return { include: true };
+  if (!routeStatus)
+    return { include: false };
+  const route = requestedProvider === "cloud" ? { approved: false, reason: "standard_cloud_analyst_requested" } : routeStatus({ requestedProvider });
+  if (!route.approved)
+    return { include: false, exclusion: "no_private_analyst_route" };
+  if (isBulkSecureLocalReleaseRequest(request)) {
+    return { include: false, exclusion: "bulk_secure_local_release_requires_approval" };
+  }
+  return { include: true };
+}
+function withSecureLocalExclusionReason(detail, exclusion) {
+  const secureCorpora = new Set(detail.skippedCorpora.filter((skip) => skip.trustDomain === "secure_local" && skip.reason === "trust_domain_not_allowed").map((skip) => skip.corpusId));
+  if (secureCorpora.size === 0)
+    return detail;
+  return {
+    ...detail,
+    skippedCorpora: detail.skippedCorpora.map((skip) => secureCorpora.has(skip.corpusId) && skip.reason === "trust_domain_not_allowed" ? { ...skip, reason: exclusion } : skip),
+    pack: {
+      ...detail.pack,
+      coverage: {
+        ...detail.pack.coverage,
+        skippedCorpora: detail.pack.coverage.skippedCorpora.map((skip) => secureCorpora.has(skip.corpusId) && skip.reason === "trust_domain_not_allowed" ? { ...skip, reason: exclusion } : skip)
+      }
+    }
+  };
+}
+function secureLocalExclusionCoverageNotes(detail) {
+  const corpora = (reason) => [...new Set(detail.skippedCorpora.filter((skip) => skip.reason === reason).map((skip) => skip.corpusId))].sort();
+  const notes = [];
+  const noRoute = corpora("no_private_analyst_route");
+  if (noRoute.length > 0) {
+    notes.push(`Private sources were not searched (${noRoute.join(", ")}): the active sovereignty policy ` + "approves no private analyst for them under this request.");
+  }
+  const bulk = corpora("bulk_secure_local_release_requires_approval");
+  if (bulk.length > 0) {
+    notes.push(`Private sources were not searched for this bulk request (${bulk.join(", ")}); ` + "ask again with include_secure_local set to true to request release approval.");
+  }
+  return notes;
 }
 function requestExplicitlyTargetsSecureLocal(request, registry) {
   if (request.include_secure_local_content === true)
@@ -22691,7 +22739,8 @@ function releaseAnalystAnswer(input) {
   const releasedUnanswered = appendUniqueCoverageNotes(sanitizeReleasedCoverageNotes(input.result.unanswered, input.detail, nonPublicPack), [
     ...unreadableMatchedGaps,
     ...input.result.unanswered.length === 0 && releasedEvidenceCount === 0 ? zeroEvidenceCoverageNotes(input.detail.pack) : [],
-    ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : []
+    ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : [],
+    ...secureLocalExclusionCoverageNotes(input.detail)
   ]);
   const safeUnsupportedAnswer = "I found matching source material, but I could not extract a cited bounded answer from it in this pass.";
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
@@ -42678,7 +42727,7 @@ var init_operations = __esm(() => {
     analyst_provider: { type: "string", enum: ["default", "local", "venice", "cloud"], description: "Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only." },
     analyst_model: { type: "string", description: "Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal)." },
     max_results: { type: "number", description: "Max results; worker-capped." },
-    include_secure_local: { type: "boolean", description: "Whether to search secure-local corpora. Defaults false unless the request targets secure-local material or scope." },
+    include_secure_local: { type: "boolean", description: "Whether to search secure-local (Private) corpora. Omit to search them whenever the sovereignty policy approves a private analyst (Argus) for them; that evidence is answered only by Argus and returns only as scanned derived answers and citations. Set false to opt out." },
     include_secure_local_content: { type: "boolean", description: "Whether secure-local answers may return OPSEC-scanned derivative content. Defaults true." },
     include_internal: { type: "boolean", description: "Whether the bridge may search internal corpora. Defaults true." },
     include_internal_content: { type: "boolean", description: "Whether internal corpora may return context passages for {{assistantName}} summarization. Defaults true." },
@@ -78727,6 +78776,7 @@ __export(exports_server2, {
   sourceAnswerAccountForCorpus: () => sourceAnswerAccountForCorpus,
   selectedSourceCredentialHandle: () => selectedSourceCredentialHandle,
   selectCredentialHandle: () => selectCredentialHandle,
+  secureLocalAnalystRouteStatus: () => secureLocalAnalystRouteStatus,
   resolveEmailSourceBindHostFromEnv: () => resolveEmailSourceBindHostFromEnv,
   registerConnectorStoreEmbeddingLane: () => registerConnectorStoreEmbeddingLane,
   parseSecureDerivativeDefault: () => parseSecureDerivativeDefault,
@@ -79207,6 +79257,27 @@ function sovereigntyAnalystRoutePlan(input) {
     selection: input.pool.explicitOrder ? "explicit_order" : "health_latency",
     steps
   };
+}
+function secureLocalAnalystRouteStatus(input) {
+  if (input.engine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
+    return { approved: false, reason: "secure_local_metadata_only_policy" };
+  }
+  try {
+    sovereigntyAnalystRoutePlan({
+      trustDomain: "secure_local",
+      pool: input.engine.resolveAnalystPool({
+        trustDomain: "secure_local",
+        requestedProvider: input.requestedProvider
+      }),
+      analysts: input.analysts
+    });
+    return { approved: true };
+  } catch (error2) {
+    if (error2 instanceof OperationError && error2.code === "config_error") {
+      return { approved: false, reason: "no_approved_private_analyst" };
+    }
+    throw error2;
+  }
 }
 async function validateSecureVeniceAnalystProfileAtConstruction(input) {
   const baseUrl = approvedVeniceAnalystBaseUrl(input.profile.baseUrl ?? "https://api.venice.ai/api/v1");
@@ -80077,6 +80148,11 @@ async function main() {
           analysts: sovereigntyAnalysts
         });
       },
+      secureLocalAnalystRoute: ({ requestedProvider }) => secureLocalAnalystRouteStatus({
+        engine: sovereigntyEngine,
+        analysts: sovereigntyAnalysts,
+        requestedProvider
+      }),
       ...sourceIndexAnswerMaxResults !== undefined ? { defaultMaxResults: sourceIndexAnswerMaxResults } : {},
       ...sourceIndexAnswerMaxCharsPerCandidate !== undefined ? { maxCharsPerCandidate: sourceIndexAnswerMaxCharsPerCandidate } : {},
       ...effectiveTrustedAnalystTimeoutMs !== undefined ? { trustedAnalystTimeoutMs: effectiveTrustedAnalystTimeoutMs } : {},

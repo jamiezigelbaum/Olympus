@@ -36,9 +36,10 @@ means Private; never substitute one for the other.
 
 Source answers may report automatic local self-heal status when incomplete
 Dropbox text is being re-ingested; follow `skills/ask-sources/SKILL.md`.
-For private/personal source questions, use one `source_answer` call with
-`include_secure_local: true` and omit `corpus_id` unless the user explicitly
-named a source or selected a prior result. Do not route legal, financial,
+For private/personal source questions, use one `source_answer` call and omit
+`corpus_id` unless the user explicitly named a source or selected a prior
+result. Private corpora are searched by default when the sovereignty policy
+approves a private analyst for them; `include_secure_local: false` opts out. Do not route legal, financial,
 medical, tax, or similar private topics to Dropbox by assumption.
 
 ## PKM Authoring And Onboarding
