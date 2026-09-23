@@ -92,6 +92,7 @@ import {
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+import { secretsDisposition } from './secrets-disposition.ts';
 
 
 /** Legs run in this order, least private first. */
@@ -208,7 +209,7 @@ export interface TieredStoreSetRun {
 type Plan =
   | { kind: 'legacy' }
   | { kind: 'routed'; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
-  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' }
+  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets' }
   | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets' };
 
 interface PlanEntry {
@@ -1033,6 +1034,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
+        // The ledger write above hid every copy. The one Secrets policy
+        // (secrets-disposition.ts) decides whether they are tombstoned now or
+        // kept, hidden, for an owner-approved purge.
+        if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
         this.copyRemovals.set(identityKey(identity), identity);
         return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };
       case 'queued_move':
