@@ -21,6 +21,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-09-23 — One public beta, no structured beta testing.** The owner
+  ends structured beta testing. The latest Olympus is published as a single
+  GitHub prerelease (`v0.4.0-beta.3`, from main `83093b76`) and is the only
+  release offered there; earlier pilot and beta releases are withdrawn once
+  it passes a clean first-time Linux install. ClawHub publication and the
+  public announcement follow that install proof, then a Xanthos (macOS) try.
+  This supersedes the Slice 4 tester and qualification-campaign requirements.
+
 - **2026-09-21 — SSH stays in private ops for this beta.** The owner keeps
   remote-compute SSH transport outside the public plugin. Olympus consumes the
   configured model API and performs model discovery; it ships no tenant hosts,
@@ -481,7 +489,7 @@ that clean-install real-provider or pilot qualification has passed.
   and its SHA-256 and byte count from GitHub without a file/receipt handoff
   or a tester GitHub login. It verifies the downloaded bytes before using
   the packaged guide and installs through the documented managed
-  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.2.tgz --force --accept-capabilities`
+  `openclaw plugins install npm-pack:/absolute/path/to/olympus-0.4.0-beta.3.tgz --force --accept-capabilities`
   command. On OpenClaw 2026.7.1, omit both flags for a clean install; on newer
   hosts `--force` also overwrites an existing plugin, so the install guide's
   existing-install checks still apply. No tester builds a package or installs
