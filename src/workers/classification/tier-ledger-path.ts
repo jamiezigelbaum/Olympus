@@ -33,3 +33,17 @@ export function secretLocationsPathForStore(storeDbPath: string): string {
   const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
   return `${base}${SECRET_LOCATIONS_FILE_SUFFIX}`;
 }
+
+// The sniffer's verdict cache and question queue, co-located the same way:
+// `<store>.tier-sniffer.sqlite`. Unlike the ledger it holds the NAMES and
+// short excerpts of items waiting for the privacy-safe model (the same
+// material the store itself holds for them), so it goes wherever the store
+// goes and is deleted with it.
+export const TIER_SNIFFER_SQLITE_STORE_ID = 'olympus_tier_sniffer';
+export const TIER_SNIFFER_FILE_SUFFIX = '.tier-sniffer.sqlite';
+
+export function tierSnifferPathForStore(storeDbPath: string): string {
+  if (storeDbPath === ':memory:') return ':memory:';
+  const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
+  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}

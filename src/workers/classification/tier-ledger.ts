@@ -294,6 +294,81 @@ export class TierLedger {
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
   }
 
+  /**
+   * Apply a privacy-safe sniffer verdict that arrived after the item was
+   * recorded (the background pass, sniffer-resolver.ts). Only the question it
+   * answers changes: a metadata verdict can only raise the metadata tier (and
+   * with it the content floor), a content verdict can only raise the content
+   * tier. The open-question reasons are replaced by the verdict's reason code,
+   * and the model id is recorded. An override, a row mid-move, or a question
+   * that is no longer open is left alone.
+   */
+  applySnifferVerdict(
+    identity: TierLedgerIdentity,
+    verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string },
+  ): { outcome: TierLedgerRecordOutcome; record: TierLedgerRecord } | undefined {
+    assertTier(verdict.tier);
+    let outcome: TierLedgerRecordOutcome | undefined;
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing) return;
+      if (existing.state === 'moving') {
+        outcome = 'held_moving';
+        return;
+      }
+      if (existing.decidedBy === 'override') {
+        outcome = 'unchanged';
+        return;
+      }
+      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith('content:'));
+      const contentReasons = existing.reasons.filter((reason) => reason.startsWith('content:'));
+      let next: EffectiveRow;
+      if (verdict.pass === 'metadata') {
+        if (!existing.metadataPending) {
+          outcome = 'unchanged';
+          return;
+        }
+        const metadataTier = maxTier(existing.metadataTier, verdict.tier);
+        const contentTier = maxTier(existing.contentTier, metadataTier);
+        next = {
+          ...rowOf(existing),
+          metadataTier,
+          contentTier,
+          decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
+          reasons: [
+            ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')),
+            verdict.reason,
+            ...contentReasons,
+          ],
+          metadataPending: false,
+        };
+      } else {
+        if (!existing.contentPending || !existing.contentRead) {
+          outcome = 'unchanged';
+          return;
+        }
+        const contentTier = maxTier(existing.contentTier, verdict.tier);
+        next = {
+          ...rowOf(existing),
+          contentTier,
+          decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
+          reasons: [
+            ...metadataReasons,
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')),
+            verdict.reason,
+          ],
+          contentPending: false,
+        };
+      }
+      outcome = this.writeRow(identity, next, undefined, existing);
+      this.db.query(`
+        UPDATE tier_items SET model_id = ?
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(verdict.modelId, identity.provider, identity.accountScope, identity.providerItemId);
+    })();
+    return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
+  }
+
   private writeRow(
     identity: TierLedgerIdentity,
     next: EffectiveRow,
@@ -1604,6 +1679,31 @@ interface EffectiveRow {
   contentPending: boolean;
   metadataForced: boolean;
   metadataFlagged: boolean;
+}
+
+function rowOf(record: TierLedgerRecord): EffectiveRow {
+  return {
+    metadataTier: record.metadataTier,
+    contentTier: record.contentTier,
+    decidedBy: record.decidedBy,
+    reasons: record.reasons,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    contentRead: record.contentRead,
+    metadataPending: record.metadataPending,
+    contentPending: record.contentPending,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+  };
+}
+
+/** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
+function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {
+  if (pass === 'metadata') {
+    return reason.startsWith('metadata:possibly_private:')
+      || (reason.startsWith('metadata:sniffer:') && reason.endsWith(':undecided'));
+  }
+  return reason.startsWith('content:sniffer:') && reason.endsWith(':undecided');
 }
 
 /**

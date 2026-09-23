@@ -29,6 +29,7 @@ import {
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
+import { installedTierClassification } from '../classification/installed-tier-classification.ts';
 
 /**
  * How a lane places items into the store(s) it has TODAY. This replaces the
@@ -61,13 +62,33 @@ export type ConnectorStorePlacement =
   | ((item: RawItem) => SourceSensitivity);
 
 /**
- * Classifier configuration for recording tier decisions. Owner rules and the
- * sniffer are P2 inputs; they are accepted now so tests can pin precedence.
+ * Classifier configuration for recording tier decisions: the owner's map,
+ * the owner tier rules and the privacy-safe sniffer. A sync that brings none
+ * uses the installed inputs (installed-tier-classification.ts), so every lane
+ * records with the same ones.
  */
 export interface ConnectorStoreTierClassification {
   sensitivityMap?: SensitivityMap;
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
+  /** The inputs cannot be trusted (an invalid rules file): record no decisions. */
+  unavailableReason?: string;
+}
+
+/**
+ * The classification inputs for one sync: the caller's own, else the
+ * installed ones (with the lane's map, when it passed one), else the lane's
+ * map alone. Never throws.
+ */
+export function resolveStoreTierClassification(
+  explicit: ConnectorStoreTierClassification | undefined,
+  storeDbPath: string,
+  laneMap: SensitivityMap | undefined,
+): ConnectorStoreTierClassification | undefined {
+  if (explicit) return explicit;
+  const installed = installedTierClassification()?.forStore(storeDbPath, laneMap);
+  if (installed) return installed;
+  return laneMap ? { sensitivityMap: laneMap } : undefined;
 }
 
 const DEFAULT_TIER_FOR_DOMAIN: Readonly<Record<SourceTrustDomain, SourceTrustTier>> = {
@@ -146,6 +167,7 @@ export function decideItemTiers(
       signals: connector.classificationSignals(item),
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
+      subject: item.identity,
     },
     {
       ...(options?.sensitivityMap ? { sensitivityMap: options.sensitivityMap } : {}),

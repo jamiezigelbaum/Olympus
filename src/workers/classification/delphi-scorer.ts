@@ -1,5 +1,10 @@
 // Local-LLM item tier scorer over the Delphi fast lane (frontier-max doctrine).
 //
+// RETIRED for the four-tier classifier: the privacy-safe sniffer (sniffer.ts)
+// replaces this seam there, and reuses the strict-verdict primitives below
+// (parseStrictJsonObject, isUnitConfidence). This class stays only for the
+// legacy engine's async seam and its pinned test.
+//
 // Plugs into the ItemTierScorer seam in engine.ts: it is consulted ONLY for
 // items the deterministic engine leaves at default_secure, AFTER every
 // sensitive detector has run — so the scorer can never override a detector
@@ -189,14 +194,8 @@ export class DelphiItemTierScorer implements ReviewableTierScorer {
 // values. Anything else (prose, truncation, wrong enums, out-of-range
 // confidence) is no verdict at all.
 export function parseDelphiScorerVerdict(text: string): DelphiTierScorerVerdict | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stripCodeFences(text.trim()));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
+  const record = parseStrictJsonObject(text);
+  if (!record) return undefined;
   const tier = record.tier;
   const category = record.category;
   const confidence = record.confidence;
@@ -204,10 +203,27 @@ export function parseDelphiScorerVerdict(text: string): DelphiTierScorerVerdict 
   if (typeof category !== 'string' || !(SCORER_CATEGORIES as readonly string[]).includes(category)) {
     return undefined;
   }
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+  if (!isUnitConfidence(confidence)) return undefined;
+  return { tier, category: category as ScorerCategory, confidence };
+}
+
+// The strict-verdict primitives, shared with the four-tier sniffer
+// (sniffer.ts), which replaces this scorer on the shared tier classifier: the
+// WHOLE response (after optional code-fence stripping) must be one JSON
+// object, or there is no verdict.
+export function parseStrictJsonObject(text: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripCodeFences(text.trim()));
+  } catch {
     return undefined;
   }
-  return { tier, category: category as ScorerCategory, confidence };
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  return parsed as Record<string, unknown>;
+}
+
+export function isUnitConfidence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function stripCodeFences(text: string): string {

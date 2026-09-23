@@ -21,6 +21,11 @@ const MODULES = [
   'src/core/classification-signals.ts',
   // The one sender matcher owner sender rules use; scanned like the rest.
   'src/core/sender-rules.ts',
+  'src/workers/classification/tier-rules.ts',
+  'src/workers/classification/sniffer.ts',
+  'src/workers/classification/sniffer-store.ts',
+  'src/workers/classification/sniffer-resolver.ts',
+  'src/workers/classification/installed-tier-classification.ts',
 ];
 
 // Everything these modules may import. A new import has to be added here on
@@ -43,6 +48,20 @@ const IMPORT_ALLOWLIST = new Set([
   './source-index/types.ts',
   './tier-classifier.ts',
   './tier-ledger-path.ts',
+  // Phase P2: owner rules, the privacy-safe sniffer and its background pass.
+  'node:crypto',
+  'node:os',
+  '../../core/analyst.ts',
+  '../../core/atomic-file.ts',
+  '../../core/operation-error.ts',
+  '../../core/sender-rules.ts',
+  '../classification/installed-tier-classification.ts',
+  './delphi-scorer.ts',
+  './sniffer.ts',
+  './sniffer-lane.ts',
+  './sniffer-store.ts',
+  './tier-ledger.ts',
+  './tier-rules.ts',
 ]);
 
 const SOURCE_NAMES = [
