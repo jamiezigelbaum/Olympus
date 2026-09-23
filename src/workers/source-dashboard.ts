@@ -705,6 +705,24 @@ export interface DashboardSourceCard {
     indexed_items: number;
     content_ready_items: number;
   }>;
+  /**
+   * Four-tier classification facts beyond the per-tier item counts (design
+   * section 4.3), counts only: Secrets located (stored nowhere), items pending
+   * classification, superseded chunks kept hidden, and the owner's tier
+   * migration when it touches this source. Absent when all are zero/none.
+   */
+  tier_classification?: {
+    secrets_located: number;
+    pending_classification_items: number;
+    superseded_chunks: number;
+    /** Chunks names-only copies still hold after a split move: unserved, kept until an approved purge strips them. */
+    names_only_kept_chunks: number;
+    migration?: {
+      state: string;
+      label: string;
+      approval_entry_id?: string;
+    };
+  };
   queue_health: {
     label: string;
     waiting: number;
@@ -1872,7 +1890,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     const corpora = options.sourceIndexStatus.corpora
       .filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora) claimedCorpusIds.add(corpus.corpus_id);
-    const card = sourceCardFromDefinition(
+    const built = sourceCardFromDefinition(
       definition,
       corpora,
       schedulerByCorpus,
@@ -1895,6 +1913,10 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
     );
+    // Four-tier facts, stamped like sync_now below: counts from the card's own
+    // corpora, and the migration only when its plan touches one of them.
+    const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
+    const card: DashboardSourceCard = tierClassification ? { ...built, tier_classification: tierClassification } : built;
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
@@ -2821,6 +2843,55 @@ function cardTrustDomain(
   return prefix !== undefined && (SOURCE_TRUST_DOMAINS as readonly string[]).includes(prefix)
     ? prefix
     : definition.trust_domain;
+}
+
+const TIER_MIGRATION_STATE_LABELS: Readonly<Record<string, string>> = {
+  planned: 'Tier migration planned — waiting for your approval',
+  approved: 'Tier migration approved — ready to run',
+  running: 'Tier migration running',
+  stopped: 'Tier migration paused — run it again to resume',
+  done: 'Tier migration done — previous copies kept, hidden, until you purge them',
+};
+
+/**
+ * Counts only, summed over the source's corpora; the migration is shown on a
+ * source only when its plan touches one of that source's stores.
+ */
+function tierClassificationFromCorpora(
+  corpora: readonly SourceIndexStatusCorpus[],
+  migration: SourceIndexStatusResult['tier_migration'],
+): DashboardSourceCard['tier_classification'] | undefined {
+  const counts = corpora.map(numericCounts);
+  const sum = (key: string) => counts.reduce((total, entry) => total + (entry[key] ?? 0), 0);
+  const secrets = sum('secret_locations');
+  const pending = sum('pending_classification_items');
+  const superseded = sum('superseded_chunks');
+  const namesOnlyKept = sum('names_only_kept_chunks');
+  const ids = new Set(corpora.map((corpus) => corpus.corpus_id));
+  const touched = migration !== undefined
+    && migration.state !== 'superseded'
+    && migration.corpora.some((corpusId) => ids.has(corpusId));
+  if (secrets === 0 && pending === 0 && superseded === 0 && namesOnlyKept === 0 && !touched) return undefined;
+  const label = touched
+    ? migration.state === 'done' && migration.purged
+      ? 'Tier migration done'
+      : TIER_MIGRATION_STATE_LABELS[migration.state] ?? `Tier migration ${migration.state}`
+    : undefined;
+  return {
+    secrets_located: secrets,
+    pending_classification_items: pending,
+    superseded_chunks: superseded,
+    names_only_kept_chunks: namesOnlyKept,
+    ...(touched && label
+      ? {
+          migration: {
+            state: migration.state,
+            label,
+            ...(migration.approval_entry_id ? { approval_entry_id: migration.approval_entry_id } : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 function aggregateTierComposition(

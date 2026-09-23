@@ -8364,6 +8364,14 @@ class TierLedger {
     }
     return { rehomed, orphaned };
   }
+  overridesCanonical() {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all();
+    return rows.map((row) => [row.provider, row.account_scope, row.conversation_key, row.provider_item_id, row.override_json].join("\x00")).join(`
+`);
+  }
   clearOverride(identity) {
     return this.db.query(`
       DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -8603,12 +8611,27 @@ class TierLedger {
     })();
     return this.getCurrent(identity);
   }
-  adoptLegacyPlacement(identity, copies) {
+  adoptLegacyPlacement(identity, copies, options = {}) {
     for (const copy of copies)
       assertCopyPlan(copy);
     const now = this.now().toISOString();
     this.db.transaction(() => {
-      const existing = this.readRow(identity);
+      let existing = this.readRow(identity);
+      if (!existing && options.whenMissing) {
+        const missing = options.whenMissing;
+        assertTier(missing.metadataTier);
+        assertTier(missing.contentTier);
+        const reasonsJson = JSON.stringify(["legacy_placement"]);
+        this.db.query(`
+          INSERT INTO tier_items (
+            provider, account_scope, conversation_key, provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, state, content_read, decided_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'legacy_placement', ?, 'legacy', 'none', 'current', 0, ?)
+        `).run(...idParams(identity), missing.family, missing.metadataTier, missing.contentTier, reasonsJson, now);
+        this.appendHistory(identity, 1, missing.metadataTier, missing.contentTier, "legacy_placement", reasonsJson, "current", now);
+        existing = this.readRow(identity);
+      }
       if (!existing)
         throw new Error("Adopting a placement needs a recorded decision first.");
       if (existing.routed)
@@ -8710,6 +8733,16 @@ class TierLedger {
         reasons: options.reasons ?? existing.reasons,
         decidedAt: now
       });
+      if (options.decision) {
+        const decision = options.decision;
+        const pending = decision.metadataPending || decision.contentPending;
+        this.db.query(`
+          UPDATE tier_items SET
+            content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+            engine_version = ?, map_revision = ?, state = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).run(decision.contentRead ? 1 : 0, decision.metadataPending ? 1 : 0, decision.contentPending ? 1 : 0, decision.metadataForced ? 1 : 0, decision.metadataFlagged ? 1 : 0, decision.engineVersion, decision.mapRevision, pending ? "pending" : "current", ...idParams(identity));
+      }
     })();
     return this.getCurrent(identity);
   }
@@ -8717,7 +8750,7 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== "current" || existing.previousMetadataTier === null || existing.previousContentTier === null) {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || existing.previousMetadataTier === null || existing.previousContentTier === null) {
         throw new TierLedgerGenerationConflictError;
       }
       const flipGeneration = existing.generation;
@@ -8791,6 +8824,68 @@ class TierLedger {
       this.deleteCopies(identity);
     })();
     return removed;
+  }
+  removeSupersededCopy(identity, corpusId) {
+    return this.db.query(`
+      DELETE FROM tier_copies
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'superseded'
+    `).run(...idParams(identity), corpusId).changes > 0;
+  }
+  replaceMigrationProposals(planId, proposals) {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM tier_migration_proposals WHERE plan_id = ?").run(planId);
+      const insert = this.db.query(`
+        INSERT INTO tier_migration_proposals (
+          plan_id, provider, account_scope, conversation_key, provider_item_id, family,
+          from_corpus_id, from_trust_domain, kind, metadata_tier, content_tier, decision_json,
+          chunks, estimated_chunks_to_embed, estimated_tokens, item_fingerprint, expected_generation, batch_keys_json,
+          status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+      `);
+      for (const proposal of proposals) {
+        assertTier(proposal.metadataTier);
+        assertTier(proposal.contentTier);
+        insert.run(planId, ...idParams(proposal.identity), proposal.family, proposal.fromCorpusId, proposal.fromTrustDomain, proposal.kind, proposal.metadataTier, proposal.contentTier, JSON.stringify(proposal.decision), proposal.chunks, proposal.estimatedChunksToEmbed, proposal.estimatedTokens, proposal.itemFingerprint, proposal.expectedGeneration ?? null, JSON.stringify(proposal.batchKeys), now);
+      }
+    })();
+  }
+  deleteMigrationProposals(planId) {
+    return this.db.query("DELETE FROM tier_migration_proposals WHERE plan_id = ?").run(planId).changes;
+  }
+  migrationProposals(planId, filter = {}) {
+    const clauses = ["plan_id = ?"];
+    const params = [planId];
+    if (filter.status) {
+      clauses.push("status = ?");
+      params.push(filter.status);
+    }
+    if (filter.batchId) {
+      clauses.push("batch_id = ?");
+      params.push(filter.batchId);
+    }
+    return this.db.query(`
+      SELECT * FROM tier_migration_proposals WHERE ${clauses.join(" AND ")}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+    `).all(...params).map(proposalFromRow);
+  }
+  migrationProposalCounts(planId) {
+    const counts = { proposed: 0, moved: 0, rolled_back: 0, skipped: 0, purged: 0 };
+    for (const row of this.db.query(`
+      SELECT status, COUNT(*) AS n FROM tier_migration_proposals WHERE plan_id = ? GROUP BY status
+    `).all(planId)) {
+      counts[row.status] = row.n;
+    }
+    return counts;
+  }
+  markMigrationProposal(planId, identity, update) {
+    this.db.query(`
+      UPDATE tier_migration_proposals SET
+        status = ?, batch_id = COALESCE(?, batch_id), moved_generation = COALESCE(?, moved_generation),
+        outcome_json = COALESCE(?, outcome_json), updated_at = ?
+      WHERE plan_id = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(update.status, update.batchId ?? null, update.movedGeneration ?? null, update.outcome ? JSON.stringify(update.outcome) : null, this.now().toISOString(), planId, ...idParams(identity));
   }
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
@@ -8900,6 +8995,30 @@ class TierLedger {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+function proposalFromRow(row) {
+  return {
+    planId: row.plan_id,
+    identity: identityFromRow(row),
+    family: row.family,
+    fromCorpusId: row.from_corpus_id,
+    fromTrustDomain: row.from_trust_domain,
+    kind: row.kind,
+    metadataTier: row.metadata_tier,
+    contentTier: row.content_tier,
+    decision: JSON.parse(row.decision_json),
+    chunks: row.chunks,
+    estimatedChunksToEmbed: row.estimated_chunks_to_embed,
+    estimatedTokens: row.estimated_tokens,
+    itemFingerprint: row.item_fingerprint,
+    ...row.expected_generation !== null ? { expectedGeneration: row.expected_generation } : {},
+    batchKeys: JSON.parse(row.batch_keys_json),
+    status: row.status,
+    batchId: row.batch_id,
+    movedGeneration: row.moved_generation,
+    outcome: row.outcome_json ? JSON.parse(row.outcome_json) : null,
+    updatedAt: row.updated_at
+  };
 }
 function identityFromRow(row) {
   return {
@@ -9138,7 +9257,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 2,
       name: "tier_copies_and_set_cursors",
       up(db) {
         db.exec(`
@@ -9265,10 +9384,46 @@ function tierLedgerMigrations() {
           );
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_migration_proposals",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_migration_proposals (
+            plan_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL,
+            from_corpus_id TEXT NOT NULL,
+            from_trust_domain TEXT NOT NULL CHECK (from_trust_domain IN ('public_safe', 'internal', 'secure_local')),
+            kind TEXT NOT NULL CHECK (kind IN ('legacy', 'queued_move')),
+            metadata_tier TEXT NOT NULL CHECK (metadata_tier ${TIER_CHECK}),
+            content_tier TEXT NOT NULL CHECK (content_tier ${TIER_CHECK}),
+            decision_json TEXT NOT NULL,
+            chunks INTEGER NOT NULL DEFAULT 0,
+            estimated_chunks_to_embed INTEGER NOT NULL DEFAULT 0,
+            estimated_tokens INTEGER NOT NULL DEFAULT 0,
+            item_fingerprint TEXT NOT NULL,
+            expected_generation INTEGER,
+            batch_keys_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('proposed', 'moved', 'rolled_back', 'skipped', 'purged')),
+            batch_id TEXT,
+            moved_generation INTEGER,
+            outcome_json TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (plan_id, provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE INDEX IF NOT EXISTS tier_migration_proposals_status
+            ON tier_migration_proposals (plan_id, status, batch_id);
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 2, TierLedgerGenerationConflictError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -10448,6 +10603,15 @@ function tierRowVisible(copies, corpusId, layer) {
     return true;
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
   return copyServingLayer(here, layer) !== undefined;
+}
+function namesOnlyKept(db, itemPks) {
+  if (itemPks.length === 0)
+    return {};
+  const n = db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))").get(JSON.stringify(itemPks)).n;
+  return n > 0 ? { namesOnlyKeptChunks: n } : {};
+}
+function migrationFingerprint(contentHash, chunkHashes) {
+  return createHash5("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -12337,11 +12501,121 @@ var init_local_index = __esm(() => {
           provider: parsed.embeddingProvider,
           backend: parsed.embeddingBackend,
           dimension: parsed.embeddingDimension,
-          epochId: parsed.embeddingEpoch
+          epochId: parsed.embeddingEpoch,
+          ...parsed.embeddingConfigHash ? { configHash: parsed.embeddingConfigHash } : {}
         };
       } catch {
         return;
       }
+    }
+    embeddingAuthorities() {
+      const models = this.db.query("SELECT model_id FROM embedding_models ORDER BY model_id").all().map((row) => row.model_id);
+      return models.flatMap((modelId) => {
+        const snapshot = this.embeddingWriteAuthoritySnapshot(modelId);
+        return snapshot ? [snapshot] : [];
+      });
+    }
+    migrationItemsPage(options = {}) {
+      const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+      const rows = this.db.query(`
+      SELECT item_pk, family, provider, account_scope, provider_item_id, provider_conversation_id,
+        local_item_id, title, locator_uri, sender_id, sender_label, source_scope_folder_keys_json,
+        mime_type, content_hash
+      FROM items
+      WHERE tombstoned = 0 AND item_pk > ?
+      ORDER BY item_pk
+      LIMIT ?
+    `).all(options.afterItemPk ?? 0, limit);
+      if (rows.length === 0)
+        return { items: [] };
+      const pks = JSON.stringify(rows.map((row) => row.item_pk));
+      const chunksByItem = new Map;
+      for (const chunk of this.db.query(`
+      SELECT item_pk, bounded_text, content_hash, embedding_input_hash FROM chunks
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+      ORDER BY item_pk, chunk_index
+    `).all(pks)) {
+        const list = chunksByItem.get(chunk.item_pk) ?? [];
+        list.push({ text: chunk.bounded_text, contentHash: chunk.content_hash, inputHash: chunk.embedding_input_hash });
+        chunksByItem.set(chunk.item_pk, list);
+      }
+      const vectorsByItem = new Map;
+      for (const vector of this.db.query(`
+      SELECT e.item_pk, e.model_id, COUNT(*) AS n
+      FROM chunk_embeddings e JOIN chunks c ON c.chunk_pk = e.chunk_pk
+      WHERE e.item_pk IN (SELECT value FROM json_each(?)) AND e.content_hash = c.embedding_input_hash
+      GROUP BY e.item_pk, e.model_id
+    `).all(pks)) {
+        const counts = vectorsByItem.get(vector.item_pk) ?? {};
+        counts[vector.model_id] = vector.n;
+        vectorsByItem.set(vector.item_pk, counts);
+      }
+      const items = rows.map((row) => {
+        const chunks = chunksByItem.get(row.item_pk) ?? [];
+        let folderKeys = [];
+        try {
+          const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) : [];
+          if (Array.isArray(parsed))
+            folderKeys = parsed.filter((key) => typeof key === "string");
+        } catch {
+          folderKeys = [];
+        }
+        return {
+          itemPk: row.item_pk,
+          identity: {
+            family: row.family,
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            localItemId: row.local_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          },
+          ...row.title ? { title: row.title } : {},
+          ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
+          ...row.sender_label ? { senderLabel: row.sender_label } : {},
+          ...row.sender_id ? { senderId: row.sender_id } : {},
+          folderKeys,
+          ...row.mime_type ? { mimeType: row.mime_type } : {},
+          chunks: chunks.map((chunk) => ({ text: chunk.text, contentHash: chunk.contentHash })),
+          vectorsByModel: vectorsByItem.get(row.item_pk) ?? {},
+          admitted: this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          }).disposition === "admit",
+          fingerprint: migrationFingerprint(row.content_hash, chunks.map((chunk) => chunk.contentHash))
+        };
+      });
+      return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
+    }
+    itemMigrationFingerprint(identity) {
+      const row = this.db.query(`
+      SELECT item_pk, content_hash FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      if (!row)
+        return;
+      const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
+      return migrationFingerprint(row.content_hash, hashes);
+    }
+    stripCopyContent(identity) {
+      return this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (!row)
+          return 0;
+        const count = this.db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?").get(row.item_pk).n;
+        if (count === 0)
+          return 0;
+        this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
+        this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+        this.refreshFtsForItem(row.item_pk);
+        return count;
+      })();
     }
     recordTierDecision(connector, item, stored, tierClassification, run) {
       if (run.ledgerFailed)
@@ -15430,15 +15704,17 @@ var init_local_index = __esm(() => {
     `).get(localItemId);
       if (!row)
         return;
-      if (!this.copyServable({
+      const identity = {
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      })) {
+      };
+      if (!this.copyServable(identity)) {
         return;
       }
-      const chunkRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk);
+      const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      const chunkRows = servesContent ? this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
       const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => chunk.bounded_text), maxChars, passageFocus);
       const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
       return {
@@ -15575,7 +15851,8 @@ var init_local_index = __esm(() => {
         supersededChunks: tier.hidden.length > 0 ? this.db.query(`
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `).get(JSON.stringify(tier.hidden)).n : 0,
-        tierMoveInProgress: tier.moving
+        tierMoveInProgress: tier.moving,
+        ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
@@ -15794,7 +16071,6 @@ var init_local_index = __esm(() => {
   ];
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
-
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -18292,6 +18568,48 @@ var init_telegram_messages = __esm(() => {
   init_store_sync2();
 });
 
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS2;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
@@ -18303,6 +18621,7 @@ var init_status = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_operation_error();
+  init_secret_locations();
 });
 
 // src/workers/dashboard/scheduler-markers.ts
@@ -20160,6 +20479,7 @@ import { homedir as homedir15 } from "node:os";
 import { mkdir as mkdir3, open as open3, readFile as readFile4 } from "node:fs/promises";
 import { dirname as dirname12, join as join16 } from "node:path";
 var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH";
+var EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
 function resolveEmbeddingLedgerPath(env = process.env) {
   const configured = env[EMBEDDING_LEDGER_PATH_ENV]?.trim();
   if (configured)
@@ -20302,7 +20622,7 @@ var EMBEDDING_LEDGER_KIND_TEXT = {
   note: "Note"
 };
 var EMBEDDING_LEDGER_APPROVAL_TEXT = {
-  jamie: "Approved in advance by the owner",
+  [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
   "system-automatic": "Not approved — the system did this on its own",
   "unattributed-historical": "Not approved — no decision is on record"
 };
@@ -20325,7 +20645,7 @@ var DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1";
 var PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1";
 var GEMINI_MODEL_ID = "gemini-embedding-2";
 var LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-var EMBEDDING_LEDGER_BACKFILL = [
+var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
   {
     entry_id: "backfill-2026-08-20-endpoint-retarget",
     recorded_at: "2026-08-20T02:42:00.000Z",
@@ -20372,7 +20692,7 @@ var EMBEDDING_LEDGER_BACKFILL = [
     model_id: QWEN3_MODEL_ID,
     epoch: QWEN3_EPOCH,
     why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-    approved_by: "jamie",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
   },
   {
@@ -20385,7 +20705,7 @@ var EMBEDDING_LEDGER_BACKFILL = [
       chunks: { dropbox: 52840, "x-bookmarks": 15 }
     },
     why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-    approved_by: "jamie",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
   }
 ];
@@ -20658,46 +20978,8 @@ init_tier_set3();
 // src/workers/connector-store/tier-visibility.ts
 init_tier_ledger();
 
-// src/workers/classification/secret-locations.ts
-init_sqlite_migrations();
-init_engine();
-var STOP_WORDS2 = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "did",
-  "do",
-  "does",
-  "find",
-  "for",
-  "have",
-  "i",
-  "in",
-  "is",
-  "it",
-  "kept",
-  "keep",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "put",
-  "saved",
-  "show",
-  "stored",
-  "the",
-  "there",
-  "to",
-  "what",
-  "where",
-  "which",
-  "who",
-  "with"
-]);
-
 // src/workers/email-source/server.ts
+init_secret_locations();
 init_credential_broker();
 init_types();
 init_secret_store();
@@ -21838,9 +22120,17 @@ class TierSnifferStore {
   dbPath;
   db;
   now;
+  readOnly;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database3(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
       mkdirSync9(dirname13(this.dbPath), { recursive: true, mode: 448 });
@@ -21864,9 +22154,9 @@ class TierSnifferStore {
   }
   close() {
     try {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
     } finally {
-      if (this.dbPath !== ":memory:")
+      if (this.dbPath !== ":memory:" && !this.readOnly)
         restrictFiles(this.dbPath);
     }
   }
@@ -22823,8 +23113,8 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-init_tier_ledger();
 import { existsSync as existsSync10 } from "node:fs";
+init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 
 class TierSnifferService {
@@ -22868,11 +23158,18 @@ class TierSnifferService {
     let checkingItems = 0;
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
+      const path = tierSnifferPathForLedger(ledgerPath);
+      if (path === ":memory:" || !existsSync10(path))
+        continue;
+      let store;
       try {
-        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        store = new TierSnifferStore({ dbPath: path, readOnly: true });
+        const counts = store.counts();
         checkingItems += counts.items;
         remainingQuestions += counts.questions;
-      } catch {}
+      } catch {} finally {
+        store?.close();
+      }
     }
     return {
       checkingItems,
@@ -22985,6 +23282,18 @@ class TierSnifferService {
     return { state: "ran", report };
   }
 }
+
+// src/workers/classification/tier-migration.ts
+init_operation_error();
+
+// src/workers/connector-store/tier-move.ts
+init_engine();
+init_tier_ledger();
+init_tier_placement();
+// src/workers/classification/tier-migration.ts
+init_engine();
+init_tier_classifier();
+init_tier_ledger();
 
 // src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {

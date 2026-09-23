@@ -30,6 +30,8 @@ import {
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
+import { existsSync } from 'node:fs';
+import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 
 /**
  * Per-ITEM embedding parity: files whose every chunk carries a current vector.
@@ -80,6 +82,12 @@ export interface SourceIndexStatusResult {
     write_failure_count: number;
     last_failure_class?: string;
   };
+  /**
+   * The owner's tier migration (design section 4.6), content-free: plan and
+   * batch states, the approval's ledger entry id, and the stores it touches.
+   * Absent when no migration was ever planned.
+   */
+  tier_migration?: SourceIndexTierMigrationStatus;
   policy: {
     read_only: true;
     raw_source_exposed: false;
@@ -88,6 +96,22 @@ export interface SourceIndexStatusResult {
     secure_local_item_metadata_exposed: false;
     castor_visible: true;
   };
+}
+
+export interface SourceIndexTierMigrationStatus {
+  plan_id: string;
+  state: 'planned' | 'approved' | 'running' | 'stopped' | 'done' | 'superseded';
+  /** True while an approved plan is moving items or has work left: parity lag in its stores is expected. */
+  in_progress: boolean;
+  approval_entry_id?: string;
+  proposed: number;
+  batches: Array<{ batch_id: string; state: string; moved: number; secrets: number; skipped: number }>;
+  corpora: string[];
+  chunks_to_embed: number;
+  /** The stores the plan hands chunks to embed, and how many: the only lag the doctor excuses, capped at these counts. */
+  destinations: Array<{ corpus_id: string; chunks_to_embed: number }>;
+  names_only_kept_chunks: number;
+  purged: boolean;
 }
 
 export interface SourceIndexEmbeddingLaneState {
@@ -187,6 +211,8 @@ export interface SourceIndexStatusHandlerOptions {
   connectorStoreStatusScope?: (store: LocalConnectorStore) => ConnectorStoreStatusScope | undefined;
   /** The four-tier classification backlog (counts only, never a time estimate). */
   tierClassification?: () => SourceIndexTierClassificationStatus | undefined;
+  /** The owner's tier migration state, read per request (content-free). */
+  tierMigration?: () => SourceIndexTierMigrationStatus | undefined;
   nowMs?: () => number;
 }
 
@@ -294,6 +320,7 @@ export function createSourceIndexStatusHandler(
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
+            secretLocationCount(store),
           )
           : configuredCorpusStatus(corpus);
         const resolved = withRetrievalEnforcementStatus(corpus, status, availability);
@@ -301,11 +328,18 @@ export function createSourceIndexStatusHandler(
         return resolved;
       });
       const tierClassification = options.tierClassification?.();
+      let tierMigration: SourceIndexTierMigrationStatus | undefined;
+      try {
+        tierMigration = options.tierMigration?.();
+      } catch {
+        tierMigration = undefined;
+      }
       const result: SourceIndexStatusResult = {
         kind: 'source_index_status',
         generated_at: new Date().toISOString(),
         corpora: statuses,
         ...(tierClassification ? { tier_classification: tierClassification } : {}),
+        ...(tierMigration ? { tier_migration: tierMigration } : {}),
         policy: {
           read_only: true,
           raw_source_exposed: false,
@@ -391,12 +425,33 @@ function defaultCorpusDefinitions(): SourceIndexCorpusDefinition[] {
   ];
 }
 
+/**
+ * How many Secrets a lane has located (design section 2.3): counted from the
+ * secret-locations index beside a Private store, read-only, never created.
+ * Location only, and only the count leaves here.
+ */
+function secretLocationCount(store: LocalConnectorStore): number | undefined {
+  if (store.trustDomain !== 'secure_local' || store.dbPath === ':memory:') return undefined;
+  const path = secretLocationsPathForStore(store.dbPath);
+  if (!existsSync(path)) return undefined;
+  let index: SecretLocationsIndex | undefined;
+  try {
+    index = new SecretLocationsIndex({ dbPath: path, readOnly: true });
+    return index.count();
+  } catch {
+    return undefined;
+  } finally {
+    index?.close();
+  }
+}
+
 function connectorStoreStatus(
   corpus: SourceIndexCorpusDefinition,
   status: ConnectorStoreStatus,
   readinessCounts?: Record<string, number>,
   extractionThroughput?: ContentExtractionThroughputSignal,
   servingModelId?: string,
+  secretLocations?: number,
 ): SourceIndexConnectorStoreStatus {
   // Parity is a claim about the SERVING model. With the model known, both
   // embedded counts come from its row (zero when it holds nothing here);
@@ -458,8 +513,11 @@ function connectorStoreStatus(
             pending_classification_items: status.tier.pendingClassificationItems,
             superseded_chunks: status.tier.supersededChunks,
             tier_move_in_progress: status.tier.tierMoveInProgress,
+            ...(status.tier.namesOnlyKeptChunks ? { names_only_kept_chunks: status.tier.namesOnlyKeptChunks } : {}),
           }
         : {}),
+      // Secrets are stored nowhere: this is how many locations the lane keeps.
+      ...(secretLocations !== undefined && secretLocations > 0 ? { secret_locations: secretLocations } : {}),
     },
     ...(status.lastSyncRun
       ? { last_refresh: lastRefreshFromConnectorStoreSync(status.lastSyncRun) }

@@ -183,6 +183,13 @@ export interface OlympusConfig {
      */
     ingestionExclusions?: SourceIngestionExclusions;
     ingestionExclusionsPath?: string;
+    /**
+     * Per embedding model, the owner's ESTIMATES for planning an embedding
+     * job (the tier migration's dry run): USD per million input tokens and
+     * chunks embedded per minute. Never a billing fact; a model with no entry
+     * uses the built-in unverified default, and the plan says which it used.
+     */
+    embeddingPriceEstimates?: Record<string, { usdPerMillionTokens: number; chunksPerMinute?: number }>;
   };
 }
 
@@ -742,6 +749,10 @@ export function configFromPluginConfig(
   if (typeof sourceIndex?.ingestionExclusionsPath === 'string' && sourceIndex.ingestionExclusionsPath.trim()) {
     config.sourceIndex.ingestionExclusionsPath = sourceIndex.ingestionExclusionsPath.trim();
   }
+  const priceEstimates = asRecord(sourceIndex?.embeddingPriceEstimates);
+  if (priceEstimates) {
+    config.sourceIndex.embeddingPriceEstimates = parseEmbeddingPriceEstimates(priceEstimates);
+  }
   const ingestionPolicies = asRecord(sourceIndex?.ingestionPolicies);
   const dropboxPersonal = asRecord(ingestionPolicies?.dropboxPersonal);
   if (dropboxPersonal) {
@@ -764,6 +775,29 @@ export function configFromPluginConfig(
 
   validateConfig(config);
   return config;
+}
+
+function parseEmbeddingPriceEstimates(
+  raw: Record<string, unknown>,
+): NonNullable<OlympusConfig['sourceIndex']['embeddingPriceEstimates']> {
+  const parsed: NonNullable<OlympusConfig['sourceIndex']['embeddingPriceEstimates']> = {};
+  for (const [modelId, value] of Object.entries(raw)) {
+    const entry = asRecord(value);
+    const usd = entry?.usdPerMillionTokens;
+    const perMinute = entry?.chunksPerMinute;
+    if (!modelId.trim() || typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0
+      || (perMinute !== undefined && (typeof perMinute !== 'number' || !Number.isFinite(perMinute) || perMinute <= 0))) {
+      throw new OperationError(
+        'config_error',
+        `sourceIndex.embeddingPriceEstimates.${modelId} must be { usdPerMillionTokens: number >= 0, chunksPerMinute?: number > 0 }.`,
+      );
+    }
+    parsed[modelId.trim()] = {
+      usdPerMillionTokens: usd,
+      ...(typeof perMinute === 'number' ? { chunksPerMinute: perMinute } : {}),
+    };
+  }
+  return parsed;
 }
 
 export function resolveLane(config: OlympusConfig, lane?: unknown): ArgusLane {

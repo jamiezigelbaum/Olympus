@@ -315,6 +315,8 @@ import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '.
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
+import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
+import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -3102,6 +3104,12 @@ export async function main(): Promise<void> {
             }
           : undefined;
       },
+      // The owner's tier migration, content-free: lets the doctor and the
+      // dashboard say "migration in progress" instead of reading its expected
+      // parity lag as a failure.
+      tierMigration: () => tierMigrationStatusSummary(
+        resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath,
+      ),
       // The policy and queue half of the readiness counts, from the shared
       // extraction queue rather than from any source's own index. Absent when
       // the factory is switched off, which leaves the coverage math on the

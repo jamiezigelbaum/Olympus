@@ -1099,6 +1099,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   serve: 'olympus serve',
 };
 
+
 function printPublicLeafCommandHelp(args: string[]): boolean {
   const commandName = v04PublicCliCommandName(args);
   if (!commandName || !PUBLIC_CLI_COMMAND_NAMES.has(commandName)) return false;
@@ -1173,6 +1174,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     `  ${TIER_CLI_USAGE['tier explain']}`,
     `  ${TIER_CLI_USAGE['tier rules']}`,
     `  ${TIER_CLI_USAGE['tier classifier']}`,
+    `  ${TIER_CLI_USAGE['tier migrate']}`,
   ],
 };
 

@@ -33,6 +33,7 @@ import { classifyContentTier, maxTier, type TierDecision } from '../classificati
 import type { TierCopy, TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
   TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
@@ -167,12 +168,18 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           sourceScope: anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope,
         });
         const recorded = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
-        for (const copy of recorded.previousCopies) {
-          const domain = set.domainForCorpus(copy.corpusId);
-          const store = domain ? set.store(domain) : undefined;
-          store?.tombstoneCopy(plan.item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, trustTier: 'S5' });
-        }
-        ledger.removeCopies(identity);
+        // Hidden by that write; tombstoned now or kept for a purge, per the
+        // one Secrets policy (connector-store/secrets-disposition.ts).
+        settleSecretsCopies({
+          ledger,
+          identity: plan.item.identity,
+          copies: recorded.previousCopies,
+          storeFor: (corpusId) => {
+            const domain = set.domainForCorpus(corpusId);
+            return domain ? set.store(domain) : undefined;
+          },
+          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        });
         return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
       }
 

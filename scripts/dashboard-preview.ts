@@ -299,6 +299,61 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
     return view;
   }
+  if (state === 'tier-migration') {
+    // An existing install mid-way through the owner-approved tier migration
+    // (design section 4.6): Dropbox's old all-Private store has handed most
+    // files' names and Personal text to its new Personal store, keeps the
+    // previous copies hidden, holds three Secrets as locations only, and the
+    // Personal store's model is still embedding what moved.
+    const status = emptyStatus();
+    const secure = corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 1_240, 1_900, { withText: 1_200, embedded: 1_200 });
+    const personal = corpus('internal.dropbox.files', 'file', 'internal', 'dropbox', 2_760, 3_100, { withText: 2_700, embedded: 1_900 });
+    Object.assign((secure as { counts: Record<string, number> }).counts, {
+      secret_locations: 3,
+      pending_classification_items: 40,
+      superseded_chunks: 3_100,
+    });
+    status.corpora = [
+      corpus('internal.readwise.library', 'readwise', 'internal', 'readwise', 250, 250, { withText: 250, embedded: 250 }),
+      secure,
+      personal,
+    ];
+    status.tier_migration = {
+      plan_id: 'tm-3f2a9c1d7e5b4a60',
+      state: 'running',
+      in_progress: true,
+      approval_entry_id: 'tier-migration-approval:tm-3f2a9c1d7e5b4a60:8b1e',
+      proposed: 2_763,
+      batches: [{ batch_id: 'tm-3f2a9c1d7e5b4a60-b1', state: 'running', moved: 2_120, secrets: 3, skipped: 4 }],
+      corpora: ['secure_local.dropbox.files', 'internal.dropbox.files'],
+      chunks_to_embed: 3_100,
+      destinations: [{ corpus_id: 'internal.dropbox.files', chunks_to_embed: 3_100 }],
+      names_only_kept_chunks: 0,
+      purged: false,
+    };
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      schedulerStatus: scheduler([
+        schedulerSource('readwise.library', 'internal.readwise.library', 0.4),
+        schedulerSource('dropbox.files', 'secure_local.dropbox.files', 0.3),
+      ]),
+      sovereigntyEngine: engine,
+      connectedHandleRegistry: registry([
+        handle('dropbox.personal', 'dropbox', ['dropbox.files.sync'], ['files.content.read']),
+        handle('readwise.personal', 'readwise', ['readwise.library.sync'], []),
+      ]),
+      apiKeyAvailability: { readwise: true },
+      oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
+      oauthClientSecretAvailability: { google: true },
+      googlePilotClientConfigured: true,
+      oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+      fileSourceScopeStatus: { 'dropbox.files': 'approved' },
+      fileSourceScopeIngestionEnabled: { 'dropbox.files': true },
+      now: NOW,
+    });
+    view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
+    return view;
+  }
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -664,7 +719,7 @@ if (import.meta.main) {
     }
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'models', 'first-install', 'gmail-scope-pending', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
@@ -712,7 +767,7 @@ if (import.meta.main) {
   },
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-  console.log('  states: /models /first-install /gmail-scope-pending /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  states: /models /first-install /gmail-scope-pending /tier-migration /fresh /partial /full /dropbox-initial /dropbox-update');
   console.log('  mail scope picker: /mail-picker (add ?approved for a saved scope)');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');

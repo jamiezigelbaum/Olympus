@@ -971,13 +971,37 @@ function scopeDebtLines(scope: DashboardExcludedSource): string[] {
  */
 function renderSensitivity(source: DashboardSourceCard, basePath?: string): string {
   if (source.tier_composition.length === 0) return '';
+  const tiers = source.tier_classification;
   const rows = source.tier_composition.map((tier) => `
             <tr><td>${escapeHtml(tier.label)}</td><td>${escapeHtml(dashboardCount(tier.indexed_items))}</td><td>${escapeHtml(dashboardCount(tier.content_ready_items))}</td></tr>`).join('');
+  // Secrets are stored nowhere: a location count, never answer-ready.
+  const secretsRow = tiers && tiers.secrets_located > 0
+    ? `
+            <tr><td>Secrets (location only)</td><td>${escapeHtml(dashboardCount(tiers.secrets_located))}</td><td>—</td></tr>`
+    : '';
+  const facts = [
+    ...(tiers && tiers.pending_classification_items > 0
+      ? [`${dashboardCount(tiers.pending_classification_items)} pending classification (kept Private)`]
+      : []),
+    ...(tiers && tiers.superseded_chunks > 0
+      ? [`${dashboardCount(tiers.superseded_chunks)} superseded chunks kept, hidden`]
+      : []),
+    ...(tiers && tiers.names_only_kept_chunks > 0
+      ? [`${dashboardCount(tiers.names_only_kept_chunks)} chunks held in names-only copies until a purge`]
+      : []),
+  ];
+  const factsLine = facts.length > 0 ? `
+        <div class="tiernote">${escapeHtml(facts.join(' · '))}</div>` : '';
+  const migration = tiers?.migration;
+  const migrationLine = migration ? `
+        <div class="tiernote">${escapeHtml(migration.label)}${
+    migration.approval_entry_id ? ` · approved (ledger entry ${escapeHtml(migration.approval_entry_id)})` : ''
+  }</div>` : '';
   return `
         <div class="dsect">Sensitivity</div>
         <table>
-          <tr><th>Tier</th><th>Items</th><th>Answer-ready</th></tr>${rows}
-        </table>
+          <tr><th>Tier</th><th>Items</th><th>Answer-ready</th></tr>${rows}${secretsRow}
+        </table>${factsLine}${migrationLine}
         <div class="tiernote"><a href="${escapeHtml(sensitivityHref(basePath))}">About tiers →</a></div>`;
 }
 

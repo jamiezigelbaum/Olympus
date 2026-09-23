@@ -128,6 +128,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'tier explain',
   'tier rules',
   'tier classifier',
+  'tier migrate',
   'doctor',
   'argus ping',
   'argus list',

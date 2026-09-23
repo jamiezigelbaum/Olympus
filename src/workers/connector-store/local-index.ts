@@ -753,12 +753,35 @@ export interface ConnectorStoreItemCopy {
   vectorAuthorities: ReadonlyArray<ConnectorStoreEmbeddingAuthoritySnapshot>;
 }
 
+/**
+ * One active stored row for the tier migration's dry run: identity, the names
+ * the classifier reads, the stored chunk text, and per-model vector counts.
+ * Never leaves the local process except as content-free counts and codes.
+ */
+export interface ConnectorStoreMigrationItem {
+  itemPk: number;
+  identity: SourceItemIdentity;
+  title?: string;
+  locatorUri?: string;
+  senderLabel?: string;
+  senderId?: string;
+  folderKeys: string[];
+  mimeType?: string;
+  chunks: Array<{ text: string; contentHash: string }>;
+  vectorsByModel: Record<string, number>;
+  fingerprint: string;
+  /** Whether the store's exclusion gate admits the row today. */
+  admitted: boolean;
+}
+
 export interface ConnectorStoreEmbeddingAuthoritySnapshot {
   modelId: string;
   provider: string;
   backend: string;
   dimension: number;
   epochId: string;
+  /** The config hash the authority recorded (informational: matching ignores it). */
+  configHash?: string;
 }
 
 export interface ConnectorStoreItemCopyImportSummary {
@@ -777,6 +800,12 @@ export interface ConnectorStoreTierStatus {
   supersededChunks: number;
   /** Items with a copy here that are mid-move. */
   tierMoveInProgress: number;
+  /**
+   * Chunks still held by copies here that serve names only (a split move
+   * re-layered a whole copy): never searched, served, counted or embedded,
+   * kept until an approved purge strips them. Absent when none.
+   */
+  namesOnlyKeptChunks?: number;
 }
 
 /**
@@ -2712,10 +2741,179 @@ export class LocalConnectorStore {
         backend: parsed.embeddingBackend,
         dimension: parsed.embeddingDimension,
         epochId: parsed.embeddingEpoch,
+        ...(parsed.embeddingConfigHash ? { configHash: parsed.embeddingConfigHash } : {}),
       };
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The identity each model's stored vectors were minted under, for every
+   * model this store records (a valid write-authority row only). The tier
+   * migration (tier-migration.ts) reads it to tell whether a move can copy
+   * vectors or must leave chunks to the destination's own model.
+   */
+  embeddingAuthorities(): ConnectorStoreEmbeddingAuthoritySnapshot[] {
+    const models = (this.db.query('SELECT model_id FROM embedding_models ORDER BY model_id').all() as Array<{ model_id: string }>)
+      .map((row) => row.model_id);
+    return models.flatMap((modelId) => {
+      const snapshot = this.embeddingWriteAuthoritySnapshot(modelId);
+      return snapshot ? [snapshot] : [];
+    });
+  }
+
+  /**
+   * One page of ACTIVE rows with the text the store holds for them, for the
+   * tier migration's dry run (design section 4.6, M0). Read-only: nothing is
+   * written, no provider is asked, and no visibility filter applies (the
+   * migration judges every stored copy against the tier ledger itself).
+   * Vectors are counted per model, never read.
+   */
+  migrationItemsPage(options: { afterItemPk?: number; limit?: number } = {}): {
+    items: ConnectorStoreMigrationItem[];
+    nextAfterItemPk?: number;
+  } {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+    const rows = this.db.query(`
+      SELECT item_pk, family, provider, account_scope, provider_item_id, provider_conversation_id,
+        local_item_id, title, locator_uri, sender_id, sender_label, source_scope_folder_keys_json,
+        mime_type, content_hash
+      FROM items
+      WHERE tombstoned = 0 AND item_pk > ?
+      ORDER BY item_pk
+      LIMIT ?
+    `).all(options.afterItemPk ?? 0, limit) as Array<{
+      item_pk: number;
+      family: string;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+      local_item_id: string;
+      title: string | null;
+      locator_uri: string | null;
+      sender_id: string | null;
+      sender_label: string | null;
+      source_scope_folder_keys_json: string | null;
+      mime_type: string | null;
+      content_hash: string | null;
+    }>;
+    if (rows.length === 0) return { items: [] };
+    const pks = JSON.stringify(rows.map((row) => row.item_pk));
+    const chunksByItem = new Map<number, Array<{ text: string; contentHash: string; inputHash: string | null }>>();
+    for (const chunk of this.db.query(`
+      SELECT item_pk, bounded_text, content_hash, embedding_input_hash FROM chunks
+      WHERE item_pk IN (SELECT value FROM json_each(?))
+      ORDER BY item_pk, chunk_index
+    `).all(pks) as Array<{ item_pk: number; bounded_text: string; content_hash: string; embedding_input_hash: string | null }>) {
+      const list = chunksByItem.get(chunk.item_pk) ?? [];
+      list.push({ text: chunk.bounded_text, contentHash: chunk.content_hash, inputHash: chunk.embedding_input_hash });
+      chunksByItem.set(chunk.item_pk, list);
+    }
+    const vectorsByItem = new Map<number, Record<string, number>>();
+    for (const vector of this.db.query(`
+      SELECT e.item_pk, e.model_id, COUNT(*) AS n
+      FROM chunk_embeddings e JOIN chunks c ON c.chunk_pk = e.chunk_pk
+      WHERE e.item_pk IN (SELECT value FROM json_each(?)) AND e.content_hash = c.embedding_input_hash
+      GROUP BY e.item_pk, e.model_id
+    `).all(pks) as Array<{ item_pk: number; model_id: string; n: number }>) {
+      const counts = vectorsByItem.get(vector.item_pk) ?? {};
+      counts[vector.model_id] = vector.n;
+      vectorsByItem.set(vector.item_pk, counts);
+    }
+    const items = rows.map((row): ConnectorStoreMigrationItem => {
+      const chunks = chunksByItem.get(row.item_pk) ?? [];
+      let folderKeys: string[] = [];
+      try {
+        const parsed = row.source_scope_folder_keys_json ? JSON.parse(row.source_scope_folder_keys_json) as unknown : [];
+        if (Array.isArray(parsed)) folderKeys = parsed.filter((key): key is string => typeof key === 'string');
+      } catch {
+        folderKeys = [];
+      }
+      return {
+        itemPk: row.item_pk,
+        identity: {
+          family: row.family as SourceFamily,
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          localItemId: row.local_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        },
+        ...(row.title ? { title: row.title } : {}),
+        ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
+        ...(row.sender_label ? { senderLabel: row.sender_label } : {}),
+        ...(row.sender_id ? { senderId: row.sender_id } : {}),
+        folderKeys,
+        ...(row.mime_type ? { mimeType: row.mime_type } : {}),
+        chunks: chunks.map((chunk) => ({ text: chunk.text, contentHash: chunk.contentHash })),
+        vectorsByModel: vectorsByItem.get(row.item_pk) ?? {},
+        // The store's own exclusion gate, as it stands: an excluded or
+        // unevaluable row is never moved (its purge is the exclusion tool's).
+        admitted: this.exclusions.evaluateItem({
+          path: row.locator_uri,
+          name: row.title,
+          mimeType: row.mime_type,
+        }).disposition === 'admit',
+        fingerprint: migrationFingerprint(row.content_hash, chunks.map((chunk) => chunk.contentHash)),
+      };
+    });
+    return { items, ...(rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1]!.item_pk } : {}) };
+  }
+
+  /**
+   * The same fingerprint `migrationItemsPage` reports, for one item's ACTIVE
+   * row; undefined when the store holds no active row for it. A migration
+   * compares it with the planned one to tell whether the item changed.
+   */
+  itemMigrationFingerprint(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): string | undefined {
+    const row = this.db.query(`
+      SELECT item_pk, content_hash FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { item_pk: number; content_hash: string | null } | null;
+    if (!row) return undefined;
+    const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index')
+      .all(row.item_pk) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
+    return migrationFingerprint(row.content_hash, hashes);
+  }
+
+  /**
+   * Strip the kept text of a names-only copy (the owner-approved tier
+   * migration purge): its chunks, their FTS rows and every vector go; the item
+   * row (its names) stays. Returns the chunks removed. The caller has checked
+   * the tier ledger says this copy serves names only.
+   */
+  stripCopyContent(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): number {
+    return this.db.transaction((): number => {
+      const row = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
+      `).get(
+        identity.provider,
+        identity.accountScope,
+        normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId,
+      ) as { item_pk: number } | null;
+      if (!row) return 0;
+      const count = (this.db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?').get(row.item_pk) as { n: number }).n;
+      if (count === 0) return 0;
+      this.db.query('DELETE FROM chunk_embeddings WHERE item_pk = ?').run(row.item_pk);
+      this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+      this.refreshFtsForItem(row.item_pk);
+      return count;
+    })();
   }
 
   /**
@@ -7953,19 +8151,25 @@ export class LocalConnectorStore {
       reactions_json: string | null;
     } | null;
     if (!row) return undefined;
-    // Never serve a superseded or staged copy. A metadata-layer copy has no
-    // chunks, so serving it can only ever hand over names.
-    if (!this.copyServable({
+    // Never serve a superseded or staged copy. A copy that serves only the
+    // names hands over names only: it may still HOLD chunks (a split move
+    // re-layers a whole copy to `metadata` and keeps its text and vectors,
+    // hidden), and those chunks belong to the more private content tier.
+    const identity = {
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-    })) {
+    };
+    if (!this.copyServable(identity)) {
       return undefined;
     }
-    const chunkRows = this.db.query(
-      'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
-    ).all(row.item_pk) as Array<{ bounded_text: string }>;
+    const servesContent = this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    const chunkRows = servesContent
+      ? this.db.query(
+        'SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+      ).all(row.item_pk) as Array<{ bounded_text: string }>
+      : [];
     const { chunks, truncated } = selectEvidencePassages(
       chunkRows.map((chunk) => chunk.bounded_text),
       maxChars,
@@ -8165,6 +8369,7 @@ export class LocalConnectorStore {
               `).get(JSON.stringify(tier.hidden)) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
+          ...namesOnlyKept(this.db, tier.metadataLayer),
         }
       : undefined;
     // "Last" means most-recently-inserted. started_at has only millisecond
@@ -9817,6 +10022,25 @@ export function tierRowVisible(
   if (!copies || copies.length === 0) return true;
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current');
   return copyServingLayer(here, layer) !== undefined;
+}
+
+/** Chunks held by names-only copies, as a status field present only when non-zero. */
+function namesOnlyKept(db: Database, itemPks: readonly number[]): { namesOnlyKeptChunks?: number } {
+  if (itemPks.length === 0) return {};
+  const n = (db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))')
+    .get(JSON.stringify(itemPks)) as { n: number }).n;
+  return n > 0 ? { namesOnlyKeptChunks: n } : {};
+}
+
+/** Content-free fingerprint of an item's stored text: its content hash and its chunks' hashes. */
+function migrationFingerprint(contentHash: string | null, chunkHashes: readonly string[]): string {
+  return createHash('sha256')
+    .update(contentHash ?? '')
+    .update('\u0000')
+    .update(String(chunkHashes.length))
+    .update('\u0000')
+    .update(chunkHashes.join('\u0000'))
+    .digest('hex');
 }
 
 /** The text the store would chunk for an item, exactly as the store reads it. */

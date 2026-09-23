@@ -50,6 +50,7 @@ import {
   V0_4_PUBLIC_SOURCE_CAPABILITIES,
   publicSourceDoctorLanes,
 } from './public-source-capabilities.ts';
+import { createSourceCorpusRegistry } from './source-corpus-registry.ts';
 
 export interface DoctorCheck {
   name: string;
@@ -100,6 +101,15 @@ const INGESTION_STUCK_WARNING_HOURS = 24;
 const INGESTION_STUCK_ERROR_HOURS = 72;
 const INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 const CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
+
+/**
+ * Per-tier stores created on first need (design per-item-four-tier-
+ * classification.md, section 3.2): a source's Public or Personal store, or a
+ * lazily created Private one. They belong to their source's lane, so they are
+ * connected exactly when it is; one that does not exist yet is skipped.
+ */
+const ON_DEMAND_TIER_CORPORA = createSourceCorpusRegistry().list().filter((corpus) => corpus.createdOnDemand === true);
+const ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => corpus.corpusId));
 
 export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   // Every check below reads the environment the worker actually runs with, not
@@ -605,10 +615,13 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const summaries: string[] = [];
   const informational: string[] = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
+  const migration = approvedTierMigrationInProgress(status.tier_migration);
 
   for (const entry of corpora) {
     const corpus = asRecord(entry);
     const corpusId = typeof corpus.corpus_id === 'string' ? corpus.corpus_id : 'unknown_corpus';
+    // A per-tier store its set has not created yet: nothing to judge.
+    if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true) continue;
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
       continue;
@@ -641,7 +654,21 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
           : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
-      problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      // An owner-approved tier migration that is moving hands chunks to a
+      // destination store whose own model embeds them afterwards. Up to the
+      // plan's chunk count for THAT store, that lag is the approved work, not
+      // a parity failure; anything beyond it, or in any other store, is.
+      const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
+      const unexcused = embeddingLag - approvedLag;
+      if (approvedLag > 0 && unexcused <= chunks * EMBEDDING_LAG_RATIO) {
+        informational.push(`${corpusId}: migration in progress (${migration!.state}, approved, ledger entry `
+          + `${migration!.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks, ${approvedLag} of them approved`);
+      } else if (approvedLag > 0) {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10% beyond the ${approvedLag} `
+          + `the migration approved, ledger entry ${migration!.approvalEntryId})`);
+      } else {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      }
     }
   }
 
@@ -663,6 +690,29 @@ async function sourceIndexStatusCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     ok: true,
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? '' : 's'}.${summary}${info}`,
   };
+}
+
+/**
+ * The worker's tier-migration summary, when an owner-APPROVED plan is moving
+ * (running, or stopped mid-batch) and names its approval entry: the stores it
+ * hands chunks to, with how many. Anything else — no plan, a plan only planned
+ * or approved, a finished one — returns undefined, so parity is judged as usual.
+ */
+function approvedTierMigrationInProgress(
+  value: unknown,
+): { state: string; approvalEntryId: string; destinations: Map<string, number> } | undefined {
+  const migration = asRecord(value);
+  if (migration.in_progress !== true) return undefined;
+  const state = typeof migration.state === 'string' ? migration.state : '';
+  if (state !== 'running' && state !== 'stopped') return undefined;
+  const approvalEntryId = typeof migration.approval_entry_id === 'string' ? migration.approval_entry_id : undefined;
+  if (!approvalEntryId) return undefined;
+  const destinations = new Map<string, number>();
+  for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
+    const destination = asRecord(entry);
+    if (typeof destination.corpus_id === 'string') destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+  }
+  return { state, approvalEntryId, destinations };
 }
 
 async function workerCredentialLanesCheck(deps: DoctorDeps): Promise<DoctorCheck> {
@@ -1248,13 +1298,19 @@ function connectedLaneEnvFlagProblem(
 function connectedSourceCorpusIds(deps: DoctorDeps): Set<string> {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const corpusIds = new Set<string>();
+  const sourceIds = new Set<string>();
   for (const handle of registry.handles) {
     if (handle.backendState?.status === 'reauth_required') continue;
     for (const lane of CONNECTED_SOURCE_LANES) {
       if (lane.provider === handle.provider && handle.allowedCapabilities.includes(lane.capability)) {
         corpusIds.add(lane.corpusId);
+        sourceIds.add(lane.sourceId);
       }
     }
+  }
+  // A connected source's per-tier stores are connected with it.
+  for (const corpus of ON_DEMAND_TIER_CORPORA) {
+    if (sourceIds.has(corpus.sourceId)) corpusIds.add(corpus.corpusId);
   }
   return corpusIds;
 }

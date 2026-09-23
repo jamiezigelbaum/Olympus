@@ -64,10 +64,19 @@ export class TierSnifferStore {
   readonly dbPath: string;
   private readonly db: Database;
   private readonly now: () => Date;
+  private readonly readOnly: boolean;
 
-  constructor(options: { dbPath: string; now?: () => Date }) {
+  constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
+    if (options.readOnly === true) {
+      // A reader (the status backlog): never creates, migrates or writes.
+      this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
     const onDisk = this.dbPath !== ':memory:';
     if (onDisk) mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     const previousUmask = onDisk ? process.umask(0o077) : undefined;
@@ -88,9 +97,9 @@ export class TierSnifferStore {
 
   close(): void {
     try {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
     } finally {
-      if (this.dbPath !== ':memory:') restrictFiles(this.dbPath);
+      if (this.dbPath !== ':memory:' && !this.readOnly) restrictFiles(this.dbPath);
     }
   }
 

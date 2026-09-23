@@ -2553,6 +2553,10 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   if (typeof sourceIndex?.ingestionExclusionsPath === "string" && sourceIndex.ingestionExclusionsPath.trim()) {
     config.sourceIndex.ingestionExclusionsPath = sourceIndex.ingestionExclusionsPath.trim();
   }
+  const priceEstimates = asRecord4(sourceIndex?.embeddingPriceEstimates);
+  if (priceEstimates) {
+    config.sourceIndex.embeddingPriceEstimates = parseEmbeddingPriceEstimates(priceEstimates);
+  }
   const ingestionPolicies = asRecord4(sourceIndex?.ingestionPolicies);
   const dropboxPersonal = asRecord4(ingestionPolicies?.dropboxPersonal);
   if (dropboxPersonal) {
@@ -2568,6 +2572,22 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   }
   validateConfig(config);
   return config;
+}
+function parseEmbeddingPriceEstimates(raw) {
+  const parsed = {};
+  for (const [modelId, value] of Object.entries(raw)) {
+    const entry = asRecord4(value);
+    const usd = entry?.usdPerMillionTokens;
+    const perMinute = entry?.chunksPerMinute;
+    if (!modelId.trim() || typeof usd !== "number" || !Number.isFinite(usd) || usd < 0 || perMinute !== undefined && (typeof perMinute !== "number" || !Number.isFinite(perMinute) || perMinute <= 0)) {
+      throw new OperationError("config_error", `sourceIndex.embeddingPriceEstimates.${modelId} must be { usdPerMillionTokens: number >= 0, chunksPerMinute?: number > 0 }.`);
+    }
+    parsed[modelId.trim()] = {
+      usdPerMillionTokens: usd,
+      ...typeof perMinute === "number" ? { chunksPerMinute: perMinute } : {}
+    };
+  }
+  return parsed;
 }
 function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));
@@ -8155,7 +8175,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
-
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -9032,6 +9051,48 @@ var init_telegram_messages = __esm(() => {
   init_store_sync();
 });
 
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS2;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
@@ -9043,6 +9104,7 @@ var init_status = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_operation_error();
+  init_secret_locations();
 });
 
 // src/core/public-source-capabilities.ts
@@ -13793,6 +13855,7 @@ init_source_ingestion_ledger();
 init_source_dashboard();
 init_ingestion_throughput();
 init_public_source_capabilities();
+init_source_corpus_registry();
 var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.";
 var EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.";
 var SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.";
@@ -13806,6 +13869,8 @@ var INGESTION_STUCK_WARNING_HOURS = 24;
 var INGESTION_STUCK_ERROR_HOURS = 72;
 var INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10;
 var CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
+var ON_DEMAND_TIER_CORPORA = createSourceCorpusRegistry().list().filter((corpus) => corpus.createdOnDemand === true);
+var ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => corpus.corpusId));
 async function runDoctor(input) {
   const inputEnv = input.env;
   const deps = inputEnv === undefined ? input : doctorDepsWithLayeredEnvironment(input, inputEnv);
@@ -14170,9 +14235,12 @@ async function sourceIndexStatusCheck(deps) {
   const summaries = [];
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
+  const migration = approvedTierMigrationInProgress(status.tier_migration);
   for (const entry of corpora) {
     const corpus = asRecord15(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
+    if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true)
+      continue;
     if (!connectedCorpusIds.has(corpusId)) {
       informational.push(`${corpusId} not connected — optional`);
       continue;
@@ -14195,7 +14263,15 @@ async function sourceIndexStatusCheck(deps) {
       summaries.push(embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
-      problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      const approvedLag = Math.min(embeddingLag, migration?.destinations.get(corpusId) ?? 0);
+      const unexcused = embeddingLag - approvedLag;
+      if (approvedLag > 0 && unexcused <= chunks * EMBEDDING_LAG_RATIO) {
+        informational.push(`${corpusId}: migration in progress (${migration.state}, approved, ledger entry ` + `${migration.approvalEntryId}); embedding lag ${embeddingLag} of ${chunks} chunks, ${approvedLag} of them approved`);
+      } else if (approvedLag > 0) {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10% beyond the ${approvedLag} ` + `the migration approved, ledger entry ${migration.approvalEntryId})`);
+      } else {
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+      }
     }
   }
   const summary = summaries.length > 0 ? ` ${summaries.join("; ")}.` : "";
@@ -14216,6 +14292,24 @@ async function sourceIndexStatusCheck(deps) {
     ok: true,
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? "" : "s"}.${summary}${info}`
   };
+}
+function approvedTierMigrationInProgress(value) {
+  const migration = asRecord15(value);
+  if (migration.in_progress !== true)
+    return;
+  const state = typeof migration.state === "string" ? migration.state : "";
+  if (state !== "running" && state !== "stopped")
+    return;
+  const approvalEntryId = typeof migration.approval_entry_id === "string" ? migration.approval_entry_id : undefined;
+  if (!approvalEntryId)
+    return;
+  const destinations = new Map;
+  for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
+    const destination = asRecord15(entry);
+    if (typeof destination.corpus_id === "string")
+      destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+  }
+  return { state, approvalEntryId, destinations };
 }
 async function workerCredentialLanesCheck(deps) {
   const name = "worker_credential_lanes";
@@ -14737,14 +14831,20 @@ function connectedLaneEnvFlagProblem(env, envFlag, defaultOffWhenAbsent) {
 function connectedSourceCorpusIds(deps) {
   const registry = deps.handleRegistry ?? readRegistrySafely(deps);
   const corpusIds = new Set;
+  const sourceIds = new Set;
   for (const handle of registry.handles) {
     if (handle.backendState?.status === "reauth_required")
       continue;
     for (const lane of CONNECTED_SOURCE_LANES) {
       if (lane.provider === handle.provider && handle.allowedCapabilities.includes(lane.capability)) {
         corpusIds.add(lane.corpusId);
+        sourceIds.add(lane.sourceId);
       }
     }
+  }
+  for (const corpus of ON_DEMAND_TIER_CORPORA) {
+    if (sourceIds.has(corpus.sourceId))
+      corpusIds.add(corpus.corpusId);
   }
   return corpusIds;
 }

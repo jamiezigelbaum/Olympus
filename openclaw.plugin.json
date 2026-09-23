@@ -455,6 +455,27 @@
             "type": "string",
             "description": "Path to a JSON file holding the ingestion exclusions. Defaults to ~/.olympus/sources/ingestion-exclusions.json."
           },
+          "embeddingPriceEstimates": {
+            "type": "object",
+            "description": "Per embedding model id, the owner's estimates for planning an embedding job (the tier migration dry run): USD per million input tokens and chunks embedded per minute. Estimates only; a model with no entry uses a built-in unverified default.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "usdPerMillionTokens"
+              ],
+              "properties": {
+                "usdPerMillionTokens": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "chunksPerMinute": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              }
+            }
+          },
           "ingestionPolicies": {
             "type": "object",
             "additionalProperties": false,

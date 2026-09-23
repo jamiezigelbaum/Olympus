@@ -52,7 +52,7 @@ import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classi
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
-import { tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
 import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
 import {
@@ -572,5 +572,27 @@ describe('pace, daily cap and the visible backlog', () => {
       }),
     }).status();
     expect(status.tier_classification).toMatchObject({ checking_items: 2, remaining_questions: 3 });
+  });
+
+  test('the backlog reads sniffer queues read-only and never creates one beside a ledger that has none', () => {
+    const dir = workspace();
+    const storePath = join(dir, 'store.sqlite');
+    const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(storePath) });
+    cleanups.push(() => ledger.close());
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const service = new TierSnifferService({
+      installed,
+      lane: LANE,
+      model: answering(() => ({ tier: 'private', category: 'other', confidence: 1 })),
+      stores: () => [{ dbPath: storePath }],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+    });
+    cleanups.push(() => service.stop());
+    const snifferPath = tierSnifferPathForLedger(tierLedgerPathForStore(storePath));
+    expect(existsSync(snifferPath)).toBe(false);
+    expect(service.backlog()).toMatchObject({ checkingItems: 0, remainingQuestions: 0 });
+    expect(service.backlog()).toMatchObject({ checkingItems: 0 });
+    expect(existsSync(snifferPath)).toBe(false);
   });
 });
