@@ -2,6 +2,10 @@ import {
   JsonCredentialOAuth2StateStore,
   type CredentialOAuth2HandleState,
 } from '../src/workers/credential-broker/index.ts';
+import {
+  clearConnectedHandleReauthRequired,
+  handleRegistryPathFromEnv,
+} from '../src/workers/credential-broker/connected-handles.ts';
 
 const handle = process.env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE?.trim()
   || 'x.bookmarks.personal';
@@ -34,11 +38,22 @@ const state: CredentialOAuth2HandleState = {
 const store = new JsonCredentialOAuth2StateStore(statePath);
 await store.save(handle, state);
 
+// The broker refuses a registry-marked handle regardless of the state store,
+// so a reseed must also clear the mark or the handle stays dead.
+const registryPath = handleRegistryPathFromEnv(process.env, true)!;
+let registryReauthMarkCleared: boolean;
+try {
+  registryReauthMarkCleared = clearConnectedHandleReauthRequired(handle, registryPath);
+} catch (error) {
+  fail(`State saved, but clearing the registry reauth mark failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+}
+
 console.log(JSON.stringify({
   ok: true,
   handle,
   provider: 'x',
   status: 'available',
+  registry_reauth_mark_cleared: registryReauthMarkCleared,
   scopes,
   provider_account_id_present: !!providerAccountId,
   raw_credential_exposed: false,
