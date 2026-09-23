@@ -19,6 +19,7 @@
 //   scorer seam below is where a local-LLM scorer plugs in later.
 
 import { scanDropboxContentPolicyText } from '../dropbox-files/content-policy.ts';
+import { senderMatchesRule } from '../../core/sender-rules.ts';
 import {
   matchSensitivityMap,
   type SensitivityMap,
@@ -98,7 +99,11 @@ export function classifyItemTier(
   const senderLower = (input.sender ?? '').toLowerCase();
   for (const pattern of options.sensitiveSenderPatterns ?? []) {
     const needle = pattern.trim().toLowerCase();
-    if (needle && senderLower.includes(needle)) {
+    // A raise, so it errs wide: the long-standing substring match stays, and
+    // an `@domain` rule additionally covers every subdomain on a label
+    // boundary (`@therapist.example` → `mail.therapist.example`, never
+    // `evil-therapist.example`).
+    if (needle && (senderLower.includes(needle) || (needle.startsWith('@') && senderMatchesRule(input.sender, needle)))) {
       return {
         tier: 'S4',
         trustDomain: 'secure_local',

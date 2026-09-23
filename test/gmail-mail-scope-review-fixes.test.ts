@@ -36,6 +36,9 @@ import {
 } from '../src/workers/google-connectors/gmail-scope-browser.ts';
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { gmailConnectorScopeFromApproval } from '../src/workers/source-scope-runtime.ts';
+import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
+import { senderMatchesRule } from '../src/core/sender-rules.ts';
+import { classifyItemTier } from '../src/workers/classification/engine.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const NOW = new Date('2026-09-23T12:00:00.000Z');
@@ -176,11 +179,11 @@ describe('no existing embeddings are thrown away by a scope', () => {
 });
 
 describe('a dormant mailbox is not re-read forever', () => {
-  test('a traversal with nothing newer than the cutoff completes on the cutoff; the next pass fetches nothing', async () => {
+  test('a traversal with nothing newer than the cutoff completes with a watermark; the next pass fetches nothing', async () => {
     const cutoffMs = Date.parse('2024-09-23T00:00:00.000Z');
     const client = fakeClient([message('old-1', cutoffMs - 10 * DAY), message('old-2', cutoffMs - 20 * DAY)]);
     const connector = () => new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: { contentAfterMs: cutoffMs },
+      apiClient: client, account: 'personal', env: {}, scope: { contentAfterMs: cutoffMs }, now: () => NOW.getTime(),
     });
     const contentLeg = await collect(connector().listItems({ limit: 50 }));
     expect(contentLeg.items).toHaveLength(0);
@@ -190,7 +193,8 @@ describe('a dormant mailbox is not re-read forever', () => {
     const gets = client.formats.length;
     const second = await collect(connector().listItems({ limit: 50, cursor: metadataLeg.cursor! }));
     expect(second.items).toHaveLength(0);
-    expect(client.queries.at(-1)).toBe(`after:${cutoffMs / 1_000 - 1}`);
+    // Completed on the traversal's own start less a day (never the whole older mailbox).
+    expect(client.queries.at(-1)).toBe(`after:${Math.floor((NOW.getTime() - DAY) / 1_000)}`);
     const third = await collect(connector().listItems({ limit: 50, cursor: second.cursor! }));
     expect(third.items).toHaveLength(0);
     expect(client.formats.length).toBe(gets);
@@ -284,6 +288,114 @@ describe('saves and cutoffs', () => {
     expect(mailScopeContentAfter('6m', new Date('2026-08-31T15:00:00.000Z'))).toBe('2026-02-28T00:00:00.000Z');
     expect(mailScopeContentAfter('2y', new Date('2026-02-28T15:00:00.000Z'))).toBe('2024-02-28T00:00:00.000Z');
     expect(mailScopeContentAfter('1y', new Date('2028-02-29T15:00:00.000Z'))).toBe('2027-02-28T00:00:00.000Z');
+  });
+});
+
+describe('re-review at 537f909b', () => {
+  test('a held message with a future Date header cannot stop new mail from being read', async () => {
+    const dir = tempDir();
+    const stores = fileStores(dir);
+    const spam: GmailMessage = {
+      ...message('spam', NOW.getTime() - 5 * DAY),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [
+          { name: 'Subject', value: 'From the future' },
+          { name: 'From', value: 'Spam <spam@example.com>' },
+          { name: 'Date', value: new Date('2036-01-01T00:00:00.000Z').toUTCString() },
+        ],
+        body: { data: Buffer.from('Body of spam.').toString('base64url') },
+      },
+    };
+    const mailbox = [spam];
+    const client = fakeClient(mailbox);
+    const internal = recordingProvider('cloud');
+    const secure = recordingProvider('local');
+    // Held before the scope was approved, stored with its 2036 Date header.
+    await laneFor(stores, client, { internal, secure }).pull({ max_items: 50 });
+    expect(stores.internalStore.itemStoredContent(identity('spam'))).toMatchObject({ chunkCount: 1 });
+
+    let clock = NOW.getTime();
+    const scoped = createGmailConnectorStoreSyncHandler({
+      ...stores, account: 'personal', apiClient: client, env: {}, now: () => clock,
+      internalEmbeddingProvider: internal, secureEmbeddingProvider: secure,
+      scope: { contentAfterMs: NOW.getTime() - 2 * 365 * DAY },
+      scopeApproval: { generation: 'g'.repeat(64), revision: 'rev-1' },
+    });
+    const contentLeg = await scoped.pull({ max_items: 50 });
+    const metadataLeg = await scoped.pull({ max_items: 50, checkpoint: contentLeg.checkpoint! });
+    // The completed traversal's bound sits at its own start less a day, never at 2036.
+    const bound = Number(/after:(\d+)/.exec(client.queries.at(-1) ?? '')?.[1] ?? '0');
+    expect(bound * 1_000).toBeLessThanOrEqual(clock);
+
+    clock += 3_600_000;
+    mailbox.push(message('fresh', clock - 60_000));
+    await scoped.pull({ max_items: 50, checkpoint: metadataLeg.checkpoint! });
+    const next = Number(/after:(\d+)/.exec(client.queries.at(-1) ?? '')?.[1] ?? '0');
+    expect(next * 1_000).toBeLessThan(clock);
+    expect(stores.internalStore.itemStoredContent(identity('fresh'))).toMatchObject({ chunkCount: 1 });
+  });
+
+  test('watermarks are capped at the clock', () => {
+    expect(promotedWatermark({ highWaterMs: Date.parse('2036-01-01T00:00:00Z'), nowMs: NOW.getTime() })).toBe(NOW.getTime());
+    expect(promotedWatermark({ floorMs: NOW.getTime() - DAY, cutoffMs: NOW.getTime() - 400 * DAY, nowMs: NOW.getTime() }))
+      .toBe(NOW.getTime() - DAY);
+    expect(promotedWatermark({ nowMs: NOW.getTime() })).toBeUndefined();
+  });
+
+  test('an @domain rule covers subdomains on a label boundary', () => {
+    expect(senderMatchesRule('Appointments <appointments@mail.therapist.example>', '@therapist.example')).toBe(true);
+    expect(senderMatchesRule('dr@therapist.example', '@therapist.example')).toBe(true);
+    expect(senderMatchesRule('x@evil-therapist.example', '@therapist.example')).toBe(false);
+    expect(senderMatchesRule('x@therapist.example.evil.com', '@therapist.example')).toBe(false);
+    expect(senderMatchesRule('Dr <DR@Therapist.Example>', 'dr@therapist.example')).toBe(true);
+    expect(senderMatchesRule('evildr@therapist.example', 'dr@therapist.example')).toBe(false);
+  });
+
+  test('"always Private" @domain raises subdomain senders and not look-alike domains', () => {
+    const classify = (sender: string) => classifyItemTier({ sender, subject: 'Hello', text: 'See you Tuesday.' }, {
+      sensitiveSenderPatterns: ['@therapist.example'],
+    });
+    expect(classify('Appointments <appointments@mail.therapist.example>')).toMatchObject({
+      tier: 'S4', trustDomain: 'secure_local', signals: ['sensitive_sender_override'],
+    });
+    expect(classify('x@evil-therapist.example').signals).not.toContain('sensitive_sender_override');
+  });
+
+  test('"always Private" subdomain mail goes to the secure store, never the cloud embedder', async () => {
+    const dir = tempDir();
+    const stores = fileStores(dir);
+    const sub: GmailMessage = {
+      ...message('sub', NOW.getTime() - DAY),
+      payload: {
+        mimeType: 'text/plain',
+        headers: [{ name: 'Subject', value: 'Appointment' }, { name: 'From', value: 'Appointments <appointments@mail.therapist.example>' }],
+        body: { data: Buffer.from('Body of sub.').toString('base64url') },
+      },
+    };
+    const cloudInputs: string[] = [];
+    await laneFor(stores, fakeClient([sub]), {
+      scope: gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@therapist.example'] }) }),
+      internal: recordingProvider('cloud', cloudInputs), secure: recordingProvider('local'),
+    }).pull({ max_items: 50 });
+    expect(stores.secureStore.itemStoredContent(identity('sub'))).toBeDefined();
+    expect(stores.internalStore.itemStoredContent(identity('sub'))).toBeUndefined();
+    expect(cloudInputs.join('\n')).not.toContain('Body of sub');
+  });
+
+  test('the skip list is re-checked after the fetch with the same domain semantics', async () => {
+    const withFrom = (id: string, from: string): GmailMessage => ({
+      ...message(id, NOW.getTime() - DAY),
+      payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: id }, { name: 'From', value: from }], body: { data: Buffer.from(`Body of ${id}.`).toString('base64url') } },
+    });
+    const client = fakeClient([
+      withFrom('sub', 'news@mail.shop.example'),
+      withFrom('lookalike', 'news@notshop.example'),
+    ]);
+    const page = await collect(new GoogleGmailSourceConnector({
+      apiClient: client, account: 'personal', env: {}, scope: { skipSenders: ['@shop.example'] },
+    }).listItems({ limit: 50 }));
+    expect(page.items.map((item) => item.identity.providerItemId)).toEqual(['lookalike']);
   });
 });
 
