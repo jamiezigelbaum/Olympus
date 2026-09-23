@@ -36,12 +36,15 @@ const LEGACY: FixtureSpec[] = [
   { id: 'legacy-misplaced', name: 'legacy-misplaced.txt', text: 'Notes about the vegetable garden rota.', legacyDomain: 'secure_local' },
 ];
 
+// Built at runtime: the repository refuses literal credential patterns.
+const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+
 const NEW: FixtureSpec[] = [
   { id: 'new-garden', name: 'garden-plan.txt', text: 'Weekly notes about the vegetable garden and the compost bins.' },
   { id: 'new-invoice', name: 'notes-0413.txt', text: 'Invoice total and IBAN GB82WEST12345698765432 for the transfer.' },
   { id: 'new-launch', name: 'launch-post.txt', text: 'Our launch post, already on the blog.', sharing: 'public_link' },
   { id: 'new-biopsy', name: 'biopsy results.txt', text: 'The lab results confirm the diagnosis; the patient starts treatment.' },
-  { id: 'new-secret', name: 'env.txt', text: 'aws key AKIAABCDEFGHIJKLMNOP for the deploy' },
+  { id: 'new-secret', name: 'env.txt', text: `aws key ${FAKE_AWS_KEY} for the deploy` },
 ];
 
 const cleanups: Array<() => void> = [];

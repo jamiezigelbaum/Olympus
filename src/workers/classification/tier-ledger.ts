@@ -21,7 +21,7 @@
 // sender, text or excerpt. The file is created owner-only (0600).
 
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
@@ -171,11 +171,16 @@ export class TierLedger {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
     const onDisk = this.dbPath !== ':memory:';
-    if (onDisk) mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
-    // Owner-only from the first byte: the umask covers the database and the
-    // -wal/-shm files SQLite creates later; the chmod below repairs any file
-    // left group- or world-readable by a crash before an earlier chmod.
-    const previousUmask = onDisk ? process.umask(0o077) : undefined;
+    if (onDisk) {
+      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+      // Owner-only from the first byte, with an explicit file mode rather than
+      // a process-wide umask (which would race every other file this process
+      // creates meanwhile). SQLite gives its -wal/-shm sidecars the database
+      // file's permissions; the chmod below repairs any file left readable by
+      // an older build or a crash.
+      if (!existsSync(this.dbPath)) closeSync(openSync(this.dbPath, 'a', 0o600));
+      restrictLedgerFiles(this.dbPath);
+    }
     let db: Database | undefined;
     try {
       db = new Database(this.dbPath, { create: true });
@@ -185,8 +190,6 @@ export class TierLedger {
     } catch (error) {
       if (db) closeSqliteStore(db);
       throw error;
-    } finally {
-      if (previousUmask !== undefined) process.umask(previousUmask);
     }
     this.db = db;
   }

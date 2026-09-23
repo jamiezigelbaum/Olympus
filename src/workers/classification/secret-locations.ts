@@ -18,10 +18,11 @@
 
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 
 export const SECRET_LOCATIONS_SQLITE_STORE_ID = 'olympus_secret_locations';
@@ -79,21 +80,27 @@ export class SecretLocationsIndex {
       this.db = new Database(this.dbPath, { readonly: true, create: false });
       return;
     }
-    const fresh = this.dbPath !== ':memory:' && !existsSync(this.dbPath);
-    if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true });
+    const onDisk = this.dbPath !== ':memory:';
+    if (onDisk) {
+      mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+      // Owner-only from the first byte, with an explicit file mode rather than
+      // a process-wide umask. SQLite gives its -wal and -shm sidecars the
+      // database file's permissions.
+      if (!existsSync(this.dbPath)) closeSync(openSync(this.dbPath, 'a', 0o600));
+      chmodSync(this.dbPath, 0o600);
+    }
     this.db = new Database(this.dbPath, { create: true });
     try {
       this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
-      if (fresh) chmodSync(this.dbPath, 0o600);
     } catch (error) {
-      this.db.close();
+      closeSqliteStore(this.db);
       throw error;
     }
   }
 
   close(): void {
-    this.db.close();
+    closeSqliteStore(this.db);
   }
 
   /** Record (or refresh) where a Secret lives. Returns false when nothing changed. */
