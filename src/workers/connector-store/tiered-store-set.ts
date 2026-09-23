@@ -26,6 +26,17 @@
 //   (hidden first on a raise) and never moved by a sync; tier-move.ts is the
 //   move primitive.
 //
+// Phase P1c adds, each declared by the lane and source-neutral:
+// - `contentArrivesLater`: a lane whose text a later reader supplies (the
+//   extraction factory) routes a new item's names at listing and lands its
+//   content by the content tier decided from that text (tiered-extraction.ts,
+//   file-extraction/tiered-store-sink.ts);
+// - `laneFloor`: a lane whose items never rest below a domain unless the
+//   OWNER lifts it (a per-item override or an owner rule of a named kind);
+// - `restingTier`: the tier a routed copy rests at in a leg;
+// - legs, the secure one included, created on first need
+//   (`createTieredLaneSet`, `createExistingStoreTierLane`).
+//
 // Cursor safety: in shared-traversal mode the set's resume point is written to
 // the set ledger only after every leg committed.
 //
