@@ -1771,7 +1771,7 @@ export async function main(): Promise<void> {
   ) => void = () => {
     throw new Error('A tier store opened before the source runtime finished wiring its stores.');
   };
-  const tierSecretLocations = (secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
+  const openTierSecretLocations = (secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
     try {
       return new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secureDbPath) });
     } catch (error) {
@@ -1783,12 +1783,15 @@ export async function main(): Promise<void> {
   // WhatsApp) registers its ledger and its on-demand stores here.
   const adoptTierLane = (input: {
     ledger: TierLedger;
+    /** The lane's Private corpus: its Secrets are located only when it was searched. */
+    secureCorpusId: string;
     corpusIds: readonly string[];
     onDemand: readonly OnDemandTierStore[];
     secrets?: SecretLocationsIndex;
   }): void => {
     tierLanes.push({
       ledger: input.ledger,
+      secureCorpusId: input.secureCorpusId,
       corpusIds: new Set(input.corpusIds),
       onDemand: [...input.onDemand],
       ...(input.secrets ? { secrets: input.secrets } : {}),
@@ -1875,6 +1878,7 @@ export async function main(): Promise<void> {
     const newStores = Object.values(lane.newStores).filter((store): store is OnDemandTierStore => store !== undefined);
     adoptTierLane({
       ledger: lane.ledger,
+      secureCorpusId: lane.set.legSpec('secure_local')!.corpusId,
       corpusIds: [input.store.corpusId, ...newStores.map((store) => store.corpusId)],
       onDemand: newStores,
       ...(input.secrets ? { secrets: input.secrets } : {}),
@@ -1887,7 +1891,7 @@ export async function main(): Promise<void> {
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
     tierSetFor: (store) => {
-      const secrets = tierSecretLocations(
+      const secrets = openTierSecretLocations(
         defaultReadwiseSecureConnectorStoreDbPath(process.env),
         READWISE_SECURE_LIBRARY_CORPUS_ID,
       );
@@ -1913,7 +1917,7 @@ export async function main(): Promise<void> {
     ...(sourceIndexAccount ? { account: sourceIndexAccount } : {}),
     env: process.env,
     tierSetFor: (store) => {
-      const secrets = tierSecretLocations(
+      const secrets = openTierSecretLocations(
         defaultXBookmarksSecureConnectorStoreDbPath(process.env),
         X_BOOKMARKS_SECURE_CORPUS_ID,
       );
@@ -2040,7 +2044,7 @@ export async function main(): Promise<void> {
   // its text to the store its content tier decides once extraction reads it.
   // The Personal and Public stores are created on first need.
   const dropboxSecretLocations = dropboxConnectorStore
-    ? tierSecretLocations(dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+    ? openTierSecretLocations(dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
     : undefined;
   const dropboxTierLane = dropboxConnectorStore
     ? createDropboxTierLane({
@@ -2058,6 +2062,7 @@ export async function main(): Promise<void> {
   if (dropboxTierLane && dropboxConnectorStore) {
     adoptTierLane({
       ledger: dropboxTierLane.ledger,
+      secureCorpusId: dropboxConnectorStore.corpusId,
       corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
       onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
       ...(dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}),
@@ -2099,7 +2104,7 @@ export async function main(): Promise<void> {
   // loading is phase P2, so none does yet), and then only a message its own
   // text keeps Personal goes to the Personal store.
   const whatsappSecretLocations = whatsappConnectorStore
-    ? tierSecretLocations(whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
+    ? openTierSecretLocations(whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
     : undefined;
   const whatsappTierSet = whatsappConnectorStore
     ? existingStoreTierSet(createWhatsAppTierLane({

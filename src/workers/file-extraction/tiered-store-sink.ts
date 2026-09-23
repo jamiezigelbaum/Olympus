@@ -187,9 +187,11 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       }
       if (contentStore !== anchorStore) {
-        // The content tier's copy is STAGED before its row is written, so the
-        // row is hidden from every read, count and embedding until the
-        // landing below makes it current.
+        // Bound to the set ledger before any routed copy lands there, so no
+        // handle reads it without that ledger. The content tier's copy is
+        // STAGED before its row is written: the row is hidden from every
+        // read, count and embedding until the landing below makes it current.
+        contentStore.bindTierSet(ledger);
         ledger.stageLandingCopy(identity, contentCopy, {
           expectedGeneration: record.generation,
           embedHold: placement.embedHold,

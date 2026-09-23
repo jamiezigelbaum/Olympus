@@ -265,7 +265,7 @@ describe('P1c: content that lands after listing', () => {
     expect(lane.ledger.getCurrent(identityOf('new-secret'))).toMatchObject({ contentTier: 'secrets' });
     expect(searchIds(lane.stores.internal, 'deploy')).toEqual([]);
     expect(searchIds(lane.stores.secure_local, 'deploy')).toEqual([]);
-    expect(lane.secrets.search('deploy', { limit: 5 }).length).toBe(1);
+    expect(lane.secrets.search('deploy', {}, { limit: 5 }).length).toBe(1);
   });
 
   test('candidates: legacy candidates first, exactly as before; routed items until their content lands; egress never below Private', async () => {
