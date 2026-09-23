@@ -206,7 +206,7 @@ export function renderDashboardDetailBody(
     renderIngestionSelection(source),
     renderTotals(source),
     renderProgress(source, progress, now),
-    renderScope(options?.scope, options?.folderPickerPath, options),
+    renderScope(options?.scope, options?.folderPickerPath, options, source.scope_selection?.kind === 'mail'),
     renderAdvanced(source, degraded, options, now),
     renderFoot(source, now),
   ].filter((section) => section.length > 0).join('');
@@ -870,8 +870,10 @@ function renderScope(
   scope: DashboardExcludedSource | undefined,
   editPath: string | undefined,
   options: DashboardDetailBodyOptions | undefined,
+  mail = false,
 ): string {
   if (!scope && editPath === undefined) return '';
+  const editLabel = mail ? 'Choose mail and ingestion scope →' : 'Choose folders and ingestion scope →';
   const unenforceable = new Set(scope?.unenforceable_rule_ids ?? []);
   const rows = (scope?.entries ?? []).map((rule) =>
     scopeRow({ ruleId: rule.rule_id, facts: scopeRuleFacts(rule, unenforceable.has(rule.rule_id)) })
@@ -894,13 +896,13 @@ function renderScope(
     ? ''
     : `\n        <div class="tiernote">${actionButton(options?.readOnly === true
       ? {
-        label: 'Choose folders and ingestion scope →',
+        label: editLabel,
         kind: 'link',
         href: `${setupHref(options?.basePath)}#dashboard-controls`,
         hint: 'unlock controls in Setup',
       }
       : {
-        label: 'Choose folders and ingestion scope →',
+        label: editLabel,
         kind: 'control_link',
         href: editPath,
         hint: 'review scope before starting ingestion',

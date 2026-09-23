@@ -615,6 +615,8 @@ export interface DashboardSourceCard {
   /** Counts-only declaration that this connected source requires an explicit folder scope. */
   scope_selection?: {
     required: true;
+    /** What the owner chooses: folders (Drive, Dropbox) or mail (Gmail). Absent reads as folders. */
+    kind?: 'folders' | 'mail';
     status: 'scope_pending' | 'approved';
     connected: boolean;
     ingestion_enabled?: boolean;
@@ -2135,10 +2137,13 @@ function sourceCardFromDefinition(
   const connectedFolderSource = fileSourceScopeStatus !== undefined
     && baseConnection.handles.length > 0
     && baseConnection.state !== 'reauth_required';
+  // Mail chooses a window, categories and senders rather than folders; the
+  // gate, the waiting state and the banner are the same machinery.
+  const scopeKind: 'folders' | 'mail' = definition.family === 'email' ? 'mail' : 'folders';
   const connection = {
     ...baseConnection,
     ...(connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
-      ? { state: 'connected' as const, label: 'connected · choose folders to start', action: { kind: 'none' as const } }
+      ? { state: 'connected' as const, label: `connected · choose ${scopeKind} to start`, action: { kind: 'none' as const } }
       : {}),
     ...(!pairedSession && baseConnection.handles.length > 0
       ? { disconnect: dashboardDisconnectAction(definition.source_id as V04PublicSourceId, definition.label) }
@@ -2165,7 +2170,7 @@ function sourceCardFromDefinition(
     : connection.state === 'reauth_required'
       ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
       : connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
-        ? { state: 'empty' as const, label: 'Choose folders to start' }
+        ? { state: 'empty' as const, label: `Choose ${scopeKind} to start` }
       : connectedFolderSource && fileSourceScopeStatus === 'approved' && !fileSourceScopeIngestionEnabled
         ? { state: 'empty' as const, label: 'Ingestion is off for this source' }
       : embeddingLaneDisabled
@@ -2215,6 +2220,7 @@ function sourceCardFromDefinition(
       ? {
           scope_selection: {
             required: true as const,
+            kind: scopeKind,
             status: fileSourceScopeStatus,
             connected: connectedFolderSource,
             ingestion_enabled: fileSourceScopeIngestionEnabled,
@@ -2328,7 +2334,9 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
     return {
       stage: 'scope',
       condition: 'blocked',
-      next_action: `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
+      next_action: card.scope_selection.kind === 'mail'
+        ? `Choose which ${card.label} mail Olympus may use, then press Save scope and start.`
+        : `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
       dependencies,
     };
   }

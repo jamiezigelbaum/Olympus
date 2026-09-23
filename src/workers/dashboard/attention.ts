@@ -166,12 +166,16 @@ function scopeApprovalBanner(source: DashboardSourceCard, options: DashboardAtte
   const path = options.folderPickerPath;
   const picker = path && !path.includes('source_id=')
     ? `${path}${path.includes('?') ? '&' : '?'}source_id=${encodeURIComponent(source.source_id)}` : path;
+  const mail = source.scope_selection.kind === 'mail';
+  const label = mail ? 'Choose mail →' : 'Choose folders →';
   return {
     kind: 'scope',
-    sentence: `${source.label} is connected. Choose the folders Olympus may use before any indexing starts.`,
+    sentence: mail
+      ? `${source.label} is connected. Choose which mail Olympus may use before any indexing starts.`
+      : `${source.label} is connected. Choose the folders Olympus may use before any indexing starts.`,
     action: options.readOnly || !picker
-      ? { kind: 'link', label: 'Choose folders →', href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
-      : { kind: 'control_link', label: 'Choose folders →', href: picker, hint: 'nothing starts before you confirm' },
+      ? { kind: 'link', label, href: `${options.setupPath}#dashboard-controls`, hint: 'unlock controls in Setup' }
+      : { kind: 'control_link', label, href: picker, hint: 'nothing starts before you confirm' },
   };
 }
 
