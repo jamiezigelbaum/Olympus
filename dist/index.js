@@ -2553,6 +2553,10 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   if (typeof sourceIndex?.ingestionExclusionsPath === "string" && sourceIndex.ingestionExclusionsPath.trim()) {
     config.sourceIndex.ingestionExclusionsPath = sourceIndex.ingestionExclusionsPath.trim();
   }
+  const priceEstimates = asRecord4(sourceIndex?.embeddingPriceEstimates);
+  if (priceEstimates) {
+    config.sourceIndex.embeddingPriceEstimates = parseEmbeddingPriceEstimates(priceEstimates);
+  }
   const ingestionPolicies = asRecord4(sourceIndex?.ingestionPolicies);
   const dropboxPersonal = asRecord4(ingestionPolicies?.dropboxPersonal);
   if (dropboxPersonal) {
@@ -2568,6 +2572,22 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   }
   validateConfig(config);
   return config;
+}
+function parseEmbeddingPriceEstimates(raw) {
+  const parsed = {};
+  for (const [modelId, value] of Object.entries(raw)) {
+    const entry = asRecord4(value);
+    const usd = entry?.usdPerMillionTokens;
+    const perMinute = entry?.chunksPerMinute;
+    if (!modelId.trim() || typeof usd !== "number" || !Number.isFinite(usd) || usd < 0 || perMinute !== undefined && (typeof perMinute !== "number" || !Number.isFinite(perMinute) || perMinute <= 0)) {
+      throw new OperationError("config_error", `sourceIndex.embeddingPriceEstimates.${modelId} must be { usdPerMillionTokens: number >= 0, chunksPerMinute?: number > 0 }.`);
+    }
+    parsed[modelId.trim()] = {
+      usdPerMillionTokens: usd,
+      ...typeof perMinute === "number" ? { chunksPerMinute: perMinute } : {}
+    };
+  }
+  return parsed;
 }
 function resolveLane(config, lane) {
   return lane === undefined || lane === null || lane === "" ? config.argus.defaultLane : parseLane(String(lane));

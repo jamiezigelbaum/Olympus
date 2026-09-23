@@ -60,6 +60,9 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
   'tier explain': 'olympus tier explain <locator>',
   'tier rules': 'olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>',
   'tier classifier': 'olympus tier classifier status | approve --why <reason>',
+  'tier migrate': 'olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | '
+    + 'run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | '
+    + 'rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status',
 };
 
 export async function runTierCommand(args: readonly string[], context: TierCliContext = {}): Promise<Record<string, unknown>> {
@@ -73,6 +76,11 @@ export async function runTierCommand(args: readonly string[], context: TierCliCo
       return runTierRules(rest, context);
     case 'classifier':
       return runTierClassifier(rest, context);
+    case 'migrate': {
+      // The migration's tooling (tier-migration-cli.ts), loaded only when used.
+      const { runTierMigrateCommand } = await import('./tier-migration-cli.ts');
+      return runTierMigrateCommand(rest);
+    }
     default:
       throw new OperationError('invalid_params', `Unknown tier command: ${command ?? '(none)'}.`, 'Run olympus tier --help.');
   }
