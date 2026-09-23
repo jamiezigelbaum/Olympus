@@ -1,6 +1,6 @@
 // What the mail scope picker shows before anything runs: the mailbox's labels
 // and categories, sender suggestions from a small metadata-only sample, and an
-// estimate of the first read. Owner-initiated tooling, never a traversal: it
+// estimate of what the scope covers. Owner-initiated tooling, never a traversal: it
 // reads no message body (metadata format, From header only) and stores
 // nothing.
 //
@@ -92,9 +92,6 @@ export interface GmailMailScopeBrowser {
     now?: Date;
     /** The operator's hidden query override, ANDed exactly as the lane does. */
     operatorQuery?: string;
-    messagesPerPass: number;
-    passIntervalMinutes: number;
-    dailyRequestBudget: number;
   }): Promise<GmailMailScopeSummary>;
 }
 
@@ -177,9 +174,6 @@ export function createGmailMailScopeBrowser(options: {
         estimate: estimateMailScope({
           contentMessages: contentPage.resultSizeEstimate ?? contentPage.messages.length,
           metadataMessages: metadataPage?.resultSizeEstimate ?? metadataPage?.messages.length ?? 0,
-          messagesPerPass: input.messagesPerPass,
-          passIntervalMinutes: input.passIntervalMinutes,
-          dailyRequestBudget: input.dailyRequestBudget,
         }),
         provider_requests: requests,
       };

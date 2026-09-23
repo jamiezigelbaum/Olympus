@@ -296,7 +296,7 @@ describe('picker budget', () => {
     const client = fakeClient(Array.from({ length: 5 }, (_, index) => message(`m-${index}`, NOW.getTime() - index * DAY)));
     await createGmailMailScopeBrowser({
       credentialHandle: 'gmail.personal', account: 'personal', apiClient: client, env: {}, requestBudget: pickerBudget,
-    }).summarize({ scope: defaultMailScopeSelection(), now: NOW, messagesPerPass: 200, passIntervalMinutes: 30, dailyRequestBudget: 5_000 });
+    }).summarize({ scope: defaultMailScopeSelection(), now: NOW });
     expect(pickerBudget.status().requests).toBe(1 + 5 + 2 + 5);
     expect(pickerBudget.status().dailyRequestBudget).toBe(GMAIL_PICKER_DAILY_REQUEST_BUDGET);
     expect(GMAIL_PICKER_DAILY_REQUEST_BUDGET).toBeLessThan(5_000);

@@ -684,15 +684,13 @@ function renderMailScopeSource(source: SourceFolderScopeSummary, locations: read
         </section>
         <aside class="finder-inspector mail-scope-estimate" aria-label="Estimate">
           <h3>Estimate</h3>
-          <p class="mail-scope-help">Estimates from Gmail's own counts and a small sample. Nothing has been read yet.</p>
+          <p class="mail-scope-help">Message counts are Gmail's own approximate counts. Nothing has been read yet.</p>
           <dl class="mail-scope-figures">
             <div><dt>Body stored</dt><dd data-mail-estimate="content_messages">—</dd></div>
             <div><dt>Metadata only</dt><dd data-mail-estimate="metadata_messages">—</dd></div>
-            <div><dt>First read takes</dt><dd data-mail-estimate="sync_days">—</dd></div>
-            <div><dt>Gmail requests</dt><dd data-mail-estimate="provider_requests">—</dd></div>
-            <div><dt>Embedding cost</dt><dd data-mail-estimate="embedding_cost_usd">—</dd></div>
+            <div><dt>Embedding cost, at most</dt><dd data-mail-estimate="embedding_cost_usd">—</dd></div>
           </dl>
-          <p class="inspector-note" data-mail-estimate-note></p>
+          <p class="inspector-note">Counts are approximate (Gmail's estimate). The embedding cost is an upper bound at an assumed cloud price; Private mail embeds on your private model.</p>
           <button type="button" class="secondary" data-mail-refresh${disabled}>Update estimate</button>
           <p class="inspector-note">Loading this page spends at most ${GMAIL_SCOPE_BROWSE_MAX_REQUESTS} Gmail requests (labels, counts, and one sender sample of ${GMAIL_SCOPE_SENDER_SAMPLE} messages read by header only).</p>
         </aside>

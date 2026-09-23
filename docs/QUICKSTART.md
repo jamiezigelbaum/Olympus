@@ -472,7 +472,8 @@ classified Private (S4): it is stored only in Gmail's secure_local store and
 embedded only by your private model, never by a cloud model. Mail Olympus
 already holds is never removed, re-read or re-tiered by a scope change, so its
 existing chunks and embeddings are kept. Before anything runs it shows an
-estimate of the message count, first-read time and embedding cost; opening the
+estimate: Gmail's approximate message counts and an upper bound on embedding
+cost (there is no sync-time estimate); opening the
 picker spends at most 108 Gmail API requests, charged to the picker's own
 allowance of 432 requests a day, never to the sync lane's budget. Saving a
 changed scope starts a fresh traversal under the new query that skips mail

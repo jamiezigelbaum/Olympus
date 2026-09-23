@@ -515,9 +515,6 @@ export function mailPickerBrowseFixture(draft: OlympusMailScopeDraft | undefined
       estimate: estimateMailScope({
         contentMessages: content,
         metadataMessages: inScope - content,
-        messagesPerPass: 200,
-        passIntervalMinutes: 30,
-        dailyRequestBudget: 5_000,
       }),
       provider_requests: 108,
     },

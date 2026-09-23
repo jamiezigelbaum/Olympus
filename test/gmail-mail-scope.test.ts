@@ -189,31 +189,18 @@ describe('Gmail query compilation', () => {
 });
 
 describe('mail scope estimate', () => {
-  test('requests, sync time and embedding cost follow the stated assumptions', () => {
-    const estimate = estimateMailScope({
-      contentMessages: 20_000,
-      metadataMessages: 30_000,
-      messagesPerPass: 200,
-      passIntervalMinutes: 30,
-      dailyRequestBudget: 5_000,
+  test('counts and the embedding cost upper bound follow the stated assumptions; no sync-time figure', () => {
+    const estimate = estimateMailScope({ contentMessages: 20_000, metadataMessages: 30_000 });
+    expect(estimate).toEqual({
+      estimate: true,
+      content_messages: 20_000,
+      metadata_messages: 30_000,
+      total_messages: 50_000,
+      // Only full-content mail embeds: 20,000 x 750 tokens at $0.15 per million.
+      embedding_tokens: 15_000_000,
+      embedding_cost_usd: 2.25,
     });
-    expect(estimate.estimate).toBe(true);
-    expect(estimate.total_messages).toBe(50_000);
-    // One get per message plus one list per 100 ids, per leg.
-    expect(estimate.provider_requests).toBe(50_000 + 200 + 300);
-    // 48 passes x 200 = 9,600 by cadence; 5,000 x 100/101 = 4,950 by budget.
-    expect(estimate.messages_per_day).toBe(4_950);
-    expect(estimate.limited_by).toBe('daily_request_budget');
-    expect(estimate.sync_days).toBe(10.1);
-    // Only full-content mail embeds: 20,000 x 750 tokens at $0.15 per million.
-    expect(estimate.embedding_tokens).toBe(15_000_000);
-    expect(estimate.embedding_cost_usd).toBe(2.25);
-
-    const cadenceBound = estimateMailScope({
-      contentMessages: 1_000, metadataMessages: 0, messagesPerPass: 50, passIntervalMinutes: 60, dailyRequestBudget: 5_000,
-    });
-    expect(cadenceBound.messages_per_day).toBe(1_200);
-    expect(cadenceBound.limited_by).toBe('pass_cadence');
+    expect(estimateMailScope({ contentMessages: -3, metadataMessages: Number.NaN }).total_messages).toBe(0);
   });
 });
 
@@ -412,7 +399,7 @@ describe('mail picker summary', () => {
     })), { estimates: { content: 20_000, metadata: 30_000 } });
     const browser = createGmailMailScopeBrowser({ credentialHandle: 'gmail.personal', account: 'personal', apiClient: client, env: {} });
     const summary = await browser.summarize({
-      scope: defaultMailScopeSelection(), now: NOW, messagesPerPass: 200, passIntervalMinutes: 30, dailyRequestBudget: 5_000,
+      scope: defaultMailScopeSelection(), now: NOW,
     });
     expect(summary.labels.map((label) => label.name)).toEqual(['Family', 'SENT']);
     expect(summary.categories.find((category) => category.category === 'promotions')?.messages_total).toBe(900);

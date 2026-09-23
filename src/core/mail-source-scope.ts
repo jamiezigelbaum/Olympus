@@ -443,7 +443,10 @@ function gmailSearchValue(value: string): string {
 
 /**
  * Stated assumptions behind the estimate. These are rough on purpose and the
- * picker labels every number built from them as an estimate.
+ * picker labels every number built from them as an estimate. There is
+ * deliberately no sync-time figure (owner, 2026-09-23): it would ignore
+ * extraction and embedding throughput, host uptime and rate limits, on top of
+ * Gmail's own approximate counts, and could not be made accurate enough.
  */
 export const MAIL_SCOPE_ESTIMATE_ASSUMPTIONS = {
   /** An average email body is ~3,000 characters, ~750 embedding tokens. */
@@ -454,8 +457,6 @@ export const MAIL_SCOPE_ESTIMATE_ASSUMPTIONS = {
    * on Venice for less, so this is an upper bound for the full-content leg.
    */
   embeddingUsdPerMillionTokens: 0.15,
-  /** Gmail lists 100 ids per request, then one get per message. */
-  messagesPerListRequest: 100,
 } as const;
 
 export interface MailScopeEstimateInput {
@@ -463,12 +464,6 @@ export interface MailScopeEstimateInput {
   contentMessages: number;
   /** Messages the metadata-only query matches. */
   metadataMessages: number;
-  /** Messages one scheduled pass may read (DEFAULT_GMAIL_SYNC_MAX_MESSAGES). */
-  messagesPerPass: number;
-  /** Minutes between scheduled passes. */
-  passIntervalMinutes: number;
-  /** Provider requests the Gmail lane may spend per day. */
-  dailyRequestBudget: number;
 }
 
 export interface MailScopeEstimate {
@@ -476,40 +471,25 @@ export interface MailScopeEstimate {
   content_messages: number;
   metadata_messages: number;
   total_messages: number;
-  provider_requests: number;
-  messages_per_day: number;
-  /** Days of scheduled passes to finish the first read. */
-  sync_days: number;
   embedding_tokens: number;
+  /** Upper bound at the assumed cloud price. */
   embedding_cost_usd: number;
-  limited_by: 'daily_request_budget' | 'pass_cadence';
 }
 
 export function estimateMailScope(input: MailScopeEstimateInput): MailScopeEstimate {
   const content = nonNegativeInteger(input.contentMessages);
   const metadata = nonNegativeInteger(input.metadataMessages);
   const total = content + metadata;
-  const perList = MAIL_SCOPE_ESTIMATE_ASSUMPTIONS.messagesPerListRequest;
-  const providerRequests = total + Math.ceil(content / perList) + Math.ceil(metadata / perList);
-  const passesPerDay = Math.max(1, Math.floor((24 * 60) / Math.max(1, input.passIntervalMinutes)));
-  const cadenceCap = passesPerDay * Math.max(1, input.messagesPerPass);
-  // Each message costs one get, and every 100 cost one list on top.
-  const budgetCap = Math.floor(Math.max(1, input.dailyRequestBudget) * perList / (perList + 1));
-  const messagesPerDay = Math.max(1, Math.min(cadenceCap, budgetCap));
   const embeddingTokens = content * MAIL_SCOPE_ESTIMATE_ASSUMPTIONS.tokensPerFullMessage;
   return {
     estimate: true,
     content_messages: content,
     metadata_messages: metadata,
     total_messages: total,
-    provider_requests: providerRequests,
-    messages_per_day: messagesPerDay,
-    sync_days: Math.round((total / messagesPerDay) * 10) / 10,
     embedding_tokens: embeddingTokens,
     embedding_cost_usd: Math.round(
       (embeddingTokens / 1_000_000) * MAIL_SCOPE_ESTIMATE_ASSUMPTIONS.embeddingUsdPerMillionTokens * 100,
     ) / 100,
-    limited_by: budgetCap <= cadenceCap ? 'daily_request_budget' : 'pass_cadence',
   };
 }
 

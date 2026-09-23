@@ -3063,7 +3063,6 @@ export async function main(): Promise<void> {
       }
       const cached = mailScopeSummaryCache.get(key);
       if (!cached) {
-        const liveConfig = defaultGmailLiveSyncConfig(process.env);
         const operatorQuery = process.env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim();
         gmailPickerRequestBudget ??= createGmailPickerRequestBudget({
           laneStatePath: defaultGmailRequestBudgetStatePath(process.env),
@@ -3075,9 +3074,6 @@ export async function main(): Promise<void> {
         }).summarize({
           scope,
           ...(operatorQuery ? { operatorQuery } : {}),
-          messagesPerPass: liveConfig.storePullMaxItems,
-          passIntervalMinutes: liveConfig.storePullIntervalMs / 60_000,
-          dailyRequestBudget: gmailDailyRequestBudgetFromEnv(process.env),
         });
         // A failed load is never cached; the next open retries.
         value.catch(() => mailScopeSummaryCache.delete(key));
