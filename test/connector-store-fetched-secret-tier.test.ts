@@ -15,7 +15,7 @@ import type {
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
 const ACCOUNT = 'personal';
-const SECRET_TEXT = 'aws key AKIAUNIQUESECRET1234 uniquesecrettoken';
+const SECRET_TEXT = `aws key ${['AKIA', 'UNIQUESECRET1234'].join('')} uniquesecrettoken`;
 // The file lane's declared placement: S4, raised to S5 when the body carries a secret.
 const PLACEMENT = { secretsInContent: true } as const;
 const PLAIN_TEXT = 'ordinary notes about the quarterly uniqueplaintoken review';

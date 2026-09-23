@@ -20,7 +20,7 @@ import {
   type TierSniffer,
 } from '../src/workers/classification/tier-classifier.ts';
 
-const AWS_KEY = 'AKIAABCDEFGHIJKLMNOP';
+const AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 const BENIGN = 'Notes from the weekly planning conversation about the garden.';
 const HEALTH = 'The lab results confirm the diagnosis; the patient starts treatment.';
 

@@ -16,6 +16,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
   maxTier,
@@ -110,7 +111,7 @@ export class TierLedger {
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      db?.close();
+      if (db) closeSqliteStore(db);
       throw error;
     } finally {
       if (previousUmask !== undefined) process.umask(previousUmask);
@@ -120,9 +121,11 @@ export class TierLedger {
 
   close(): void {
     try {
-      if (this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
+      // Checkpointed close, like every Olympus store: the ledger is safe to
+      // hand to another process the moment this returns.
+      closeSqliteStore(this.db);
     } finally {
-      this.db.close();
+      if (this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
 

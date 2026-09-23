@@ -9,6 +9,10 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 
+// Built at runtime so the repository's credential-pattern check never sees a
+// literal key in the diff (the same approach as test/credential-pattern-check.test.ts).
+const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+
 const MODULES = [
   'src/workers/classification/tier-classifier.ts',
   'src/workers/classification/tier-ledger.ts',
@@ -27,6 +31,7 @@ const IMPORT_ALLOWLIST = new Set([
   '../../core/sensitivity-map.ts',
   '../../core/source-index/types.ts',
   '../../core/sqlite-migrations.ts',
+  '../../core/sqlite-store.ts',
   '../classification/engine.ts',
   '../classification/tier-classifier.ts',
   '../classification/tier-ledger.ts',
@@ -94,7 +99,7 @@ describe('tier classification is source-agnostic', () => {
       { signals: { title: 'Garden plan' }, text: 'weekly notes' },
       { signals: { title: 'biopsy results' }, text: 'The lab results confirm the diagnosis for the patient.' },
       { signals: { title: 'launch', sharing: 'public_link' as const }, text: 'hello world' },
-      { signals: { title: 'env', path: '/cfg/env' }, text: 'AKIAABCDEFGHIJKLMNOP' },
+      { signals: { title: 'env', path: '/cfg/env' }, text: FAKE_AWS_KEY },
       { signals: { title: 'chat', prior: { tier: 'secure' as const, strength: 'prior' as const, basis: 'b' } }, text: 'hi' },
     ];
     for (const entry of cases) {

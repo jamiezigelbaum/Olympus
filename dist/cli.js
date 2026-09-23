@@ -11934,6 +11934,16 @@ var init_engine = __esm(() => {
   WORK_COORDINATION_PATTERN = /\b(?:project update|status update|roadmap|milestone|pull request|pr review|design review|launch plan|offsite agenda|meeting recap|action items|next steps)\b/i;
 });
 
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
 // src/workers/classification/tier-classifier.ts
 function tierRank(tier) {
   return TIER_RANK[tier];
@@ -12312,7 +12322,8 @@ class TierLedger {
       if (onDisk)
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      db?.close();
+      if (db)
+        closeSqliteStore(db);
       throw error;
     } finally {
       if (previousUmask !== undefined)
@@ -12322,10 +12333,10 @@ class TierLedger {
   }
   close() {
     try {
+      closeSqliteStore(this.db);
+    } finally {
       if (this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
-    } finally {
-      this.db.close();
     }
   }
   recordDecision(identity, decision, stored) {
@@ -13356,16 +13367,6 @@ var init_reactions = __esm(() => {
     }
   };
 });
-
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash9, randomUUID as randomUUID4 } from "node:crypto";
