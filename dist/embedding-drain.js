@@ -14382,7 +14382,7 @@ var init_local_index = __esm(() => {
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       const tierExcluded = this.tierHiddenItemPks();
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
-      const tierFilter = excludedPks.length > 0 ? ` AND i.item_pk NOT IN (${excludedPks.map(() => "?").join(", ")})` : "";
+      const tierFilter = excludedPks.length > 0 ? " AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       return this.db.query(`
       SELECT
         c.chunk_pk,
@@ -14402,7 +14402,7 @@ var init_local_index = __esm(() => {
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? [], ...excludedPks, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+    `).all(...selectedLocalItemIds ?? [], ...excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -14578,9 +14578,9 @@ var init_local_index = __esm(() => {
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
       const tier = this.tierHiddenItemPks();
-      const hiddenNotIn = tier.hidden.length > 0 ? `AND i.item_pk NOT IN (${tier.hidden.map(() => "?").join(", ")})` : "";
-      const heldNotIn = tier.held.length > 0 ? `AND i.item_pk NOT IN (${tier.held.map(() => "?").join(", ")})` : "";
-      const namesOnlyNotIn = tier.metadataLayer.length > 0 ? `AND i.item_pk NOT IN (${tier.metadataLayer.map(() => "?").join(", ")})` : "";
+      const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const namesOnlyNotIn = tier.metadataLayer.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${itemFilters.sql}
@@ -14592,9 +14592,15 @@ var init_local_index = __esm(() => {
       ${namesOnlyNotIn}`;
       const parityWhere = `${contentWhere}
       ${heldNotIn}`;
-      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...tier.hidden];
-      const contentParams = [...accountScope ? [accountScope] : [], ...contentFilters.params, ...tier.hidden, ...tier.metadataLayer];
-      const parityParams = [...contentParams, ...tier.held];
+      const jsonList = (pks) => pks.length > 0 ? [JSON.stringify(pks)] : [];
+      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...jsonList(tier.hidden)];
+      const contentParams = [
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...jsonList(tier.hidden),
+        ...jsonList(tier.metadataLayer)
+      ];
+      const parityParams = [...contentParams, ...jsonList(tier.held)];
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -14684,8 +14690,8 @@ var init_local_index = __esm(() => {
       const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
         pendingClassificationItems: tier.held.length,
         supersededChunks: tier.hidden.length > 0 ? this.db.query(`
-                SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (${tier.hidden.map(() => "?").join(", ")})
-              `).get(...tier.hidden).n : 0,
+                SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
+              `).get(JSON.stringify(tier.hidden)).n : 0,
         tierMoveInProgress: tier.moving
       } : undefined;
       const last = this.db.query(`SELECT * FROM sync_runs
