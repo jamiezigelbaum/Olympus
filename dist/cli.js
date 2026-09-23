@@ -7574,6 +7574,9 @@ function parseSourceCorpusConfig(value) {
   if (record.enabled !== undefined && typeof record.enabled !== "boolean") {
     throw new OperationError("config_error", `sourceIndex corpus ${corpusId} enabled must be boolean when provided.`);
   }
+  if (record.createdOnDemand !== undefined && typeof record.createdOnDemand !== "boolean") {
+    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} createdOnDemand must be boolean when provided.`);
+  }
   return {
     corpusId,
     sourceId,
@@ -7583,6 +7586,7 @@ function parseSourceCorpusConfig(value) {
     ...activationMode ? { activationMode } : {},
     ...record.enabled !== undefined ? { enabled: record.enabled } : {},
     capabilities,
+    ...record.createdOnDemand === true ? { createdOnDemand: true } : {},
     ...typeof record.description === "string" && record.description.trim() ? { description: record.description.trim() } : {}
   };
 }
@@ -7631,6 +7635,28 @@ var init_source_corpus_registry = __esm(() => {
       trustDomain: "internal",
       activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "public_safe.email",
+      sourceId: "gmail.email",
+      provider: "gmail",
+      family: "email",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Gmail messages, routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.drive.docs",
+      sourceId: "google_drive.docs",
+      provider: "google_drive",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_primary",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Google Drive/Docs items, routed here by per-item four-tier classification."
     },
     {
       corpusId: "internal.drive.docs",
@@ -7712,8 +7738,10 @@ var init_source_corpus_registry = __esm(() => {
     answer: [
       "secure_local.email.private",
       "internal.email",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
       "internal.x.bookmarks",
@@ -7724,8 +7752,10 @@ var init_source_corpus_registry = __esm(() => {
     status: [
       "secure_local.email.private",
       "internal.email",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
       "internal.x.bookmarks",
@@ -7747,8 +7777,10 @@ var init_source_corpus_registry = __esm(() => {
     search: [
       "internal.email",
       "secure_local.email.private",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "secure_local.dropbox.files",
       "internal.x.bookmarks",
       "internal.telegram.messages",
@@ -9425,7 +9457,13 @@ function tierLedgerPathForStore(storeDbPath) {
   const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
   return `${base}${TIER_LEDGER_FILE_SUFFIX}`;
 }
-var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite";
+function secretLocationsPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${SECRET_LOCATIONS_FILE_SUFFIX}`;
+}
+var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite";
 
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
@@ -12442,8 +12480,14 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
-import { chmodSync as chmodSync4, existsSync as existsSync13, mkdirSync as mkdirSync8 } from "node:fs";
+import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync8, openSync as openSync7 } from "node:fs";
 import { dirname as dirname13 } from "node:path";
+function tierLedgerConversationKey(identity) {
+  return identity.providerConversationId ?? "";
+}
+function idParams(identity) {
+  return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
+}
 
 class TierLedger {
   dbPath;
@@ -12453,9 +12497,12 @@ class TierLedger {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
-    if (onDisk)
+    if (onDisk) {
       mkdirSync8(dirname13(this.dbPath), { recursive: true, mode: 448 });
-    const previousUmask = onDisk ? process.umask(63) : undefined;
+      if (!existsSync13(this.dbPath))
+        closeSync7(openSync7(this.dbPath, "a", 384));
+      restrictLedgerFiles(this.dbPath);
+    }
     let db;
     try {
       db = new Database(this.dbPath, { create: true });
@@ -12467,9 +12514,6 @@ class TierLedger {
       if (db)
         closeSqliteStore(db);
       throw error;
-    } finally {
-      if (previousUmask !== undefined)
-        process.umask(previousUmask);
     }
     this.db = db;
   }
@@ -12527,6 +12571,8 @@ class TierLedger {
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
   }
   writeRow(identity, next, stored, existing) {
+    if (existing?.routed)
+      stored = undefined;
     const decidedAt = this.now().toISOString();
     const reasonsJson = JSON.stringify(next.reasons);
     const state = next.metadataPending || next.contentPending ? "pending" : "current";
@@ -12540,7 +12586,7 @@ class TierLedger {
     if (!existing) {
       this.db.query(`
         INSERT INTO tier_items (
-          provider, account_scope, provider_item_id, family,
+          provider, account_scope, conversation_key, provider_item_id, family,
           metadata_tier, content_tier, generation, decided_by, reasons_json,
           engine_version, map_revision, model_id,
           previous_metadata_tier, previous_content_tier, state,
@@ -12548,8 +12594,8 @@ class TierLedger {
           stored_trust_domain, stored_trust_tier,
           content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
           decided_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(identity.provider, identity.accountScope, identity.providerItemId, identity.family ?? "unknown", next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(...idParams(identity), identity.family ?? "unknown", next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt);
       this.appendHistory(identity, 1, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
       return "inserted";
     }
@@ -12567,8 +12613,8 @@ class TierLedger {
         stored_trust_tier = COALESCE(?, stored_trust_tier),
         content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
         decided_at = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(next.metadataTier, next.contentTier, generation, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt, identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(next.metadataTier, next.contentTier, generation, next.decidedBy, reasonsJson, next.engineVersion, next.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, state, stored?.trustDomain ?? null, stored?.trustTier ?? null, ...flags, decidedAt, ...idParams(identity));
     this.appendHistory(identity, generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, state, decidedAt);
     return "updated";
   }
@@ -12580,9 +12626,9 @@ class TierLedger {
     assertTier(target.contentTier);
     const result = this.db.query(`
       UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND generation = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
         AND state != 'moving'
-    `).run(target.metadataTier, target.contentTier, identity.provider, identity.accountScope, identity.providerItemId, expectedGeneration);
+    `).run(target.metadataTier, target.contentTier, ...idParams(identity), expectedGeneration);
     if (result.changes !== 1)
       throw new TierLedgerGenerationConflictError;
     return this.getCurrent(identity);
@@ -12613,8 +12659,8 @@ class TierLedger {
           stored_trust_domain = COALESCE(?, stored_trust_domain),
           stored_trust_tier = COALESCE(?, stored_trust_tier),
           decided_at = ?
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND generation = ?
-      `).run(metadataTier, contentTier, generation, decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, options.stored?.trustDomain ?? null, options.stored?.trustTier ?? null, decidedAt, identity.provider, identity.accountScope, identity.providerItemId, options.expectedGeneration);
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
+      `).run(metadataTier, contentTier, generation, decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, options.stored?.trustDomain ?? null, options.stored?.trustTier ?? null, decidedAt, ...idParams(identity), options.expectedGeneration);
       this.appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, "current", decidedAt);
       flipped = this.readRow(identity);
     })();
@@ -12625,12 +12671,12 @@ class TierLedger {
     const rows = options.after ? this.db.query(`
           SELECT * FROM tier_items
           WHERE state = 'pending'
-            AND (provider, account_scope, provider_item_id) > (?, ?, ?)
-          ORDER BY provider, account_scope, provider_item_id
+            AND (provider, account_scope, provider_item_id, conversation_key) > (?, ?, ?, ?)
+          ORDER BY provider, account_scope, provider_item_id, conversation_key
           LIMIT ?
-        `).all(options.after.provider, options.after.accountScope, options.after.providerItemId, limit) : this.db.query(`
+        `).all(options.after.provider, options.after.accountScope, options.after.providerItemId, tierLedgerConversationKey(options.after), limit) : this.db.query(`
           SELECT * FROM tier_items WHERE state = 'pending'
-          ORDER BY provider, account_scope, provider_item_id
+          ORDER BY provider, account_scope, provider_item_id, conversation_key
           LIMIT ?
         `).all(limit);
     return rows.map(recordFromRow);
@@ -12650,9 +12696,9 @@ class TierLedger {
     return this.db.query(`
       SELECT generation, metadata_tier, content_tier, decided_by, state, decided_at
       FROM tier_history
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       ORDER BY history_pk
-    `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => ({
+    `).all(...idParams(identity)).map((row) => ({
       generation: row.generation,
       metadataTier: row.metadata_tier,
       contentTier: row.content_tier,
@@ -12665,17 +12711,17 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.query(`
-      INSERT INTO tier_overrides (provider, account_scope, provider_item_id, override_json, set_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, provider_item_id)
+      INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
       DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-    `).run(identity.provider, identity.accountScope, identity.providerItemId, JSON.stringify(override), this.now().toISOString());
+    `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
   }
   getOverride(identity) {
     const row = this.db.query(`
       SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerItemId);
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
     if (!row)
       return;
     const parsed = JSON.parse(row.override_json);
@@ -12687,28 +12733,521 @@ class TierLedger {
   }
   clearOverride(identity) {
     return this.db.query(`
-      DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerItemId).changes > 0;
+      DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity)).changes > 0;
+  }
+  ledgerId() {
+    const row = this.db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+    if (!row)
+      throw new Error("Tier ledger has no identity.");
+    return row.value;
+  }
+  isRouted(identity) {
+    return this.readRow(identity)?.routed === true;
+  }
+  copies(identity) {
+    return this.db.query(`
+      SELECT * FROM tier_copies
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      ORDER BY corpus_id
+    `).all(...idParams(identity)).map(copyFromRow);
+  }
+  copiesForMany(identities) {
+    const result = new Map;
+    if (identities.length === 0)
+      return result;
+    const unique = new Map;
+    for (const identity of identities)
+      unique.set(tierLedgerIdentityKey(identity), identity);
+    const list = [...unique.values()];
+    this.db.transaction(() => {
+      for (let offset = 0;offset < list.length; offset += 200) {
+        const batch = list.slice(offset, offset + 200);
+        const rows = this.db.query(`
+          SELECT * FROM tier_copies
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+          ORDER BY corpus_id
+        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
+        for (const row of rows) {
+          const key = tierLedgerIdentityKey(identityFromRow(row));
+          const existing = result.get(key);
+          if (existing)
+            existing.push(copyFromRow(row));
+          else
+            result.set(key, [copyFromRow(row)]);
+        }
+      }
+    })();
+    return result;
+  }
+  recordRoutedPlacement(identity, decision, plan, options = {}) {
+    const decidedAt = this.now().toISOString();
+    const reasonsJson = JSON.stringify(decision.reasons);
+    for (const copy of plan.copies)
+      assertCopyPlan(copy);
+    if (new Set(plan.copies.map((copy) => copy.corpusId)).size !== plan.copies.length) {
+      throw new Error("A tier placement plan names each store at most once.");
+    }
+    let outcome = "unchanged";
+    let raise = false;
+    let previousCopies = [];
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      previousCopies = this.copies(identity);
+      const secrets = decision.contentTier === "secrets";
+      if (!existing) {
+        this.db.query(`
+          INSERT INTO tier_items (
+            provider, account_scope, conversation_key, provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, model_id,
+            previous_metadata_tier, previous_content_tier, state,
+            target_metadata_tier, target_content_tier,
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, routed
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `).run(...idParams(identity), identity.family ?? "unknown", decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt);
+        this.appendHistory(identity, 1, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
+        if (!secrets)
+          this.insertCopies(identity, plan, "current", 1, decidedAt);
+        outcome = secrets ? "secrets" : "inserted";
+        return;
+      }
+      if (existing.state === "moving" && secrets && existing.routed) {
+        const generation = existing.generation + 1;
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        `).run(generation, decidedAt, ...idParams(identity));
+        this.flipTiers(identity, existing, {
+          metadataTier: decision.metadataTier,
+          contentTier: decision.contentTier,
+          generation,
+          decidedBy: decision.decidedBy,
+          reasons: decision.reasons,
+          decidedAt
+        });
+        outcome = "secrets";
+        return;
+      }
+      if (existing.state === "moving") {
+        outcome = "held_moving";
+        return;
+      }
+      const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
+      const current = previousCopies.filter((copy) => copy.state === "current");
+      const staged = previousCopies.some((copy) => copy.state === "staged");
+      const firstPlacement = !existing.routed || options.staleCopiesGone === true;
+      if (secrets || firstPlacement || samePlan(current, plan.copies) && !staged) {
+        const generation = tiersChanged ? existing.generation + 1 : existing.generation;
+        const detailChanged = tiersChanged || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision;
+        if (detailChanged) {
+          this.db.query(`
+            UPDATE tier_items SET
+              metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+              engine_version = ?, map_revision = ?,
+              previous_metadata_tier = ?, previous_content_tier = ?, state = ?,
+              stored_trust_domain = COALESCE(?, stored_trust_domain),
+              stored_trust_tier = COALESCE(?, stored_trust_tier),
+              content_read = ?, metadata_pending = ?, content_pending = ?, metadata_forced = ?, metadata_flagged = ?,
+              decided_at = ?, routed = 1
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          `).run(decision.metadataTier, decision.contentTier, generation, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, tiersChanged ? existing.metadataTier : existing.previousMetadataTier, tiersChanged ? existing.contentTier : existing.previousContentTier, decision.state, plan.stored?.trustDomain ?? null, plan.stored?.trustTier ?? null, ...decisionFlags(decision), decidedAt, ...idParams(identity));
+          this.appendHistory(identity, generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.state, decidedAt);
+        }
+        if (secrets) {
+          this.supersedeCurrentCopies(identity, generation, decidedAt);
+          outcome = "secrets";
+          return;
+        }
+        if (firstPlacement) {
+          this.deleteCopies(identity);
+          this.insertCopies(identity, plan, "current", generation, decidedAt);
+          outcome = "inserted";
+          return;
+        }
+        const holdChanged = current.some((copy) => copy.embedHold !== plan.embedHold);
+        if (holdChanged) {
+          this.db.query(`
+            UPDATE tier_copies SET embed_hold = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+          `).run(plan.embedHold ? 1 : 0, decidedAt, ...idParams(identity));
+        }
+        outcome = detailChanged || holdChanged ? "updated" : "unchanged";
+        return;
+      }
+      raise = placementIsRaise(current, plan.copies);
+      this.db.query(`
+        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?,
+          decided_by = ?, reasons_json = ?, engine_version = ?, map_revision = ?, decided_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, decision.engineVersion, decision.mapRevision, decidedAt, ...idParams(identity));
+      this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", decidedAt);
+      if (raise)
+        this.supersedeCurrentCopies(identity, existing.generation + 1, decidedAt);
+      outcome = "queued_move";
+    })();
+    return { outcome, record: this.getCurrent(identity), previousCopies, raise };
+  }
+  adoptLegacyPlacement(identity, copies) {
+    for (const copy of copies)
+      assertCopyPlan(copy);
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing)
+        throw new Error("Adopting a placement needs a recorded decision first.");
+      if (existing.routed)
+        throw new Error("This item is already routed.");
+      this.db.query(`
+        UPDATE tier_items SET routed = 1
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+      this.deleteCopies(identity);
+      this.insertCopies(identity, { copies, embedHold: false }, "current", existing.generation, now);
+    })();
+    return this.getCurrent(identity);
+  }
+  stageMove(identity, options) {
+    assertTier(options.target.metadataTier);
+    assertTier(options.target.contentTier);
+    if (options.destination.length === 0)
+      throw new Error("A move needs at least one destination copy.");
+    for (const copy of options.destination)
+      assertCopyPlan(copy);
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      if (!existing.routed)
+        throw new Error("A move needs copy rows; adopt the legacy placement first.");
+      if (existing.state === "moving" && (existing.targetMetadataTier !== options.target.metadataTier || existing.targetContentTier !== options.target.contentTier)) {
+        throw new TierLedgerGenerationConflictError("The item is already moving toward different tiers.");
+      }
+      const nextGeneration = existing.generation + 1;
+      const sources = this.moveSources(identity, nextGeneration);
+      this.db.query(`
+        UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
+      if (options.hideSource)
+        this.supersedeCurrentCopies(identity, nextGeneration, now);
+      const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
+      for (const destination of staged) {
+        this.db.query(`
+          DELETE FROM tier_copies
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(...idParams(identity), destination.corpusId);
+      }
+      this.insertCopies(identity, { copies: staged, embedHold: options.embedHold === true }, "staged", nextGeneration, now);
+    })();
+    return this.getCurrent(identity);
+  }
+  moveSources(identity, moveGeneration) {
+    return this.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  }
+  completeMove(identity, options) {
+    for (const copy of options.destination)
+      assertCopyPlan(copy);
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== "moving" || existing.targetMetadataTier === null || existing.targetContentTier === null) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      const generation = existing.generation + 1;
+      const copies = this.copies(identity);
+      const sources = this.moveSources(identity, generation);
+      for (const planned of options.destination) {
+        const row = copies.find((copy) => copy.corpusId === planned.corpusId);
+        if (!row)
+          throw new Error("A move completes only once every destination copy is staged or kept.");
+        if (row.state === "staged") {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
+              superseded_by_generation = NULL, previous_layers = NULL, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, now, ...idParams(identity), planned.corpusId);
+        } else if (sources.some((source) => source.corpusId === planned.corpusId)) {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'current', layers = ?, generation = ?,
+              superseded_by_generation = NULL, previous_layers = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(planned.layers, generation, row.layers, now, ...idParams(identity), planned.corpusId);
+        } else {
+          throw new Error("A move destination must be staged or be one of the item's source copies.");
+        }
+      }
+      for (const source of sources) {
+        if (options.destination.some((planned) => planned.corpusId === source.corpusId))
+          continue;
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, previous_layers = NULL, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(generation, now, ...idParams(identity), source.corpusId);
+      }
+      this.flipTiers(identity, existing, {
+        metadataTier: existing.targetMetadataTier,
+        contentTier: existing.targetContentTier,
+        generation,
+        decidedBy: options.decidedBy ?? "move",
+        reasons: options.reasons ?? existing.reasons,
+        decidedAt: now
+      });
+    })();
+    return this.getCurrent(identity);
+  }
+  rollbackMove(identity, options) {
+    const now = this.now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state !== "current" || existing.previousMetadataTier === null || existing.previousContentTier === null) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      const flipGeneration = existing.generation;
+      const copies = this.copies(identity);
+      const restore = copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipGeneration);
+      const relayered = copies.filter((copy) => copy.state === "current" && copy.generation === flipGeneration && copy.previousLayers !== null);
+      if (restore.length === 0 && relayered.length === 0) {
+        throw new Error("Nothing to roll back to: the last flip superseded or re-layered no copy.");
+      }
+      const generation = flipGeneration + 1;
+      for (const copy of copies) {
+        if (copy.state !== "current" || copy.generation !== flipGeneration)
+          continue;
+        if (copy.previousLayers !== null) {
+          this.db.query(`
+            UPDATE tier_copies SET layers = ?, previous_layers = NULL, generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(copy.previousLayers, generation, now, ...idParams(identity), copy.corpusId);
+        } else {
+          this.db.query(`
+            UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+            WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+          `).run(generation, now, ...idParams(identity), copy.corpusId);
+        }
+      }
+      for (const copy of restore) {
+        this.db.query(`
+          UPDATE tier_copies SET copy_state = 'current', generation = ?, superseded_by_generation = NULL, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+        `).run(generation, now, ...idParams(identity), copy.corpusId);
+      }
+      this.flipTiers(identity, existing, {
+        metadataTier: existing.previousMetadataTier,
+        contentTier: existing.previousContentTier,
+        generation,
+        decidedBy: "rollback",
+        reasons: existing.reasons,
+        decidedAt: now
+      });
+    })();
+    return this.getCurrent(identity);
+  }
+  flipToSecrets(identity, options) {
+    const now = this.now().toISOString();
+    let copies = [];
+    this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.generation !== options.expectedGeneration) {
+        throw new TierLedgerGenerationConflictError;
+      }
+      if (!existing.routed)
+        throw new Error("A move needs copy rows; adopt the legacy placement first.");
+      copies = this.copies(identity);
+      const generation = existing.generation + 1;
+      this.supersedeCurrentCopies(identity, generation, now);
+      this.flipTiers(identity, existing, {
+        metadataTier: "secrets",
+        contentTier: "secrets",
+        generation,
+        decidedBy: "secret_detector",
+        reasons: options.reasons ?? existing.reasons,
+        decidedAt: now
+      });
+    })();
+    return { record: this.getCurrent(identity), copies };
+  }
+  removeCopies(identity) {
+    let removed = [];
+    this.db.transaction(() => {
+      removed = this.copies(identity);
+      this.deleteCopies(identity);
+    })();
+    return removed;
+  }
+  corpusHasCopies(corpusId) {
+    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
+  }
+  corpusCopyIdentities(corpusId, filter) {
+    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
+    const page = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND ${where}
+        AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 5000
+    `);
+    const identities = [];
+    let after = ["", "", "", ""];
+    for (;; ) {
+      const rows = page.all(corpusId, ...after);
+      for (const row of rows)
+        identities.push(identityFromRow(row));
+      if (rows.length < 5000)
+        break;
+      const last = rows[rows.length - 1];
+      after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+    }
+    return identities;
+  }
+  corpusCopyCounts(corpusId) {
+    const row = this.db.query(`
+      SELECT
+        SUM(CASE WHEN c.copy_state = 'current' THEN 1 ELSE 0 END) AS current,
+        SUM(CASE WHEN c.copy_state = 'superseded' THEN 1 ELSE 0 END) AS superseded,
+        SUM(CASE WHEN c.copy_state = 'staged' THEN 1 ELSE 0 END) AS staged,
+        SUM(CASE WHEN c.copy_state = 'current' AND c.embed_hold = 1 THEN 1 ELSE 0 END) AS held,
+        SUM(CASE WHEN t.state = 'moving' THEN 1 ELSE 0 END) AS moving
+      FROM tier_copies c
+      JOIN tier_items t
+        ON t.provider = c.provider AND t.account_scope = c.account_scope
+          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+      WHERE c.corpus_id = ?
+    `).get(corpusId);
+    return {
+      current: row["current"] ?? 0,
+      superseded: row["superseded"] ?? 0,
+      staged: row["staged"] ?? 0,
+      held: row["held"] ?? 0,
+      moving: row["moving"] ?? 0
+    };
+  }
+  commitSetCursor(setId, connectorId, cursor) {
+    this.db.query(`
+      INSERT INTO tier_set_cursors (set_id, connector_id, cursor, committed_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (set_id, connector_id)
+      DO UPDATE SET cursor = excluded.cursor, committed_at = excluded.committed_at
+    `).run(setId, connectorId, cursor, this.now().toISOString());
+  }
+  setCursor(setId, connectorId) {
+    const row = this.db.query(`
+      SELECT cursor, committed_at FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?
+    `).get(setId, connectorId);
+    return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
+  }
+  insertCopies(identity, plan, state, generation, now) {
+    const insert = this.db.query(`
+      INSERT INTO tier_copies (
+        provider, account_scope, conversation_key, provider_item_id, corpus_id, trust_domain,
+        layers, copy_state, embed_hold, generation, superseded_by_generation, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+    `);
+    for (const copy of plan.copies) {
+      insert.run(...idParams(identity), copy.corpusId, copy.trustDomain, copy.layers, state, plan.embedHold ? 1 : 0, generation, now);
+    }
+  }
+  deleteCopies(identity) {
+    this.db.query(`
+      DELETE FROM tier_copies WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
+  }
+  supersedeCurrentCopies(identity, byGeneration, now) {
+    this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity));
+  }
+  flipTiers(identity, existing, next) {
+    const reasonsJson = JSON.stringify(next.reasons);
+    this.db.query(`
+      UPDATE tier_items SET
+        metadata_tier = ?, content_tier = ?, generation = ?, decided_by = ?, reasons_json = ?,
+        previous_metadata_tier = ?, previous_content_tier = ?, state = 'current',
+        target_metadata_tier = NULL, target_content_tier = NULL, decided_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(next.metadataTier, next.contentTier, next.generation, next.decidedBy, reasonsJson, existing.metadataTier, existing.contentTier, next.decidedAt, ...idParams(identity));
+    this.appendHistory(identity, next.generation, next.metadataTier, next.contentTier, next.decidedBy, reasonsJson, "current", next.decidedAt);
   }
   readRow(identity) {
     const row = this.db.query(`
-      SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerItemId);
+      SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
     return row ? recordFromRow(row) : undefined;
   }
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
     this.db.query(`
       INSERT INTO tier_history (
-        provider, account_scope, provider_item_id, generation,
+        provider, account_scope, conversation_key, provider_item_id, generation,
         metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(identity.provider, identity.accountScope, identity.providerItemId, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
+  }
+}
+function identityFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+  };
+}
+function copyFromRow(row) {
+  return {
+    corpusId: row.corpus_id,
+    trustDomain: row.trust_domain,
+    layers: row.layers,
+    state: row.copy_state,
+    embedHold: row.embed_hold === 1,
+    generation: row.generation,
+    supersededByGeneration: row.superseded_by_generation,
+    previousLayers: row.previous_layers,
+    updatedAt: row.updated_at
+  };
+}
+function tierLedgerIdentityKey(identity) {
+  return `${identity.provider}\x00${identity.accountScope}\x00${tierLedgerConversationKey(identity)}\x00${identity.providerItemId}`;
+}
+function trustDomainRank(domain) {
+  return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
+}
+function copyServingLayer(copies, layer) {
+  return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
+}
+function samePlan(current, planned) {
+  if (current.length !== planned.length)
+    return false;
+  return planned.every((plan) => current.some((copy) => copy.corpusId === plan.corpusId && copy.trustDomain === plan.trustDomain && copy.layers === plan.layers));
+}
+function placementIsRaise(current, planned) {
+  for (const layer of ["metadata", "content"]) {
+    const from = copyServingLayer(current, layer);
+    const to = copyServingLayer(planned, layer);
+    if (from && to && trustDomainRank(to.trustDomain) > trustDomainRank(from.trustDomain))
+      return true;
+    if (from && !to)
+      return true;
+  }
+  return false;
+}
+function assertCopyPlan(copy) {
+  if (!copy.corpusId?.trim())
+    throw new Error("A tier copy names its store.");
+  if (!(copy.trustDomain in TRUST_DOMAIN_RANK))
+    throw new Error(`Unknown trust domain "${copy.trustDomain}".`);
+  if (copy.layers !== "metadata" && copy.layers !== "content" && copy.layers !== "both") {
+    throw new Error(`Unknown copy layers "${String(copy.layers)}".`);
   }
 }
 function recordFromRow(row) {
   return {
     provider: row.provider,
     accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
     providerItemId: row.provider_item_id,
     family: row.family,
     metadataTier: row.metadata_tier,
@@ -12731,7 +13270,8 @@ function recordFromRow(row) {
     contentPending: row.content_pending === 1,
     metadataForced: row.metadata_forced === 1,
     metadataFlagged: row.metadata_flagged === 1,
-    decidedAt: row.decided_at
+    decidedAt: row.decided_at,
+    routed: row.routed === 1
   };
 }
 function effectiveRow(existing, decision) {
@@ -12764,6 +13304,15 @@ function effectiveRow(existing, decision) {
   }
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
 }
+function decisionFlags(decision) {
+  return [
+    decision.contentRead ? 1 : 0,
+    decision.metadataPending ? 1 : 0,
+    decision.contentPending ? 1 : 0,
+    decision.metadataForced ? 1 : 0,
+    decision.metadataFlagged ? 1 : 0
+  ];
+}
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
     if (existsSync13(path))
@@ -12778,7 +13327,7 @@ function assertTier(tier) {
 function tierLedgerMigrations() {
   return [
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 1,
       name: "create_tier_ledger",
       up(db) {
         db.exec(`
@@ -12835,10 +13384,139 @@ function tierLedgerMigrations() {
           );
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "tier_copies_and_set_cursors",
+      up(db) {
+        db.exec(`
+          ALTER TABLE tier_items RENAME TO tier_items_v1;
+          ALTER TABLE tier_history RENAME TO tier_history_v1;
+          ALTER TABLE tier_overrides RENAME TO tier_overrides_v1;
+          DROP INDEX IF EXISTS tier_items_state;
+          DROP INDEX IF EXISTS tier_history_item;
+          CREATE TABLE tier_items (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL,
+            metadata_tier TEXT NOT NULL CHECK (metadata_tier ${TIER_CHECK}),
+            content_tier TEXT NOT NULL CHECK (content_tier ${TIER_CHECK}),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            decided_by TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            engine_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            model_id TEXT,
+            previous_metadata_tier TEXT CHECK (previous_metadata_tier IS NULL OR previous_metadata_tier ${TIER_CHECK}),
+            previous_content_tier TEXT CHECK (previous_content_tier IS NULL OR previous_content_tier ${TIER_CHECK}),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'current', 'moving')),
+            target_metadata_tier TEXT CHECK (target_metadata_tier IS NULL OR target_metadata_tier ${TIER_CHECK}),
+            target_content_tier TEXT CHECK (target_content_tier IS NULL OR target_content_tier ${TIER_CHECK}),
+            stored_trust_domain TEXT,
+            stored_trust_tier TEXT,
+            content_read INTEGER NOT NULL DEFAULT 0 CHECK (content_read IN (0, 1)),
+            metadata_pending INTEGER NOT NULL DEFAULT 0 CHECK (metadata_pending IN (0, 1)),
+            content_pending INTEGER NOT NULL DEFAULT 0 CHECK (content_pending IN (0, 1)),
+            metadata_forced INTEGER NOT NULL DEFAULT 0 CHECK (metadata_forced IN (0, 1)),
+            metadata_flagged INTEGER NOT NULL DEFAULT 0 CHECK (metadata_flagged IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            routed INTEGER NOT NULL DEFAULT 0 CHECK (routed IN (0, 1)),
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          INSERT INTO tier_items (
+            provider, account_scope, conversation_key, provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, model_id,
+            previous_metadata_tier, previous_content_tier, state,
+            target_metadata_tier, target_content_tier,
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, routed
+          )
+          SELECT
+            provider, account_scope, '', provider_item_id, family,
+            metadata_tier, content_tier, generation, decided_by, reasons_json,
+            engine_version, map_revision, model_id,
+            previous_metadata_tier, previous_content_tier, state,
+            target_metadata_tier, target_content_tier,
+            stored_trust_domain, stored_trust_tier,
+            content_read, metadata_pending, content_pending, metadata_forced, metadata_flagged,
+            decided_at, 0
+          FROM tier_items_v1;
+          DROP TABLE tier_items_v1;
+          CREATE INDEX tier_items_state ON tier_items (state, provider, account_scope, provider_item_id, conversation_key);
+          CREATE TABLE tier_history (
+            history_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            metadata_tier TEXT NOT NULL,
+            content_tier TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            reasons_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            decided_at TEXT NOT NULL
+          );
+          INSERT INTO tier_history (
+            history_pk, provider, account_scope, conversation_key, provider_item_id, generation,
+            metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
+          )
+          SELECT history_pk, provider, account_scope, '', provider_item_id, generation,
+            metadata_tier, content_tier, decided_by, reasons_json, state, decided_at
+          FROM tier_history_v1;
+          DROP TABLE tier_history_v1;
+          CREATE INDEX tier_history_item ON tier_history (provider, account_scope, conversation_key, provider_item_id, history_pk);
+          CREATE TABLE tier_overrides (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            override_json TEXT NOT NULL,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
+          SELECT provider, account_scope, '', provider_item_id, override_json, set_at FROM tier_overrides_v1;
+          DROP TABLE tier_overrides_v1;
+          CREATE TABLE IF NOT EXISTS tier_ledger_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );
+          INSERT OR IGNORE INTO tier_ledger_meta (key, value) VALUES ('ledger_id', lower(hex(randomblob(16))));
+          CREATE TABLE IF NOT EXISTS tier_copies (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            corpus_id TEXT NOT NULL,
+            trust_domain TEXT NOT NULL CHECK (trust_domain IN ('public_safe', 'internal', 'secure_local')),
+            layers TEXT NOT NULL CHECK (layers IN ('metadata', 'content', 'both')),
+            copy_state TEXT NOT NULL CHECK (copy_state IN ('current', 'staged', 'superseded')),
+            embed_hold INTEGER NOT NULL DEFAULT 0 CHECK (embed_hold IN (0, 1)),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            superseded_by_generation INTEGER,
+            previous_layers TEXT CHECK (previous_layers IS NULL OR previous_layers IN ('metadata', 'content', 'both')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id, corpus_id)
+          );
+          CREATE INDEX IF NOT EXISTS tier_copies_corpus ON tier_copies (corpus_id, copy_state, embed_hold);
+          CREATE TABLE IF NOT EXISTS tier_set_cursors (
+            set_id TEXT NOT NULL,
+            connector_id TEXT NOT NULL,
+            cursor TEXT,
+            committed_at TEXT NOT NULL,
+            PRIMARY KEY (set_id, connector_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 1, TierLedgerGenerationConflictError, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 2, TierLedgerGenerationConflictError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -12847,6 +13525,11 @@ var init_tier_ledger = __esm(() => {
       super(message);
       this.name = "TierLedgerGenerationConflictError";
     }
+  };
+  TRUST_DOMAIN_RANK = {
+    public_safe: 0,
+    internal: 1,
+    secure_local: 2
   };
 });
 
@@ -13512,7 +14195,7 @@ var init_reactions = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash9, randomUUID as randomUUID4 } from "node:crypto";
-import { lstatSync as lstatSync7, mkdirSync as mkdirSync9, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync14, lstatSync as lstatSync7, mkdirSync as mkdirSync9, statSync as statSync5 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -14577,6 +15260,15 @@ function combineSearchText(parts) {
   });
   return values.length > 0 ? values.join(`
 `) : null;
+}
+function tierRowVisible(copies, corpusId, layer) {
+  if (!copies || copies.length === 0)
+    return true;
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
+  return copyServingLayer(here, layer) !== undefined;
+}
+function connectorStoreItemText(item) {
+  return textFromRawItem(item);
 }
 function textFromRawItem(item) {
   if (item.content.kind === "text")
@@ -15854,13 +16546,13 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -15927,6 +16619,12 @@ var init_local_index = __esm(() => {
       this.ruleId = ruleId;
     }
   };
+  TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
+    constructor(corpusId) {
+      super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
+      this.name = "TierLedgerUnavailableError";
+    }
+  };
   ConnectorStoreLocatorIdentityIndexNotReadyError = class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     constructor() {
       super("Connector store locator identity index requires bounded backfill before path-only deletions can run.");
@@ -15947,6 +16645,7 @@ var init_local_index = __esm(() => {
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
+    boundLedgerHandle;
     constructor(options) {
       this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
@@ -15999,6 +16698,8 @@ var init_local_index = __esm(() => {
       try {
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
+        this.boundLedgerHandle?.close();
+        this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
         closeSqliteStore(this.db);
@@ -16035,6 +16736,384 @@ var init_local_index = __esm(() => {
         return ledger.recordContentDecision(item.identity, content) !== undefined;
       } catch {
         return false;
+      }
+    }
+    useTierLedger(ledger) {
+      if (this.tierLedgerHandle === ledger)
+        return;
+      if (this.tierLedgerOwned === true)
+        this.tierLedgerHandle?.close();
+      this.tierLedgerHandle = ledger;
+      this.tierLedgerOwned = false;
+    }
+    visibilityLedger() {
+      const binding = this.tierSetBinding();
+      if (binding) {
+        const ledger = this.tierLedgerHandle?.dbPath === binding.ledgerPath ? this.tierLedgerHandle : this.boundTierLedger(binding.ledgerPath);
+        let ledgerId;
+        try {
+          ledgerId = ledger.ledgerId();
+        } catch {
+          ledgerId = undefined;
+        }
+        if (ledgerId !== binding.ledgerId) {
+          throw new TierLedgerUnavailableError(this.corpusId);
+        }
+        return ledger;
+      }
+      if (this.tierLedgerHandle)
+        return this.tierLedgerHandle;
+      if (this.tierLedgerDisabled === true)
+        return;
+      const path = tierLedgerPathForStore(this.dbPath);
+      if (path === ":memory:" || !existsSync14(path))
+        return;
+      return this.tierLedger();
+    }
+    boundTierLedger(ledgerPath) {
+      if (this.boundLedgerHandle?.dbPath === ledgerPath)
+        return this.boundLedgerHandle;
+      if (ledgerPath !== ":memory:" && !existsSync14(ledgerPath))
+        throw new TierLedgerUnavailableError(this.corpusId);
+      this.boundLedgerHandle?.close();
+      this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
+      return this.boundLedgerHandle;
+    }
+    tierSetBinding() {
+      const row = this.db.query(`
+      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+      if (!row?.cursor)
+        return;
+      try {
+        const parsed = JSON.parse(row.cursor);
+        if (typeof parsed.ledgerId === "string" && typeof parsed.ledgerPath === "string") {
+          return { ledgerId: parsed.ledgerId, ledgerPath: parsed.ledgerPath };
+        }
+      } catch {}
+      throw new TierLedgerUnavailableError(this.corpusId);
+    }
+    bindTierSet(ledger) {
+      const ledgerId = ledger.ledgerId();
+      const existing = this.tierSetBinding();
+      if (existing) {
+        if (existing.ledgerId !== ledgerId)
+          throw new TierLedgerUnavailableError(this.corpusId);
+        return;
+      }
+      this.db.query(`
+      INSERT INTO sync_runs (
+        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+        items_indexed, started_at, completed_at
+      ) VALUES (?, ?, ?, 'completed', ?, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z')
+    `).run(TIER_SET_BINDING_RUN_ID, this.corpusId, TIER_SET_BINDING_CONNECTOR_ID, JSON.stringify({ ledgerId, ledgerPath: ledger.dbPath }));
+    }
+    hiddenCopyKeys(identities) {
+      const ledger = this.visibilityLedger();
+      if (!ledger || identities.length === 0 || !ledger.corpusHasCopies(this.corpusId))
+        return new Set;
+      const hidden = new Set;
+      for (const [key, copies] of ledger.copiesForMany(identities)) {
+        if (copies.some((copy) => copy.corpusId === this.corpusId && copy.state !== "current"))
+          hidden.add(key);
+      }
+      return hidden;
+    }
+    tierVisibleRows(rows, identityOf, layerOf) {
+      if (rows.length === 0)
+        return [];
+      let copies;
+      try {
+        const ledger = this.visibilityLedger();
+        if (!ledger || !ledger.corpusHasCopies(this.corpusId))
+          return [...rows];
+        copies = ledger.copiesForMany(rows.map(identityOf));
+      } catch {
+        return [];
+      }
+      return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
+    }
+    tierHiddenItemPks() {
+      const ledger = this.visibilityLedger();
+      if (!ledger || !ledger.corpusHasCopies(this.corpusId))
+        return { hidden: [], held: [], metadataLayer: [], moving: 0 };
+      const pksFor = (identities) => {
+        const lookup2 = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
+      `);
+        const pks = [];
+        for (const identity of identities) {
+          const row = lookup2.get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+          if (row)
+            pks.push(row.item_pk);
+        }
+        return pks;
+      };
+      return {
+        hidden: pksFor([
+          ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
+          ...ledger.corpusCopyIdentities(this.corpusId, "staged")
+        ]),
+        held: pksFor(ledger.corpusCopyIdentities(this.corpusId, "held")),
+        metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer")),
+        moving: ledger.corpusCopyCounts(this.corpusId).moving
+      };
+    }
+    copyServable(identity) {
+      return this.tierVisibleRows([identity], (entry) => entry, () => "metadata").length > 0 || this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+    }
+    hasItemRow(identity) {
+      return this.db.query(`
+      SELECT 1 FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
+    }
+    reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
+      const row = this.db.query(`
+      SELECT item_pk FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
+      if (!row)
+        return;
+      this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso2(), "provider_listing");
+    }
+    tombstoneCopy(identity, options) {
+      const syncRunId = `connector-tier-copy-${randomUUID4()}`;
+      const startedAt = nowIso2();
+      return this.db.transaction(() => {
+        this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, completed_at
+        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, options.connectorId, startedAt, startedAt);
+        return this.tombstoneItem({
+          identity,
+          mimeType: "application/octet-stream",
+          content: { kind: "metadata_only" },
+          metadata: {},
+          fetchedAt: startedAt
+        }, options.connectorId, "observed", syncRunId, options.trustTier, true);
+      })();
+    }
+    exportItemCopy(identity) {
+      const row = this.db.query(`
+      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(", ")}
+      FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      if (!row)
+        return;
+      const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+      const owners = this.db.query(`
+      SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
+      FROM item_owners WHERE item_pk = ? ORDER BY connector_id
+    `).all(row.item_pk).map((owner) => ({
+        connectorId: owner.connector_id,
+        ownershipKind: owner.ownership_kind,
+        firstSeenAt: owner.first_seen_at,
+        lastSeenAt: owner.last_seen_at
+      }));
+      const chunks = this.db.query(`
+      SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+      FROM chunks WHERE item_pk = ? ORDER BY chunk_index
+    `).all(row.item_pk).map((chunk) => ({
+        chunkIndex: chunk.chunk_index,
+        boundedText: chunk.bounded_text,
+        contentHash: chunk.content_hash,
+        embeddingInputHash: chunk.embedding_input_hash
+      }));
+      const vectors = this.db.query(`
+      SELECT c.chunk_index, e.model_id, e.content_hash, e.embedding
+      FROM chunk_embeddings e
+      JOIN chunks c ON c.chunk_pk = e.chunk_pk
+      WHERE e.item_pk = ? AND c.item_pk = ? AND e.content_hash = c.embedding_input_hash
+      ORDER BY e.model_id, c.chunk_index
+    `).all(row.item_pk, row.item_pk).map((vector) => ({
+        chunkIndex: vector.chunk_index,
+        modelId: vector.model_id,
+        contentHash: vector.content_hash,
+        embedding: new Uint8Array(vector.embedding)
+      }));
+      const vectorAuthorities = [];
+      for (const modelId of new Set(vectors.map((vector) => vector.modelId))) {
+        const authority = this.embeddingWriteAuthoritySnapshot(modelId);
+        if (authority)
+          vectorAuthorities.push(authority);
+      }
+      const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+      return {
+        identity: {
+          family: String(columns.family),
+          provider: String(columns.provider),
+          accountScope: String(columns.account_scope),
+          providerItemId: String(columns.provider_item_id),
+          localItemId: String(columns.local_item_id),
+          ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
+          ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
+          ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
+          ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
+          ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
+        },
+        columns,
+        trustTier: trustTierFromRow(row.trust_tier),
+        owners,
+        chunks,
+        vectors,
+        vectorAuthorities
+      };
+    }
+    importItemCopy(copy, options) {
+      const sensitivity = buildSourceSensitivity({ trustTier: options.trustTier, trustDomain: this.trustDomain });
+      if (sensitivity.trustTier === "S5") {
+        throw new Error("A Secrets item is never copied into a store.");
+      }
+      if (options.vectorProvider) {
+        assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
+      }
+      const syncRunId = `connector-tier-move-${randomUUID4()}`;
+      const now = nowIso2();
+      return this.db.transaction(() => {
+        this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, completed_at
+        ) VALUES (?, ?, ?, 'completed', NULL, 1, 1, ?, ?)
+      `).run(syncRunId, this.corpusId, options.syncConnectorId, now, now);
+        const columnList = CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(", ");
+        const updates = CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter((column) => column !== "provider" && column !== "account_scope" && column !== "provider_item_id").map((column) => `${column} = excluded.${column}`).join(", ");
+        this.db.query(`
+        INSERT INTO items (${columnList}, indexed_at, trust_tier, tombstoned, deleted_at, sync_run_id)
+        VALUES (${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map(() => "?").join(", ")}, ?, ?, 0, NULL, ?)
+        ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
+          ${updates}, indexed_at = excluded.indexed_at, trust_tier = excluded.trust_tier,
+          tombstoned = 0, deleted_at = NULL, sync_run_id = excluded.sync_run_id
+      `).run(...CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => copy.columns[column] ?? null), now, sensitivity.trustTier, syncRunId);
+        const itemPk = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+      `).get(copy.identity.provider, copy.identity.accountScope, normalizeConversationId(copy.identity.providerConversationId), copy.identity.providerItemId).item_pk;
+        for (const owner of copy.owners) {
+          this.db.query(`
+          INSERT INTO item_owners (
+            item_pk, connector_id, ownership_kind, first_seen_sync_run_id,
+            last_seen_sync_run_id, first_seen_at, last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(item_pk, connector_id) DO UPDATE SET
+            last_seen_sync_run_id = excluded.last_seen_sync_run_id,
+            last_seen_at = MAX(item_owners.last_seen_at, excluded.last_seen_at)
+        `).run(itemPk, owner.connectorId, owner.ownershipKind, syncRunId, syncRunId, owner.firstSeenAt, owner.lastSeenAt);
+        }
+        const existing = this.db.query(`
+        SELECT chunk_index, bounded_text, content_hash, embedding_input_hash
+        FROM chunks WHERE item_pk = ? ORDER BY chunk_index
+      `).all(itemPk);
+        const namesOnly = options.layers === "metadata";
+        const unchanged = namesOnly || existing.length === copy.chunks.length && copy.chunks.every((chunk, index) => {
+          const current = existing[index];
+          return current?.chunk_index === chunk.chunkIndex && current.bounded_text === chunk.boundedText && current.content_hash === chunk.contentHash && current.embedding_input_hash === chunk.embeddingInputHash;
+        });
+        let chunksWritten = 0;
+        if (!unchanged) {
+          this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(itemPk);
+          const insert = this.db.query(`
+          INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+          for (const chunk of copy.chunks) {
+            insert.run(itemPk, chunk.chunkIndex, chunk.boundedText, chunk.contentHash, chunk.embeddingInputHash, now);
+            chunksWritten += 1;
+          }
+        }
+        this.refreshFtsForItem(itemPk);
+        const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
+        const provider = namesOnly ? undefined : options.vectorProvider;
+        if (!provider)
+          return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: "no_provider" };
+        const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
+        if (!minted || minted.provider !== provider.provider || minted.backend !== provider.backend || minted.dimension !== provider.dimension || minted.epochId !== provider.epochId) {
+          return {
+            chunksWritten,
+            chunksKept,
+            vectorsCopied: 0,
+            vectorsNotCopiedReason: copy.vectors.some((vector) => vector.modelId === provider.modelId) ? "identity_mismatch" : "no_current_vectors"
+          };
+        }
+        const providerEpoch = this.matchOrMintEmbeddingWriteAuthority(provider);
+        this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+        const chunkPks = new Map(this.db.query(`
+        SELECT chunk_index, chunk_pk, embedding_input_hash FROM chunks WHERE item_pk = ?
+      `).all(itemPk).map((chunk) => [chunk.chunk_index, chunk]));
+        let vectorsCopied = 0;
+        let hashMismatch = false;
+        const write = this.db.query(`
+        INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chunk_pk, model_id) DO UPDATE SET
+          item_pk = excluded.item_pk, content_hash = excluded.content_hash,
+          embedding = excluded.embedding, embedded_at = excluded.embedded_at
+      `);
+        for (const vector of copy.vectors) {
+          if (vector.modelId !== provider.modelId)
+            continue;
+          const target = chunkPks.get(vector.chunkIndex);
+          if (!target || target.embedding_input_hash !== vector.contentHash) {
+            hashMismatch = true;
+            continue;
+          }
+          write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
+          vectorsCopied += 1;
+        }
+        if (vectorsCopied > 0)
+          this.recordEmbeddingModel(provider, now);
+        return {
+          chunksWritten,
+          chunksKept,
+          vectorsCopied,
+          ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
+        };
+      })();
+    }
+    matchOrMintEmbeddingWriteAuthority(provider) {
+      const existing = this.db.query(`
+      SELECT 1 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
+      if (existing)
+        return this.bindEmbeddingWriteAuthority(provider, { mode: "match", invalidateOnCreate: false });
+      const prior = this.db.query(`
+      SELECT
+        EXISTS(SELECT 1 FROM chunk_embeddings WHERE model_id = ?) AS vectors,
+        EXISTS(SELECT 1 FROM embedding_models WHERE model_id = ?) AS provenance
+    `).get(provider.modelId, provider.modelId);
+      if (prior.vectors === 1 || prior.provenance === 1) {
+        throw new Error("A tier move refuses to mint embedding authority over prior vectors: that would invalidate them.");
+      }
+      return this.bindEmbeddingWriteAuthority(provider, { mode: "rebind", invalidateOnCreate: false });
+    }
+    embeddingWriteAuthoritySnapshot(modelId) {
+      const row = this.db.query(`
+      SELECT status, cursor, audit_receipt_sha256 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(connectorStoreEmbeddingWriteAuthorityId(modelId), "connector_store_embedding_write_authority");
+      if (!row || row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? ""))
+        return;
+      try {
+        const parsed = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+        if (parsed.kind !== "v2" || parsed.currencyRebuildPending)
+          return;
+        return {
+          modelId: parsed.modelId,
+          provider: parsed.embeddingProvider,
+          backend: parsed.embeddingBackend,
+          dimension: parsed.embeddingDimension,
+          epochId: parsed.embeddingEpoch
+        };
+      } catch {
+        return;
       }
     }
     recordTierDecision(connector, item, stored, tierClassification, run) {
@@ -16112,10 +17191,11 @@ var init_local_index = __esm(() => {
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedProvider = normalizeBoundedFilterString(provider, "provider");
       const rows = this.db.query(`
-      SELECT DISTINCT i.provider_conversation_id, i.title
+      SELECT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.title
       FROM connector_store_fts
       JOIN items i ON i.item_pk = connector_store_fts.item_pk
       WHERE connector_store_fts MATCH ?
+        AND connector_store_fts.chunk_pk IS NULL
         AND i.tombstoned = 0
         AND i.provider_conversation_id IS NOT NULL
         AND i.provider_conversation_id <> ''
@@ -16124,13 +17204,23 @@ var init_local_index = __esm(() => {
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedProvider ? "AND i.provider = ?" : ""}
       LIMIT ?
-    `).all(titleQuery, ...selectedAccount ? [selectedAccount] : [], ...selectedProvider ? [selectedProvider] : [], MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1);
+    `).all(titleQuery, ...selectedAccount ? [selectedAccount] : [], ...selectedProvider ? [selectedProvider] : [], (MAX_CONVERSATION_TITLE_LOOKUP_ROWS + 1) * 8);
+      const visible = this.tierVisibleRows(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        providerConversationId: row.provider_conversation_id
+      }), () => "metadata");
+      const distinct = new Map;
+      for (const row of visible) {
+        const key = JSON.stringify([row.provider_conversation_id, row.title]);
+        if (!distinct.has(key))
+          distinct.set(key, { conversationId: row.provider_conversation_id, title: row.title });
+      }
+      const candidates = [...distinct.values()];
       return {
-        candidates: rows.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS).map((row) => ({
-          conversationId: row.provider_conversation_id,
-          title: row.title
-        })),
-        truncated: rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS
+        candidates: candidates.slice(0, MAX_CONVERSATION_TITLE_LOOKUP_ROWS),
+        truncated: candidates.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS || rows.length > MAX_CONVERSATION_TITLE_LOOKUP_ROWS * 8
       };
     }
     senderAggregation(options) {
@@ -16412,6 +17502,8 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(input.provider, input.accountScope, identity.localItemId);
       if (!row?.locator_uri)
+        return;
+      if (!this.copyServable(identity))
         return;
       return {
         identity,
@@ -16910,11 +18002,14 @@ var init_local_index = __esm(() => {
           AND normalized_conversation = ? AND provider_item_id = ?
           AND tombstoned = 0
       `);
+        const hiddenCopies = this.hiddenCopyKeys(options.identities);
         for (const identity of options.identities) {
           const key = sourceItemIdentityKey(identity);
           if (considered.has(key))
             continue;
           considered.add(key);
+          if (hiddenCopies.has(tierLedgerIdentityKey(identity)))
+            continue;
           const row = findActive.get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
           if (row)
             doomed.push({ itemPk: row.item_pk, localItemId: identity.localItemId });
@@ -17641,6 +18736,8 @@ var init_local_index = __esm(() => {
       const classification = normalizeClassificationOptions(options?.classification);
       const placement = options?.placement;
       const tierClassification = options?.tierClassification ?? (classification?.sensitivityMap ? { sensitivityMap: classification.sensitivityMap } : undefined);
+      const tierRouting = options?.tierRouting;
+      let itemsRoutedElsewhere = 0;
       const ownershipKind = options?.ownershipKind ?? "observed";
       const reconcileAbsenceAuthority = options?.reconcileAbsenceAuthority ?? "complete_snapshot";
       const reconcileCurrentMembershipAuthority = options?.reconcileCurrentMembershipAuthority ?? "connector_owned";
@@ -17738,9 +18835,44 @@ var init_local_index = __esm(() => {
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
               }
             }
-            const sensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
-            if (itemForStorage.metadata["deleted"] !== true) {
+            const legacySensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
+            const route = tierRouting ? await tierRouting.route({
+              store: this,
+              connector,
+              item: itemForStorage,
+              legacy: legacySensitivity,
+              metadataOnly,
+              contentFetchFailed,
+              ...options?.sourceScopeObservation ? { sourceScope: normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) } : {}
+            }) : { kind: "legacy" };
+            if (route.kind === "elsewhere") {
+              this.reobserveRoutedCopy(itemForStorage, connector.id, ownershipKind, syncRunId);
+              itemsRoutedElsewhere += 1;
+              continue;
+            }
+            if (route.kind === "delete") {
+              const secrets = route.reason === "secrets";
+              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, true)) {
+                itemsTombstoned += 1;
+                if (secrets) {
+                  secretsTierItemsTombstoned += 1;
+                  gaps.push(secretsTierExcludedGap(itemForStorage));
+                } else {
+                  deletedEventItemsTombstoned += 1;
+                }
+              }
+              continue;
+            }
+            if (route.kind === "store" && route.sensitivity.trustDomain !== this.trustDomain) {
+              throw new Error("A tier route must place an item only in the store that asked.");
+            }
+            const routedLayer = route.kind === "store" ? route.layer : undefined;
+            const sensitivity = route.kind === "store" ? route.sensitivity : legacySensitivity;
+            if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true) {
               this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun);
+            }
+            if (routedLayer === "metadata") {
+              itemForStorage = { ...itemForStorage, content: { kind: "metadata_only" } };
             }
             if (sensitivity.trustDomain !== this.trustDomain) {
               const stored = this.activeStoredCopy(itemForStorage);
@@ -17788,8 +18920,8 @@ var init_local_index = __esm(() => {
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
-            if (fetchContent && !contentFetchFailed && !metadataOnly && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
-              const indexed = await this.indexItemContent(connector, (fetched) => classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
+            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!deferMetadataOnlyContent || itemForStorage.content.kind !== "metadata_only")) {
+              const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
               }, () => {
@@ -17901,6 +19033,7 @@ var init_local_index = __esm(() => {
         exclusions: exclusionCounts(exclusionTally),
         itemsMetadataOnly: metadataOnlyTally.total,
         metadataOnly: exclusionCounts(metadataOnlyTally),
+        ...tierRouting ? { itemsRoutedElsewhere } : {},
         chunksIndexed,
         ...checkpoint ? { cursor: checkpoint } : {},
         traversalComplete: sawDonePage,
@@ -18837,7 +19970,7 @@ var init_local_index = __esm(() => {
       const rankedItems = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]).slice(0, limit);
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-      const laneRows = searchRows.flatMap((row) => {
+      const laneRows = this.tierVisibleRows(searchRows, (row) => row.sourceItem, () => "content").flatMap((row) => {
         const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
         if (winner === undefined)
           return [];
@@ -18882,6 +20015,9 @@ var init_local_index = __esm(() => {
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
+      const tierExcluded = this.tierHiddenItemPks();
+      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+      const tierFilter = excludedPks.length > 0 ? " AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       return this.db.query(`
       SELECT
         c.chunk_pk,
@@ -18897,10 +20033,11 @@ var init_local_index = __esm(() => {
       JOIN items i ON i.item_pk = c.item_pk
       WHERE i.tombstoned = 0
         ${itemFilter}
+        ${tierFilter}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+    `).all(...selectedLocalItemIds ?? [], ...excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)
@@ -18989,6 +20126,12 @@ var init_local_index = __esm(() => {
         }
         selected = rows.filter((row) => (matchedGroups.get(row.item_pk) ?? 0) >= 2);
       }
+      selected = this.tierVisibleRows(selected, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       const spanTerms = queryTermsForSpan(query);
       return {
         rows: selected.slice(0, limit).map((row) => {
@@ -19039,16 +20182,30 @@ var init_local_index = __esm(() => {
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
     `).all(...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit);
-      return rows.map((row) => searchRowFromItemRow(row));
+      return this.tierVisibleRows(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), () => "content").map((row) => searchRowFromItemRow(row));
     }
     localContent(localItemId, maxChars, passageFocus) {
       const row = this.db.query(`
-      SELECT item_pk, trust_tier, locator_uri, mime_type,
+      SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
+        provider_conversation_id,
         ${this.reactionsColumnPresent ? "reactions_json" : "NULL AS reactions_json"}
       FROM items WHERE local_item_id = ? AND tombstoned = 0
     `).get(localItemId);
       if (!row)
         return;
+      if (!this.copyServable({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      })) {
+        return;
+      }
       const chunkRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk);
       const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => chunk.bounded_text), maxChars, passageFocus);
       const reactionLine = renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json));
@@ -19071,14 +20228,30 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+      const tier = this.tierHiddenItemPks();
+      const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const namesOnlyNotIn = tier.metadataLayer.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
-      ${itemFilters.sql}`;
+      ${itemFilters.sql}
+      ${hiddenNotIn}`;
       const contentWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
-      ${contentFilters.sql}`;
-      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params];
-      const contentParams = [...accountScope ? [accountScope] : [], ...contentFilters.params];
+      ${contentFilters.sql}
+      ${hiddenNotIn}
+      ${namesOnlyNotIn}`;
+      const parityWhere = `${contentWhere}
+      ${heldNotIn}`;
+      const jsonList = (pks) => pks.length > 0 ? [JSON.stringify(pks)] : [];
+      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...jsonList(tier.hidden)];
+      const contentParams = [
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...jsonList(tier.hidden),
+        ...jsonList(tier.metadataLayer)
+      ];
+      const parityParams = [...contentParams, ...jsonList(tier.held)];
       const counts = this.db.query(`
       SELECT
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
@@ -19088,16 +20261,16 @@ var init_local_index = __esm(() => {
           AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
         (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
         (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-          WHERE i.tombstoned = 0 ${contentWhere}) AS chunks,
+          WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
-            ${contentWhere}
+            ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id <> 'connector_store_embedding_write_authority'
+          WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
         ) AS sync_runs,
         -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
         -- the first chunk row instead of walking every chunk of every item.
@@ -19111,7 +20284,7 @@ var init_local_index = __esm(() => {
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${contentWhere}
         ) AS full_ingestion_files
-    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...contentParams, ...contentParams, ...contentParams, ...contentParams);
+    `).get(...itemParams, ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...contentParams);
       let policyDeferredItems = 0;
       if (scope && scope.contentAllowed !== false && counts.full_ingestion_files > 0) {
         const rows = this.db.query(`
@@ -19140,12 +20313,12 @@ var init_local_index = __esm(() => {
           JOIN chunks c ON c.chunk_pk = emb.chunk_pk
           JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
-            ${contentWhere}
+            ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM items i
           WHERE i.tombstoned = 0
             AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-            ${contentWhere}
+            ${parityWhere}
             AND NOT EXISTS (
               SELECT 1 FROM chunks c
               WHERE c.item_pk = i.item_pk
@@ -19164,9 +20337,16 @@ var init_local_index = __esm(() => {
         WHERE i.tombstoned = 0 ${contentWhere}
       ) m
       ORDER BY m.model_id
-    `).all(...contentParams, ...contentParams, ...contentParams);
+    `).all(...parityParams, ...parityParams, ...contentParams);
+      const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
+        pendingClassificationItems: tier.held.length,
+        supersededChunks: tier.hidden.length > 0 ? this.db.query(`
+                SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
+              `).get(JSON.stringify(tier.hidden)).n : 0,
+        tierMoveInProgress: tier.moving
+      } : undefined;
       const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id <> 'connector_store_embedding_write_authority'
+       WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
       return {
         corpusId: this.corpusId,
@@ -19194,6 +20374,7 @@ var init_local_index = __esm(() => {
           embeddedChunks: row.embedded_chunks,
           itemsEmbedded: row.items_embedded
         })),
+        ...tierStatus ? { tier: tierStatus } : {},
         ...last ? { lastSyncRun: syncRunFromRow(last) } : {}
       };
     }
@@ -19221,6 +20402,33 @@ var init_local_index = __esm(() => {
     }
   };
   lexicalContentPreference = connectorStoreContentPreference(new Set);
+  CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
+    "provider",
+    "family",
+    "account_scope",
+    "provider_item_id",
+    "provider_thread_id",
+    "provider_conversation_id",
+    "provider_file_id",
+    "provider_event_id",
+    "local_item_id",
+    "source_version",
+    "title",
+    "search_text",
+    "reactions_json",
+    "source_scope_generation",
+    "source_scope_revision",
+    "source_scope_folder_keys_json",
+    "sender_id",
+    "sender_label",
+    "sender_is_owner",
+    "locator_uri",
+    "mime_type",
+    "authored_at",
+    "updated_at",
+    "fetched_at",
+    "content_hash"
+  ];
   CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
     "sync_runs",
     "items",
@@ -19451,7 +20659,8 @@ var init_filter_capabilities = __esm(() => {
     "authored_before",
     "after",
     "before",
-    "trust_domain"
+    "trust_domain",
+    "all_tiers"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -21909,6 +23118,11 @@ async function routeSourceIndexSearch(options) {
       }))
     });
   }
+  if (options.visibilityGate) {
+    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    for (const lane of lanes)
+      lane.items = lane.items.filter((hit) => kept.has(hit));
+  }
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index]));
   const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(fuseRankedCandidateLanes({
     lanes,
@@ -22196,7 +23410,8 @@ var init_router = __esm(() => {
 // src/core/evidence-pack.ts
 async function buildEvidencePackDetailed(input) {
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input);
-  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(routed.hits, input);
+  const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
+  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
   const candidates = [];
   const candidateCorpusIds = [];
   const extractionGaps = [];
@@ -22264,6 +23479,8 @@ async function buildEvidencePackDetailed(input) {
     ...matchCounts.length > 0 ? { matchCounts } : {}
   };
   const corpusReadabilityGaps = candidates.length === 0 ? await corpusReadabilityGapsFor(routed.searchedCorpora, input.contentProviders) : [];
+  const secretLocations = input.secretLocations?.(input.searchQuery ?? input.question, routed.searchedCorpora) ?? [];
+  const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? []).filter((note) => note.pendingClassificationItems > 0);
   const builtAt = (input.now ?? (() => new Date))().toISOString();
   return {
     pack: { question: input.question, candidates, coverage, builtAt },
@@ -22273,7 +23490,9 @@ async function buildEvidencePackDetailed(input) {
     degradations: routed.degradations,
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
-    corpusReadabilityGaps
+    corpusReadabilityGaps,
+    ...secretLocations.length > 0 ? { secretLocations } : {},
+    ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
 }
 function evidenceBytesPerCandidate(candidateCount, maxCharsPerCandidate, evidenceByteBudget) {
@@ -22494,7 +23713,8 @@ function runRoutedSearch(input, query, ordinal) {
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
       context: input.searchContext
     },
-    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}
+    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
+    ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
 function isStrongLiteralRun(run, maxResults) {
@@ -22559,13 +23779,13 @@ function conservativeTierForDomain2(trustDomain) {
   return "S4";
 }
 function assertNoTrustDomainDowngrade(hit, sensitivity) {
-  const routedRank = trustDomainRank(hit.trustDomain);
-  const contentRank = trustDomainRank(sensitivity.trustDomain);
+  const routedRank = trustDomainRank2(hit.trustDomain);
+  const contentRank = trustDomainRank2(sensitivity.trustDomain);
   if (contentRank < routedRank) {
     throw new Error(`Local content provider downgraded ${hit.corpusId} from ${hit.trustDomain} to ${sensitivity.trustDomain}.`);
   }
 }
-function trustDomainRank(trustDomain) {
+function trustDomainRank2(trustDomain) {
   if (trustDomain === "public_safe")
     return 0;
   if (trustDomain === "internal")
@@ -22729,7 +23949,7 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync5, existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync15, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { dirname as dirname15, join as join19 } from "node:path";
 function defaultSovereigntyConfigPath() {
@@ -22744,7 +23964,7 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath();
-  if (existsSync14(configPath)) {
+  if (existsSync15(configPath)) {
     const parsed = JSON.parse(readFileSync15(configPath, "utf8"));
     return createSovereigntyEngine(parseSovereigntyConfig(parsed, configPath), {
       source: "file",
@@ -22973,7 +24193,7 @@ function describeSovereigntyPolicy(engine) {
 }
 function writeSovereigntyConfigFile(input) {
   const path = input.path?.trim() || defaultSovereigntyConfigPath();
-  if (existsSync14(path) && input.force !== true) {
+  if (existsSync15(path) && input.force !== true) {
     throw new OperationError("invalid_params", `Sovereignty config already exists at ${path}.`, "Pass --force to overwrite it.");
   }
   const config = validateSovereigntyConfig(input.config);
@@ -22988,7 +24208,7 @@ function writeSovereigntyConfigFile(input) {
 function loadSovereigntyPreset(name) {
   const sourceLayoutPath = join19(import.meta.dir, "..", "..", "config", "sovereignty", "presets", `${name}.json`);
   const bundledLayoutPath = join19(import.meta.dir, "..", "config", "sovereignty", "presets", `${name}.json`);
-  const path = existsSync14(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const path = existsSync15(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync15(path, "utf8"));
   return validateSovereigntyConfig(parsed);
 }
@@ -23551,7 +24771,10 @@ function createAnalystSourceIndexAnswerHandler(options) {
         contentProviders: activeLanes.contentProviders,
         maxCharsPerCandidate,
         evidenceByteBudget,
-        ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}
+        ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
+        ...activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {},
+        ...activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {},
+        ...activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}
       }));
       const initialAttempt = request.selected_items?.length ? "selected" : retrievalRequest.retrieval_mode ?? "hybrid";
       let detail = await buildDetail(lanes, initialAttempt);
@@ -23687,6 +24910,15 @@ function createAnalystSourceIndexAnswerHandler(options) {
       return {
         answer,
         evidence: released ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
+        ...(detail.secretLocations ?? []).length > 0 ? {
+          secret_locations: (detail.secretLocations ?? []).map((location) => ({
+            source: location.source,
+            ref: location.ref,
+            ...location.locator ? { locator: location.locator } : {},
+            ...location.title ? { title: location.title } : {},
+            finding_kinds: [...location.findingKinds]
+          }))
+        } : {},
         audit: {
           searched_corpora: [...pack.coverage.searchedCorpora],
           skipped_corpora: detail.skippedCorpora.map((skip) => ({
@@ -23704,6 +24936,12 @@ function createAnalystSourceIndexAnswerHandler(options) {
             }))
           } : {},
           ...selfHealAudit ? { self_heal: selfHealAudit } : {},
+          ...(detail.classificationCoverage ?? []).length > 0 ? {
+            classification_coverage: (detail.classificationCoverage ?? []).map((note) => ({
+              corpus_id: note.corpusId,
+              pending_classification_items: note.pendingClassificationItems
+            }))
+          } : {},
           answer_synthesis: {
             private_context_used: localOnly,
             secure_local_items_consulted: secureCandidates.length,
@@ -24456,7 +25694,9 @@ function releaseAnalystAnswer(input) {
     ...unreadableMatchedGaps,
     ...input.result.unanswered.length === 0 && releasedEvidenceCount === 0 ? zeroEvidenceCoverageNotes(input.detail.pack) : [],
     ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : [],
-    ...secureLocalExclusionCoverageNotes(input.detail)
+    ...secureLocalExclusionCoverageNotes(input.detail),
+    ...classificationCoverageNotes(input.detail),
+    ...secretLocationCoverageNotes(input.detail)
   ]);
   const safeUnsupportedAnswer = "I found matching source material, but I could not extract a cited bounded answer from it in this pass.";
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
@@ -24527,6 +25767,24 @@ function releaseDecisionWithReason(decision, reason) {
     ...decision,
     reasons: decision.reasons.includes(reason) ? [...decision.reasons] : [reason, ...decision.reasons]
   };
+}
+function classificationCoverageNotes(detail) {
+  const notes = (detail.classificationCoverage ?? []).filter((note) => note.pendingClassificationItems > 0);
+  if (notes.length === 0)
+    return [];
+  const total = notes.reduce((sum, note) => sum + note.pendingClassificationItems, 0);
+  const corpora = [...new Set(notes.map((note) => note.corpusId))].sort();
+  return [
+    `${total} item(s) pending classification in ${corpora.join(", ")} were searched by keyword only.`
+  ];
+}
+function secretLocationCoverageNotes(detail) {
+  const count = detail.secretLocations?.length ?? 0;
+  if (count === 0)
+    return [];
+  return [
+    `${count} Secret(s) matched by location only; their contents are never read into an answer.`
+  ];
 }
 function composeReleasedAnswer(answer, unanswered) {
   if (unanswered.length === 0)
@@ -24846,7 +26104,7 @@ function sourceInvocationProvenance(value) {
 
 // src/core/source-scope-approval.ts
 import { createHash as createHash12, randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync15, readFileSync as readFileSync16 } from "node:fs";
+import { existsSync as existsSync16, readFileSync as readFileSync16 } from "node:fs";
 import { dirname as dirname16, join as join20 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
   return join20(dirname16(handleRegistryPath), "file-source-scopes.json");
@@ -25015,7 +26273,7 @@ function normalizeAncestorKeys(input) {
   return [...new Set(keys)];
 }
 function readState(path) {
-  if (!existsSync15(path))
+  if (!existsSync16(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -25094,7 +26352,7 @@ var init_source_scope_approval = __esm(() => {
 
 // src/core/mail-source-scope.ts
 import { createHash as createHash13, randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync16, readFileSync as readFileSync17 } from "node:fs";
+import { existsSync as existsSync17, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname17, join as join21 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
   return join21(dirname17(handleRegistryPath), "mail-source-scopes.json");
@@ -25397,7 +26655,7 @@ function pendingSnapshot2(revision, accountGeneration, reason) {
   };
 }
 function readState2(path) {
-  if (!existsSync16(path))
+  if (!existsSync17(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -25579,7 +26837,7 @@ var init_classification = __esm(() => {
 // src/workers/google-connectors/request-budget.ts
 import {
   chmodSync as chmodSync6,
-  existsSync as existsSync17,
+  existsSync as existsSync18,
   mkdirSync as mkdirSync11,
   readFileSync as readFileSync18,
   renameSync as renameSync3
@@ -25820,7 +27078,7 @@ function isSqliteBusy(error) {
 function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
-      if (existsSync17(path))
+      if (existsSync18(path))
         chmodSync6(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
@@ -26341,6 +27599,13 @@ function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir17(), ".local", "share");
   return join22(dataHome, "openclaw", "olympus", "gmail-secure-connector-store.sqlite");
 }
+function defaultGmailPublicConnectorStoreDbPath(env = process.env) {
+  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
+    return env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
+  }
+  const dataHome = env.XDG_DATA_HOME?.trim() || join22(homedir17(), ".local", "share");
+  return join22(dataHome, "openclaw", "olympus", "gmail-public-connector-store.sqlite");
+}
 
 class RestGmailApiClient {
   token;
@@ -26590,7 +27855,7 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash14("sha256").update(value).digest("hex");
 }
-var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
+var GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_METADATA_HEADERS;
 var init_gmail = __esm(() => {
   init_mail_source_scope();
   init_sender_rules();
@@ -26635,6 +27900,536 @@ var init_gmail_live_control = __esm(() => {
   GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
+// src/workers/connector-store/tiered-store-set.ts
+import { existsSync as existsSync19 } from "node:fs";
+function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
+  return tierLedgerPathForStore(secureLocalStoreDbPath);
+}
+
+class TieredStoreSet {
+  setId;
+  ledger;
+  legs;
+  splitLayers;
+  tierClassification;
+  secretLocations;
+  onLegOpened;
+  constructor(options) {
+    if (!options.setId.trim())
+      throw new Error("A tiered store set needs a stable id.");
+    this.setId = options.setId;
+    this.ledger = options.ledger;
+    this.splitLayers = options.splitLayers !== false;
+    this.tierClassification = options.tierClassification;
+    this.secretLocations = options.secretLocations;
+    this.onLegOpened = options.onLegOpened;
+    this.legs = new Map;
+    for (const spec of options.legs) {
+      if (this.legs.has(spec.trustDomain))
+        throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
+      if (!spec.store && !spec.open)
+        throw new Error("A tiered store leg needs an open store or a way to open one.");
+      if (spec.store && (spec.store.trustDomain !== spec.trustDomain || spec.store.corpusId !== spec.corpusId)) {
+        throw new Error("A tiered store leg's store must match its declared trust domain and corpus.");
+      }
+      spec.store?.useTierLedger(this.ledger);
+      this.legs.set(spec.trustDomain, { spec, store: spec.store });
+    }
+    if (!this.legs.has("secure_local"))
+      throw new Error("A tiered store set needs a secure_local leg.");
+  }
+  store(trustDomain, options = {}) {
+    const leg = this.legs.get(trustDomain);
+    if (!leg)
+      return;
+    if (leg.store)
+      return leg.store;
+    if (!options.create && leg.spec.exists?.() !== true)
+      return;
+    const store = leg.spec.open();
+    if (store.trustDomain !== trustDomain || store.corpusId !== leg.spec.corpusId) {
+      store.close();
+      throw new Error("A lazily opened tiered store does not match its declared leg.");
+    }
+    store.useTierLedger(this.ledger);
+    leg.store = store;
+    this.onLegOpened?.(store, leg.spec);
+    return store;
+  }
+  openStores() {
+    return TIER_DOMAIN_ORDER.flatMap((domain) => {
+      const store = this.store(domain);
+      return store ? [store] : [];
+    });
+  }
+  legSpec(trustDomain) {
+    return this.legs.get(trustDomain)?.spec;
+  }
+  committedCursor(connectorId) {
+    return this.ledger.setCursor(this.setId, connectorId);
+  }
+  placementFor(decision) {
+    if (decision.contentTier === "secrets" || decision.metadataTier === "secrets") {
+      return { copies: [], embedHold: false };
+    }
+    const pending = decision.state === "pending" || decision.metadataPending || decision.contentPending;
+    if (pending) {
+      const domain = this.domainAtLeast("secure_local");
+      return {
+        copies: [{ corpusId: this.corpusFor(domain), trustDomain: domain, layers: "both" }],
+        embedHold: true,
+        stored: { trustDomain: domain, trustTier: defaultStoreTrustTier(domain) }
+      };
+    }
+    const metadataDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[decision.metadataTier]);
+    const contentDomain = this.domainAtLeast(TIER_KEY_TRUST_DOMAIN[maxTier(decision.contentTier, decision.metadataTier)]);
+    const copies = !this.splitLayers || metadataDomain === contentDomain ? [{ corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "both" }] : [
+      { corpusId: this.corpusFor(metadataDomain), trustDomain: metadataDomain, layers: "metadata" },
+      { corpusId: this.corpusFor(contentDomain), trustDomain: contentDomain, layers: "content" }
+    ];
+    return {
+      copies,
+      embedHold: false,
+      stored: { trustDomain: contentDomain, trustTier: defaultStoreTrustTier(contentDomain) }
+    };
+  }
+  async sync(connector, sync = {}, options = {}) {
+    this.assertLedgerGovernsLegs();
+    const run = new TieredRoutingRun(this, "shared");
+    const traversal = recordedTraversal(connector);
+    const legRuns = [];
+    const ran = new Set;
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const store = this.store(domain);
+      if (!store)
+        continue;
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+      ran.add(domain);
+    }
+    for (const domain of TIER_DOMAIN_ORDER) {
+      if (ran.has(domain) || !run.routedDomains.has(domain))
+        continue;
+      const store = this.store(domain, { create: true });
+      legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }));
+    }
+    run.finalize();
+    const cursor = legRuns[0]?.sync.cursor;
+    if (options.commitCursor !== false)
+      this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
+    return tieredRun(legRuns, run.counts, cursor);
+  }
+  async syncLegs(entries) {
+    this.assertLedgerGovernsLegs();
+    const run = new TieredRoutingRun(this, "per_leg");
+    const legRuns = [];
+    for (const entry of entries) {
+      const store = this.store(entry.trustDomain, { create: true });
+      if (!store)
+        throw new Error(`No ${entry.trustDomain} leg in this tiered store set.`);
+      run.legOptions.set(store.corpusId, entry.sync ?? {});
+      legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
+      run.finalize();
+    }
+    return tieredRun(legRuns, run.counts, undefined);
+  }
+  assertLedgerGovernsLegs() {
+    const ledgerId = this.ledger.ledgerId();
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const store = this.store(domain);
+      const binding = store?.tierSetBinding();
+      if (store && binding && binding.ledgerId !== ledgerId)
+        throw new TierLedgerUnavailableError(store.corpusId);
+    }
+  }
+  domainAtLeast(domain) {
+    for (const candidate of TIER_DOMAIN_ORDER) {
+      if (trustDomainRank(candidate) >= trustDomainRank(domain) && this.legs.has(candidate))
+        return candidate;
+    }
+    return "secure_local";
+  }
+  corpusFor(domain) {
+    const leg = this.legs.get(domain);
+    if (!leg)
+      throw new Error(`No ${domain} leg in this tiered store set.`);
+    return leg.spec.corpusId;
+  }
+  domainForCorpus(corpusId) {
+    for (const [domain, leg] of this.legs)
+      if (leg.spec.corpusId === corpusId)
+        return domain;
+    return;
+  }
+  routedCopiesGone(identity) {
+    const current = this.ledger.copies(identity).filter((copy) => copy.state === "current");
+    if (current.length === 0)
+      return false;
+    return current.every((copy) => {
+      const domain = this.domainForCorpus(copy.corpusId);
+      const store = domain ? this.store(domain) : undefined;
+      return store !== undefined && !store.itemPresence(identity).active;
+    });
+  }
+  anyLegHasRow(identity) {
+    return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
+  }
+  classification() {
+    return this.tierClassification;
+  }
+  secrets() {
+    return this.secretLocations;
+  }
+  async runLeg(domain, store, connector, sync) {
+    const provider = this.legs.get(domain)?.spec.embeddingProvider;
+    if (!provider) {
+      return { trustDomain: domain, corpusId: store.corpusId, sync: await store.syncFromConnector(connector, sync) };
+    }
+    const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync });
+    return { trustDomain: domain, corpusId: store.corpusId, sync: result.sync, embed: result.embed };
+  }
+}
+function createLaneTieredStoreSet(options) {
+  const ledger = options.ledger ?? options.secureStore.tierLedger() ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+  return new TieredStoreSet({
+    setId: options.setId,
+    ledger,
+    ...options.splitLayers === false ? { splitLayers: false } : {},
+    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
+    ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
+    legs: [
+      ...options.publicLeg ? [{
+        trustDomain: "public_safe",
+        corpusId: options.publicLeg.corpusId,
+        open: options.publicLeg.open,
+        exists: options.publicLeg.exists,
+        ...options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}
+      }] : [],
+      {
+        trustDomain: "internal",
+        corpusId: options.internalStore.corpusId,
+        store: options.internalStore,
+        legacy: true,
+        ...options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}
+      },
+      {
+        trustDomain: "secure_local",
+        corpusId: options.secureStore.corpusId,
+        store: options.secureStore,
+        legacy: true,
+        ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
+      }
+    ]
+  });
+}
+function onDemandTierStore(options) {
+  let opened;
+  return {
+    corpusId: options.corpusId,
+    dbPath: options.dbPath,
+    open() {
+      if (opened)
+        return opened;
+      const store = options.create();
+      if (store.corpusId !== options.corpusId) {
+        store.close();
+        throw new Error("An on-demand tier store opened with the wrong corpus.");
+      }
+      opened = store;
+      options.onOpened?.(store);
+      return store;
+    },
+    exists: () => opened !== undefined || options.dbPath !== ":memory:" && existsSync19(options.dbPath),
+    current: () => opened
+  };
+}
+function tieredLaneReceiptCounts(input) {
+  const routing = input.routing;
+  return {
+    ...input.public ? {
+      public_items_indexed: input.public.sync.itemsIndexed,
+      public_chunks_indexed: input.public.sync.chunksIndexed,
+      public_chunks_embedded: input.public.embed?.chunksEmbedded ?? 0
+    } : {},
+    ...routing.itemsRouted + routing.itemsSecrets + routing.movesQueued + routing.routedDeletions > 0 ? {
+      tier_routed_items: routing.itemsRouted,
+      tier_pending_items: routing.itemsPendingHeld,
+      tier_secret_items: routing.itemsSecrets,
+      tier_moves_queued: routing.movesQueued
+    } : {}
+  };
+}
+
+class TieredRoutingRun {
+  routedDomains;
+  legOptions;
+  counts;
+  plans;
+  copyRemovals;
+  set;
+  mode;
+  constructor(set, mode) {
+    this.set = set;
+    this.mode = mode;
+    this.routedDomains = new Set;
+    this.legOptions = new Map;
+    this.plans = new Map;
+    this.copyRemovals = new Map;
+    this.counts = {
+      itemsRouted: 0,
+      itemsLegacy: 0,
+      itemsSecrets: 0,
+      itemsPendingHeld: 0,
+      movesQueued: 0,
+      routedDeletions: 0,
+      contentUnreadHeld: 0
+    };
+  }
+  async route(input) {
+    const domain = this.set.domainForCorpus(input.store.corpusId);
+    if (!domain)
+      throw new Error("A tier route was asked by a store outside its set.");
+    const key = identityKey(input.item.identity);
+    let entry = this.plans.get(key);
+    if (!entry) {
+      entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
+      this.plans.set(key, entry);
+    }
+    if (this.mode === "per_leg" && !entry.handedOff) {
+      entry.handedOff = true;
+      await this.handOff(entry, input, domain);
+    }
+    return this.routeFor(entry.plan, input.store.corpusId, domain);
+  }
+  finalize() {
+    for (const identity of this.copyRemovals.values())
+      this.set.ledger.removeCopies(identity);
+    this.copyRemovals.clear();
+  }
+  routeFor(plan, corpusId, domain) {
+    switch (plan.kind) {
+      case "legacy":
+        return this.set.legSpec(domain)?.legacy === true ? { kind: "legacy" } : { kind: "elsewhere", reason: "routed_to_other_tier" };
+      case "routed": {
+        const layers = plan.copies.get(corpusId);
+        const sensitivity = plan.sensitivity.get(corpusId);
+        return layers && sensitivity ? { kind: "store", sensitivity, layer: layers } : { kind: "elsewhere", reason: "routed_to_other_tier" };
+      }
+      case "hold":
+        return { kind: "elsewhere", reason: plan.reason };
+      case "delete":
+        return plan.corpora.has(corpusId) ? { kind: "delete", reason: plan.reason } : { kind: "elsewhere", reason: plan.reason === "secrets" ? "secrets" : "routed_to_other_tier" };
+    }
+  }
+  planFor(input) {
+    const { item, connector } = input;
+    const identity = item.identity;
+    const ledger = this.set.ledger;
+    const hasRow = this.set.anyLegHasRow(identity);
+    const routed = ledger.isRouted(identity);
+    if (item.metadata["deleted"] === true) {
+      this.set.secrets()?.remove(identity);
+      if (!routed) {
+        this.counts.itemsLegacy += 1;
+        return { kind: "legacy" };
+      }
+      this.counts.routedDeletions += 1;
+      this.copyRemovals.set(identityKey(identity), identity);
+      return { kind: "delete", corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: "provider_deleted" };
+    }
+    const text = connectorStoreItemText(item);
+    const decision = decideItemTiers(connector, item, text, this.set.classification(), ledger);
+    this.recordSecretLocation(input, text, decision);
+    const contentRead = decision.contentRead && !input.contentFetchFailed;
+    if (!routed) {
+      if (hasRow || !contentRead || input.metadataOnly) {
+        this.counts.itemsLegacy += 1;
+        return { kind: "legacy" };
+      }
+    } else if (!contentRead) {
+      this.counts.contentUnreadHeld += 1;
+      return { kind: "hold", reason: "content_unread" };
+    }
+    const placement = this.set.placementFor(decision);
+    const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
+      staleCopiesGone: routed && this.set.routedCopiesGone(identity)
+    });
+    switch (recorded.outcome) {
+      case "secrets":
+        this.counts.itemsSecrets += 1;
+        this.copyRemovals.set(identityKey(identity), identity);
+        return { kind: "delete", corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: "secrets" };
+      case "queued_move":
+      case "held_moving":
+        this.counts.movesQueued += 1;
+        return { kind: "hold", reason: "move_queued" };
+      default: {
+        this.counts.itemsRouted += 1;
+        if (placement.embedHold)
+          this.counts.itemsPendingHeld += 1;
+        const copies = new Map;
+        const sensitivity = new Map;
+        for (const copy of placement.copies) {
+          this.set.store(copy.trustDomain, { create: true }).bindTierSet(ledger);
+          copies.set(copy.corpusId, copy.layers);
+          sensitivity.set(copy.corpusId, buildSourceSensitivity({
+            trustTier: defaultStoreTrustTier(copy.trustDomain),
+            trustDomain: copy.trustDomain
+          }));
+          this.routedDomains.add(copy.trustDomain);
+        }
+        return { kind: "routed", copies, sensitivity };
+      }
+    }
+  }
+  async handOff(entry, input, listingDomain) {
+    const plan = entry.plan;
+    if (plan.kind === "routed") {
+      for (const corpusId of plan.copies.keys()) {
+        const domain = this.set.domainForCorpus(corpusId);
+        if (domain === listingDomain)
+          continue;
+        const store = this.set.store(domain, { create: true });
+        const listing = this.legOptions.get(input.store.corpusId) ?? {};
+        await store.syncFromConnector(handoffConnector(input.connector, input.item), {
+          ...listing.fetchContent !== undefined ? { fetchContent: listing.fetchContent } : {},
+          ...listing.deferMetadataOnlyContent !== undefined ? { deferMetadataOnlyContent: listing.deferMetadataOnlyContent } : {},
+          tierRouting: this
+        });
+      }
+      return;
+    }
+    if (plan.kind === "delete") {
+      for (const corpusId of plan.corpora) {
+        const domain = this.set.domainForCorpus(corpusId);
+        if (!domain || domain === listingDomain)
+          continue;
+        this.set.store(domain)?.tombstoneCopy(entry.identity, {
+          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+          ...plan.reason === "secrets" ? { trustTier: "S5" } : {}
+        });
+      }
+    }
+  }
+  recordSecretLocation(input, text, decision) {
+    const index = this.set.secrets();
+    if (!index)
+      return;
+    const item = input.item;
+    if (decision.contentTier !== "secrets" && decision.metadataTier !== "secrets") {
+      if (decision.contentRead)
+        index.remove(item.identity);
+      return;
+    }
+    const title = stringMetadata(item, ["title", "name", "subject"]);
+    const locator = stringMetadata(item, ["locatorUri", "pathDisplay", "url"]);
+    const kinds = [...new Set([
+      ...text ? detectSecretFindingKinds(text) : [],
+      ...title ? detectSecretFindingKinds(title) : [],
+      ...locator ? detectSecretFindingKinds(locator) : []
+    ])];
+    let folderKeys = input.sourceScope?.folderKeys ?? [];
+    if (folderKeys.length === 0) {
+      try {
+        folderKeys = input.connector.classificationSignals(item).folderKeys ?? [];
+      } catch {
+        folderKeys = [];
+      }
+    }
+    const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
+    index.record({
+      identity: item.identity,
+      ...locator ? { locator } : {},
+      ...title && namesReleasable ? { title } : {},
+      namesReleasable,
+      folderKeys,
+      ...input.sourceScope ? { scopeGeneration: input.sourceScope.accountGeneration, scopeRevision: input.sourceScope.scopeRevision } : {},
+      findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
+      ...text !== undefined ? { text } : {}
+    });
+  }
+}
+function tieredRun(legs, routing, cursor) {
+  const byDomain = {};
+  for (const leg of legs)
+    byDomain[leg.trustDomain] = leg;
+  return { legs, byDomain, ...cursor ? { cursor } : {}, routing: { ...routing } };
+}
+function identityKey(identity) {
+  return tierLedgerIdentityKey(identity);
+}
+function stringMetadata(item, keys) {
+  for (const key of keys) {
+    const value = item.metadata[key];
+    if (typeof value === "string" && value.trim())
+      return value.trim();
+  }
+  return;
+}
+function recordedTraversal(connector) {
+  const pages = [];
+  let recorded = false;
+  let failed = false;
+  return {
+    id: connector.id,
+    family: connector.family,
+    authenticate: () => connector.authenticate(),
+    fetchItem: (localItemId) => connector.fetchItem(localItemId),
+    classificationSignals: (item) => connector.classificationSignals(item),
+    listItems(options = {}) {
+      if (recorded) {
+        return async function* () {
+          for (const page of pages)
+            yield page;
+        }();
+      }
+      return async function* () {
+        try {
+          for await (const page of connector.listItems(options)) {
+            pages.push(page);
+            yield page;
+          }
+        } catch (error) {
+          failed = true;
+          throw error;
+        } finally {
+          if (!failed)
+            recorded = true;
+        }
+      }();
+    }
+  };
+}
+function handoffConnector(source, item) {
+  return {
+    id: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+    family: source.family,
+    authenticate: async () => {},
+    fetchItem: (localItemId) => source.fetchItem(localItemId),
+    classificationSignals: (listed) => source.classificationSignals(listed),
+    listItems() {
+      return async function* () {
+        yield { items: [item], done: true };
+      }();
+    }
+  };
+}
+var TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var init_tiered_store_set = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_local_index();
+  init_tier_placement();
+  TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
+  TIER_KEY_TRUST_DOMAIN = {
+    public: "public_safe",
+    private: "internal",
+    secure: "secure_local"
+  };
+});
+
 // src/workers/google-connectors/gmail-live-sync.ts
 import { createHash as createHash15 } from "node:crypto";
 function createGmailConnectorStoreSyncHandler(options) {
@@ -26668,8 +28463,19 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
   });
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: connectorId,
+    internalStore: options.internalStore,
+    secureStore: options.secureStore,
+    ...options.publicStore ? { publicLeg: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } } : {},
+    ...options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {},
+    ...options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {},
+    tierClassification,
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
+    ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {}
+  });
   const runBothStores = async (input) => {
-    const traversal = sharedTraversal(input.connector, connectorId);
+    const traversal = scopedTraversal(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
@@ -26682,19 +28488,13 @@ function createGmailConnectorStoreSyncHandler(options) {
         reconcileAbsenceAuthority: "partial_window"
       } : {}
     };
-    const internal = await runStore({
-      store: options.internalStore,
-      connector: traversal,
-      sync,
-      ...options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}
-    });
-    const secure = await runStore({
-      store: options.secureStore,
-      connector: traversal,
-      sync,
-      ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
-    });
-    return { internal, secure };
+    const run = await tierSet.sync(traversal, sync, { commitCursor: input.reconcile !== true });
+    return {
+      internal: gmailLegOf(run, "internal"),
+      secure: gmailLegOf(run, "secure_local"),
+      ...run.byDomain.public_safe ? { public: gmailLegOf(run, "public_safe") } : {},
+      routing: run.routing
+    };
   };
   return {
     async sync(request = {}) {
@@ -26717,7 +28517,7 @@ function createGmailConnectorStoreSyncHandler(options) {
       const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
       const warnings = [];
       const resume = decodeCheckpoint(request.checkpoint, scopeTag);
-      const headStoreCursor = options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
+      const headStoreCursor = tierSet.committedCursor(connectorId)?.cursor ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
       let headResume = resume.head ?? (isGmailConnectorCursor(headStoreCursor) ? headStoreCursor : undefined);
       if (resume.headRejected)
         warnings.push(GMAIL_RESUME_REJECTED_WARNING);
@@ -26775,50 +28575,20 @@ function createGmailConnectorStoreSyncHandler(options) {
     requestBudgetStatus: () => options.requestBudget?.status()
   };
 }
-async function runStore(input) {
-  if (!input.embeddingProvider) {
-    return { sync: await input.store.syncFromConnector(input.connector, input.sync), embed: undefined };
-  }
-  const run = await syncAndEmbedFromConnector({
-    store: input.store,
-    connector: input.connector,
-    embeddingProvider: input.embeddingProvider,
-    ...input.sync ? { sync: input.sync } : {}
-  });
-  return { sync: run.sync, embed: run.embed };
+function gmailLegOf(run, domain) {
+  const leg = run.byDomain[domain];
+  if (!leg)
+    throw new Error(`The Gmail ${domain} store did not run.`);
+  return { sync: leg.sync, embed: leg.embed };
 }
-function sharedTraversal(connector, connectorId) {
-  const pages = [];
-  let recorded = false;
-  let failed = false;
+function scopedTraversal(connector, connectorId) {
   return {
     id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId) => connector.fetchItem(localItemId),
     classificationSignals: (item) => connector.classificationSignals(item),
-    listItems(options = {}) {
-      if (recorded) {
-        return async function* () {
-          for (const page of pages)
-            yield page;
-        }();
-      }
-      return async function* () {
-        try {
-          for await (const page of connector.listItems(options)) {
-            pages.push(page);
-            yield page;
-          }
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          if (!failed)
-            recorded = true;
-        }
-      }();
-    }
+    listItems: (options) => connector.listItems(options)
   };
 }
 function gmailCursorConnectorId(account, scope) {
@@ -26863,7 +28633,7 @@ function taskOutcome(input) {
   const secureTombstoned = input.head.secure.sync.itemsTombstoned;
   const internalEmbedded = input.head.internal.embed?.chunksEmbedded ?? 0;
   const secureEmbedded = input.head.secure.embed?.chunksEmbedded ?? 0;
-  const changed = internalIndexed > 0 || secureIndexed > 0 || internalTombstoned > 0 || secureTombstoned > 0 || internalEmbedded > 0 || secureEmbedded > 0;
+  const changed = internalIndexed > 0 || secureIndexed > 0 || internalTombstoned > 0 || secureTombstoned > 0 || internalEmbedded > 0 || secureEmbedded > 0 || (input.head.public?.sync.itemsIndexed ?? 0) > 0 || (input.head.public?.embed?.chunksEmbedded ?? 0) > 0;
   const warnings = [...new Set(input.warnings)];
   if (input.traversal.attachmentsNotIngested > 0) {
     warnings.push(GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING);
@@ -26898,7 +28668,8 @@ function taskOutcome(input) {
       resumed_from_checkpoint: Number(input.resumed),
       resume_cursor_rejected: Number(warnings.includes(GMAIL_RESUME_REJECTED_WARNING)),
       traversal_complete: Number(input.head.internal.sync.traversalComplete),
-      absence_authoritative: 0
+      absence_authoritative: 0,
+      ...tieredLaneReceiptCounts(input.head)
     },
     api_usage: {
       utc_day: input.usage?.utcDay ?? ""
@@ -26943,7 +28714,7 @@ function latestCompletedAt(values) {
 }
 var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
-  init_connector_store();
+  init_tiered_store_set();
   init_embeddings();
   init_classification();
   init_gmail();
@@ -27410,6 +29181,13 @@ function defaultGoogleDriveSecureConnectorStoreDbPath(env = process.env) {
   const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir18(), ".local", "share");
   return join23(dataHome, "openclaw", "olympus", "google-drive-secure-connector-store.sqlite");
 }
+function defaultGoogleDrivePublicConnectorStoreDbPath(env = process.env) {
+  if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
+    return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
+  }
+  const dataHome = env.XDG_DATA_HOME?.trim() || join23(homedir18(), ".local", "share");
+  return join23(dataHome, "openclaw", "olympus", "google-drive-public-connector-store.sqlite");
+}
 
 class RestGoogleDriveApiClient {
   token;
@@ -27590,7 +29368,7 @@ function safeProviderDetail2(value) {
 function hashString4(value) {
   return createHash16("sha256").update(value).digest("hex");
 }
-var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
+var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
   init_source_ingestion_exclusions();
   init_credential_broker();
@@ -27666,8 +29444,20 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
   });
+  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: connectorId,
+    internalStore: options.internalStore,
+    secureStore: options.secureStore,
+    ...options.publicStore ? { publicLeg: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } } : {},
+    ...options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {},
+    ...options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {},
+    ...sensitivityMap ? { tierClassification: { sensitivityMap } } : {},
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
+    ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {}
+  });
   const runBothStores = async (input) => {
-    const traversal = sharedTraversal2(input.connector, connectorId);
+    const traversal = scopedTraversal2(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
@@ -27686,19 +29476,14 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
         reconcileAbsenceAuthority: "partial_window"
       } : {}
     };
-    const internal = await runStore2({
-      store: options.internalStore,
-      connector: traversal,
-      sync,
-      ...options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}
-    });
-    const secure = await runStore2({
-      store: options.secureStore,
-      connector: traversal,
-      sync,
-      ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
-    });
-    return { internal, secure, traversal: input.connector.traversalStatus() };
+    const run = await tierSet.sync(traversal, sync, { commitCursor: input.reconcile !== true });
+    return {
+      internal: legOf(run, "internal"),
+      secure: legOf(run, "secure_local"),
+      ...run.byDomain.public_safe ? { public: legOf(run, "public_safe") } : {},
+      routing: run.routing,
+      traversal: input.connector.traversalStatus()
+    };
   };
   return {
     async sync(request = {}) {
@@ -27724,7 +29509,7 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
       const envelope = request.checkpoint?.trim() || undefined;
       const envelopeCursor = googleDriveCheckpointCursor(envelope, connectorId, options.scope !== undefined);
       const envelopeUsable = isGoogleDriveConnectorCursor(envelopeCursor);
-      const candidate = envelopeUsable ? envelopeCursor : options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
+      const candidate = envelopeUsable ? envelopeCursor : tierSet.committedCursor(connectorId)?.cursor ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
       let resume = isGoogleDriveConnectorCursor(candidate) ? candidate : undefined;
       if (envelope !== undefined && !envelopeUsable || candidate !== undefined && resume === undefined) {
         warnings.push(GOOGLE_DRIVE_RESUME_REJECTED_WARNING);
@@ -27777,50 +29562,20 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
     requestBudgetStatus: () => options.requestBudget?.status()
   };
 }
-async function runStore2(input) {
-  if (!input.embeddingProvider) {
-    return { sync: await input.store.syncFromConnector(input.connector, input.sync), embed: undefined };
-  }
-  const run = await syncAndEmbedFromConnector({
-    store: input.store,
-    connector: input.connector,
-    embeddingProvider: input.embeddingProvider,
-    ...input.sync ? { sync: input.sync } : {}
-  });
-  return { sync: run.sync, embed: run.embed };
+function legOf(run, domain) {
+  const leg = run.byDomain[domain];
+  if (!leg)
+    throw new Error(`The Google Drive ${domain} store did not run.`);
+  return { sync: leg.sync, embed: leg.embed };
 }
-function sharedTraversal2(connector, connectorId) {
-  const pages = [];
-  let recorded = false;
-  let failed = false;
+function scopedTraversal2(connector, connectorId) {
   return {
     id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId) => connector.fetchItem(localItemId),
     classificationSignals: (item) => connector.classificationSignals(item),
-    listItems(options = {}) {
-      if (recorded) {
-        return async function* () {
-          for (const page of pages)
-            yield page;
-        }();
-      }
-      return async function* () {
-        try {
-          for await (const page of connector.listItems(options)) {
-            pages.push(page);
-            yield page;
-          }
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          if (!failed)
-            recorded = true;
-        }
-      }();
-    }
+    listItems: (options) => connector.listItems(options)
   };
 }
 function googleDriveCursorConnectorId(account, scope) {
@@ -27859,7 +29614,8 @@ function taskOutcome2(input) {
   const internalExcludedUnevaluable = input.run.internal.sync.exclusions.items_excluded_unevaluable;
   const secureExcluded = input.run.secure.sync.itemsExcluded;
   const secureExcludedUnevaluable = input.run.secure.sync.exclusions.items_excluded_unevaluable;
-  const changed = internalIndexed > 0 || secureIndexed > 0 || internalTombstoned > 0 || secureTombstoned > 0 || internalEmbedded > 0 || secureEmbedded > 0;
+  const publicLeg = input.run.public;
+  const changed = internalIndexed > 0 || secureIndexed > 0 || internalTombstoned > 0 || secureTombstoned > 0 || internalEmbedded > 0 || secureEmbedded > 0 || (publicLeg?.sync.itemsIndexed ?? 0) > 0 || (publicLeg?.embed?.chunksEmbedded ?? 0) > 0;
   const warnings = [...new Set(input.warnings)];
   if ((internalExcluded > 0 || secureExcluded > 0) && !warnings.includes(GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING)) {
     warnings.push(GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING);
@@ -27892,7 +29648,8 @@ function taskOutcome2(input) {
       resumed_from_checkpoint: Number(input.resumed),
       resume_cursor_rejected: Number(warnings.includes(GOOGLE_DRIVE_RESUME_REJECTED_WARNING)),
       traversal_complete: Number(input.run.internal.sync.traversalComplete),
-      absence_authoritative: 0
+      absence_authoritative: 0,
+      ...tieredLaneReceiptCounts(input.run)
     },
     api_usage: {
       utc_day: input.usage?.utcDay ?? ""
@@ -27937,7 +29694,7 @@ function latestCompletedAt2(values) {
 }
 var GOOGLE_DRIVE_STORE_PULL_RECEIPT_KIND = "google_drive_connector_store_pull_receipt", GOOGLE_DRIVE_STORE_RECONCILE_RECEIPT_KIND = "google_drive_connector_store_reconcile_receipt", GOOGLE_DRIVE_RESUME_REJECTED_WARNING = "google_drive_store_resume_cursor_rejected", GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING = "google_drive_store_ingest_exclusion", GOOGLE_DRIVE_SCOPED_CHECKPOINT_PREFIX = "gds1:", MAX_RECONCILE_FILES = 1000, MAX_RECONCILE_CONTENT_FILES = 500;
 var init_drive_live_sync = __esm(() => {
-  init_connector_store();
+  init_tiered_store_set();
   init_embeddings();
   init_classification();
   init_drive();
@@ -28063,7 +29820,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 // src/workers/telegram-messages/capture-spool-connector.ts
 import { createHash as createHash18 } from "node:crypto";
-import { existsSync as existsSync18, lstatSync as lstatSync8, readFileSync as readFileSync19, readdirSync } from "node:fs";
+import { existsSync as existsSync20, lstatSync as lstatSync8, readFileSync as readFileSync19, readdirSync } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 import { join as join25 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -28205,21 +29962,21 @@ function readTelegramCaptureSpool(options) {
           malformedRecords += 1;
           continue;
         }
-        const identityKey = record.capturedItem.item.identity.localItemId;
+        const identityKey2 = record.capturedItem.item.identity.localItemId;
         const observedTrust = record.capturedItem.trustDomain;
-        const priorTrust = trustByIdentity.get(identityKey);
-        const resolvedTrust = mostRestrictiveTrust(observedTrust, priorTrust, options.resolvedTrustByItemId?.get(identityKey));
+        const priorTrust = trustByIdentity.get(identityKey2);
+        const resolvedTrust = mostRestrictiveTrust(observedTrust, priorTrust, options.resolvedTrustByItemId?.get(identityKey2));
         if (resolvedTrust !== observedTrust || priorTrust !== undefined && priorTrust !== observedTrust) {
-          trustConflicts.set(identityKey, resolvedTrust);
+          trustConflicts.set(identityKey2, resolvedTrust);
         }
         if (priorTrust !== undefined && priorTrust !== resolvedTrust) {
           for (let index = records.length - 1;index >= 0; index -= 1) {
-            if (records[index].capturedItem.item.identity.localItemId === identityKey) {
+            if (records[index].capturedItem.item.identity.localItemId === identityKey2) {
               records.splice(index, 1);
             }
           }
         }
-        trustByIdentity.set(identityKey, resolvedTrust);
+        trustByIdentity.set(identityKey2, resolvedTrust);
         if (resolvedTrust !== observedTrust)
           continue;
         if (options.trustDomain === undefined || resolvedTrust === options.trustDomain) {
@@ -28245,7 +30002,7 @@ function mostRestrictiveTrust(observed, ...others) {
   return observed === "secure_local" || others.includes("secure_local") ? "secure_local" : "internal";
 }
 function assertTelegramCaptureSpoolDirectory(spoolDir) {
-  if (!existsSync18(spoolDir))
+  if (!existsSync20(spoolDir))
     throw new Error("Telegram capture spool directory does not exist.");
   const dir = lstatSync8(spoolDir);
   if (!dir.isDirectory() || dir.isSymbolicLink()) {
@@ -28526,6 +30283,13 @@ function reconcileTelegramTrustStores(stores, options = {}) {
 function createTelegramConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: TELEGRAM_MESSAGES_SOURCE_ID,
+    internalStore: options.stores.internal,
+    secureStore: options.stores.secureLocal,
+    splitLayers: false,
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {}
+  });
   return {
     async pull(request = {}) {
       const maxItems = telegramPullMaxItems(request.max_items ?? options.maxItems);
@@ -28556,30 +30320,42 @@ function createTelegramConnectorStoreSyncHandler(options) {
         conflictedItemIds.add(localItemId);
       for (const localItemId of reconciliation.relinquishedLocalItemIds)
         conflictedItemIds.add(localItemId);
-      const internal = await options.stores.internal.syncFromConnector(createTelegramCaptureSpoolConnector({
-        spoolDir,
-        trustDomain: "internal",
-        admitThroughCursor,
-        ...resolved
-      }), {
-        placement: { trustTier: "S3", trustDomain: "internal" },
-        ...cursors.internal ? { cursor: cursors.internal } : {},
-        maxItems,
-        fetchContent: true,
-        deferMetadataOnlyContent: true
-      });
-      const secureLocal = await options.stores.secureLocal.syncFromConnector(createTelegramCaptureSpoolConnector({
-        spoolDir,
-        trustDomain: "secure_local",
-        admitThroughCursor,
-        ...resolved
-      }), {
-        placement: { trustTier: "S4", trustDomain: "secure_local" },
-        ...cursors.secureLocal ? { cursor: cursors.secureLocal } : {},
-        maxItems,
-        fetchContent: true,
-        deferMetadataOnlyContent: true
-      });
+      const run = await tierSet.syncLegs([
+        {
+          trustDomain: "internal",
+          connector: createTelegramCaptureSpoolConnector({
+            spoolDir,
+            trustDomain: "internal",
+            admitThroughCursor,
+            ...resolved
+          }),
+          sync: {
+            placement: { trustTier: "S3", trustDomain: "internal" },
+            ...cursors.internal ? { cursor: cursors.internal } : {},
+            maxItems,
+            fetchContent: true,
+            deferMetadataOnlyContent: true
+          }
+        },
+        {
+          trustDomain: "secure_local",
+          connector: createTelegramCaptureSpoolConnector({
+            spoolDir,
+            trustDomain: "secure_local",
+            admitThroughCursor,
+            ...resolved
+          }),
+          sync: {
+            placement: { trustTier: "S4", trustDomain: "secure_local" },
+            ...cursors.secureLocal ? { cursor: cursors.secureLocal } : {},
+            maxItems,
+            fetchContent: true,
+            deferMetadataOnlyContent: true
+          }
+        }
+      ]);
+      const internal = run.byDomain.internal.sync;
+      const secureLocal = run.byDomain.secure_local.sync;
       return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished);
     },
     lastStoreRunCompletedAt() {
@@ -28660,6 +30436,7 @@ function sum(runs, key) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages", TELEGRAM_PERSONAL_ACCOUNT_SCOPE = "telegram.personal", TELEGRAM_MALFORMED_SPOOL_WARNING = "telegram_malformed_spool_records", TELEGRAM_TRUST_CONFLICT_WARNING = "telegram_trust_conflict_items", DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500, MAX_TELEGRAM_PULL_MAX_ITEMS = 1e4;
 var init_store_sync = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_corpus_adapter2();
   init_capture_spool_connector();
 });
@@ -34594,7 +36371,7 @@ var init_api_connector = __esm(() => {
 import { createHash as createHash25, randomUUID as randomUUID10 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
-  existsSync as existsSync19,
+  existsSync as existsSync21,
   mkdirSync as mkdirSync15,
   renameSync as renameSync4,
   statSync as statSync6,
@@ -34846,7 +36623,7 @@ function writePrivateReport(pathValue, contents) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
   } finally {
-    if (existsSync19(temporaryPath))
+    if (existsSync21(temporaryPath))
       unlinkSync2(temporaryPath);
   }
 }
@@ -35769,7 +37546,7 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { existsSync as existsSync20, readFileSync as readFileSync21, readdirSync as readdirSync2, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync21, readdirSync as readdirSync2, statSync as statSync7 } from "node:fs";
 import { join as join30 } from "node:path";
 function createWhatsAppLiveSourceConnector(options) {
   const spoolDir = requireNonEmpty4(options.spoolDir, "WhatsApp live connector spoolDir");
@@ -35778,7 +37555,7 @@ function createWhatsAppLiveSourceConnector(options) {
     id: CONNECTOR_ID2,
     family: "chat",
     async authenticate() {
-      if (!existsSync20(spoolDir) || !statSync7(spoolDir).isDirectory()) {
+      if (!existsSync22(spoolDir) || !statSync7(spoolDir).isDirectory()) {
         throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
       }
     },
@@ -36972,7 +38749,7 @@ var init_email_policy = __esm(() => {
 import { createHash as createHash29, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync11,
-  existsSync as existsSync22,
+  existsSync as existsSync24,
   lstatSync as lstatSync11,
   mkdirSync as mkdirSync17
 } from "node:fs";
@@ -37722,7 +39499,7 @@ function hardenPrivateDatabasePath(dbPath) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
   chmodSync11(leafDir, 448);
-  if (existsSync22(dbPath)) {
+  if (existsSync24(dbPath)) {
     const dbStat = lstatSync11(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
@@ -38333,7 +40110,8 @@ class EmailClient {
         ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
         ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
         ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}
+        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
       })
     });
     const data = asRecord8(response);
@@ -38653,8 +40431,31 @@ function parseSourceIndexAnswerResult(value) {
       castor_safe_bridge: true
     },
     ...value.internal_context !== undefined ? { internal_context: value.internal_context } : {},
-    ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {}
+    ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {},
+    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {}
   };
+}
+function parseSecretLocations(value) {
+  if (value === undefined)
+    return;
+  if (!Array.isArray(value)) {
+    throw new OperationError("email_error", "secret_locations must be an array.");
+  }
+  return value.map((entry) => {
+    const record = asRecord8(entry);
+    const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
+    const extra = Object.keys(record).filter((key) => !allowed.has(key));
+    if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
+      throw new OperationError("email_error", "secret_locations entries carry location only.");
+    }
+    return {
+      source: record.source,
+      ref: record.ref,
+      ...typeof record.locator === "string" ? { locator: record.locator } : {},
+      ...typeof record.title === "string" ? { title: record.title } : {},
+      finding_kinds: record.finding_kinds
+    };
+  });
 }
 function parseSourceAnswerSelfHealAudit(value) {
   const audit = asRecord8(value);
@@ -38791,10 +40592,20 @@ function parseSourceIndexSearchResult(value, context) {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
-  const corpus = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search").find((entry) => entry.corpusId === corpusId);
+  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search");
+  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
+  const auditRecord = asRecord8(value.audit);
+  const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
+    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    if (!entry || entry.sourceId !== corpus.sourceId) {
+      throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
+    }
+    return entry;
+  }) : [corpus];
+  const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === "secure_local") ? "secure_local" : tierCorpora.some((entry) => entry.trustDomain === "internal") ? "internal" : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
@@ -38802,7 +40613,7 @@ function parseSourceIndexSearchResult(value, context) {
   const policy = asRecord8(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
-  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || corpus.trustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== corpus.trustDomain) {
+  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || expectedTrustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== expectedTrustDomain) {
     throw new OperationError("email_error", "source index search policy must describe a local safe result.");
   }
   const retrievalMode = optionalRetrievalMode(audit.retrieval_mode);
@@ -38838,12 +40649,16 @@ function parseSourceIndexSearchResult(value, context) {
   if (locatorsExposed && validateDropboxLocatorPayloads(value.hits) === 0) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
+  const secretLocations = parseSecretLocations(value.secret_locations);
+  const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
     corpus_id: corpusId,
     retrieval_source: "local_index",
     hits: value.hits,
+    ...secretLocations ? { secret_locations: secretLocations } : {},
     audit: {
+      ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString4(audit.request_id, "audit.request_id"),
       retrieval_source: "local_index",
       queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
@@ -38868,7 +40683,7 @@ function parseSourceIndexSearchResult(value, context) {
       source_text_returned: sourceTextReturned,
       source_packets_exposed: false,
       local_only: policy.local_only,
-      trust_domain: corpus.trustDomain,
+      trust_domain: expectedTrustDomain,
       ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
     }
   };
@@ -39116,7 +40931,7 @@ var init_operation_exposure = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
-import { existsSync as existsSync23 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 async function setupPreflight(options) {
   const env = environmentWithWorkerSetupEnv({
     ...options.env ? { env: options.env } : {},
@@ -39124,7 +40939,7 @@ async function setupPreflight(options) {
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
   const inputEnv = options.env ?? process.env;
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync23(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync25(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   const secretStore = options.secretStore ?? createDefaultSecretStore({ env });
   const unmet = [];
@@ -40515,7 +42330,12 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
       ...status.counts.scopeMetadataOnlyFiles === undefined || status.counts.policyDeferredItems === undefined ? {} : {
         [METADATA_ONLY_EXPECTED_COUNT_KEY]: status.counts.scopeMetadataOnlyFiles + status.counts.policyDeferredItems
       },
-      ...forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded }
+      ...forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded },
+      ...status.tier ? {
+        pending_classification_items: status.tier.pendingClassificationItems,
+        superseded_chunks: status.tier.supersededChunks,
+        tier_move_in_progress: status.tier.tierMoveInProgress
+      } : {}
     },
     ...status.lastSyncRun ? { last_refresh: lastRefreshFromConnectorStoreSync(status.lastSyncRun) } : {},
     skipped_item_metadata_reason: "connector_store_item_metadata_not_exposed_to_castor",
@@ -42672,7 +44492,7 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync24, mkdirSync as mkdirSync20 } from "node:fs";
+import { existsSync as existsSync26, mkdirSync as mkdirSync20 } from "node:fs";
 import { homedir as homedir30 } from "node:os";
 import { dirname as dirname27, join as join36 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
@@ -42878,7 +44698,7 @@ async function collectLocalSourceIngestionLedger(options = {}) {
   ]);
   const exclusionSources = [];
   for (const store of localConnectorStores(env)) {
-    if (!existsSync24(store.dbPath))
+    if (!existsSync26(store.dbPath))
       continue;
     const gated = store.family === "file";
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
@@ -43623,7 +45443,7 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync25, mkdirSync as mkdirSync21, readFileSync as readFileSync24, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync27, mkdirSync as mkdirSync21, readFileSync as readFileSync24, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname28, join as join37 } from "node:path";
 async function runDoctor(input) {
   const inputEnv = input.env;
@@ -43681,7 +45501,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync25(configPath))
+  if (configPath === undefined || !existsSync27(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -44467,7 +46287,7 @@ function ingestionHealthStateFromLedger(ledger) {
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync25(path))
+    if (!existsSync27(path))
       return;
     const parsed = JSON.parse(readFileSync24(path, "utf8"));
     const record = asRecord9(parsed);
@@ -44698,7 +46518,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync25(join37(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync27(join37(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync4(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -45118,7 +46938,8 @@ var init_operations = __esm(() => {
     include_deleted: { type: "boolean", description: "Whether Telegram search may include tombstoned messages." },
     attachment_type: { type: "string", enum: ["image", "video", "audio", "file", "link", "other"], description: "Optional Telegram attachment type filter." },
     max_results: { type: "number", description: "Max hits; worker-capped." },
-    include_locators: { type: "boolean", description: "Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes." }
+    include_locators: { type: "boolean", description: "Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes." },
+    all_tiers: { type: "boolean", description: "Default true: also search the source's other tier corpora. false searches only corpus_id." }
   };
   SOURCE_ANSWER_PARAMS = {
     question: { type: "string", required: true, description: "Question or search intent to route across approved source corpora." },
@@ -45398,7 +47219,9 @@ var init_operations = __esm(() => {
         const attachmentType = optionalAttachmentType(params.attachment_type);
         const maxResults = optionalNumber4(params.max_results, "max_results");
         const includeLocators = optionalBoolean2(params.include_locators, "include_locators");
+        const allTiers = optionalBoolean2(params.all_tiers, "all_tiers");
         return ctx.email.sourceIndexSearch({
+          ...allTiers !== undefined ? { allTiers } : {},
           query,
           corpusId,
           ...retrievalMode !== undefined ? { retrievalMode } : {},
@@ -65861,7 +67684,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync29,
+  existsSync as existsSync31,
   mkdirSync as mkdirSync25,
   readFileSync as readFileSync29,
   renameSync as renameSync8,
@@ -66044,7 +67867,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync29(path))
+  if (!existsSync31(path))
     return;
   let payload;
   try {
@@ -66891,7 +68714,8 @@ function createSourceWatchSearchFromAnalystLanes(lanes) {
             allowedCorpusIds: [corpusId],
             allowCloudQueries: true
           }
-        }
+        },
+        ...configured.visibilityGate ? { visibilityGate: configured.visibilityGate } : {}
       });
       return routed.hits.map((hit) => ({
         ref: {
@@ -74928,7 +76752,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync15, copyFileSync, existsSync as existsSync30, lstatSync as lstatSync15, mkdirSync as mkdirSync27, readFileSync as readFileSync33 } from "node:fs";
+import { chmodSync as chmodSync15, copyFileSync, existsSync as existsSync32, lstatSync as lstatSync15, mkdirSync as mkdirSync27, readFileSync as readFileSync33 } from "node:fs";
 import { dirname as dirname37 } from "node:path";
 function buildSourceDispositionsView(options) {
   const now = options.now ?? new Date;
@@ -74986,7 +76810,7 @@ function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath();
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync30(path)) {
+  if (!existsSync32(path)) {
     return {
       path,
       present: false,
@@ -75035,7 +76859,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync30(path)) {
+  if (existsSync32(path)) {
     const stat5 = lstatSync15(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -75787,7 +77611,9 @@ function createEmailSourceWorker(options = {}) {
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
-  const connectorStoresByCorpusId = new Map(connectorStores.map((store) => [store.corpusId, store]));
+  const connectorStoresByCorpusId = {
+    get: (corpusId) => connectorStores.find((store) => store.corpusId === corpusId)
+  };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map;
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map;
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map;
@@ -77012,53 +78838,109 @@ function createEmailSourceWorker(options = {}) {
           const corpusId = canonicalRequestCorpusId(record3);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
-            const mandatoryScope = connectorStoreReadScope?.(connectorStore);
-            if (mandatoryScope?.allowed === false) {
+            const searchConnectorStore = async (store) => {
+              const mandatoryScope = connectorStoreReadScope?.(store);
+              if (mandatoryScope?.allowed === false)
+                return;
+              const searchRequest2 = parseConnectorStoreIndexSearchRequestRecord(store === connectorStore ? record3 : { ...record3, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
+              const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
+              const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
+              const retrievalMode = searchRequest2.retrievalMode ?? (searchEmbeddingProvider && store.hasEmbeddings(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
+              const combinedFilters = searchRequest2.filters || mandatoryScope?.filters ? normalizeConnectorStoreSearchFilters({
+                ...searchRequest2.filters,
+                ...mandatoryScope?.filters
+              }) : undefined;
+              const adapter = createConnectorStoreCorpusAdapter({
+                store,
+                retrievalMode,
+                ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest2.accountScope ? { accountScope: searchRequest2.accountScope } : {},
+                ...combinedFilters ? { filters: combinedFilters } : {},
+                ...searchRequest2.resultProjector ? { resultProjector: searchRequest2.resultProjector } : {},
+                ...searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}
+              });
+              const result = await retrySqliteBusy(() => adapter({
+                query: searchRequest2.query,
+                maxResults: searchRequest2.maxResults,
+                corpus: defineConnectorCorpus({
+                  corpusId: store.corpusId,
+                  family: store.family,
+                  trustDomain: store.trustDomain
+                }),
+                context: {
+                  allowedTrustDomains: [store.trustDomain],
+                  allowedCorpusIds: [store.corpusId]
+                }
+              }));
+              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope ? mandatoryScope.accountScope : searchRequest2.accountScope;
+              return {
+                store,
+                searchRequest: searchRequest2,
+                result,
+                scope: {
+                  corpusId: store.corpusId,
+                  ...accountScope ? { accountScope } : {},
+                  ...combinedFilters ? { filters: combinedFilters } : {}
+                }
+              };
+            };
+            const primary = await searchConnectorStore(connectorStore);
+            if (!primary) {
               throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source is unavailable until its folder scope is approved for the connected account.");
             }
-            const searchRequest = parseConnectorStoreIndexSearchRequestRecord(record3, connectorStore, connectorStoreAccountScopes.get(connectorStore.corpusId), connectorStore.family === "chat" ? connectorStorePrincipals.get(connectorStore.corpusId) : undefined, connectorStorePrincipals.get(connectorStore.corpusId), connectorStoreFilterCapabilities);
-            const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId) ?? sourceIndexEmbeddingProvider;
-            const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (connectorStore.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
-            const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && connectorStore.hasEmbeddings(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
-            const combinedFilters = searchRequest.filters || mandatoryScope?.filters ? normalizeConnectorStoreSearchFilters({
-              ...searchRequest.filters,
-              ...mandatoryScope?.filters
-            }) : undefined;
-            const adapter = createConnectorStoreCorpusAdapter({
-              store: connectorStore,
-              retrievalMode,
-              ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
-              ...combinedFilters ? { filters: combinedFilters } : {},
-              ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
-              ...searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}
+            const searchRequest = primary.searchRequest;
+            const siblings = record3.all_tiers === false || record3.trust_domain !== undefined ? [] : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? []).flatMap((siblingCorpusId) => {
+              const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
+              return sibling && sibling !== connectorStore ? [sibling] : [];
             });
-            const result = await retrySqliteBusy(() => adapter({
-              query: searchRequest.query,
-              maxResults: searchRequest.maxResults,
-              corpus: defineConnectorCorpus({
-                corpusId: connectorStore.corpusId,
-                family: connectorStore.family,
-                trustDomain: connectorStore.trustDomain
-              }),
-              context: {
-                allowedTrustDomains: [connectorStore.trustDomain],
-                allowedCorpusIds: [connectorStore.corpusId]
+            const siblingRuns = [];
+            for (const sibling of siblings) {
+              const run = await searchConnectorStore(sibling);
+              if (run)
+                siblingRuns.push(run);
+            }
+            const runs = [primary, ...siblingRuns];
+            const tiered = siblingRuns.length > 0;
+            const tagged = runs.flatMap((run) => run.result.hits.map((hit) => ({
+              ...hit,
+              corpusId: run.store.corpusId,
+              trustDomain: run.store.trustDomain
+            })));
+            const visible = new Set(tiered && options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
+            const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
+            const merged = [];
+            for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits2) => hits2.length > rank); rank += 1) {
+              for (const hits2 of perRun) {
+                const hit = hits2[rank];
+                if (hit && merged.length < searchRequest.maxResults)
+                  merged.push(hit);
               }
-            }));
-            const locatorsExposed = result.hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+            }
+            const hits = tiered ? merged : tagged;
+            const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+            const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
             const safeResult = {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: result.hits.map((hit) => addSelectedItemToSearchHit(connectorStore.corpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              ...secretLocations.length > 0 ? {
+                secret_locations: secretLocations.map((location) => ({
+                  source: location.source,
+                  ref: location.ref,
+                  ...location.locator ? { locator: location.locator } : {},
+                  ...location.title ? { title: location.title } : {},
+                  finding_kinds: [...location.findingKinds]
+                }))
+              } : {},
               audit: {
                 request_id: `${connectorStore.corpusId}:connector-store-search`,
                 retrieval_source: "local_index",
-                queries_attempted: 1,
-                metadata_hits: result.hits.length,
-                items_returned: result.hits.length,
-                latency_ms: result.latencyMs,
-                ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: result.laneAudits ?? [] },
+                queries_attempted: runs.length,
+                metadata_hits: hits.length,
+                items_returned: hits.length,
+                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
+                ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) },
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...searchRequest.locatorsRequested ? { locators_requested: true } : {}
@@ -77067,8 +78949,8 @@ function createEmailSourceWorker(options = {}) {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 source_packets_exposed: false,
-                local_only: searchRequest.explicitEmptyChatScope || connectorStore.trustDomain === "secure_local",
-                trust_domain: connectorStore.trustDomain,
+                local_only: searchRequest.explicitEmptyChatScope || runs.some((run) => run.store.trustDomain === "secure_local"),
+                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
                 ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
               }
             };
@@ -79302,6 +81184,13 @@ function html(value, status = 200, extraHeaders) {
     }
   });
 }
+function mostPrivateTrustDomain(domains) {
+  if (domains.includes("secure_local"))
+    return "secure_local";
+  if (domains.includes("internal"))
+    return "internal";
+  return "public_safe";
+}
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_EMBEDDING_LEDGER_QUERY_PARAM = "embedding-ledger";
 var init_email_source = __esm(() => {
   init_email_policy();
@@ -79591,8 +81480,288 @@ var init_query_planner = __esm(() => {
   QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
 });
 
-// src/workers/source-scheduler.ts
+// src/workers/connector-store/tier-visibility.ts
+function createTierVisibilityGate(scopes) {
+  return (hits) => {
+    const current = scopes();
+    if (current.length === 0 || hits.length === 0)
+      return hits;
+    const hidden = new Set;
+    for (const scope of current) {
+      const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+      if (governed.length === 0)
+        continue;
+      let copies;
+      try {
+        copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
+      } catch {
+        for (const hit of governed)
+          hidden.add(hit);
+        continue;
+      }
+      for (const hit of governed) {
+        const itemCopies = copies.get(tierLedgerIdentityKey(hit.sourceItem));
+        if (!itemCopies || itemCopies.length === 0)
+          continue;
+        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current");
+        if (!currentHere)
+          hidden.add(hit);
+      }
+    }
+    return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
+  };
+}
+var init_tier_visibility = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/classification/secret-locations.ts
+import { Database as Database12 } from "bun:sqlite";
 import { createHash as createHash40 } from "node:crypto";
+import { chmodSync as chmodSync16, closeSync as closeSync10, existsSync as existsSync33, mkdirSync as mkdirSync28, openSync as openSync10 } from "node:fs";
+import { dirname as dirname38 } from "node:path";
+
+class SecretLocationsIndex {
+  dbPath;
+  db;
+  now;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database12(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      return;
+    }
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk) {
+      mkdirSync28(dirname38(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync33(this.dbPath))
+        closeSync10(openSync10(this.dbPath, "a", 384));
+      chmodSync16(this.dbPath, 384);
+    }
+    this.db = new Database12(this.dbPath, { create: true });
+    try {
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
+    } catch (error2) {
+      closeSqliteStore(this.db);
+      throw error2;
+    }
+  }
+  close() {
+    closeSqliteStore(this.db);
+  }
+  record(input) {
+    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
+    if (kinds.length === 0)
+      throw new Error("A secret location needs at least one finding kind.");
+    const namesReleasable = input.namesReleasable === true;
+    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
+    const locator = input.locator?.trim() && detectSecretFindingKinds(input.locator).length === 0 ? input.locator.trim().slice(0, 1000) : null;
+    const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
+    const contentHash = input.text !== undefined ? createHash40("sha256").update(input.text, "utf8").digest("hex") : null;
+    const existing = this.get(input.identity);
+    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
+      return false;
+    }
+    this.db.query(`
+      INSERT INTO secret_locations (
+        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
+        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
+        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
+        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
+        content_hash = excluded.content_hash, detected_at = excluded.detected_at
+    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
+    return true;
+  }
+  remove(identity) {
+    return this.db.query(`
+      DELETE FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
+  }
+  get(identity) {
+    const row = this.db.query(`
+      SELECT * FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+    return row ? locationFromRow(row) : undefined;
+  }
+  count() {
+    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
+  }
+  search(query, scope, options = {}) {
+    const terms = secretLocationQueryTerms(query);
+    if (terms.length === 0)
+      return [];
+    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
+    const rows = this.db.query(`
+      SELECT * FROM secret_locations
+      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
+      ORDER BY detected_at DESC
+    `).all(...scope.accountScope ? [scope.accountScope] : []);
+    const scored = [];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (!secretLocationWithinScope(location, scope))
+        continue;
+      const haystack = [
+        location.namesReleasable ? location.locator ?? "" : "",
+        location.title ?? "",
+        location.findingKinds.join(" ").replaceAll("_", " ")
+      ].join(`
+`).toLowerCase();
+      const score = terms.filter((term) => haystack.includes(term)).length;
+      if (score > 0)
+        scored.push({ location, score });
+    }
+    return scored.sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+      source: location.source,
+      ref: secretLocationRef(location),
+      locator: location.namesReleasable ? location.locator : null,
+      title: location.namesReleasable ? location.title : null,
+      findingKinds: location.findingKinds,
+      detectedAt: location.detectedAt
+    }));
+  }
+}
+function secretLocationRef(location) {
+  return `secret:${createHash40("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+}
+function secretLocationWithinScope(location, scope) {
+  if (scope.accountScope && location.accountScope !== scope.accountScope)
+    return false;
+  const filters = scope.filters;
+  if (!filters)
+    return true;
+  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
+    return false;
+  }
+  if (filters.provider && location.source !== filters.provider)
+    return false;
+  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
+    return false;
+  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
+    return false;
+  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
+    return false;
+  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key) => location.folderKeys.includes(key))) {
+    return false;
+  }
+  if (filters.sourceScopeFolderNoneKeys?.some((key) => location.folderKeys.includes(key)))
+    return false;
+  const pathScopes = [
+    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
+    ...filters.locatorPathScopes ?? []
+  ];
+  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  return true;
+}
+function locatorWithin(locator, scopePath) {
+  if (!locator)
+    return false;
+  const path = locator.toLowerCase();
+  const root = scopePath.toLowerCase().replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function secretLocationQueryTerms(query) {
+  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2 && !STOP_WORDS2.has(term)))];
+}
+function locationFromRow(row) {
+  return {
+    source: row.provider,
+    accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
+    providerItemId: row.provider_item_id,
+    locator: row.locator,
+    title: row.title,
+    namesReleasable: row.names_releasable === 1,
+    folderKeys: JSON.parse(row.folder_keys_json),
+    scopeGeneration: row.scope_generation,
+    scopeRevision: row.scope_revision,
+    findingKinds: JSON.parse(row.finding_kinds_json),
+    contentHash: row.content_hash,
+    detectedAt: row.detected_at
+  };
+}
+function secretLocationsMigrations() {
+  return [
+    {
+      version: SECRET_LOCATIONS_SCHEMA_VERSION,
+      name: "create_secret_locations",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_locations (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            locator TEXT,
+            title TEXT,
+            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
+            folder_keys_json TEXT NOT NULL DEFAULT '[]',
+            scope_generation TEXT,
+            scope_revision TEXT,
+            finding_kinds_json TEXT NOT NULL,
+            content_hash TEXT,
+            detected_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
+    }
+  ];
+}
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS2;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
+// src/workers/source-scheduler.ts
+import { createHash as createHash41 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -80258,7 +82427,7 @@ function createCanonicalDropboxSchedulerSource(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash40("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash41("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -80818,7 +82987,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash40("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash41("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -81277,12 +83446,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname38, join as join53 } from "node:path";
+import { dirname as dirname39, join as join53 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join53(dirname38(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join53(dirname39(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -81607,7 +83776,7 @@ __export(exports_server2, {
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle
 });
-import { existsSync as existsSync31 } from "node:fs";
+import { existsSync as existsSync34 } from "node:fs";
 import { isAbsolute as isAbsolute8 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
@@ -81925,7 +84094,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync31(store.dbPath))
+        if (!existsSync34(store.dbPath))
           continue;
         const handle = new LocalConnectorStore({
           dbPath: store.dbPath,
@@ -82529,6 +84698,58 @@ async function main() {
       timeoutMs: parseOptionalTimeoutSecondsOrNone(process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS, "OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS")
     } : {}
   }) : undefined;
+  const tierLanes = [];
+  let registerTierLegStore = () => {
+    throw new Error("A tier store opened before the source runtime finished wiring its stores.");
+  };
+  const tierLane = (input) => {
+    const ledger = input.secure.tierLedger();
+    if (!ledger)
+      return;
+    input.internal.useTierLedger(ledger);
+    let secrets;
+    try {
+      secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(input.secure.dbPath) });
+    } catch (error2) {
+      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error2 instanceof Error ? error2.name : "error"}`);
+    }
+    const lane = {
+      ledger,
+      secureCorpusId: input.secure.corpusId,
+      corpusIds: new Set([
+        input.internal.corpusId,
+        input.secure.corpusId,
+        ...input.publicStore ? [input.publicStore.corpusId] : []
+      ]),
+      ...secrets ? { secrets } : {},
+      ...input.publicStore ? { publicStore: input.publicStore } : {}
+    };
+    tierLanes.push(lane);
+    return lane;
+  };
+  const tierSecretLocations = (query, searched) => tierLanes.flatMap((lane) => {
+    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
+    if (!scope || !lane.secrets)
+      return [];
+    try {
+      return lane.secrets.search(query, {
+        ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+        ...scope.filters ? { filters: scope.filters } : {}
+      }, { limit: 5 });
+    } catch {
+      return [];
+    }
+  });
+  const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+    ledger: lane.ledger,
+    corpusIds: lane.corpusIds
+  })));
+  const onDemandCorpusAbsent = (corpusId) => {
+    const lane = tierLanes.find((candidate) => candidate.publicStore?.corpusId === corpusId);
+    if (lane)
+      return lane.publicStore.current() === undefined;
+    return sourceCorpusRegistry2.list().some((corpus) => corpus.corpusId === corpusId && corpus.createdOnDemand === true);
+  };
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
   const telegramConnectorAccountScope = telegramMessagesAccount ?? TELEGRAM_PERSONAL_ACCOUNT_SCOPE;
   const readwiseConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
@@ -82562,6 +84783,21 @@ async function main() {
     family: "email",
     trustDomain: "secure_local"
   }) : undefined;
+  const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
+    internal: gmailInternalConnectorStore,
+    secure: gmailSecureConnectorStore,
+    publicStore: onDemandTierStore({
+      corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+      dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+      create: () => new LocalConnectorStore({
+        dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
+        corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+        family: "email",
+        trustDomain: "public_safe"
+      }),
+      onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
+    })
+  }) : undefined;
   const googleDriveRequestBudget = googleDriveConnectorStoreLane.enabled ? createGoogleDriveDailyRequestBudget({ env: process.env }) : undefined;
   const googleDriveExclusions = googleDriveConnectorStoreLane.enabled ? googleDriveIngestionExclusionMatcher(process.env) : undefined;
   const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? new LocalConnectorStore({
@@ -82577,6 +84813,22 @@ async function main() {
     family: "file",
     trustDomain: "secure_local",
     ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+  }) : undefined;
+  const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
+    internal: googleDriveInternalConnectorStore,
+    secure: googleDriveSecureConnectorStore,
+    publicStore: onDemandTierStore({
+      corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+      dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+      create: () => new LocalConnectorStore({
+        dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
+        corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+        family: "file",
+        trustDomain: "public_safe",
+        ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+      }),
+      onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
+    })
   }) : undefined;
   const dropboxConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled);
   const dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
@@ -82599,9 +84851,11 @@ async function main() {
   const whatsappLiveMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS, "OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS");
   const telegramConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED", sourceIndexReadEnabled);
   const telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
+  const telegramTierLane = telegramConnectorStores ? tierLane({ internal: telegramConnectorStores.internal, secure: telegramConnectorStores.secureLocal }) : undefined;
   const telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
     stores: telegramConnectorStores,
-    env: process.env
+    env: process.env,
+    ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {}
   }) : undefined;
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
   const laneConnectorStores = [
@@ -82756,7 +85010,7 @@ async function main() {
     }
   }
   const connectorStoreReadScope = (store) => {
-    const sourceId = store === dropboxConnectorStore ? "dropbox.files" : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore ? "google_drive.docs" : undefined;
+    const sourceId = store === dropboxConnectorStore ? "dropbox.files" : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : undefined;
     if (!sourceId)
       return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -82825,6 +85079,25 @@ async function main() {
     fullyDefinedCorpusIds.add(store.corpusId);
   }
   const retrievalAvailability = {};
+  registerTierLegStore = (store, siblingCorpusId) => {
+    if (!connectorStores.includes(store))
+      connectorStores.push(store);
+    const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
+    if (accountScope)
+      connectorStoreAccountScopes.set(store.corpusId, accountScope);
+    const principal = connectorStorePrincipals.get(siblingCorpusId);
+    if (principal)
+      connectorStorePrincipals.set(store.corpusId, principal);
+    const provider = connectorStoreEmbeddingProviders.get(siblingCorpusId) ?? sourceIndexEmbeddingProvider;
+    if (provider && !connectorStoreEmbeddingProviders.has(store.corpusId)) {
+      registerConnectorStoreEmbeddingLane({
+        store,
+        provider,
+        providers: connectorStoreEmbeddingProviders,
+        retrievalAvailability
+      });
+    }
+  };
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
       store: xBookmarksConnectorStore,
@@ -82862,6 +85135,10 @@ async function main() {
   if (readwiseConnectorStore) {
     connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || "personal");
   }
+  for (const lane of tierLanes) {
+    if (lane.publicStore?.exists())
+      lane.publicStore.open();
+  }
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
@@ -82871,6 +85148,8 @@ async function main() {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      ...gmailTierLane?.publicStore ? { publicStore: gmailTierLane.publicStore } : {},
+      ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
       ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(sourceIndexEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
       ...secureLocalPolicyEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(secureLocalPolicyEmbeddingProvider) ? { secureEmbeddingProvider: scopeBoundEmbeddingProvider(secureLocalPolicyEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
       ...handle?.handle ? { credentialHandle: handle.handle } : {},
@@ -82884,6 +85163,8 @@ async function main() {
       internalStore: googleDriveInternalConnectorStore,
       secureStore: googleDriveSecureConnectorStore,
       requestBudget: googleDriveRequestBudget,
+      ...googleDriveTierLane?.publicStore ? { publicStore: googleDriveTierLane.publicStore } : {},
+      ...googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {},
       scope: createScopeBoundGoogleDriveContentScope({ authority: fileSourceScopeAuthority, ref: scopeRef }),
       ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {},
       ...googleDriveDocsEmbeddingProvider ? { internalEmbeddingProvider: scopeBoundEmbeddingProvider(googleDriveDocsEmbeddingProvider, fileSourceScopeAuthority, scopeRef) } : {},
@@ -82977,6 +85258,7 @@ async function main() {
       },
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = (request) => {
+        const searchScopes = new Map;
         const connectorStoreAdapter = (store) => {
           const mandatoryScope = connectorStoreReadScope(store);
           if (!mandatoryScope.allowed)
@@ -82991,6 +85273,10 @@ async function main() {
             return;
           const connectorStoreEmbedding = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
           const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || connectorStoreAccountScopes.get(store.corpusId));
+          searchScopes.set(store.corpusId, {
+            ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+            ...scope.filters || mandatoryScope.filters ? { filters: { ...scope.filters, ...mandatoryScope.filters } } : {}
+          });
           return createConnectorStoreCorpusAdapter({
             store,
             retrievalMode: request.retrieval_mode ?? "keyword",
@@ -83001,7 +85287,23 @@ async function main() {
           });
         };
         return {
-          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions)),
+          registry: buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
+          visibilityGate: tierVisibilityGate,
+          secretLocations: (query, searchedCorpora) => tierSecretLocations(query, searchedCorpora.flatMap((corpusId) => {
+            const scope = searchScopes.get(corpusId);
+            return scope ? [{ corpusId, ...scope }] : [];
+          })),
+          classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
+            const lane = tierLanes.find((candidate) => candidate.corpusIds.has(corpusId));
+            if (!lane)
+              return [];
+            try {
+              const held = lane.ledger.corpusCopyCounts(corpusId).held;
+              return held > 0 ? [{ corpusId, pendingClassificationItems: held }] : [];
+            } catch {
+              return [];
+            }
+          }),
           adapters: {
             ...Object.fromEntries(readConnectorStores.flatMap((store) => {
               const adapter = connectorStoreAdapter(store);
@@ -83038,7 +85340,7 @@ async function main() {
     })
   } : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
-    corpusDefinitions: sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions),
+    corpusDefinitions: sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
     connectorStores,
     connectorStoreStatusScope,
     retrievalAvailability,
@@ -83530,6 +85832,13 @@ async function main() {
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
     ...connectorStores.length > 0 ? { connectorStores } : {},
+    ...tierLanes.length > 0 ? {
+      connectorStoreTierSiblings: (corpusId) => [
+        ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
+      ].filter((sibling) => sibling !== corpusId),
+      sourceIndexVisibilityGate: tierVisibilityGate,
+      secretLocationSearch: tierSecretLocations
+    } : {},
     ...connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {},
     ...connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {},
     ...connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {},
@@ -84147,6 +86456,9 @@ var init_server4 = __esm(async () => {
   init_telegram_messages();
   init_connector_store();
   init_principal();
+  init_tiered_store_set();
+  init_tier_visibility();
+  init_secret_locations();
   init_chat_scope_filter();
   init_credential_broker();
   init_types();
@@ -84511,7 +86823,7 @@ init_messaging_capture();
 init_config();
 init_dashboard_launch();
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { readFileSync as readFileSync35, openSync as openSync9, closeSync as closeSync9, writeSync as writeSync2 } from "node:fs";
+import { readFileSync as readFileSync35, openSync as openSync11, closeSync as closeSync11, writeSync as writeSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve10 } from "node:path";
@@ -84533,12 +86845,12 @@ init_public_source_capabilities();
 init_worker_service();
 import { createHash as createHash28, randomUUID as randomUUID12 } from "node:crypto";
 import {
-  closeSync as closeSync7,
-  existsSync as existsSync21,
+  closeSync as closeSync8,
+  existsSync as existsSync23,
   fsyncSync as fsyncSync3,
   lstatSync as lstatSync10,
   mkdirSync as mkdirSync16,
-  openSync as openSync7,
+  openSync as openSync8,
   readSync as readSync2,
   readdirSync as readdirSync3,
   readFileSync as readFileSync22,
@@ -84562,7 +86874,8 @@ function lifecycleSourceSpecs() {
       sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_EMAIL_INDEX_DB_PATH", "email-index.sqlite"),
       connectorStorePaths: (context) => [
         defaultGmailConnectorStoreDbPath(envForContext(context)),
-        defaultGmailSecureConnectorStoreDbPath(envForContext(context))
+        defaultGmailSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGmailPublicConnectorStoreDbPath(envForContext(context))
       ]
     },
     {
@@ -84582,7 +86895,8 @@ function lifecycleSourceSpecs() {
       sqlitePath: (context) => legacySourceIndexPath(envForContext(context), "OLYMPUS_SOURCE_INDEX_DRIVE_INDEX_DB_PATH", "google-drive-docs-index.sqlite"),
       connectorStorePaths: (context) => [
         defaultGoogleDriveConnectorStoreDbPath(envForContext(context)),
-        defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context))
+        defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context)),
+        defaultGoogleDrivePublicConnectorStoreDbPath(envForContext(context))
       ]
     },
     {
@@ -84782,11 +87096,11 @@ function deleteOlympusData(options) {
   const missing = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
   for (const target of uniqueDeleteTargets) {
-    if (existsSync21(target.path))
+    if (existsSync23(target.path))
       assertDeleteTargetSafe(target);
   }
   for (const target of uniqueDeleteTargets) {
-    if (!existsSync21(target.path)) {
+    if (!existsSync23(target.path)) {
       missing.push(target.path);
       continue;
     }
@@ -84885,7 +87199,8 @@ function sourceDeleteTargets(source, context) {
     ...legacyIndexPath ? sqliteDeleteTargets(legacyIndexPath, legacyStoreIdFor(source), context) : [],
     ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
       ...sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context),
-      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context)
+      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context),
+      ...storePath === ":memory:" ? [] : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context)
     ]),
     ...(source.rawStatePaths?.(context) ?? []).map((path) => ({
       path,
@@ -84947,7 +87262,7 @@ function requireSource(sourceId) {
 }
 function exportSqliteStore(options) {
   const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped, artifacts } = options;
-  if (!existsSync21(sqlitePath)) {
+  if (!existsSync23(sqlitePath)) {
     for (const path of sqliteWithSidecars(sqlitePath))
       skipped.push(path);
     return;
@@ -85033,7 +87348,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
 }
 function sha256File(path) {
   const hash = createHash28("sha256");
-  const descriptor = openSync7(path, "r");
+  const descriptor = openSync8(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
     for (;; ) {
@@ -85043,7 +87358,7 @@ function sha256File(path) {
       hash.update(buffer.subarray(0, bytesRead));
     }
   } finally {
-    closeSync7(descriptor);
+    closeSync8(descriptor);
   }
   return hash.digest("hex");
 }
@@ -85068,7 +87383,7 @@ function sqliteWithSidecars(sqlitePath) {
   return [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
 }
 function copySanitizedJsonIfPresent(source, destination, files, skipped) {
-  if (!existsSync21(source)) {
+  if (!existsSync23(source)) {
     skipped.push(source);
     return false;
   }
@@ -85081,7 +87396,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
 function exportDurabilityBoundary(destination) {
   let current = dirname23(resolve7(destination));
   for (;; ) {
-    if (existsSync21(current))
+    if (existsSync23(current))
       return current;
     const parent = dirname23(current);
     if (parent === current)
@@ -85103,22 +87418,22 @@ function makeDurableDirectory(path, boundary) {
   }
 }
 function syncFileSync(path) {
-  const descriptor = openSync7(path, "r");
+  const descriptor = openSync8(path, "r");
   try {
     fsyncSync3(descriptor);
   } finally {
-    closeSync7(descriptor);
+    closeSync8(descriptor);
   }
 }
 function syncDirectorySync2(path) {
-  const descriptor = openSync7(path, "r");
+  const descriptor = openSync8(path, "r");
   try {
     fsyncSync3(descriptor);
   } catch (error) {
     if (!isUnsupportedDirectorySyncError(error))
       throw error;
   } finally {
-    closeSync7(descriptor);
+    closeSync8(descriptor);
   }
 }
 function sanitizeForExport(value) {
@@ -85150,7 +87465,7 @@ function containsPrivateKeyBlock(value) {
   return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
 }
 function globExisting(root, pattern) {
-  if (!existsSync21(root))
+  if (!existsSync23(root))
     return [];
   return readdirSync3(root).map((entry) => join32(root, entry)).filter((path) => {
     const name = basename4(path);
@@ -85282,7 +87597,7 @@ init_version();
 init_atomic_file();
 import { createHash as createHash32 } from "node:crypto";
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { existsSync as existsSync28, lstatSync as lstatSync14, mkdirSync as mkdirSync22, readFileSync as readFileSync28 } from "node:fs";
+import { existsSync as existsSync30, lstatSync as lstatSync14, mkdirSync as mkdirSync22, readFileSync as readFileSync28 } from "node:fs";
 import { homedir as homedir31, platform as osPlatform2 } from "node:os";
 import { dirname as dirname30, isAbsolute as isAbsolute6, join as join41 } from "node:path";
 
@@ -85293,12 +87608,12 @@ import { createHash as createHash31, randomUUID as randomUUID14 } from "node:cry
 import { spawnSync as spawnSync5 } from "node:child_process";
 import {
   chmodSync as chmodSync12,
-  closeSync as closeSync8,
-  existsSync as existsSync26,
+  closeSync as closeSync9,
+  existsSync as existsSync28,
   fsyncSync as fsyncSync4,
   lstatSync as lstatSync12,
   mkdtempSync,
-  openSync as openSync8,
+  openSync as openSync9,
   readFileSync as readFileSync26,
   readdirSync as readdirSync4,
   renameSync as renameSync7,
@@ -85320,12 +87635,12 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactSha256 = createHash31("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync(join39(tmpdir3(), ".olympus-artifact-snapshot-"));
   const artifactPath = join39(snapshotDir, "artifact.tgz");
-  const descriptor = openSync8(artifactPath, "wx", 384);
+  const descriptor = openSync9(artifactPath, "wx", 384);
   try {
     writeFileSync8(descriptor, artifactBytes);
     fsyncSync4(descriptor);
   } finally {
-    closeSync8(descriptor);
+    closeSync9(descriptor);
   }
   syncDirectorySync(snapshotDir);
   try {
@@ -85357,7 +87672,7 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync26(workingDirectory)) {
+      if (existsSync28(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
         const existingMode = lstatSync12(workingDirectory).mode & 511;
@@ -85370,13 +87685,13 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync26(staging))
+      if (existsSync28(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync26(staging))
+      if (options.dryRun && existsSync28(staging))
         rmSync8(staging, { recursive: true, force: true });
     }
   } finally {
@@ -85557,11 +87872,11 @@ function syncVersionTree(root) {
       syncVersionTree(path);
       continue;
     }
-    const descriptor = openSync8(path, "r");
+    const descriptor = openSync9(path, "r");
     try {
       fsyncSync4(descriptor);
     } finally {
-      closeSync8(descriptor);
+      closeSync9(descriptor);
     }
   }
   syncDirectorySync(root);
@@ -85593,7 +87908,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let replacedPath;
   let published = false;
   try {
-    if (existsSync26(workingDirectory)) {
+    if (existsSync28(workingDirectory)) {
       replacedPath = join39(versionsDir, `.olympus-replaced-${basename5(workingDirectory)}-${randomUUID14()}`);
       renameSync7(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
@@ -85605,9 +87920,9 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     syncDirectory2(versionsDir);
   } catch (error) {
     try {
-      if (published && existsSync26(workingDirectory))
+      if (published && existsSync28(workingDirectory))
         removeStagingTree(workingDirectory);
-      if (replacedPath && existsSync26(replacedPath) && !existsSync26(workingDirectory)) {
+      if (replacedPath && existsSync28(replacedPath) && !existsSync28(workingDirectory)) {
         renameSync7(replacedPath, workingDirectory);
       }
       syncDirectory2(versionsDir);
@@ -85618,7 +87933,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     }
     throw error;
   }
-  if (replacedPath && existsSync26(replacedPath)) {
+  if (replacedPath && existsSync28(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectory2(versionsDir);
   }
@@ -85637,7 +87952,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID15 } from "node:crypto";
-import { existsSync as existsSync27, linkSync, lstatSync as lstatSync13, readFileSync as readFileSync27 } from "node:fs";
+import { existsSync as existsSync29, linkSync, lstatSync as lstatSync13, readFileSync as readFileSync27 } from "node:fs";
 import { join as join40 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join40(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -85667,7 +87982,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
-      if (existsSync27(candidate))
+      if (existsSync29(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
@@ -85680,7 +87995,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         }
         removeFileDurablySync(lockPath);
         const staleCandidate = join40(dir, `mutation-owner-${current.nonce}.tmp`);
-        if (existsSync27(staleCandidate))
+        if (existsSync29(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -86117,7 +88432,7 @@ function readTransaction(options) {
   const homeDir = validateHomeDir(options.homeDir ?? homedir31());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync28(paths.transaction))
+  if (!existsSync30(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value;
@@ -86147,14 +88462,14 @@ function clearTransaction(options) {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir31()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir31()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.transaction]) {
-    if (!existsSync28(path))
+    if (!existsSync30(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync28(path)) {
+  if (!existsSync30(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
@@ -86162,7 +88477,7 @@ function readManagedFileSnapshot(path) {
 }
 function writeSnapshotBackup(path, text) {
   if (text === undefined) {
-    if (existsSync28(path)) {
+    if (existsSync30(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -86172,7 +88487,7 @@ function writeSnapshotBackup(path, text) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync28(path)) {
+    if (existsSync30(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
@@ -86262,7 +88577,7 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync28(envPath))
+  if (!existsSync30(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
   const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync28(envPath, "utf8"))?.[1];
@@ -88491,7 +90806,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   }
   let terminal;
   try {
-    terminal = openSync9("/dev/tty", "r+");
+    terminal = openSync11("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
@@ -88537,7 +90852,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = runWorkerLifecycle("restart");
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : "Pairing is saved. Ask your agent to repair the managed worker before capture can start." };
   } finally {
-    closeSync9(terminal);
+    closeSync11(terminal);
   }
 }
 function parseConnectOptions(args) {

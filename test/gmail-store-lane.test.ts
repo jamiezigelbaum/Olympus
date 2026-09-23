@@ -94,10 +94,12 @@ describe('Gmail connector-store lane', () => {
     // provider call, doubling the get cost inside a bounded slice.
     expect(client.getCalls).toEqual(['msg-1', 'msg-2', 'msg-3']);
     expect(outcome.receipt.counts.internal_items_indexed).toBe(3);
-    // Baseline classification is S3/internal, so the secure store rejects every
-    // item; the spine's trust-domain check is what routes between the two.
+    // Every new message is Personal, so the tier set routes each to the
+    // internal store and the secure leg skips it as routed elsewhere (P1b),
+    // not as a rejection.
     expect(outcome.receipt.counts.secure_items_indexed).toBe(0);
-    expect(outcome.receipt.counts.secure_items_rejected).toBe(3);
+    expect(outcome.receipt.counts.secure_items_rejected).toBe(0);
+    expect(outcome.receipt.counts.tier_routed_items).toBe(3);
     // Load-bearing: without in-run embedding the store fills with chunks and
     // zero embeddings, so the corpus can never become servable.
     expect(outcome.receipt.counts.internal_chunks_indexed).toBeGreaterThan(0);

@@ -18,3 +18,18 @@ export function tierLedgerPathForStore(storeDbPath: string): string {
   const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
   return `${base}${TIER_LEDGER_FILE_SUFFIX}`;
 }
+
+/**
+ * The secret-locations index (secret-locations.ts) is co-located the same
+ * way: one per tiered store set, beside the set's secure_local store, whose
+ * ledger is the set ledger. Deleting a source therefore deletes exactly that
+ * source's secret locations, and nothing else's.
+ */
+export const SECRET_LOCATIONS_SQLITE_STORE_ID = 'olympus_secret_locations';
+export const SECRET_LOCATIONS_FILE_SUFFIX = '.secret-locations.sqlite';
+
+export function secretLocationsPathForStore(storeDbPath: string): string {
+  if (storeDbPath === ':memory:') return ':memory:';
+  const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
+  return `${base}${SECRET_LOCATIONS_FILE_SUFFIX}`;
+}

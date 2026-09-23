@@ -449,6 +449,9 @@ function parseSourceCorpusConfig(value) {
   if (record.enabled !== undefined && typeof record.enabled !== "boolean") {
     throw new OperationError("config_error", `sourceIndex corpus ${corpusId} enabled must be boolean when provided.`);
   }
+  if (record.createdOnDemand !== undefined && typeof record.createdOnDemand !== "boolean") {
+    throw new OperationError("config_error", `sourceIndex corpus ${corpusId} createdOnDemand must be boolean when provided.`);
+  }
   return {
     corpusId,
     sourceId,
@@ -458,6 +461,7 @@ function parseSourceCorpusConfig(value) {
     ...activationMode ? { activationMode } : {},
     ...record.enabled !== undefined ? { enabled: record.enabled } : {},
     capabilities,
+    ...record.createdOnDemand === true ? { createdOnDemand: true } : {},
     ...typeof record.description === "string" && record.description.trim() ? { description: record.description.trim() } : {}
   };
 }
@@ -506,6 +510,28 @@ var init_source_corpus_registry = __esm(() => {
       trustDomain: "internal",
       activationMode: "hybrid_shadow",
       capabilities: ["answer", "status", "sync", "search"]
+    },
+    {
+      corpusId: "public_safe.email",
+      sourceId: "gmail.email",
+      provider: "gmail",
+      family: "email",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_shadow",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Gmail messages, routed here by per-item four-tier classification."
+    },
+    {
+      corpusId: "public_safe.drive.docs",
+      sourceId: "google_drive.docs",
+      provider: "google_drive",
+      family: "file",
+      trustDomain: "public_safe",
+      activationMode: "hybrid_primary",
+      capabilities: ["answer", "status", "search"],
+      createdOnDemand: true,
+      description: "Public Google Drive/Docs items, routed here by per-item four-tier classification."
     },
     {
       corpusId: "internal.drive.docs",
@@ -587,8 +613,10 @@ var init_source_corpus_registry = __esm(() => {
     answer: [
       "secure_local.email.private",
       "internal.email",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
       "internal.x.bookmarks",
@@ -599,8 +627,10 @@ var init_source_corpus_registry = __esm(() => {
     status: [
       "secure_local.email.private",
       "internal.email",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "internal.telegram.messages",
       READWISE_LIBRARY_CORPUS_ID,
       "internal.x.bookmarks",
@@ -622,8 +652,10 @@ var init_source_corpus_registry = __esm(() => {
     search: [
       "internal.email",
       "secure_local.email.private",
+      "public_safe.email",
       "internal.drive.docs",
       "secure_local.drive.docs",
+      "public_safe.drive.docs",
       "secure_local.dropbox.files",
       "internal.x.bookmarks",
       "internal.telegram.messages",
@@ -8003,7 +8035,8 @@ var init_filter_capabilities = __esm(() => {
     "authored_before",
     "after",
     "before",
-    "trust_domain"
+    "trust_domain",
+    "all_tiers"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -8881,9 +8914,20 @@ var init_capture_spool_connector = __esm(() => {
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
 });
 
+// src/workers/connector-store/tiered-store-set.ts
+var init_tiered_store_set = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_local_index();
+  init_tier_placement();
+});
+
 // src/workers/telegram-messages/store-sync.ts
 var init_store_sync = __esm(() => {
   init_connector_store();
+  init_tiered_store_set();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -9104,7 +9148,7 @@ var init_gmail_live_control = __esm(() => {
 // src/workers/google-connectors/gmail-live-sync.ts
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
-  init_connector_store();
+  init_tiered_store_set();
   init_embeddings();
   init_classification();
   init_gmail();
@@ -9123,7 +9167,7 @@ var init_drive_live_control = __esm(() => {
 
 // src/workers/google-connectors/drive-live-sync.ts
 var init_drive_live_sync = __esm(() => {
-  init_connector_store();
+  init_tiered_store_set();
   init_embeddings();
   init_classification();
   init_drive();
@@ -11367,7 +11411,8 @@ class EmailClient {
         ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
         ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
         ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}
+        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
       })
     });
     const data = asRecord7(response);
@@ -11688,8 +11733,31 @@ function parseSourceIndexAnswerResult(value) {
       castor_safe_bridge: true
     },
     ...value.internal_context !== undefined ? { internal_context: value.internal_context } : {},
-    ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {}
+    ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {},
+    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {}
   };
+}
+function parseSecretLocations(value) {
+  if (value === undefined)
+    return;
+  if (!Array.isArray(value)) {
+    throw new OperationError("email_error", "secret_locations must be an array.");
+  }
+  return value.map((entry) => {
+    const record = asRecord7(entry);
+    const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
+    const extra = Object.keys(record).filter((key) => !allowed.has(key));
+    if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
+      throw new OperationError("email_error", "secret_locations entries carry location only.");
+    }
+    return {
+      source: record.source,
+      ref: record.ref,
+      ...typeof record.locator === "string" ? { locator: record.locator } : {},
+      ...typeof record.title === "string" ? { title: record.title } : {},
+      finding_kinds: record.finding_kinds
+    };
+  });
 }
 function parseSourceAnswerSelfHealAudit(value) {
   const audit = asRecord7(value);
@@ -11826,10 +11894,20 @@ function parseSourceIndexSearchResult(value, context) {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
-  const corpus = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search").find((entry) => entry.corpusId === corpusId);
+  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search");
+  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
+  const auditRecord = asRecord7(value.audit);
+  const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
+    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    if (!entry || entry.sourceId !== corpus.sourceId) {
+      throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
+    }
+    return entry;
+  }) : [corpus];
+  const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === "secure_local") ? "secure_local" : tierCorpora.some((entry) => entry.trustDomain === "internal") ? "internal" : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
@@ -11837,7 +11915,7 @@ function parseSourceIndexSearchResult(value, context) {
   const policy = asRecord7(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
-  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || corpus.trustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== corpus.trustDomain) {
+  if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || expectedTrustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== expectedTrustDomain) {
     throw new OperationError("email_error", "source index search policy must describe a local safe result.");
   }
   const retrievalMode = optionalRetrievalMode(audit.retrieval_mode);
@@ -11873,12 +11951,16 @@ function parseSourceIndexSearchResult(value, context) {
   if (locatorsExposed && validateDropboxLocatorPayloads(value.hits) === 0) {
     throw new OperationError("email_error", "source index locator policy requires at least one released locator.");
   }
+  const secretLocations = parseSecretLocations(value.secret_locations);
+  const searchedCorpora = Array.isArray(audit.searched_corpora) ? audit.searched_corpora.filter((corpus2) => typeof corpus2 === "string") : undefined;
   return {
     kind: "source_index_search",
     corpus_id: corpusId,
     retrieval_source: "local_index",
     hits: value.hits,
+    ...secretLocations ? { secret_locations: secretLocations } : {},
     audit: {
+      ...searchedCorpora ? { searched_corpora: searchedCorpora } : {},
       request_id: requiredString3(audit.request_id, "audit.request_id"),
       retrieval_source: "local_index",
       queries_attempted: requiredNumber(audit.queries_attempted, "audit.queries_attempted"),
@@ -11903,7 +11985,7 @@ function parseSourceIndexSearchResult(value, context) {
       source_text_returned: sourceTextReturned,
       source_packets_exposed: false,
       local_only: policy.local_only,
-      trust_domain: corpus.trustDomain,
+      trust_domain: expectedTrustDomain,
       ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
     }
   };
@@ -14773,7 +14855,8 @@ var SOURCE_INDEX_SEARCH_PARAMS = {
   include_deleted: { type: "boolean", description: "Whether Telegram search may include tombstoned messages." },
   attachment_type: { type: "string", enum: ["image", "video", "audio", "file", "link", "other"], description: "Optional Telegram attachment type filter." },
   max_results: { type: "number", description: "Max hits; worker-capped." },
-  include_locators: { type: "boolean", description: "Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes." }
+  include_locators: { type: "boolean", description: "Dropbox files only: return path/Dropbox-link metadata (and Finder links when configured). Folder locators are not supported. Never source text or bytes." },
+  all_tiers: { type: "boolean", description: "Default true: also search the source's other tier corpora. false searches only corpus_id." }
 };
 var SOURCE_ANSWER_PARAMS = {
   question: { type: "string", required: true, description: "Question or search intent to route across approved source corpora." },
@@ -15053,7 +15136,9 @@ var operations = [
       const attachmentType = optionalAttachmentType(params.attachment_type);
       const maxResults = optionalNumber2(params.max_results, "max_results");
       const includeLocators = optionalBoolean(params.include_locators, "include_locators");
+      const allTiers = optionalBoolean(params.all_tiers, "all_tiers");
       return ctx.email.sourceIndexSearch({
+        ...allTiers !== undefined ? { allTiers } : {},
         query,
         corpusId,
         ...retrievalMode !== undefined ? { retrievalMode } : {},

@@ -39,6 +39,12 @@ export interface SourceCorpusConfig {
   enabled?: boolean;
   capabilities: SourceCorpusCapability[];
   description?: string;
+  /**
+   * A per-tier store (design per-item-four-tier-classification.md, section
+   * 3.2) whose file is created only when its first item is routed there.
+   * Until then it is simply absent: not a wiring loss, not a degraded lane.
+   */
+  createdOnDemand?: boolean;
 }
 
 export interface SourceCorpusRegistryConfig {
@@ -75,6 +81,30 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
     capabilities: ['answer', 'status', 'sync', 'search'],
+  },
+  {
+    corpusId: 'public_safe.email',
+    sourceId: 'gmail.email',
+    provider: 'gmail',
+    family: 'email',
+    trustDomain: 'public_safe',
+    activationMode: 'hybrid_shadow',
+    // No 'sync' of its own: the Gmail lane's tier set fills it.
+    capabilities: ['answer', 'status', 'search'],
+    createdOnDemand: true,
+    description: 'Public Gmail messages, routed here by per-item four-tier classification.',
+  },
+  {
+    corpusId: 'public_safe.drive.docs',
+    sourceId: 'google_drive.docs',
+    provider: 'google_drive',
+    family: 'file',
+    trustDomain: 'public_safe',
+    activationMode: 'hybrid_primary',
+    // No 'sync' of its own: the Drive lane's tier set fills it.
+    capabilities: ['answer', 'status', 'search'],
+    createdOnDemand: true,
+    description: 'Public Google Drive/Docs items, routed here by per-item four-tier classification.',
   },
   {
     corpusId: 'internal.drive.docs',
@@ -157,8 +187,10 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
   answer: [
     'secure_local.email.private',
     'internal.email',
+    'public_safe.email',
     'internal.drive.docs',
     'secure_local.drive.docs',
+    'public_safe.drive.docs',
     'internal.telegram.messages',
     READWISE_LIBRARY_CORPUS_ID,
     'internal.x.bookmarks',
@@ -169,8 +201,10 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
   status: [
     'secure_local.email.private',
     'internal.email',
+    'public_safe.email',
     'internal.drive.docs',
     'secure_local.drive.docs',
+    'public_safe.drive.docs',
     'internal.telegram.messages',
     READWISE_LIBRARY_CORPUS_ID,
     'internal.x.bookmarks',
@@ -192,8 +226,10 @@ const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly 
   search: [
     'internal.email',
     'secure_local.email.private',
+    'public_safe.email',
     'internal.drive.docs',
     'secure_local.drive.docs',
+    'public_safe.drive.docs',
     'secure_local.dropbox.files',
     'internal.x.bookmarks',
     'internal.telegram.messages',
@@ -443,6 +479,9 @@ function parseSourceCorpusConfig(value: unknown): SourceCorpusConfig {
   if (record.enabled !== undefined && typeof record.enabled !== 'boolean') {
     throw new OperationError('config_error', `sourceIndex corpus ${corpusId} enabled must be boolean when provided.`);
   }
+  if (record.createdOnDemand !== undefined && typeof record.createdOnDemand !== 'boolean') {
+    throw new OperationError('config_error', `sourceIndex corpus ${corpusId} createdOnDemand must be boolean when provided.`);
+  }
   return {
     corpusId,
     sourceId,
@@ -452,6 +491,7 @@ function parseSourceCorpusConfig(value: unknown): SourceCorpusConfig {
     ...(activationMode ? { activationMode } : {}),
     ...(record.enabled !== undefined ? { enabled: record.enabled } : {}),
     capabilities,
+    ...(record.createdOnDemand === true ? { createdOnDemand: true } : {}),
     ...(typeof record.description === 'string' && record.description.trim()
       ? { description: record.description.trim() }
       : {}),

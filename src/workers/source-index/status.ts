@@ -423,6 +423,17 @@ function connectorStoreStatus(
       // The per-item parity gauge the dashboard's embedding bar divides in
       // files: published only against a known serving model.
       ...(forModel === undefined ? {} : { [ITEMS_EMBEDDED_COUNT_KEY]: forModel.itemsEmbedded }),
+      // Four-tier classification (design section 4.3). Published only when the
+      // store holds routed copies in these states; `chunks` and
+      // `embedded_chunks` above already leave superseded and pending chunks
+      // out of the parity denominator.
+      ...(status.tier
+        ? {
+            pending_classification_items: status.tier.pendingClassificationItems,
+            superseded_chunks: status.tier.supersededChunks,
+            tier_move_in_progress: status.tier.tierMoveInProgress,
+          }
+        : {}),
     },
     ...(status.lastSyncRun
       ? { last_refresh: lastRefreshFromConnectorStoreSync(status.lastSyncRun) }

@@ -8,6 +8,8 @@ import {
   type ConnectorStoreSyncSummary,
   type ConnectorStoreTrustReconciliationSummary,
 } from '../connector-store/index.ts';
+import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -139,9 +141,19 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   reconciliation?: { maxItems?: number; maxWindows?: number };
   /** Test seam for proving the preflight receives the same bounded window. */
   preflightRead?: typeof readTelegramCaptureSpool;
+  /** The lanes' per-tier stores. Omitted: a set over the two stores, kept whole per message. */
+  tierSet?: TieredStoreSet;
+  secretLocations?: SecretLocationsIndex;
 }): TelegramConnectorStoreSyncHandler {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: TELEGRAM_MESSAGES_SOURCE_ID,
+    internalStore: options.stores.internal,
+    secureStore: options.stores.secureLocal,
+    splitLayers: false,
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+  });
 
   return {
     async pull(request = {}): Promise<TelegramConnectorStoreSyncReceipt> {
@@ -225,36 +237,48 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // land in the same receipt counts as the window's own.
       for (const localItemId of reconciliation.relinquishedLocalItemIds) conflictedItemIds.add(localItemId);
 
-      const internal = await options.stores.internal.syncFromConnector(
-        createTelegramCaptureSpoolConnector({
-          spoolDir,
+      // Both lanes run through the shared tier set, each with its own spool
+      // connector and cursor. A NEW message is routed by its recorded tiers
+      // (kept whole: a chat message is not split); one whose content is more
+      // private than its chat's lane is written to the secure lane inline,
+      // before the listing lane's page commits. Every existing message keeps
+      // the lane placement below.
+      const run = await tierSet.syncLegs([
+        {
           trustDomain: 'internal',
-          admitThroughCursor,
-          ...resolved,
-        }),
-        {
-          placement: { trustTier: 'S3', trustDomain: 'internal' },
-          ...(cursors.internal ? { cursor: cursors.internal } : {}),
-          maxItems,
-          fetchContent: true,
-          deferMetadataOnlyContent: true,
+          connector: createTelegramCaptureSpoolConnector({
+            spoolDir,
+            trustDomain: 'internal',
+            admitThroughCursor,
+            ...resolved,
+          }),
+          sync: {
+            placement: { trustTier: 'S3', trustDomain: 'internal' },
+            ...(cursors.internal ? { cursor: cursors.internal } : {}),
+            maxItems,
+            fetchContent: true,
+            deferMetadataOnlyContent: true,
+          },
         },
-      );
-      const secureLocal = await options.stores.secureLocal.syncFromConnector(
-        createTelegramCaptureSpoolConnector({
-          spoolDir,
+        {
           trustDomain: 'secure_local',
-          admitThroughCursor,
-          ...resolved,
-        }),
-        {
-          placement: { trustTier: 'S4', trustDomain: 'secure_local' },
-          ...(cursors.secureLocal ? { cursor: cursors.secureLocal } : {}),
-          maxItems,
-          fetchContent: true,
-          deferMetadataOnlyContent: true,
+          connector: createTelegramCaptureSpoolConnector({
+            spoolDir,
+            trustDomain: 'secure_local',
+            admitThroughCursor,
+            ...resolved,
+          }),
+          sync: {
+            placement: { trustTier: 'S4', trustDomain: 'secure_local' },
+            ...(cursors.secureLocal ? { cursor: cursors.secureLocal } : {}),
+            maxItems,
+            fetchContent: true,
+            deferMetadataOnlyContent: true,
+          },
         },
-      );
+      ]);
+      const internal = run.byDomain.internal!.sync;
+      const secureLocal = run.byDomain.secure_local!.sync;
       return telegramSyncReceipt(
         internal,
         secureLocal,

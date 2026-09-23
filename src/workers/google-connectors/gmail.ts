@@ -41,6 +41,8 @@ import {
 
 export const GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = 'internal.email';
 export const GMAIL_SECURE_CONNECTOR_CORPUS_ID = 'secure_local.email.private';
+/** The lane's Public store (P1b per-tier stores), created when its first message is routed there. */
+export const GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = 'public_safe.email';
 export const GMAIL_CONNECTOR_CORPUS_ID = GMAIL_INTERNAL_CONNECTOR_CORPUS_ID;
 export const GMAIL_PROVIDER = 'gmail';
 export const DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200;
@@ -820,6 +822,14 @@ export function defaultGmailSecureConnectorStoreDbPath(env: Record<string, strin
   }
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
   return join(dataHome, 'openclaw', 'olympus', 'gmail-secure-connector-store.sqlite');
+}
+
+export function defaultGmailPublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
+  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
+    return env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
+  }
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', 'gmail-public-connector-store.sqlite');
 }
 
 class RestGmailApiClient implements GmailApiClient {

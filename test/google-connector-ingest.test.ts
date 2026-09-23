@@ -92,12 +92,16 @@ describe('Google connector-store ingestion', () => {
     expect(client.listCalls).toBe(1);
     expect(client.getCalls).toEqual(['msg-plain', 'msg-therapy']);
 
+    // New messages are routed by their recorded tiers (P1b): the other leg
+    // skips each as routed elsewhere, not as a rejection.
     expect(result.internal.itemsSeen).toBe(2);
     expect(result.internal.itemsIndexed).toBe(1);
-    expect(result.internal.itemsRejected).toBe(1);
+    expect(result.internal.itemsRejected).toBe(0);
+    expect(result.internal.itemsRoutedElsewhere).toBe(1);
     expect(result.secure.itemsSeen).toBe(2);
     expect(result.secure.itemsIndexed).toBe(1);
-    expect(result.secure.itemsRejected).toBe(1);
+    expect(result.secure.itemsRejected).toBe(0);
+    expect(result.secure.itemsRoutedElsewhere).toBe(1);
 
     const plain = await localContent(internalStore, 'personal:msg-plain');
     const secure = await localContent(secureStore, 'personal:msg-therapy');
@@ -148,14 +152,19 @@ describe('Google connector-store ingestion', () => {
     expect(client.listCalls).toBe(1);
     expect(client.contentCalls).toEqual(['file-plain', 'file-therapy', 'file-passwords']);
 
+    // New files are routed by their recorded tiers (P1b): each lands in its
+    // tier's store and the other legs skip it as routed elsewhere, not as a
+    // rejection. The Secret lands in no store at all (location only).
     expect(result.internal.itemsSeen).toBe(3);
     expect(result.internal.itemsIndexed).toBe(1);
-    expect(result.internal.itemsRejected).toBe(2);
+    expect(result.internal.itemsRejected).toBe(0);
+    expect(result.internal.itemsRoutedElsewhere).toBe(2);
     expect(result.secure.itemsSeen).toBe(3);
     expect(result.secure.itemsIndexed).toBe(1);
-    expect(result.secure.itemsRejected).toBe(1);
-    expect(result.secure.itemsTombstoned).toBe(1);
-    expect(result.secure.gaps).toContainEqual(expect.stringContaining('secrets_tier_excluded'));
+    expect(result.secure.itemsRejected).toBe(0);
+    expect(result.secure.itemsRoutedElsewhere).toBe(2);
+    expect(secureStore.hasItemRow({ provider: 'google_drive', accountScope: 'personal', providerItemId: 'file-passwords' })).toBe(false);
+    expect(internalStore.hasItemRow({ provider: 'google_drive', accountScope: 'personal', providerItemId: 'file-passwords' })).toBe(false);
 
     const plain = await localContent(internalStore, 'personal:file-plain');
     const secure = await localContent(secureStore, 'personal:file-therapy');

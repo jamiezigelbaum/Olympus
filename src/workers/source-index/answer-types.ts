@@ -65,9 +65,26 @@ export interface SourceAnswerSelectedItem {
   updated_at?: string;
 }
 
+// Where a matched Secret lives. Location only (design section 2.3).
+export interface SourceIndexAnswerSecretLocation {
+  source: string;
+  // Opaque reference; the only handle when the item's metadata is Private.
+  ref: string;
+  locator?: string;
+  title?: string;
+  finding_kinds: string[];
+}
+
+export interface SourceIndexAnswerClassificationCoverage {
+  corpus_id: string;
+  pending_classification_items: number;
+}
+
 export interface SourceIndexAnswerResult {
   answer: string;
   evidence: SourceIndexAnswerEvidence[];
+  // Present only when Secrets matched the question: where they are, never what they say.
+  secret_locations?: SourceIndexAnswerSecretLocation[];
   audit: {
     searched_corpora: string[];
     skipped_corpora: SourceIndexAnswerSkippedCorpus[];
@@ -84,6 +101,9 @@ export interface SourceIndexAnswerResult {
     // in full and the same sentence over a corpus with unread pages are two
     // different facts that otherwise produce a byte-identical answer.
     corpus_readability?: SourceIndexAnswerCorpusReadability[];
+    // Items stored and keyword-searched whose tier is not final yet (not
+    // embedded). Counts-only.
+    classification_coverage?: SourceIndexAnswerClassificationCoverage[];
     self_heal?: SourceIndexAnswerSelfHealAudit;
     answer_synthesis: {
       private_context_used: boolean;

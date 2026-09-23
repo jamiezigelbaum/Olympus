@@ -1,4 +1,7 @@
 import type { ModelSetupView } from '../../core/model-setup.ts';
+import type { SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
+import type { SourceTrustDomain } from '../../core/source-index/types.ts';
+import type { SecretLocationNote } from '../../core/evidence-pack.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -403,6 +406,23 @@ export interface EmailSourceWorkerOptions {
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
+  /**
+   * Per-tier stores (P1b): the sibling corpora of a corpus in a tiered store
+   * set. `source_index_search` searches every tier of the named source unless
+   * the request says `all_tiers: false`.
+   */
+  connectorStoreTierSiblings?: (corpusId: string) => readonly string[];
+  /** One tier-ledger snapshot over every hit a tiered search gathered. */
+  sourceIndexVisibilityGate?: SourceIndexVisibilityGate;
+  /**
+   * Location-only Secret matches for a query, returned beside the hits,
+   * confined to the corpora this search covered and the account and filters
+   * each was searched under.
+   */
+  secretLocationSearch?: (
+    query: string,
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ) => readonly SecretLocationNote[];
   /** Generic corpus-keyed overrides for connector-store retrieval providers. */
   connectorStoreEmbeddingProviders?: ReadonlyMap<string, SourceEmbeddingProvider>;
   /** Generic corpus-keyed principal account boundaries for connector-store reads. */
@@ -679,7 +699,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const dropboxSourceExport = options.dropboxSourceExport;
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
-  const connectorStoresByCorpusId = new Map(connectorStores.map((store) => [store.corpusId, store]));
+  // Looked up live: a tiered store set opens its Public store on first need,
+  // after this worker was created, and the runtime appends it to this list.
+  const connectorStoresByCorpusId = {
+    get: (corpusId: string): LocalConnectorStore | undefined => connectorStores.find((store) => store.corpusId === corpusId),
+  };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map();
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map();
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map();
@@ -2564,87 +2588,164 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
-            const mandatoryScope = connectorStoreReadScope?.(connectorStore);
-            if (mandatoryScope?.allowed === false) {
+            const searchConnectorStore = async (store: LocalConnectorStore) => {
+              const mandatoryScope = connectorStoreReadScope?.(store);
+              if (mandatoryScope?.allowed === false) return undefined;
+              const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
+                // A sibling tier is searched under its own corpus id.
+                store === connectorStore ? record : { ...record, corpus_id: store.corpusId },
+                store,
+                connectorStoreAccountScopes.get(store.corpusId),
+                store.family === 'chat'
+                  ? connectorStorePrincipals.get(store.corpusId)
+                  : undefined,
+                connectorStorePrincipals.get(store.corpusId),
+                connectorStoreFilterCapabilities,
+              );
+              const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId)
+                ?? sourceIndexEmbeddingProvider;
+              const searchEmbeddingProvider = connectorStoreEmbeddingProvider
+                && (store.trustDomain !== 'secure_local'
+                  || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
+                ? connectorStoreEmbeddingProvider
+                : undefined;
+              // An unpinned request gets hybrid exactly when this corpus can
+              // serve it (an approved provider with current embeddings), so a
+              // content match found semantically is not lost behind lexical
+              // title noise. Without embeddings it stays keyword, with no
+              // skipped-lane marker for a lane nobody asked for.
+              const retrievalMode = searchRequest.retrievalMode
+                ?? (searchEmbeddingProvider && store.hasEmbeddings(searchEmbeddingProvider.modelId)
+                  ? 'hybrid'
+                  : 'keyword');
+              const combinedFilters = searchRequest.filters || mandatoryScope?.filters
+                ? normalizeConnectorStoreSearchFilters({
+                    ...searchRequest.filters,
+                    ...mandatoryScope?.filters,
+                  })
+                : undefined;
+              const adapter = createConnectorStoreCorpusAdapter({
+                store,
+                retrievalMode,
+                ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
+                  ? { accountScope: mandatoryScope.accountScope }
+                  : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
+                ...(combinedFilters ? { filters: combinedFilters } : {}),
+                ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
+                ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
+              });
+              const result = await retrySqliteBusy(() => adapter({
+                query: searchRequest.query,
+                maxResults: searchRequest.maxResults,
+                corpus: defineConnectorCorpus({
+                  corpusId: store.corpusId,
+                  family: store.family,
+                  trustDomain: store.trustDomain,
+                }),
+                context: {
+                  allowedTrustDomains: [store.trustDomain],
+                  allowedCorpusIds: [store.corpusId],
+                },
+              }));
+              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope
+                ? mandatoryScope.accountScope
+                : searchRequest.accountScope;
+              return {
+                store,
+                searchRequest,
+                result,
+                scope: {
+                  corpusId: store.corpusId,
+                  ...(accountScope ? { accountScope } : {}),
+                  ...(combinedFilters ? { filters: combinedFilters } : {}),
+                },
+              };
+            };
+            const primary = await searchConnectorStore(connectorStore);
+            if (!primary) {
               throw new EmailSourceWorkerError(
                 403,
                 'source_index_policy_violation',
                 'This file source is unavailable until its folder scope is approved for the connected account.',
               );
             }
-            const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
-              record,
-              connectorStore,
-              connectorStoreAccountScopes.get(connectorStore.corpusId),
-              connectorStore.family === 'chat'
-                ? connectorStorePrincipals.get(connectorStore.corpusId)
-                : undefined,
-              connectorStorePrincipals.get(connectorStore.corpusId),
-              connectorStoreFilterCapabilities,
-            );
-            const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
-              ?? sourceIndexEmbeddingProvider;
-            const searchEmbeddingProvider = connectorStoreEmbeddingProvider
-              && (connectorStore.trustDomain !== 'secure_local'
-                || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider))
-              ? connectorStoreEmbeddingProvider
-              : undefined;
-            // An unpinned request gets hybrid exactly when this corpus can
-            // serve it (an approved provider with current embeddings), so a
-            // content match found semantically is not lost behind lexical
-            // title noise. Without embeddings it stays keyword, with no
-            // skipped-lane marker for a lane nobody asked for.
-            const retrievalMode = searchRequest.retrievalMode
-              ?? (searchEmbeddingProvider && connectorStore.hasEmbeddings(searchEmbeddingProvider.modelId)
-                ? 'hybrid'
-                : 'keyword');
-            const combinedFilters = searchRequest.filters || mandatoryScope?.filters
-              ? normalizeConnectorStoreSearchFilters({
-                  ...searchRequest.filters,
-                  ...mandatoryScope?.filters,
-                })
-              : undefined;
-            const adapter = createConnectorStoreCorpusAdapter({
-              store: connectorStore,
-              retrievalMode,
-              ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
-                ? { accountScope: mandatoryScope.accountScope }
-                : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
-              ...(combinedFilters ? { filters: combinedFilters } : {}),
-              ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
-              ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
-            });
-            const result = await retrySqliteBusy(() => adapter({
-              query: searchRequest.query,
-              maxResults: searchRequest.maxResults,
-              corpus: defineConnectorCorpus({
-                corpusId: connectorStore.corpusId,
-                family: connectorStore.family,
-                trustDomain: connectorStore.trustDomain,
-              }),
-              context: {
-                allowedTrustDomains: [connectorStore.trustDomain],
-                allowedCorpusIds: [connectorStore.corpusId],
-              },
-            }));
-            const locatorsExposed = result.hits.some((hit) => (
+            const searchRequest = primary.searchRequest;
+            // Every tier of the named source (design section 5), unless the
+            // caller pinned this one corpus with `all_tiers: false`. A sibling
+            // that does not exist yet (an on-demand Public store) or whose
+            // scope is not approved is simply not searched.
+            // An explicit trust_domain is a single-corpus consistency check,
+            // so it pins the search as `all_tiers: false` does.
+            const siblings = record.all_tiers === false || record.trust_domain !== undefined
+              ? []
+              : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? [])
+                .flatMap((siblingCorpusId) => {
+                  const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
+                  return sibling && sibling !== connectorStore ? [sibling] : [];
+                });
+            const siblingRuns: Array<NonNullable<Awaited<ReturnType<typeof searchConnectorStore>>>> = [];
+            for (const sibling of siblings) {
+              const run = await searchConnectorStore(sibling);
+              if (run) siblingRuns.push(run);
+            }
+            const runs = [primary, ...siblingRuns];
+            const tiered = siblingRuns.length > 0;
+            const tagged = runs.flatMap((run) => run.result.hits.map((hit) => ({
+              ...hit,
+              corpusId: run.store.corpusId,
+              trustDomain: run.store.trustDomain,
+            })));
+            // One tier-ledger snapshot judges every tier's hits together.
+            const visible = new Set(tiered && options.sourceIndexVisibilityGate
+              ? options.sourceIndexVisibilityGate(tagged)
+              : tagged);
+            // Round-robin across tiers, so a full page from one tier cannot
+            // starve another, then the request's own bound.
+            const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
+            const merged: typeof tagged = [];
+            for (let rank = 0; merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
+              for (const hits of perRun) {
+                const hit = hits[rank];
+                if (hit && merged.length < searchRequest.maxResults) merged.push(hit);
+              }
+            }
+            const hits = tiered ? merged : tagged;
+            const secretLocations = tiered
+              ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
+              : [];
+            const locatorsExposed = hits.some((hit) => (
               Object.prototype.hasOwnProperty.call(hit, 'locator')
             ));
             const safeResult = {
               kind: 'source_index_search',
               corpus_id: connectorStore.corpusId,
               retrieval_source: 'local_index',
-              hits: result.hits.map((hit) => addSelectedItemToSearchHit(connectorStore.corpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, ...hit }) => (
+                addSelectedItemToSearchHit(hitCorpusId, hit)
+              )),
+              ...(secretLocations.length > 0
+                ? {
+                    // Location only, beside the hits: never content.
+                    secret_locations: secretLocations.map((location) => ({
+                      source: location.source,
+                      ref: location.ref,
+                      ...(location.locator ? { locator: location.locator } : {}),
+                      ...(location.title ? { title: location.title } : {}),
+                      finding_kinds: [...location.findingKinds],
+                    })),
+                  }
+                : {}),
               audit: {
                 request_id: `${connectorStore.corpusId}:connector-store-search`,
                 retrieval_source: 'local_index',
-                queries_attempted: 1,
-                metadata_hits: result.hits.length,
-                items_returned: result.hits.length,
-                latency_ms: result.latencyMs,
+                queries_attempted: runs.length,
+                metadata_hits: hits.length,
+                items_returned: hits.length,
+                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                ...(tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
                 ...(searchRequest.explicitEmptyChatScope
                   ? {}
-                  : { lane_audits: result.laneAudits ?? [] }),
+                  : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) }),
                 raw_source_exposed: false,
                 source_text_returned: false,
                 ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
@@ -2654,8 +2755,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 source_text_returned: false,
                 source_packets_exposed: false,
                 local_only: searchRequest.explicitEmptyChatScope
-                  || connectorStore.trustDomain === 'secure_local',
-                trust_domain: connectorStore.trustDomain,
+                  || runs.some((run) => run.store.trustDomain === 'secure_local'),
+                // The most private tier this search read, not the named
+                // corpus's: a tiered result may carry Private hits.
+                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
                 ...(locatorsExposed
                   ? { locators_exposed: true, locator_release: 'explicit_request' as const }
                   : {}),
@@ -6360,3 +6463,9 @@ export {
   gmailEmailCorpusTrustDomainForCorpusId,
   type GmailEmailCorpusId,
 } from '../google-connectors/corpora.ts';
+
+function mostPrivateTrustDomain(domains: readonly SourceTrustDomain[]): SourceTrustDomain {
+  if (domains.includes('secure_local')) return 'secure_local';
+  if (domains.includes('internal')) return 'internal';
+  return 'public_safe';
+}

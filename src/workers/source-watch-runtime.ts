@@ -182,6 +182,7 @@ export function createSourceWatchSearchFromAnalystLanes(
             allowCloudQueries: true,
           },
         },
+        ...(configured.visibilityGate ? { visibilityGate: configured.visibilityGate } : {}),
       });
       return routed.hits.map((hit) => ({
         ref: {

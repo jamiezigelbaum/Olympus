@@ -176,10 +176,21 @@ export interface SourceIndexRoutedCorpusTiming {
   outcome: 'success' | 'timeout';
 }
 
+/**
+ * A final visibility check over one query's hits from EVERY corpus, applied
+ * once, before fusion. Tiered stores use it to judge all hits against one
+ * snapshot of their tier ledger, so an item whose copy moved between two
+ * stores mid-query is never returned from both. Returns the hits to keep.
+ */
+export type SourceIndexVisibilityGate = (
+  hits: readonly SourceIndexRoutedSearchHit[],
+) => readonly SourceIndexRoutedSearchHit[];
+
 export interface RouteSourceIndexSearchOptions {
   registry: SourceIndexCorpusRegistry;
   adapters: SourceIndexRouterAdapterMap;
   request: SourceIndexSearchRequest;
+  visibilityGate?: SourceIndexVisibilityGate;
   // Per-lane retrieval deadline for the evidence-pack fan-out. A corpus adapter
   // that does not settle within this budget is DROPPED from the pack and
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
@@ -360,6 +371,12 @@ export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOpti
         trustDomain: corpus.trustDomain,
       })),
     });
+  }
+
+  if (options.visibilityGate) {
+    // One call for every lane's hits: one snapshot decides them all.
+    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
   }
 
   // Lane declaration order — registry.list() preserves the order the corpora
