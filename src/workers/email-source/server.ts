@@ -2775,7 +2775,9 @@ export async function main(): Promise<void> {
     : undefined;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
-      corpusDefinitions: sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
+      // Read per request: a per-tier store its tier set creates while the
+      // runtime is up is reported from that moment, with no restart.
+      corpusDefinitions: () => sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
         .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
       connectorStores,
       connectorStoreStatusScope,

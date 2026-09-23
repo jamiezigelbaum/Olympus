@@ -167,7 +167,17 @@ export interface SourceIndexStatusHandler {
 }
 
 export interface SourceIndexStatusHandlerOptions {
-  corpusDefinitions?: SourceIndexCorpusDefinition[];
+  /**
+   * The corpora status reports. A function is read on every request, so a
+   * per-tier store a tier set creates at runtime (design
+   * per-item-four-tier-classification.md, section 3.2) is reported from the
+   * moment it exists, with no restart.
+   */
+  corpusDefinitions?: SourceIndexCorpusDefinition[] | (() => SourceIndexCorpusDefinition[]);
+  /**
+   * Read on every request too: a runtime appends a store its tier set opened
+   * to this same array.
+   */
   connectorStores?: LocalConnectorStore[];
   retrievalAvailability?: Readonly<Record<string, SourceIndexStatusRetrievalAvailability | undefined>>;
   readinessLedger?: SourceIndexReadinessLedger;
@@ -213,9 +223,11 @@ export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
 export function createSourceIndexStatusHandler(
   options: SourceIndexStatusHandlerOptions = {},
 ): SourceIndexStatusHandler {
-  const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
-  const definitions = options.corpusDefinitions ?? defaultCorpusDefinitions();
-  const registry = buildSourceIndexCorpusRegistry(definitions);
+  const staticRegistry = typeof options.corpusDefinitions === 'function'
+    ? undefined
+    : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
+  const currentRegistry = () => staticRegistry
+    ?? buildSourceIndexCorpusRegistry((options.corpusDefinitions as () => SourceIndexCorpusDefinition[])());
   const cache = new Map<string, { recordedAtMs: number; status: SourceIndexStatusCorpus }>();
   const nowMs = options.nowMs ?? Date.now;
 
@@ -225,7 +237,8 @@ export function createSourceIndexStatusHandler(
       const requestedCorpusId = request.corpus_id
         ? canonicalSourceCorpusId(request.corpus_id)
         : undefined;
-      const corpora = registry
+      const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
+      const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
       const statuses = corpora.map((corpus) => {
