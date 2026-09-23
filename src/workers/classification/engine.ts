@@ -263,6 +263,16 @@ export function detectSensitiveContent(input: ClassifyItemTierInput): SensitiveC
     && matchTerms(haystack, HEALTH_WEAK_TERMS).length === 1) {
     borderline.push('health');
   }
+  // Therapy, legal, family-law and identity vocabulary in the TEXT has no
+  // deterministic raise of its own; it is exactly what the privacy-safe
+  // sniffer's excerpt question is for (design section 2.2, step 12). The text
+  // alone: the names were already judged in pass 1, where an owner's
+  // Personal-target category can settle them.
+  const text = input.text ?? '';
+  if (PERSONAL_LIFE_NAME_PATTERN.test(text)) borderline.push('personal_life');
+  if (!signals.some((signal) => signal.startsWith('identity:')) && IDENTITY_NAME_PATTERN.test(text)) {
+    borderline.push('identity');
+  }
   return { signals, borderline };
 }
 
