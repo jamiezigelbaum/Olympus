@@ -6627,9 +6627,54 @@ var init_content_policy = __esm(() => {
   ];
 });
 
+// src/core/owner-config-read.ts
+import { readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
+function ownerConfigStamp(path) {
+  try {
+    return stampOf(statSync3(path));
+  } catch {
+    return "missing";
+  }
+}
+function readOwnerConfigFile(path) {
+  let before;
+  try {
+    before = statSync3(path);
+  } catch (error) {
+    return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
+  }
+  const stamp = stampOf(before);
+  if (!before.isFile() || (before.mode & 18) !== 0 || !ownedByThisUser(before)) {
+    return { status: "refused", reason: "unsafe_permissions", stamp };
+  }
+  let text;
+  try {
+    text = readFileSync7(path, "utf8");
+  } catch {
+    return { status: "refused", reason: "unreadable", stamp };
+  }
+  let after;
+  try {
+    after = statSync3(path);
+  } catch {
+    return { status: "refused", reason: "torn_read", stamp };
+  }
+  if (stampOf(after) !== stamp || Buffer.byteLength(text, "utf8") !== before.size) {
+    return { status: "refused", reason: "torn_read", stamp: stampOf(after) };
+  }
+  return { status: "ok", text, stamp };
+}
+function stampOf(stat2) {
+  return `${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+}
+function ownedByThisUser(stat2) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return uid === undefined || stat2.uid === uid;
+}
+var init_owner_config_read = () => {};
+
 // src/core/sensitivity-map.ts
 import { createHash as createHash4 } from "node:crypto";
-import { chmodSync as chmodSync2, existsSync as existsSync6, lstatSync as lstatSync2, readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname7, join as join6 } from "node:path";
 function defaultSensitivityMapPath() {
@@ -6639,26 +6684,18 @@ function resolveSensitivityMapPath(options = {}) {
   const env = options.env ?? process.env;
   return options.path?.trim() || env[OLYMPUS_SENSITIVITY_MAP_ENV]?.trim() || defaultSensitivityMapPath();
 }
-function loadOwnerSensitivityMap(env = process.env) {
-  return loadSensitivityMap({ env, allowMissing: true, ignoreInvalid: true });
-}
-function loadSensitivityMap(options = {}) {
-  const path = resolveSensitivityMapPath(options);
-  if (!existsSync6(path)) {
-    if (options.allowMissing)
-      return;
-    throw new OperationError("config_error", `Sensitivity map not found at ${path}.`, sensitivityMapRemedy(path));
-  }
+function readOwnerSensitivityMap(env = process.env) {
+  const path = resolveSensitivityMapPath({ env });
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing")
+    return { status: "missing" };
+  if (read.status === "refused")
+    return { status: "invalid", reason: read.reason, stamp: read.stamp };
   try {
-    return parseSensitivityMap(JSON.parse(readFileSync7(path, "utf8")), path);
-  } catch (error) {
-    if (options.ignoreInvalid)
-      return;
-    throw error;
+    return { status: "ok", map: parseSensitivityMap(JSON.parse(read.text), path), stamp: read.stamp };
+  } catch {
+    return { status: "invalid", reason: "invalid_map", stamp: read.stamp };
   }
-}
-function sensitivityMapRemedy(path) {
-  return `Write the map to ${path}. Run olympus setup first if ${dirname7(path)} does not exist yet; it creates that directory with owner-only permissions.`;
 }
 function parseSensitivityMap(rawMap, label = "sensitivity map") {
   const root = asRecord4(rawMap);
@@ -6882,6 +6919,7 @@ function boundedStringList(value, label, bounds) {
 var OLYMPUS_SENSITIVITY_MAP_ENV = "OLYMPUS_SENSITIVITY_MAP_PATH", USER_FACING_TIER_MAPPING, USER_FACING_TIER_NAMES, USER_FACING_TIER_SET, TRUST_TIER_SET, TRUST_DOMAIN_SET, MAX_CATEGORIES = 64, MAX_EXAMPLES_PER_CATEGORY = 12, MAX_MATCH_TERMS_PER_FIELD = 64, MAX_STRING_LENGTH = 240, CATEGORY_ID_PATTERN, RAISING_TIER_NAMES;
 var init_sensitivity_map = __esm(() => {
   init_operation_error();
+  init_owner_config_read();
   init_types();
   USER_FACING_TIER_MAPPING = {
     public: { targetTrustTier: "S0", targetTrustDomain: "public_safe" },
@@ -7625,6 +7663,7 @@ function metadataPass(args) {
       flags,
       material: snifferNames(signals),
       mapRevision: args.mapRevision,
+      solo: Boolean(signals.sender?.trim() || signals.conversationKind || (signals.recipients?.length ?? 0) > 0),
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
@@ -7713,6 +7752,7 @@ function contentPass(args) {
       flags,
       material: snifferExcerpt(text),
       mapRevision: args.mapRevision,
+      solo: true,
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
@@ -7965,7 +8005,7 @@ var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
-import { chmodSync as chmodSync3, closeSync as closeSync3, existsSync as existsSync7, mkdirSync as mkdirSync6, openSync as openSync3 } from "node:fs";
+import { chmodSync as chmodSync2, closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync3 } from "node:fs";
 import { dirname as dirname8 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
@@ -7984,7 +8024,7 @@ class TierLedger {
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
       mkdirSync6(dirname8(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync7(this.dbPath))
+      if (!existsSync6(this.dbPath))
         closeSync3(openSync3(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
@@ -8068,6 +8108,10 @@ class TierLedger {
       }
       if (existing.decidedBy === "override") {
         outcome = "unchanged";
+        return;
+      }
+      if (verdict.mapRevision !== undefined && verdict.mapRevision !== existing.mapRevision) {
+        outcome = "stale_map";
         return;
       }
       const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith("content:"));
@@ -9025,8 +9069,8 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync7(path))
-      chmodSync3(path, 384);
+    if (existsSync6(path))
+      chmodSync2(path, 384);
   }
 }
 function assertTier(tier) {
@@ -9257,17 +9301,17 @@ function resolveStoreTierClassification(explicit, ledgerPath, laneMap) {
   const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
   if (!installed)
     return explicit ?? (laneMap ? { sensitivityMap: laneMap } : undefined);
-  if (installed.unavailableReason || !explicit)
+  if (!explicit)
     return installed;
-  if (explicit.unavailableReason)
-    return explicit;
   const rules = [...explicit.rules ?? [], ...installed.rules ?? []];
   const sniffer = explicit.sniffer ?? installed.sniffer;
-  const sensitivityMap = installed.sensitivityMap;
+  const sensitivityMap = installed.sensitivityMap ?? (installed.unavailableReason ? explicit.sensitivityMap ?? laneMap : undefined);
+  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
   return {
     ...sensitivityMap ? { sensitivityMap } : {},
     ...rules.length > 0 ? { rules } : {},
-    ...sniffer ? { sniffer } : {}
+    ...sniffer ? { sniffer } : {},
+    ...unavailableReason ? { unavailableReason } : {}
   };
 }
 function defaultStoreTrustTier(trustDomain) {
@@ -9787,7 +9831,7 @@ var init_reactions = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync8, lstatSync as lstatSync3, mkdirSync as mkdirSync7, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync7, lstatSync as lstatSync2, mkdirSync as mkdirSync7, statSync as statSync4 } from "node:fs";
 import { dirname as dirname9 } from "node:path";
 import { Database as Database2 } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -11802,7 +11846,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat2 = lstatSync3(this.dbPath);
+        const stat2 = lstatSync2(this.dbPath);
         if (!stat2.isFile() || stat2.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
@@ -11910,14 +11954,14 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync8(path))
+      if (path === ":memory:" || !existsSync7(path))
         return;
       return this.tierLedger();
     }
     boundTierLedger(ledgerPath) {
       if (this.boundLedgerHandle?.dbPath === ledgerPath)
         return this.boundLedgerHandle;
-      if (ledgerPath !== ":memory:" && !existsSync8(ledgerPath))
+      if (ledgerPath !== ":memory:" && !existsSync7(ledgerPath))
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
@@ -13275,8 +13319,8 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store trust reconciliation requires two distinct stores.");
       }
       if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-        const looserFile = statSync3(this.dbPath);
-        const stricterFile = statSync3(options.stricter.dbPath);
+        const looserFile = statSync4(this.dbPath);
+        const stricterFile = statSync4(options.stricter.dbPath);
         if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
           throw new Error("Connector store trust reconciliation refuses one database as both stores.");
         }
@@ -18568,9 +18612,9 @@ init_atomic_file();
 init_config();
 init_sovereignty();
 init_secret_store();
-import { createHash as createHash15 } from "node:crypto";
-import { existsSync as existsSync13, lstatSync as lstatSync5, mkdirSync as mkdirSync11, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname16, isAbsolute as isAbsolute3 } from "node:path";
+import { createHash as createHash16 } from "node:crypto";
+import { existsSync as existsSync11, lstatSync as lstatSync3, mkdirSync as mkdirSync11, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname17, isAbsolute as isAbsolute3 } from "node:path";
 
 // src/core/worker-auth.ts
 import { readFileSync as readFileSync5, statSync as statSync2 } from "node:fs";
@@ -19265,7 +19309,7 @@ init_operation_error();
 // src/core/venice-model-catalog.ts
 init_venice_models();
 import {
-  existsSync as existsSync9,
+  existsSync as existsSync8,
   mkdirSync as mkdirSync8,
   readFileSync as readFileSync8,
   renameSync as renameSync2,
@@ -19455,7 +19499,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync9(path))
+  if (!existsSync8(path))
     return;
   let payload;
   try {
@@ -21729,11 +21773,12 @@ init_drive();
 init_provider_client();
 
 // src/workers/classification/installed-tier-classification.ts
+init_owner_config_read();
 init_sensitivity_map();
-import { statSync as statSync5 } from "node:fs";
 
 // src/workers/classification/sniffer.ts
 init_engine();
+import { createHash as createHash15 } from "node:crypto";
 
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT = [
@@ -21783,7 +21828,7 @@ function stripCodeFences(text) {
 init_sqlite_migrations();
 import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash14 } from "node:crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync10, mkdirSync as mkdirSync9 } from "node:fs";
+import { chmodSync as chmodSync3, existsSync as existsSync9, mkdirSync as mkdirSync9 } from "node:fs";
 import { dirname as dirname13 } from "node:path";
 var TIER_SNIFFER_SCHEMA_VERSION = 1;
 function snifferMaterialHash(pass, material) {
@@ -21855,8 +21900,8 @@ class TierSnifferStore {
     const materialHash = snifferMaterialHash(question.pass, question.material);
     this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, solo
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
@@ -21864,8 +21909,9 @@ class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
-        flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString());
+        flags_json = excluded.flags_json,
+        solo = excluded.solo
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), question.solo === true ? 1 : 0);
   }
   questionFor(subject, pass) {
     const row = this.db.query(`
@@ -21915,7 +21961,8 @@ function questionFromRow(row) {
     material: row.material,
     flags: JSON.parse(row.flags_json),
     attempts: row.attempts,
-    queuedAt: row.queued_at
+    queuedAt: row.queued_at,
+    solo: row.solo === 1
   };
 }
 function subjectParams(subject) {
@@ -21923,8 +21970,8 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync10(path))
-      chmodSync4(path, 384);
+    if (existsSync9(path))
+      chmodSync3(path, 384);
   }
 }
 function snifferMigrations() {
@@ -21959,6 +22006,7 @@ function snifferMigrations() {
             flags_json TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             queued_at TEXT NOT NULL,
+            solo INTEGER NOT NULL DEFAULT 1 CHECK (solo IN (0, 1)),
             UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
           );
         `);
@@ -21968,10 +22016,10 @@ function snifferMigrations() {
 }
 
 // src/workers/classification/sniffer.ts
-var SNIFFER_PROMPT_VERSION = "v1";
 var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
 var SNIFFER_METADATA_BATCH_SIZE = 100;
-var SNIFFER_CONTENT_BATCH_SIZE = 8;
+var SNIFFER_LOCAL_METADATA_BATCH_SIZE = 20;
+var SNIFFER_CONTENT_BATCH_SIZE = 1;
 var SNIFFER_MAX_ATTEMPTS = 3;
 var SNIFFER_CATEGORIES = [
   "health",
@@ -21991,9 +22039,22 @@ function snifferTierKey(verdict) {
 }
 function snifferReasonCode(verdict) {
   if (verdict.failSafe)
-    return "unresolved:0.00";
+    return verdict.category === SNIFFER_INJECTION_CATEGORY ? "injection:0.00" : "unresolved:0.00";
   const category = SNIFFER_CATEGORIES.includes(verdict.category) ? verdict.category : "other";
   return `${category}:${verdict.confidence.toFixed(2)}`;
+}
+var SNIFFER_INJECTION_CATEGORY = "injection";
+var INJECTION_PATTERNS = [
+  /\b(?:ignore|disregard|forget|override|bypass)\b[^\n]{0,40}\b(?:instructions?|rules|prompt|above|previous|prior|earlier)\b/i,
+  /\b(?:system prompt|developer message|assistant:|as an ai|you are an? (?:ai|assistant|model|classifier)|respond with|answer with|reply with|output only|return only)\b/i,
+  /\bverdicts?\b/i,
+  /["']?\b(?:tier|confidence|category)\b["']?\s*[:=]/i,
+  /[{}]/,
+  /\b(?:personal|private|public)\b[^\n]{0,20}\bconfidence\b/i,
+  /\b(?:classify|label|mark|treat)\b[^\n]{0,30}\b(?:as|is)\s+(?:personal|public|not private|safe)\b/i
+];
+function snifferMaterialLooksLikeInjection(material) {
+  return INJECTION_PATTERNS.some((pattern) => pattern.test(material));
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   return `${lane.kind}:${promptVersion}`;
@@ -22022,6 +22083,7 @@ function buildSnifferBatchPrompt(pass, items) {
   return [intro, `There are ${items.length} items.`, "", ...lines].join(`
 `);
 }
+var SNIFFER_PROMPT_VERSION = `p-${createHash15("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
 function parseSnifferBatchResponse(text, expected) {
   const verdicts = new Map;
   const record = parseStrictJsonObject(text);
@@ -22072,6 +22134,9 @@ class CachedTierSniffer {
     const material = request.material?.trim();
     if (!material || snifferMaterialCarriesSecret(material))
       return { verdict: "undecided" };
+    if (snifferMaterialLooksLikeInjection(material)) {
+      return { verdict: "decided", tier: "secure", code: "injection:0.00" };
+    }
     const mapRevision = request.mapRevision ?? "none";
     try {
       const cached = this.store.getVerdict({
@@ -22083,7 +22148,14 @@ class CachedTierSniffer {
       if (cached)
         return { verdict: "decided", tier: snifferTierKey(cached), code: snifferReasonCode(cached) };
       if (request.subject) {
-        this.store.enqueue({ subject: request.subject, pass: request.pass, material, mapRevision, flags: request.flags });
+        this.store.enqueue({
+          subject: request.subject,
+          pass: request.pass,
+          material,
+          mapRevision,
+          flags: request.flags,
+          solo: request.solo === true || request.pass === "content"
+        });
       }
     } catch {}
     return { verdict: "undecided" };
@@ -22092,8 +22164,8 @@ class CachedTierSniffer {
 // src/workers/classification/tier-rules.ts
 init_atomic_file();
 init_operation_error();
+init_owner_config_read();
 init_tier_classifier();
-import { existsSync as existsSync11, lstatSync as lstatSync4, chmodSync as chmodSync5, mkdirSync as mkdirSync10, readFileSync as readFileSync9, statSync as statSync4 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { dirname as dirname14, join as join17 } from "node:path";
 var TIER_RULES_SCHEMA_VERSION = 1;
@@ -22113,27 +22185,25 @@ function resolveTierRulesPath(options = {}) {
 }
 function loadOwnerTierRules(options = {}) {
   const path = resolveTierRulesPath(options);
-  if (!existsSync11(path)) {
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing") {
     if (options.allowMissing)
       return [];
     throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
   }
+  if (read.status === "refused") {
+    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
+  }
   let raw;
   try {
-    raw = JSON.parse(readFileSync9(path, "utf8"));
+    raw = JSON.parse(read.text);
   } catch {
     throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
   }
   return parseOwnerTierRules(raw, path);
 }
 function tierRulesFileStamp(options = {}) {
-  const path = resolveTierRulesPath(options);
-  try {
-    const stat3 = statSync4(path);
-    return `${stat3.mtimeMs}:${stat3.size}`;
-  } catch {
-    return "missing";
-  }
+  return ownerConfigStamp(resolveTierRulesPath(options));
 }
 function parseOwnerTierRules(raw, label = "tier rules") {
   const root = asRecord7(raw);
@@ -22223,9 +22293,10 @@ class InstalledTierClassification {
   snifferStores = new Map;
   mapStamp;
   map;
+  mapInvalid = false;
   rulesStamp;
-  rules;
-  rulesError = false;
+  rules = [];
+  rulesInvalid = false;
   constructor(options = {}) {
     this.env = options.env ?? process.env;
     this.lane = options.lane;
@@ -22233,9 +22304,8 @@ class InstalledTierClassification {
   }
   forLedger(ledgerPath) {
     const rules = this.currentRules();
-    if (rules === undefined)
-      return { unavailableReason: "tier_rules_invalid" };
     const sensitivityMap = this.currentMap();
+    const unavailableReason = this.rulesInvalid ? "tier_rules_invalid" : this.mapInvalid ? "sensitivity_map_invalid" : undefined;
     let sniffer;
     if (this.lane && ledgerPath !== ":memory:") {
       try {
@@ -22245,7 +22315,8 @@ class InstalledTierClassification {
     return {
       ...sensitivityMap ? { sensitivityMap } : {},
       ...rules.length > 0 ? { rules } : {},
-      ...sniffer ? { sniffer } : {}
+      ...sniffer ? { sniffer } : {},
+      ...unavailableReason ? { unavailableReason } : {}
     };
   }
   snifferStoreForLedger(ledgerPath) {
@@ -22266,45 +22337,49 @@ class InstalledTierClassification {
     this.snifferStores.clear();
   }
   currentMap() {
-    const stamp = fileStamp(resolveSensitivityMapPath({ env: this.env }));
+    const stamp = ownerConfigStamp(resolveSensitivityMapPath({ env: this.env }));
     if (stamp !== this.mapStamp) {
-      this.map = loadOwnerSensitivityMap(this.env);
-      this.mapStamp = stamp;
+      const read = readOwnerSensitivityMap(this.env);
+      if (read.status === "ok") {
+        this.map = read.map;
+        this.mapInvalid = false;
+        this.mapStamp = read.stamp;
+      } else if (read.status === "missing") {
+        this.map = undefined;
+        this.mapInvalid = false;
+        this.mapStamp = stamp;
+      } else {
+        this.mapInvalid = true;
+        this.mapStamp = read.reason === "torn_read" ? undefined : stamp;
+      }
     }
     return this.map;
   }
   currentRules() {
     const stamp = tierRulesFileStamp({ env: this.env });
     if (stamp !== this.rulesStamp) {
-      this.rulesStamp = stamp;
       try {
         this.rules = loadOwnerTierRules({ env: this.env, allowMissing: true });
-        this.rulesError = false;
+        this.rulesInvalid = false;
+        this.rulesStamp = stamp;
       } catch {
-        this.rules = undefined;
-        this.rulesError = true;
+        this.rulesInvalid = true;
+        this.rulesStamp = undefined;
       }
     }
-    return this.rulesError ? undefined : this.rules;
-  }
-}
-function fileStamp(path) {
-  try {
-    const stat3 = statSync5(path);
-    return `${stat3.mtimeMs}:${stat3.size}`;
-  } catch {
-    return "missing";
+    return this.rules;
   }
 }
 
 // src/workers/classification/sniffer-lane.ts
 init_operation_error();
+init_sovereignty();
 
 class SnifferLaneRefusedError extends OperationError {
   reason;
   profileId;
   constructor(reason, profileId) {
-    super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
+    super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : reason === "outside_private_policy" ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
     this.name = "SnifferLaneRefusedError";
     this.reason = reason;
     this.profileId = profileId;
@@ -22315,8 +22390,10 @@ function assertSnifferProfileAllowed(profileId, profile) {
     throw new SnifferLaneRefusedError("standard_cloud", profileId);
   if (profile.provider === "local-openai-compatible" && profile.trust === "local")
     return "local";
-  if (profile.provider === "venice" && profile.trust === "encrypted_cloud")
+  if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
+    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
     return "venice";
+  }
   throw new SnifferLaneRefusedError("unsupported_provider", profileId);
 }
 
@@ -22380,9 +22457,9 @@ function parseClassificationLedgerJsonl(text) {
   }
   return { entries, skipped };
 }
-function isClassifierApproved(entries, pair) {
+function isClassifierApproved(entries, key) {
   for (const entry of entries) {
-    if (entry.model_id !== pair.modelId || entry.prompt_version !== pair.promptVersion)
+    if (entry.model_id !== key.modelId || entry.prompt_version !== key.promptVersion || entry.lane !== key.lane || entry.profile_id !== key.profileId)
       continue;
     if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
       continue;
@@ -22407,7 +22484,7 @@ function isClassificationLedgerEntry(value) {
     return false;
   if (!["pending", "complete", "n/a"].includes(record.status))
     return false;
-  for (const key of ["model_id", "prompt_version", "lane", "why", "entry_id"]) {
+  for (const key of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
     if (record[key] !== undefined && typeof record[key] !== "string")
       return false;
   }
@@ -22422,6 +22499,9 @@ function stampOrder2(recordedAt) {
 }
 
 // src/workers/classification/sniffer-resolver.ts
+init_atomic_file();
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync9 } from "node:fs";
+import { dirname as dirname16 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_PASS = 10;
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 2000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -22430,18 +22510,39 @@ var OUTPUT_CHARS_PER_ITEM = 110;
 class SnifferCallBudget {
   maxCallsPerDay;
   now;
+  statePath;
   day = "";
   used = 0;
   constructor(options = {}) {
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date);
+    this.statePath = options.statePath;
+    if (this.statePath) {
+      try {
+        const saved = JSON.parse(readFileSync9(this.statePath, "utf8"));
+        if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
+          this.day = saved.day;
+          this.used = Math.max(0, Math.floor(saved.used));
+        }
+      } catch {}
+    }
   }
   tryConsume() {
     this.roll();
     if (this.used >= this.maxCallsPerDay)
       return false;
     this.used += 1;
+    this.save();
     return true;
+  }
+  save() {
+    if (!this.statePath)
+      return;
+    try {
+      mkdirSync10(dirname16(this.statePath), { recursive: true, mode: 448 });
+      writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
+`);
+    } catch {}
   }
   usedToday() {
     this.roll();
@@ -22470,6 +22571,7 @@ async function runSnifferPass(options) {
     failSafePrivate: 0,
     cacheHits: 0,
     secretRefused: 0,
+    injectionRefused: 0,
     staleDropped: 0,
     awaitingPlacement: 0,
     movesQueued: 0,
@@ -22491,8 +22593,14 @@ async function runSnifferPass(options) {
       pass: item.question.pass,
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${snifferReasonCode(verdict)}`,
-      modelId: options.lane.modelId
+      modelId: options.lane.modelId,
+      mapRevision: item.question.mapRevision
     }, item.target.placementFor ? { placementFor: item.target.placementFor } : {});
+    if (applied?.outcome === "stale_map") {
+      item.target.sniffer.deleteQuestion(item.question, item.question.pass);
+      report.staleDropped += 1;
+      return;
+    }
     if (applied?.outcome === "needs_placement") {
       report.awaitingPlacement += 1;
       return;
@@ -22510,7 +22618,7 @@ async function runSnifferPass(options) {
   };
   const stillOpen = (target, question) => {
     const row = target.ledger.getCurrent(question);
-    return row !== undefined && row.state === "pending" && row.decidedBy !== "override" && openPasses(row).includes(question.pass);
+    return row !== undefined && row.state === "pending" && row.decidedBy !== "override" && row.mapRevision === question.mapRevision && openPasses(row).includes(question.pass);
   };
   const work = { metadata: [], content: [] };
   for (const target of options.targets) {
@@ -22524,6 +22632,13 @@ async function runSnifferPass(options) {
       if (snifferMaterialCarriesSecret(question.material)) {
         target.sniffer.deleteQuestion(question, question.pass);
         report.secretRefused += 1;
+        continue;
+      }
+      if (snifferMaterialLooksLikeInjection(question.material)) {
+        const failSafe = { tier: "private", category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true };
+        target.sniffer.putVerdict(keyOf(question), failSafe);
+        apply({ target, question }, failSafe);
+        report.injectionRefused += 1;
         continue;
       }
       const cached = target.sniffer.getVerdict(keyOf(question));
@@ -22548,15 +22663,14 @@ async function runSnifferPass(options) {
       report.staleDropped += 1;
       return false;
     });
-    const groups = groupByMaterial(open5);
-    const batchSize = pass === "metadata" ? options.metadataBatchSize ?? SNIFFER_METADATA_BATCH_SIZE : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
-    for (let start = 0;start < groups.length; start += batchSize) {
+    const batchSize = pass === "metadata" ? options.metadataBatchSize ?? (options.lane.kind === "local" ? SNIFFER_LOCAL_METADATA_BATCH_SIZE : SNIFFER_METADATA_BATCH_SIZE) : options.contentBatchSize ?? SNIFFER_CONTENT_BATCH_SIZE;
+    const batches = batchGroups(groupByMaterial(open5), batchSize);
+    for (const batch of batches) {
       const stop = stopReason(options, report, maxCallsPerPass);
       if (stop) {
         report.stoppedBy = stop;
         return finish(report);
       }
-      const batch = groups.slice(start, start + batchSize);
       assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
       const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: group[0].question.material })));
       report.calls += 1;
@@ -22573,6 +22687,10 @@ async function runSnifferPass(options) {
         });
         text = completion.text;
       } catch {
+        if (options.signal?.aborted) {
+          report.stoppedBy = "preempted";
+          return finish(report);
+        }
         report.failedCalls += 1;
         consecutiveTransportFailures += 1;
         if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
@@ -22618,6 +22736,24 @@ function openPasses(row) {
     passes.push("content");
   return passes;
 }
+function batchGroups(groups, size) {
+  const batches = [];
+  let shared = [];
+  for (const group of groups) {
+    if (group.some((item) => item.question.solo)) {
+      batches.push([group]);
+      continue;
+    }
+    shared.push(group);
+    if (shared.length >= size) {
+      batches.push(shared);
+      shared = [];
+    }
+  }
+  if (shared.length > 0)
+    batches.push(shared);
+  return batches;
+}
 function groupByMaterial(items) {
   const groups = new Map;
   for (const item of items) {
@@ -22649,7 +22785,7 @@ function finish(report) {
 
 // src/workers/classification/sniffer-service.ts
 init_tier_ledger();
-import { existsSync as existsSync12 } from "node:fs";
+import { existsSync as existsSync10 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 
 class TierSnifferService {
@@ -22659,12 +22795,14 @@ class TierSnifferService {
   running = false;
   abort;
   lastTick;
+  stopped = false;
   ledgers = new Map;
   constructor(options) {
     this.options = options;
     this.budget = new SnifferCallBudget({
       maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
-      ...options.now ? { now: options.now } : {}
+      ...options.now ? { now: options.now } : {},
+      ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
   }
   start() {
@@ -22676,12 +22814,16 @@ class TierSnifferService {
     this.timer.unref?.();
   }
   stop() {
+    this.stopped = true;
     if (this.timer)
       clearInterval(this.timer);
     this.timer = undefined;
     this.abort?.abort();
     if (!this.running)
       this.closeLedgers();
+  }
+  preempt() {
+    this.abort?.abort();
   }
   status() {
     return {
@@ -22692,7 +22834,7 @@ class TierSnifferService {
     };
   }
   async runOnce() {
-    if (this.running)
+    if (this.running || this.stopped)
       return { state: "skipped_running" };
     this.running = true;
     this.abort = new AbortController;
@@ -22707,6 +22849,8 @@ class TierSnifferService {
     } finally {
       this.running = false;
       this.abort = undefined;
+      if (this.stopped)
+        this.closeLedgers();
     }
   }
   ledgerPaths() {
@@ -22716,11 +22860,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync12(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync10(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync12(own))
+      if (existsSync10(own))
         paths.add(own);
     }
     return [...paths];
@@ -22744,20 +22888,21 @@ class TierSnifferService {
   async tick(signal) {
     const { lane } = this.options;
     const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
-    const pair = { modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
-    if (!isClassifierApproved(ledger.entries, pair)) {
+    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
+    if (!isClassifierApproved(ledger.entries, key)) {
       await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
         recorded_at: (this.options.now?.() ?? new Date).toISOString(),
         kind: "classifier_model_decision",
-        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} with prompt ${SNIFFER_PROMPT_VERSION}; it waits for the owner's approval before classifying anything.`,
+        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${SNIFFER_PROMPT_VERSION}; it waits for the owner's approval before classifying anything.`,
         model_id: lane.modelId,
         prompt_version: SNIFFER_PROMPT_VERSION,
         lane: lane.kind,
+        profile_id: lane.profileId,
         approved_by: "system-automatic",
         status: "pending",
-        entry_id: `sniffer-approval-requested:${lane.modelId}:${SNIFFER_PROMPT_VERSION}`
+        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${SNIFFER_PROMPT_VERSION}`
       });
-      return { state: "awaiting_owner_approval", ...pair };
+      return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: SNIFFER_PROMPT_VERSION };
     }
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
@@ -23511,7 +23656,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash15("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash16("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -23640,7 +23785,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync13(config.dbPath))
+    if (!config.dbPath || !existsSync11(config.dbPath))
       return [];
     const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
     try {
@@ -23965,7 +24110,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash15("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash16("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -24069,9 +24214,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute3(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname16(readinessPath);
+  const directory = dirname17(readinessPath);
   mkdirSync11(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync5(directory);
+  const parent = lstatSync3(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -24092,7 +24237,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync11(dirname16(args.reportPath), { recursive: true });
+      mkdirSync11(dirname17(args.reportPath), { recursive: true });
       writeFileSync5(args.reportPath, `${json}
 `);
     }
@@ -24102,7 +24247,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync11(dirname16(args.reportPath), { recursive: true });
+      mkdirSync11(dirname17(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync5(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

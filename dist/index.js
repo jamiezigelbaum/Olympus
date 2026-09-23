@@ -6499,10 +6499,14 @@ var init_ingest_filter = __esm(() => {
   OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
 });
 
+// src/core/owner-config-read.ts
+var init_owner_config_read = () => {};
+
 // src/core/sensitivity-map.ts
 var USER_FACING_TIER_MAPPING, USER_FACING_TIER_NAMES, USER_FACING_TIER_SET, TRUST_TIER_SET, TRUST_DOMAIN_SET, RAISING_TIER_NAMES;
 var init_sensitivity_map = __esm(() => {
   init_operation_error();
+  init_owner_config_read();
   init_types();
   USER_FACING_TIER_MAPPING = {
     public: { targetTrustTier: "S0", targetTrustDomain: "public_safe" },
