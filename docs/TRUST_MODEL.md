@@ -397,17 +397,24 @@ Rules:
 - `S4` may have full search quality, but only inside `secure_local` search
   spaces and secure-custodian routes.
 - Ordinary Castor/cloud-led sessions may receive deliberately distilled `S3`
-  derivatives or safe opaque references to `S4` evidence when policy allows;
-  they must not query or receive raw `S4` collections by default.
+  derivatives of `S4` evidence and citations to it when policy allows; they
+  must not query or receive raw `S4` collections by default.
+- Item metadata and content are tiered separately (owner ruling 2026-09-23).
+  Titles, file and folder names and paths, subjects, and senders are
+  Personal by default; content is what is Private. A citation's labels are
+  therefore releasable beside an answer derived from Private content.
 - `source_answer` searches `secure_local` corpora by default when the active
   sovereignty policy approves a private analyst route for them (Argus: a local
   model or Venice Private, per preset). That evidence is reasoned over only by
-  the approved route. Castor receives the derived answer, which passes the
-  OPSEC release gate, and one citation per cited item: its identifiers plus
-  its title, source, conversation, and author labels and its locator, each
-  scanned for secret-like text and withheld on a match. It never receives
-  source text. With no approved route (for example `no-sensitive`), or when
-  the private analyst is down, the corpora are left out and the answer's
+  the approved route. For Private evidence Castor receives the Argus-derived
+  answer, which passes the OPSEC release gate, and one citation per cited
+  item: its identifiers plus its labels (title, path, source, conversation,
+  author). The labels are scanned for secret-like text and withheld on a
+  match, and are released because item metadata defaults to Personal. Castor
+  never receives Private source text. Once the per-item four-tier ledger
+  lands, an item whose metadata tier is Private will be cited by opaque
+  identifiers only. With no approved route (for example `no-sensitive`), or
+  when the private analyst is down, the corpora are left out and the answer's
   coverage notes say so. Callers opt out with `include_secure_local: false`;
   the bulk release approval gate applies to every explicit `secure_local`
   request.
