@@ -2311,6 +2311,18 @@ export class LocalConnectorStore {
     };
   }
 
+  /**
+   * The conversations this store holds a provider item id in (a chat
+   * message id can repeat across conversations). Identifiers only.
+   */
+  conversationIdsForProviderItem(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>): string[] {
+    return (this.db.query(`
+      SELECT DISTINCT provider_conversation_id FROM items
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
+    `).all(identity.provider, identity.accountScope, identity.providerItemId) as Array<{ provider_conversation_id: string }>)
+      .map((row) => row.provider_conversation_id);
+  }
+
   /** Whether this store has ANY row for the identity, active or tombstoned. */
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
     return this.db.query(`

@@ -193,6 +193,7 @@ import { canonicalConnectorStoreChatPrincipal } from '../connector-store/princip
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import {
   onDemandTierStore,
+  rehomeChatLaneOverrides,
   type ExistingStoreTierLane,
   type OnDemandTierStore,
   type TieredStoreSet,
@@ -365,6 +366,19 @@ export function createWorkerMessagingCaptureOwnership(options: {
       revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
     },
   };
+}
+
+/**
+ * Per-item tier overrides of a chat lane written before identities carried
+ * their conversation: re-homed at boot where the conversation is derivable,
+ * otherwise kept (applying to nothing) and reported as orphaned. Counts only.
+ */
+function reportRehomedChatOverrides(lane: string, result: { rehomed: number; orphaned: number }): void {
+  if (result.rehomed === 0 && result.orphaned === 0) return;
+  console.warn(
+    `[tier] ${lane}: ${result.rehomed} per-item override(s) re-homed under their conversation; `
+    + `${result.orphaned} orphaned (conversation not derivable; kept, applying to nothing, until reset).`,
+  );
 }
 
 export function registerConnectorStoreEmbeddingLane(options: {
@@ -2118,6 +2132,9 @@ export async function main(): Promise<void> {
         ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
       })
     : undefined;
+  if (whatsappTierSet && whatsappConnectorStore) {
+    reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
+  }
   const whatsappConnectorStoreSync: WhatsAppConnectorStoreSyncHandler | undefined = whatsappConnectorStore
     ? createWhatsAppConnectorStoreSyncHandler({
         ...(whatsappTierSet ? { tierSet: whatsappTierSet } : {}),
@@ -2144,6 +2161,13 @@ export async function main(): Promise<void> {
   const telegramTierLane = telegramConnectorStores
     ? tierLane({ internal: telegramConnectorStores.internal, secure: telegramConnectorStores.secureLocal })
     : undefined;
+  if (telegramTierLane && telegramConnectorStores) {
+    reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
+      telegramTierLane.ledger,
+      'telegram',
+      [telegramConnectorStores.internal, telegramConnectorStores.secureLocal],
+    ));
+  }
   const telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined = telegramConnectorStores
     ? createTelegramConnectorStoreSyncHandler({
         stores: telegramConnectorStores,

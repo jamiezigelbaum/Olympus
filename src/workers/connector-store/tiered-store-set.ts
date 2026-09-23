@@ -625,6 +625,23 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
   });
 }
 
+/**
+ * Re-home a chat lane's per-item overrides that predate conversation-keyed
+ * identities (TierLedger.rehomeConversationlessOverrides), resolving each
+ * message's conversation from the lane's stores. Content-free counts only.
+ */
+export function rehomeChatLaneOverrides(
+  ledger: TierLedger,
+  provider: string,
+  stores: readonly LocalConnectorStore[],
+): { rehomed: number; orphaned: number } {
+  const result = ledger.rehomeConversationlessOverrides({
+    provider,
+    conversationsFor: (identity) => stores.flatMap((store) => store.conversationIdsForProviderItem(identity)),
+  });
+  return { rehomed: result.rehomed, orphaned: result.orphaned.length };
+}
+
 /** A tier store a lane creates only when its first item is routed there. */
 export interface NewTierLegSpec {
   corpusId: string;
