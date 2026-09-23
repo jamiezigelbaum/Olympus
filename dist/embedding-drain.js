@@ -8750,6 +8750,9 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (existing && (existing.contentTier === "secrets" || existing.metadataTier === "secrets")) {
+        throw new TierLedgerSecretsRollbackRefusedError;
+      }
       if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || existing.previousMetadataTier === null || existing.previousContentTier === null) {
         throw new TierLedgerGenerationConflictError;
       }
@@ -9423,7 +9426,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -9431,6 +9434,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message);
       this.name = "TierLedgerGenerationConflictError";
+    }
+  };
+  TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
+    constructor(message = "A Secrets row is never rolled back: its copies stay hidden until an approved purge.") {
+      super(message);
+      this.name = "TierLedgerSecretsRollbackRefusedError";
     }
   };
   TRUST_DOMAIN_RANK = {
@@ -23294,6 +23303,14 @@ init_tier_placement();
 init_engine();
 init_tier_classifier();
 init_tier_ledger();
+var TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
+  "unplanned_destination",
+  "copy_only_destination_needs_embed",
+  "destination_chunk_cap",
+  "destination_cost_cap",
+  "chunk_cap",
+  "cost_cap"
+]);
 
 // src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {

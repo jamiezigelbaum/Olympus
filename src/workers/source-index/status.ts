@@ -112,6 +112,8 @@ export interface SourceIndexTierMigrationStatus {
   destinations: Array<{ corpus_id: string; chunks_to_embed: number }>;
   names_only_kept_chunks: number;
   purged: boolean;
+  /** When a stopped plan stopped: the doctor excuses its lag only for a bounded time after. */
+  stopped_at?: string;
 }
 
 export interface SourceIndexEmbeddingLaneState {

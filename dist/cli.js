@@ -13448,6 +13448,9 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (existing && (existing.contentTier === "secrets" || existing.metadataTier === "secrets")) {
+        throw new TierLedgerSecretsRollbackRefusedError;
+      }
       if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || existing.previousMetadataTier === null || existing.previousContentTier === null) {
         throw new TierLedgerGenerationConflictError;
       }
@@ -14121,7 +14124,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 3, TierLedgerGenerationConflictError, TierLedgerSecretsRollbackRefusedError, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -14129,6 +14132,12 @@ var init_tier_ledger = __esm(() => {
     constructor(message = "Tier ledger generation changed; re-read the row before flipping.") {
       super(message);
       this.name = "TierLedgerGenerationConflictError";
+    }
+  };
+  TierLedgerSecretsRollbackRefusedError = class TierLedgerSecretsRollbackRefusedError extends Error {
+    constructor(message = "A Secrets row is never rolled back: its copies stay hidden until an approved purge.") {
+      super(message);
+      this.name = "TierLedgerSecretsRollbackRefusedError";
     }
   };
   TRUST_DOMAIN_RANK = {
@@ -47482,7 +47491,7 @@ async function sourceIndexStatusCheck(deps) {
   const summaries = [];
   const informational = [];
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
-  const migration = approvedTierMigrationInProgress(status.tier_migration);
+  const migration = approvedTierMigrationInProgress(status.tier_migration, deps.now?.() ?? new Date, tierMigrationStoppedGraceDays(deps.env ?? process.env));
   for (const entry of corpora) {
     const corpus = asRecord9(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
@@ -47517,7 +47526,8 @@ async function sourceIndexStatusCheck(deps) {
       } else if (approvedLag > 0) {
         problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10% beyond the ${approvedLag} ` + `the migration approved, ledger entry ${migration.approvalEntryId})`);
       } else {
-        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%)`);
+        const expired = migration?.expired && migration.expired.corpora.has(corpusId) ? `; ${migration.expired.note}` : "";
+        problems.push(`${corpusId} embedding lag is ${embeddingLag} of ${chunks} chunks (over 10%${expired})`);
       }
     }
   }
@@ -47540,7 +47550,14 @@ async function sourceIndexStatusCheck(deps) {
     detail: `Source index status is healthy across ${corpora.length} corpus report${corpora.length === 1 ? "" : "s"}.${summary}${info}`
   };
 }
-function approvedTierMigrationInProgress(value) {
+function tierMigrationStoppedGraceDays(env) {
+  const raw = env[TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
+}
+function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord9(value);
   if (migration.in_progress !== true)
     return;
@@ -47555,6 +47572,22 @@ function approvedTierMigrationInProgress(value) {
     const destination = asRecord9(entry);
     if (typeof destination.corpus_id === "string")
       destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+  }
+  if (state === "stopped") {
+    const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
+    const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
+    if (ageMs > graceDays * DAY_MS) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS)} days ago` : "migration stopped at an unknown time";
+      return {
+        state,
+        approvalEntryId,
+        destinations: new Map,
+        expired: {
+          corpora: new Set(destinations.keys()),
+          note: `${when}, past its ${graceDays}-day lag exception (ledger entry ${approvalEntryId})`
+        }
+      };
+    }
   }
   return { state, approvalEntryId, destinations };
 }
@@ -48241,7 +48274,7 @@ function asCount(value) {
 function errorDetail2(error) {
   return error instanceof Error && error.message ? error.message : String(error);
 }
-var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS;
+var ARGUS_LANE_HINT = "Check the configured local model service and rerun olympus doctor.", EMAIL_WORKER_HINT = "Run olympus worker status, then olympus worker start or olympus worker install.", SOURCE_INDEX_HINT = "Run olympus source index status, then use Sync now in the dashboard or check the worker logs.", SCHEDULER_HINT = "Run olympus worker status and olympus source index status; restart the worker if the scheduler is not running.", CREDENTIAL_HINT2 = "Run the matching olympus connect command again for each handle that needs reauthorization.", STALE_RUNNING_SYNC_MS, EMBEDDING_LAG_RATIO = 0.1, DROPBOX_FILES_CORPUS_ID2 = "secure_local.dropbox.files", ARGUS_GENERATION_PROBE_TIMEOUT_MS = 15000, INGESTION_STUCK_WARNING_HOURS = 24, INGESTION_STUCK_ERROR_HOURS = 72, INGESTION_TERMINAL_FAILURE_DELTA_WARNING = 10, CONNECTED_SOURCE_LANES, ON_DEMAND_TIER_CORPORA, ON_DEMAND_TIER_CORPUS_IDS, TIER_MIGRATION_STOPPED_GRACE_DAYS_ENV = "OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS", DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS = 7, DAY_MS;
 var init_doctor = __esm(() => {
   init_config();
   init_worker_auth();
@@ -48259,6 +48292,7 @@ var init_doctor = __esm(() => {
   CONNECTED_SOURCE_LANES = publicSourceDoctorLanes();
   ON_DEMAND_TIER_CORPORA = createSourceCorpusRegistry().list().filter((corpus) => corpus.createdOnDemand === true);
   ON_DEMAND_TIER_CORPUS_IDS = new Set(ON_DEMAND_TIER_CORPORA.map((corpus) => corpus.corpusId));
+  DAY_MS = 24 * 60 * 60 * 1000;
 });
 
 // src/core/source-index/selected-item-safety.ts
@@ -51058,6 +51092,7 @@ async function runTierMigration(options) {
   updatePlan(options.paths.statePath, plan.planId, (record) => {
     record.state = "running";
     record.lock = { pid: process.pid, startedAt: now().toISOString() };
+    delete record.stoppedAt;
     if (!resumable) {
       record.batches.push({
         batchId,
@@ -51106,6 +51141,7 @@ async function runTierMigration(options) {
     destination.corpusId,
     destination.chunksToEmbed > 0 ? destination.estimatedCostUsd / destination.chunksToEmbed : 0
   ]));
+  const destinationBudgets = destinationBudgetsFor(findPlan(options.paths.statePath, plan.planId));
   let stopReason;
   let processed = 0;
   const secretsDeleted = {};
@@ -51126,6 +51162,7 @@ async function runTierMigration(options) {
         remainingChunks: approvedChunks - consumed.chunksToEmbed,
         remainingCost: approvedCost - consumed.costUsd,
         costPerChunk,
+        destinationBudgets,
         ...options.secretsDisposition ? { secretsDisposition: options.secretsDisposition } : {}
       });
       if (outcome.kind === "cap") {
@@ -51160,6 +51197,11 @@ async function runTierMigration(options) {
         tally.estimatedCostUsd = roundCents(tally.estimatedCostUsd + cost);
         consumed.costUsd += cost;
         consumed.chunksToEmbed += chunks;
+        const budget = destinationBudgets.get(corpusId);
+        if (budget) {
+          budget.remainingChunks -= chunks;
+          budget.remainingCost -= cost;
+        }
       }
       lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, {
         status: "moved",
@@ -51213,7 +51255,7 @@ async function runTierMigration(options) {
     await appendEmbeddingLedgerEntry(options.paths.embeddingLedgerPath, {
       recorded_at: now().toISOString(),
       kind: "note",
-      what: `Tier migration batch ${batchId} of plan ${plan.planId} stopped (${stopReason}): ${tally.moved} item(s) moved and ` + `${tally.secrets} settled as Secrets so far; observed chunks for destination models so far are in scope. Running it again resumes it.${keptSecretsText}`,
+      what: `Tier migration batch ${batchId} of plan ${plan.planId} stopped (${stopReason}): ${tally.moved} item(s) moved and ` + `${tally.secrets} settled as Secrets so far; observed chunks for destination models so far are in scope. ` + (TIER_MIGRATION_REPLAN_STOP_REASONS.has(stopReason) ? "The next move needs embeds its approval does not cover: nothing more runs until the owner plans again and approves the new costs." : "Running it again resumes it.") + keptSecretsText,
       scope: { corpora: Object.keys(tally.chunksToEmbed).sort(), chunks: tally.chunksToEmbed },
       approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
       status: "in_progress"
@@ -51230,6 +51272,8 @@ async function runTierMigration(options) {
       entry.stopReason = stopReason;
     delete record.lock;
     record.state = remaining === 0 ? "done" : stopReason ? "stopped" : "approved";
+    if (record.state === "stopped")
+      record.stoppedAt = now().toISOString();
   });
   if (failure !== undefined) {
     throw new OperationError("source_index_error", `Tier migration batch ${batchId} stopped on an error: ${failure instanceof Error ? failure.message : String(failure)}`, "Fix the cause and run the same command again: the batch resumes where it stopped.");
@@ -51261,6 +51305,27 @@ function currentPlanConsumption(plan) {
   }
   return { chunksToEmbed, costUsd };
 }
+function destinationBudgetsFor(plan) {
+  const budgets = new Map;
+  for (const destination of plan.totals.destinations) {
+    budgets.set(destination.corpusId, {
+      plannedChunks: destination.chunksToEmbed,
+      remainingChunks: destination.chunksToEmbed,
+      remainingCost: destination.estimatedCostUsd
+    });
+  }
+  for (const batch of plan.batches) {
+    for (const [corpusId, chunks] of Object.entries(batch.chunksToEmbed)) {
+      const budget = budgets.get(corpusId);
+      if (!budget)
+        continue;
+      const destination = plan.totals.destinations.find((candidate) => candidate.corpusId === corpusId);
+      budget.remainingChunks -= chunks;
+      budget.remainingCost -= destination.chunksToEmbed > 0 ? chunks * destination.estimatedCostUsd / destination.chunksToEmbed : 0;
+    }
+  }
+  return budgets;
+}
 function persistBatch(statePath, planId, batchId, tally) {
   updatePlan(statePath, planId, (record) => {
     const batch = record.batches.find((candidate) => candidate.batchId === batchId);
@@ -51280,9 +51345,12 @@ function sleep2(ms) {
 }
 function adoptedByThisPlan(record, proposal) {
   const expected = proposal.expectedGeneration ?? 0;
-  if (record.generation === expected)
-    return true;
-  return expected === 0 && record.generation === 1 && record.decidedBy === "legacy_placement";
+  if (expected > 0)
+    return record.generation === expected;
+  return record.generation === 1 && record.decidedBy === "legacy_placement";
+}
+function unroutedRowAsPlanned(record, proposal) {
+  return (record?.generation ?? 0) === (proposal.expectedGeneration ?? 0);
 }
 function fullIdentity2(proposal, localItemId) {
   return {
@@ -51324,6 +51392,8 @@ async function migrateOne(lane, proposal, context) {
       return { kind: "skipped", reason: "changed_since_plan" };
     }
   } else if (!record?.routed) {
+    if (!unroutedRowAsPlanned(record, proposal))
+      return { kind: "skipped", reason: "changed_since_plan" };
     sourceStore.bindTierSet(ledger);
     record = ledger.adoptLegacyPlacement(proposal.identity, [{ corpusId: proposal.fromCorpusId, trustDomain: proposal.fromTrustDomain, layers: "both" }], {
       whenMissing: {
@@ -51368,6 +51438,20 @@ async function migrateOne(lane, proposal, context) {
   }
   if (Object.entries(projected).some(([corpusId, count]) => count > 0 && !context.costPerChunk.has(corpusId))) {
     return { kind: "cap", reason: "unplanned_destination" };
+  }
+  for (const [corpusId, count] of Object.entries(projected)) {
+    if (count <= 0)
+      continue;
+    const budget = context.destinationBudgets.get(corpusId);
+    if (!budget)
+      return { kind: "cap", reason: "unplanned_destination" };
+    if (budget.plannedChunks <= 0)
+      return { kind: "cap", reason: "copy_only_destination_needs_embed" };
+    if (count > budget.remainingChunks)
+      return { kind: "cap", reason: "destination_chunk_cap" };
+    if (count * (context.costPerChunk.get(corpusId) ?? 0) > budget.remainingCost + 0.000001) {
+      return { kind: "cap", reason: "destination_cost_cap" };
+    }
   }
   const projectedChunks = Object.values(projected).reduce((sum2, count) => sum2 + count, 0);
   const projectedCost = Object.entries(projected).reduce((sum2, [corpusId, count]) => sum2 + count * (context.costPerChunk.get(corpusId) ?? 0), 0);
@@ -51477,6 +51561,10 @@ async function rollbackTierMigrationBatch(options) {
       } catch (error) {
         if (error instanceof TierLedgerGenerationConflictError) {
           skipped += 1;
+          continue;
+        }
+        if (error instanceof TierLedgerSecretsRollbackRefusedError) {
+          secretsKept += 1;
           continue;
         }
         throw error;
@@ -51666,10 +51754,11 @@ function tierMigrationStatusSummary(statePath) {
     chunks_to_embed: plan.totals.chunksToEmbed,
     destinations: plan.totals.destinations.filter((destination) => destination.chunksToEmbed > 0).map((destination) => ({ corpus_id: destination.corpusId, chunks_to_embed: destination.chunksToEmbed })),
     names_only_kept_chunks: plan.totals.namesOnlyKeptChunks ?? 0,
-    purged: plan.purge !== undefined
+    purged: plan.purge !== undefined,
+    ...plan.state === "stopped" ? { stopped_at: plan.stoppedAt ?? plan.updatedAt } : {}
   };
 }
-var TIER_MIGRATION_STATE_SCHEMA_VERSION = 1, TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", TIER_DISPLAY, DEFAULT_TIER_MIGRATION_ESTIMATES, FALLBACK_ESTIMATE, SELECTOR_KINDS;
+var TIER_MIGRATION_STATE_SCHEMA_VERSION = 1, TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", TIER_DISPLAY, DEFAULT_TIER_MIGRATION_ESTIMATES, FALLBACK_ESTIMATE, SELECTOR_KINDS, TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
   init_operation_error();
   init_tier_move();
@@ -51690,6 +51779,14 @@ var init_tier_migration = __esm(() => {
   };
   FALLBACK_ESTIMATE = { usdPerMillionTokens: 0.15, chunksPerMinute: 60 };
   SELECTOR_KINDS = ["source", "folder", "label", "sender", "chat"];
+  TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
+    "unplanned_destination",
+    "copy_only_destination_needs_embed",
+    "destination_chunk_cap",
+    "destination_cost_cap",
+    "chunk_cap",
+    "cost_cap"
+  ]);
 });
 
 // src/workers/classification/tier-migration-lanes.ts
@@ -51965,7 +52062,13 @@ async function runTierMigrateCommand(args, context = {}) {
           itemDelayMs: context.itemDelayMs ?? 2,
           ...context.now ? { now: context.now } : {}
         });
-        return { kind: "olympus_tier_migration_run", ...snake(result) };
+        return {
+          kind: "olympus_tier_migration_run",
+          ...snake(result),
+          ...result.stopReason && TIER_MIGRATION_REPLAN_STOP_REASONS.has(result.stopReason) ? {
+            next: "The approval does not cover the embeds the next move needs. Run olympus tier migrate plan, " + "review the new costs, and approve the new plan."
+          } : {}
+        };
       });
     }
     case "rollback": {

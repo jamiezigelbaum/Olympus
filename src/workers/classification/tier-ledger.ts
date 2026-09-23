@@ -179,6 +179,14 @@ export class TierLedgerGenerationConflictError extends Error {
   }
 }
 
+/** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
+export class TierLedgerSecretsRollbackRefusedError extends Error {
+  constructor(message = 'A Secrets row is never rolled back: its copies stay hidden until an approved purge.') {
+    super(message);
+    this.name = 'TierLedgerSecretsRollbackRefusedError';
+  }
+}
+
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
@@ -1325,12 +1333,16 @@ export class TierLedger {
    * Rollback is a ledger flip: the copies the last flip superseded become
    * current again, re-layered copies get their old layers back, and the copies
    * the flip made current become superseded. No store is written and nothing
-   * is re-embedded.
+   * is re-embedded. A Secrets row is refused whatever the caller checked
+   * (defense in depth): rolling it back would make the Secret visible again.
    */
   rollbackMove(identity: TierLedgerIdentity, options: { expectedGeneration: number }): TierLedgerRecord {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (existing && (existing.contentTier === 'secrets' || existing.metadataTier === 'secrets')) {
+        throw new TierLedgerSecretsRollbackRefusedError();
+      }
       // A flip that carried an open question (pending) is rolled back too; only
       // a row mid-move is refused.
       if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving'

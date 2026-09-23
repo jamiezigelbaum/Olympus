@@ -68,6 +68,7 @@ import {
 } from './tier-classifier.ts';
 import {
   TierLedgerGenerationConflictError,
+  TierLedgerSecretsRollbackRefusedError,
   copyServingLayer,
   tierLedgerIdentityKey,
   type TierCopy,
@@ -266,6 +267,8 @@ export interface TierMigrationPlanRecord {
   batches: TierMigrationBatchRecord[];
   purge?: { approvalEntryId: string; invalidationEntryId: string; purgedAt: string; chunks: Record<string, number>; copies: number };
   lock?: { pid: number; startedAt: string };
+  /** When the plan last stopped mid-way; cleared when a run resumes it. */
+  stoppedAt?: string;
 }
 
 interface TierMigrationStateFile {
@@ -1259,6 +1262,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
   updatePlan(options.paths.statePath, plan.planId, (record) => {
     record.state = 'running';
     record.lock = { pid: process.pid, startedAt: now().toISOString() };
+    delete record.stoppedAt;
     if (!resumable) {
       record.batches.push({
         batchId,
@@ -1310,6 +1314,10 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
     destination.corpusId,
     destination.chunksToEmbed > 0 ? destination.estimatedCostUsd / destination.chunksToEmbed : 0,
   ]));
+  // Each destination store's own approved budget: its planned chunks and cost,
+  // less what earlier batches of this plan already handed it. A store planned
+  // with 0 chunks to embed (vectors copied only) may receive no embed at all.
+  const destinationBudgets = destinationBudgetsFor(findPlan(options.paths.statePath, plan.planId));
   let stopReason: string | undefined;
   let processed = 0;
   // Secrets settled in THIS run, per corpus: deleted now, or kept hidden (the
@@ -1333,6 +1341,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       remainingChunks: approvedChunks - consumed.chunksToEmbed,
       remainingCost: approvedCost - consumed.costUsd,
       costPerChunk,
+      destinationBudgets,
       ...(options.secretsDisposition ? { secretsDisposition: options.secretsDisposition } : {}),
     });
     if (outcome.kind === 'cap') {
@@ -1366,6 +1375,11 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       tally.estimatedCostUsd = roundCents(tally.estimatedCostUsd + cost);
       consumed.costUsd += cost;
       consumed.chunksToEmbed += chunks;
+      const budget = destinationBudgets.get(corpusId);
+      if (budget) {
+        budget.remainingChunks -= chunks;
+        budget.remainingCost -= cost;
+      }
     }
     lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, {
       status: 'moved',
@@ -1430,7 +1444,11 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
       recorded_at: now().toISOString(),
       kind: 'note',
       what: `Tier migration batch ${batchId} of plan ${plan.planId} stopped (${stopReason}): ${tally.moved} item(s) moved and `
-        + `${tally.secrets} settled as Secrets so far; observed chunks for destination models so far are in scope. Running it again resumes it.${keptSecretsText}`,
+        + `${tally.secrets} settled as Secrets so far; observed chunks for destination models so far are in scope. `
+        + (TIER_MIGRATION_REPLAN_STOP_REASONS.has(stopReason!)
+          ? 'The next move needs embeds its approval does not cover: nothing more runs until the owner plans again and approves the new costs.'
+          : 'Running it again resumes it.')
+        + keptSecretsText,
       scope: { corpora: Object.keys(tally.chunksToEmbed).sort(), chunks: tally.chunksToEmbed },
       approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
       status: 'in_progress',
@@ -1446,6 +1464,7 @@ export async function runTierMigration(options: TierMigrationRunOptions): Promis
     if (stopReason) entry.stopReason = stopReason;
     delete record.lock;
     record.state = remaining === 0 ? 'done' : stopReason ? 'stopped' : 'approved';
+    if (record.state === 'stopped') record.stoppedAt = now().toISOString();
   });
   if (failure !== undefined) {
     throw new OperationError(
@@ -1482,6 +1501,48 @@ function currentPlanConsumption(plan: TierMigrationPlanRecord): { chunksToEmbed:
   }
   return { chunksToEmbed, costUsd };
 }
+
+interface DestinationBudget {
+  plannedChunks: number;
+  remainingChunks: number;
+  remainingCost: number;
+}
+
+/** Each planned destination store's approved chunks and cost, less what the plan's batches already handed it. */
+function destinationBudgetsFor(plan: TierMigrationPlanRecord): Map<string, DestinationBudget> {
+  const budgets = new Map<string, DestinationBudget>();
+  for (const destination of plan.totals.destinations) {
+    budgets.set(destination.corpusId, {
+      plannedChunks: destination.chunksToEmbed,
+      remainingChunks: destination.chunksToEmbed,
+      remainingCost: destination.estimatedCostUsd,
+    });
+  }
+  for (const batch of plan.batches) {
+    for (const [corpusId, chunks] of Object.entries(batch.chunksToEmbed)) {
+      const budget = budgets.get(corpusId);
+      if (!budget) continue;
+      const destination = plan.totals.destinations.find((candidate) => candidate.corpusId === corpusId)!;
+      budget.remainingChunks -= chunks;
+      budget.remainingCost -= destination.chunksToEmbed > 0 ? chunks * destination.estimatedCostUsd / destination.chunksToEmbed : 0;
+    }
+  }
+  return budgets;
+}
+
+/**
+ * Stop reasons that no resume can get past: the approval does not cover the
+ * embeds this move now needs, so the owner must re-plan and approve the new
+ * costs first.
+ */
+export const TIER_MIGRATION_REPLAN_STOP_REASONS: ReadonlySet<string> = new Set([
+  'unplanned_destination',
+  'copy_only_destination_needs_embed',
+  'destination_chunk_cap',
+  'destination_cost_cap',
+  'chunk_cap',
+  'cost_cap',
+]);
 
 function persistBatch(
   statePath: string,
@@ -1521,13 +1582,26 @@ type ItemOutcome =
 
 /**
  * Whether a routed legacy item was routed by THIS migration (adopted, perhaps
- * mid-move after a crash): adoption keeps the generation the plan saw, or
- * mints generation 1 for an item that had no ledger row.
+ * mid-move after a crash). The run adopts only a row still at the generation
+ * the plan saw (see migrateOne), and adoption never changes a generation: an
+ * item that already had a ledger row (P1a) keeps it, and an item with none is
+ * minted at generation 1 by `legacy_placement`. So the adopted row is exactly
+ * one of those two; anything else was routed or re-decided by someone else.
  */
 function adoptedByThisPlan(record: TierLedgerRecord, proposal: TierMigrationProposal): boolean {
   const expected = proposal.expectedGeneration ?? 0;
-  if (record.generation === expected) return true;
-  return expected === 0 && record.generation === 1 && record.decidedBy === 'legacy_placement';
+  if (expected > 0) return record.generation === expected;
+  return record.generation === 1 && record.decidedBy === 'legacy_placement';
+}
+
+/**
+ * Whether an unrouted legacy item's ledger row is still what the plan saw
+ * (none, or the same generation). Adopting a row that changed since planning
+ * would route an item whose resume then could not recognize it as this
+ * plan's, stranding it routed but unmoved where no later plan picks it up.
+ */
+function unroutedRowAsPlanned(record: TierLedgerRecord | undefined, proposal: TierMigrationProposal): boolean {
+  return (record?.generation ?? 0) === (proposal.expectedGeneration ?? 0);
 }
 
 function fullIdentity(proposal: TierMigrationProposal, localItemId: string): SourceItemIdentity {
@@ -1555,6 +1629,7 @@ async function migrateOne(
     remainingChunks: number;
     remainingCost: number;
     costPerChunk: ReadonlyMap<string, number>;
+    destinationBudgets: ReadonlyMap<string, DestinationBudget>;
     secretsDisposition?: SecretsDisposition;
   },
 ): Promise<ItemOutcome> {
@@ -1593,6 +1668,9 @@ async function migrateOne(
       return { kind: 'skipped', reason: 'changed_since_plan' };
     }
   } else if (!record?.routed) {
+    // A sync recorded or re-decided the item since planning: its newer
+    // decision wins, and the item stays legacy for the next plan to judge.
+    if (!unroutedRowAsPlanned(record, proposal)) return { kind: 'skipped', reason: 'changed_since_plan' };
     // The legacy store is about to hold a copy the set ledger governs. Bind it
     // first (as a sync binds a store before its first routed copy), so EVERY
     // handle on it, a read-only reader or the drain included, judges its rows
@@ -1657,6 +1735,20 @@ async function migrateOne(
   // A destination the approved plan never priced is never counted as free.
   if (Object.entries(projected).some(([corpusId, count]) => count > 0 && !context.costPerChunk.has(corpusId))) {
     return { kind: 'cap', reason: 'unplanned_destination' };
+  }
+  // Each destination store is held to ITS approved chunks and cost: slack
+  // approved for another store never pays for this one. A store approved for
+  // copied vectors only (0 chunks to embed) receives no embed at all; if its
+  // vectors turned out uncopyable, the owner re-plans and approves the cost.
+  for (const [corpusId, count] of Object.entries(projected)) {
+    if (count <= 0) continue;
+    const budget = context.destinationBudgets.get(corpusId);
+    if (!budget) return { kind: 'cap', reason: 'unplanned_destination' };
+    if (budget.plannedChunks <= 0) return { kind: 'cap', reason: 'copy_only_destination_needs_embed' };
+    if (count > budget.remainingChunks) return { kind: 'cap', reason: 'destination_chunk_cap' };
+    if (count * (context.costPerChunk.get(corpusId) ?? 0) > budget.remainingCost + 1e-6) {
+      return { kind: 'cap', reason: 'destination_cost_cap' };
+    }
   }
   const projectedChunks = Object.values(projected).reduce((sum, count) => sum + count, 0);
   const projectedCost = Object.entries(projected).reduce((sum, [corpusId, count]) => sum + count * (context.costPerChunk.get(corpusId) ?? 0), 0);
@@ -1798,6 +1890,10 @@ export async function rollbackTierMigrationBatch(options: {
       } catch (error) {
         if (error instanceof TierLedgerGenerationConflictError) {
           skipped += 1;
+          continue;
+        }
+        if (error instanceof TierLedgerSecretsRollbackRefusedError) {
+          secretsKept += 1;
           continue;
         }
         throw error;
@@ -2048,6 +2144,11 @@ export interface TierMigrationStatusSummary {
   /** Chunks split raises leave in names-only copies (unserved) until an approved purge strips them. */
   names_only_kept_chunks: number;
   purged: boolean;
+  /**
+   * When a stopped plan stopped. A doctor excuses a stopped plan's lag only
+   * for a bounded time after this.
+   */
+  stopped_at?: string;
 }
 
 export function tierMigrationStatusSummary(statePath: string): TierMigrationStatusSummary | undefined {
@@ -2082,5 +2183,7 @@ export function tierMigrationStatusSummary(statePath: string): TierMigrationStat
       .map((destination) => ({ corpus_id: destination.corpusId, chunks_to_embed: destination.chunksToEmbed })),
     names_only_kept_chunks: plan.totals.namesOnlyKeptChunks ?? 0,
     purged: plan.purge !== undefined,
+    // A plan stopped before stoppedAt was recorded: its last update is when.
+    ...(plan.state === 'stopped' ? { stopped_at: plan.stoppedAt ?? plan.updatedAt } : {}),
   };
 }

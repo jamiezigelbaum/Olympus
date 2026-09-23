@@ -500,7 +500,65 @@ describe('runDoctor', () => {
     ]) {
       expect((await run(statusWith(other, [personalDropbox(100)]))).ok).toBe(false);
     }
-    expect((await run(statusWith({ ...migration, state: 'stopped' }, [personalDropbox(100)]))).ok).toBe(true);
+    expect((await run(statusWith({ ...migration, state: 'stopped', stopped_at: new Date().toISOString() }, [personalDropbox(100)]))).ok).toBe(true);
+  });
+
+  test('a stopped migration\'s lag exception expires after a bounded age, then lag reports normally with a note', async () => {
+    const now = new Date('2026-09-23T12:00:00.000Z');
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+    const stopped = (stoppedAt: string | undefined) => ({
+      plan_id: 'tm-0123456789abcdef',
+      state: 'stopped',
+      in_progress: true,
+      approval_entry_id: 'tier-migration-approval:tm-0123456789abcdef:abc',
+      proposed: 10,
+      batches: [],
+      corpora: ['secure_local.dropbox.files'],
+      chunks_to_embed: 100,
+      destinations: [{ corpus_id: 'secure_local.dropbox.files', chunks_to_embed: 100 }],
+      names_only_kept_chunks: 0,
+      purged: false,
+      ...(stoppedAt ? { stopped_at: stoppedAt } : {}),
+    });
+    const run = async (tierMigration: unknown, env: Record<string, string> = {}) => checkByName((await runDoctor(doctorDeps({
+      config: enabledEmailConfig(),
+      delphi: healthyDelphi(),
+      env,
+      now: () => now,
+      fetchImpl: fakeWorkerFetch({
+        '/v1/health': { status: 'ok', configured: true },
+        '/v1/source/index/status': {
+          kind: 'source_index_status',
+          corpora: [corpusReport('secure_local.dropbox.files', { family: 'file', counts: { chunks: 200, embedded_chunks: 100 } })],
+          tier_migration: tierMigration,
+        },
+      }).fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('dropbox')] },
+    }))).checks, 'source_index_status');
+
+    // Within the default 7 days: excused.
+    const recent = await run(stopped(daysAgo(6)));
+    expect(recent.ok).toBe(true);
+    expect(recent.detail).toContain('secure_local.dropbox.files: migration in progress (stopped, approved');
+    // Past 7 days: lag reports as usual, saying how long ago it stopped.
+    const old = await run(stopped(daysAgo(9)));
+    expect(old.ok).toBe(false);
+    expect(old.detail).toContain('secure_local.dropbox.files embedding lag is 100 of 200 chunks (over 10%; migration stopped 9 days ago, '
+      + 'past its 7-day lag exception (ledger entry tier-migration-approval:tm-0123456789abcdef:abc))');
+    expect(old.detail).not.toContain('migration in progress');
+    // Configurable: a longer grace excuses it again; a shorter one expires sooner.
+    expect((await run(stopped(daysAgo(9)), { OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS: '14' })).ok).toBe(true);
+    const short = await run(stopped(daysAgo(2)), { OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS: '1' });
+    expect(short.ok).toBe(false);
+    expect(short.detail).toContain('migration stopped 2 days ago, past its 1-day lag exception');
+    // An invalid value keeps the default.
+    expect((await run(stopped(daysAgo(6)), { OLYMPUS_TIER_MIGRATION_STOPPED_GRACE_DAYS: 'soon' })).ok).toBe(true);
+    // Fail closed: a stopped plan with no stop time excuses nothing.
+    const unknown = await run(stopped(undefined));
+    expect(unknown.ok).toBe(false);
+    expect(unknown.detail).toContain('migration stopped at an unknown time');
+    // A running plan is not aged.
+    expect((await run({ ...stopped(daysAgo(30)), state: 'running' })).ok).toBe(true);
   });
 
   test('a connected source\'s per-tier stores are checked once they exist, and skipped until then', async () => {
