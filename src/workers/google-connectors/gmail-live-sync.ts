@@ -217,13 +217,7 @@ export function createGmailConnectorStoreSyncHandler(
     const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)]
       .filter((copy): copy is NonNullable<typeof copy> => copy !== undefined);
     if (copies.length === 0) return undefined;
-    const authoredAtMs = copies
-      .map((copy) => (copy.authoredAt ? Date.parse(copy.authoredAt) : Number.NaN))
-      .find((value) => Number.isFinite(value));
-    return {
-      hasContent: copies.some((copy) => copy.chunkCount > 0),
-      ...(authoredAtMs !== undefined ? { authoredAtMs } : {}),
-    };
+    return { hasContent: copies.some((copy) => copy.chunkCount > 0) };
   };
   const scope = options.scope ? { ...options.scope, storedItem } : undefined;
   const buildConnector = (overrides: {

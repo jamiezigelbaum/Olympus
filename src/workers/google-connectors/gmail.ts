@@ -14,6 +14,7 @@ import {
 } from '../../core/invocation-provenance.ts';
 import type { SensitivityMap } from '../../core/sensitivity-map.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
+import { senderMatchesRule } from '../../core/sender-rules.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -55,7 +56,13 @@ const DEFAULT_GMAIL_PAGE_SIZE = 100;
 const MAX_GMAIL_SYNC_MESSAGES = 1_000;
 /** List pages one run may walk: pages of already-held mail spend no gets. */
 const MAX_GMAIL_LIST_PAGES_PER_RUN = 50;
-const STORED_HIGH_WATER_MARGIN_MS = 86_400_000;
+/**
+ * How far behind a scoped traversal's own start the next incremental bound
+ * sits. Mail that arrives while a traversal is paging lands at the head the
+ * traversal already passed; a day of margin re-lists it (idempotently) rather
+ * than skipping it.
+ */
+const TRAVERSAL_START_MARGIN_MS = 86_400_000;
 const GMAIL_API_BASE_URL = 'https://gmail.googleapis.com/gmail/v1';
 const GMAIL_CURSOR_PREFIX = 'gm1:';
 const MAX_GMAIL_CURSOR_LENGTH = 4_096;
@@ -96,6 +103,8 @@ export interface GoogleGmailSourceConnectorOptions {
    * never constructs a connector without one.
    */
   scope?: GmailConnectorScope;
+  /** Clock for traversal start and watermark caps (tests). */
+  now?: () => number;
 }
 
 /**
@@ -112,6 +121,8 @@ export interface GmailConnectorScope {
   skippedCategoryLabelIds?: readonly string[];
   /** Label ids the scope skips; re-checked on every fetched message. */
   skippedLabelIds?: readonly string[];
+  /** Skip-list senders; re-checked on every fetched message (domain rules cover subdomains). */
+  skipSenders?: readonly string[];
   /**
    * Addresses or @domains the owner marked "always Private". Their mail is
    * raised to S4, so it lands in the secure_local store with private
@@ -128,7 +139,6 @@ export interface GmailConnectorScope {
 export interface GmailStoredItem {
   /** True when a stored copy has chunks (a body), false for a metadata-only row. */
   hasContent: boolean;
-  authoredAtMs?: number;
 }
 
 /**
@@ -152,6 +162,14 @@ interface GmailCursor {
    * internalDate, promoted to the watermark when this leg completes.
    */
   phase?: 'metadata';
+  /**
+   * Scoped traversals only: when this traversal began (the connector's clock).
+   * A completed scoped traversal has examined every message received before
+   * it began, so the next incremental bound may move up to here even when
+   * every message was already held and none was fetched. It never comes from
+   * a message's own Date header, which the sender controls.
+   */
+  startedMs?: number;
 }
 
 export interface GmailSourceConnectorTraversalStatus {
@@ -235,6 +253,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private readonly defaultMaxMessages: number;
   private readonly query: string | undefined;
   private readonly scope: GmailConnectorScope | undefined;
+  private readonly now: () => number;
   private readonly requestBudget: GoogleDailyRequestBudget | undefined;
   private readonly provenance: SourceInvocationProvenance;
   private readonly maxRetries: number | undefined;
@@ -272,6 +291,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.sleepImpl = options.sleep;
     this.injectedClient = options.apiClient;
     this.scope = options.scope;
+    this.now = options.now ?? (() => Date.now());
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     // The approved scope says which categories are skipped. An explicit
     // operator setting still wins; otherwise the scope replaces the built-in
@@ -312,6 +332,12 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     // then metadata-only before it. Incremental passes read only new mail.
     const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
+    const nowMs = this.now();
+    // Carried from the first page of a scoped traversal to its last; a fresh
+    // or stale start takes the clock now.
+    const startedMs = this.scope
+      ? (!staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs)
+      : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
     const requestedPageTokens = new Set<string>();
     let listPages = 0;
@@ -339,12 +365,10 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // stored metadata-only that the content leg may now store in full.
         const stored = this.scope?.storedItem?.(message.id);
         if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.authoredAtMs !== undefined) {
-            // Date header, not internalDate: a day of margin keeps the next
-            // incremental bound safely behind any message not yet stored.
-            const observed = stored.authoredAtMs - STORED_HIGH_WATER_MARGIN_MS;
-            if (highWaterMs === undefined || observed > highWaterMs) highWaterMs = observed;
-          }
+          // Held mail never moves the high-water mark: its stored date is the
+          // sender's Date header, which can say anything (a spam dated 2036
+          // would park every later query past all real mail). The traversal's
+          // own start bounds the next pass instead; see `startedMs`.
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -373,10 +397,16 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // The metadata leg walks older mail; only the content leg moves the
         // high-water mark the next incremental pass starts from.
         if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
-          highWaterMs = internalDateMs;
+          // Gmail's receipt time, capped at the clock: a future internalDate
+          // must not push the next bound past mail that has yet to arrive.
+          highWaterMs = Math.min(internalDateMs, nowMs);
         }
         const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
         const from = metadataString(item.metadata, 'from');
+        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
+          this.itemsSkippedCategory += 1;
+          continue;
+        }
         const body = item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet');
         // Metadata-only items carry no body and no snippet, so the OTP filter
         // judges them by subject alone. Skipped labels are checked here by id
@@ -413,18 +443,29 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       // A scoped mailbox with nothing new since the cutoff still completes
       // with a watermark (the cutoff), so the next pass asks only for new
       // mail instead of re-listing the whole older mailbox forever.
-      const promoted = highWaterMs ?? watermarkMs ?? (cutoffMs !== undefined ? cutoffMs - 1_000 : undefined);
+      const promoted = promotedWatermark({
+        highWaterMs,
+        watermarkMs,
+        ...(this.scope && startedMs !== undefined ? { floorMs: startedMs - TRAVERSAL_START_MARGIN_MS } : {}),
+        ...(cutoffMs !== undefined ? { cutoffMs } : {}),
+        nowMs,
+      });
       const nextCursor = done
         // A completed traversal hands forward only the promoted watermark, so
         // the next run asks Gmail for new mail instead of for the mailbox.
         ? encodeGmailCursor(promoted !== undefined ? { watermarkMs: promoted } : {})
         : enterMetadataLeg
-          ? encodeGmailCursor({ phase: 'metadata', ...(highWaterMs !== undefined ? { highWaterMs } : {}) })
+          ? encodeGmailCursor({
+            phase: 'metadata',
+            ...(highWaterMs !== undefined ? { highWaterMs } : {}),
+            ...(startedMs !== undefined ? { startedMs } : {}),
+          })
           : encodeGmailCursor({
             ...(watermarkMs !== undefined ? { watermarkMs } : {}),
             ...(highWaterMs !== undefined ? { highWaterMs } : {}),
             ...(pageToken ? { pageToken } : {}),
             ...(metadataLeg ? { phase: 'metadata' as const } : {}),
+            ...(startedMs !== undefined ? { startedMs } : {}),
           });
       yield {
         items,
@@ -679,6 +720,28 @@ function budgetedGmailApiClient(
   };
 }
 
+/**
+ * The watermark a completed traversal hands forward: the newest fetched
+ * internalDate, never behind the previous watermark, a scoped traversal's own
+ * start (less a margin) or the scope's cutoff, and never ahead of the clock.
+ */
+export function promotedWatermark(input: {
+  highWaterMs?: number | undefined;
+  watermarkMs?: number | undefined;
+  floorMs?: number | undefined;
+  cutoffMs?: number | undefined;
+  nowMs: number;
+}): number | undefined {
+  const candidates = [
+    input.highWaterMs,
+    input.watermarkMs,
+    input.floorMs,
+    input.cutoffMs !== undefined ? input.cutoffMs - 1_000 : undefined,
+  ].filter((value): value is number => value !== undefined && Number.isFinite(value));
+  if (candidates.length === 0) return undefined;
+  return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
+}
+
 function encodeGmailCursor(cursor: GmailCursor): string | undefined {
   if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
     return undefined;
@@ -694,9 +757,10 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
   try {
     const parsed = JSON.parse(
       Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), 'base64url').toString('utf8'),
-    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown };
+    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown; startedMs?: unknown };
     const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
     const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
+    const startedMs = decodeCursorEpochMs(parsed.startedMs);
     if (
       parsed.pageToken !== undefined
       && (
@@ -713,6 +777,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
       ...(highWaterMs !== undefined ? { highWaterMs } : {}),
       ...(typeof parsed.pageToken === 'string' ? { pageToken: parsed.pageToken.trim() } : {}),
       ...(parsed.phase === 'metadata' ? { phase: 'metadata' as const } : {}),
+      ...(startedMs !== undefined ? { startedMs } : {}),
     };
   } catch {
     throw new TypeError('Gmail connector cursor is invalid.');

@@ -220,7 +220,7 @@ describe('scoped Gmail traversal', () => {
       message('old-2', cutoffMs - 400 * 86_400_000),
     ]);
     const connector = new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope,
+      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
     });
     const contentLeg = await collect(connector.listItems({ limit: 50 }));
     expect(client.queries[0]).toBe(`after:${cutoffMs / 1_000 - 1} -category:promotions -category:social (in:anywhere)`);
@@ -234,7 +234,7 @@ describe('scoped Gmail traversal', () => {
     expect(contentLeg.done).toBe(false);
 
     const metadataLeg = await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope,
+      apiClient: client, account: 'personal', env: { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'in:anywhere' }, scope: connectorScope, now: () => NOW.getTime(),
     }).listItems({ limit: 50, cursor: contentLeg.cursor! }));
     expect(client.queries[1]).toBe(`before:${cutoffMs / 1_000} -category:promotions -category:social (in:anywhere)`);
     expect(metadataLeg.items.map((item) => item.identity.providerItemId)).toEqual(['old-1', 'old-2']);
@@ -250,11 +250,13 @@ describe('scoped Gmail traversal', () => {
     }
     expect(metadataLeg.done).toBe(true);
 
-    // The next pass is incremental from the content leg's newest message.
+    // The next pass is incremental. Its bound is the newest fetched
+    // internalDate or the traversal's own start less a day, whichever is
+    // later (here the start: the newest message is older than a day).
     await collect(new GoogleGmailSourceConnector({
-      apiClient: client, account: 'personal', env: {}, scope: connectorScope,
+      apiClient: client, account: 'personal', env: {}, scope: connectorScope, now: () => NOW.getTime(),
     }).listItems({ limit: 50, cursor: metadataLeg.cursor! }));
-    expect(client.queries[2]).toBe(`after:${Math.floor((cutoffMs + 10 * 86_400_000) / 1_000)} -category:promotions -category:social`);
+    expect(client.queries[2]).toBe(`after:${Math.floor((NOW.getTime() - 86_400_000) / 1_000)} -category:promotions -category:social`);
   });
 
   test('a message older than the cutoff that the content query still returns is kept metadata-only', async () => {
