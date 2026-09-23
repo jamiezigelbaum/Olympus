@@ -79,7 +79,8 @@ templates and query regexes. That is the specific failure this architecture
 exists to prevent. Rules of the road:
 
 - **Only `SourceConnector` is per-source.** A connector is a thin (~300-line)
-  adapter: authenticate, list/fetch raw items, classify trust. Everything
+  adapter: authenticate, list/fetch raw items, publish classification
+  signals (the shared tier classifier decides the tier). Everything
   downstream — extract, index, retrieve, reason, release — is shared and
   source-agnostic. No source-specific branches downstream of the connector.
 - **"Small increment" never means extending a per-source monolith or adding a

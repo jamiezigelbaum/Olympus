@@ -64,8 +64,10 @@ stop. That is the bug this architecture exists to prevent.
 ## Contract 1 — SourceConnector
 
 The only per-source code. A connector authenticates, lists/fetches raw items,
-and classifies trust. Everything downstream consumes the normalized `RawItem`.
-A connector should be ~300 lines, not ~6,000.
+and publishes the classification signals it knows as provider facts. Since
+2.0.0 it no longer decides a tier: the shared, source-agnostic tier classifier
+does. Everything downstream consumes the normalized `RawItem`. A connector
+should be ~300 lines, not ~6,000.
 
 ```ts
 interface SourceConnector {
@@ -74,8 +76,20 @@ interface SourceConnector {
   authenticate(): Promise<void>;  // via the existing credential broker
   listItems(options?): AsyncIterable<SourceConnectorListPage>;  // live sync OR archive import
   fetchItem(localItemId: string): Promise<RawItem>;
-  classify(item: RawItem): SourceSensitivity;  // the ONE place policy is source-aware
+  classificationSignals(item: RawItem): SourceClassificationSignals;  // source facts, never a tier
 }
+
+interface SourceClassificationSignals {
+  floor?: { tier; basis };                 // provider fact setting a minimum tier
+  prior?: { tier; strength: 'prior' | 'force'; basis };  // configured resting tier
+  sharing?: 'public_link' | 'published' | 'shared' | 'private' | 'unknown';
+  title?; path?; folderKeys?; sender?; recipients?; labels?;
+  conversationKind?: 'direct' | 'group' | 'channel' | 'secret_chat';
+}
+```
+
+Tier keys use the schema-v1 stored names: `public` (Public), `private`
+(Personal), `secure` (Private), `secrets` (Secrets).
 ```
 
 `SourceConnectorListPage` is a union, not a record, and the reason is
@@ -98,9 +112,17 @@ Notes:
 
 - Extraction does **not** live here. A scanned PDF from Dropbox and a PDF
   attachment from Gmail go through the same shared MIME-keyed extractor.
-- `classify` returns `SourceSensitivity` from
-  [`source-index/types.ts`](../src/core/source-index/types.ts), which the
-  storage-profile builder already uses to enforce local-only handling.
+- `classificationSignals` returns source facts only. The shared classifier
+  ([`tier-classifier.ts`](../src/workers/classification/tier-classifier.ts))
+  turns them, plus the item's text, into a metadata tier and a content tier
+  with content-free reasons, and the store records the decision in the tier
+  ledger. It reads signal kinds only and never branches on a source name.
+- Only `public_link` and `published` are positive evidence for Public. A
+  connector that cannot read sharing state publishes none.
+- Storage placement is the store lane's declaration
+  (`ConnectorStoreSyncOptions.placement`), not the connector's. In 2.0.0 each
+  lane declares exactly what its connector's `classify()` used to return, so
+  no stored item moved (design phase P1a).
 
 ## Contract 2 — EvidencePack
 
@@ -295,6 +317,28 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-09-23 — **SourceConnector 2.0.0 (breaking; owner-approved design
+  [per-item four-tier classification](design/per-item-four-tier-classification.md)).**
+  `classify(item): SourceSensitivity` is replaced by
+  `classificationSignals(item): SourceClassificationSignals`: connectors publish
+  source facts (floor, prior, sharing, names, sender, recipients, labels,
+  conversation kind) and the shared tier classifier decides a metadata tier
+  (Personal by default) and a content tier (only ever raised). Decisions and
+  content-free reasons are recorded in a new local tier ledger
+  (`tier-ledger.sqlite` beside the stores). EvidencePack and Analyst shapes are
+  unchanged.
+  **Migration note.** No stored data migrates in this version. Each store lane
+  declares the placement its connector's `classify()` returned (Readwise and X
+  S1/internal; Dropbox S4/secure_local raised to S5 on a secret in the body;
+  Gmail and Drive keep the shared raise-only classification policy; Telegram,
+  WhatsApp, Apple Messages, Roam and Reflect keep their store's domain), so
+  every item, chunk and vector stays byte-identical and nothing is re-embedded
+  (`test/tier-p1a-storage-unchanged.test.ts`). A third-party connector migrates
+  by deleting `classify()`, adding `classificationSignals()` with the facts it
+  knows, and passing its old answer as the lane's `placement`. Moving items to
+  their recorded tier is phase P1b and runs only as owner-approved batches
+  (design section 4.6).
+
 - 2026-09-10 — Owner approved a Venice Private embedding fallback when no
   local provider is configured. The embedding catalog owns privacy eligibility;
   explicit routing, exact vector identity, cost approval, and ledger receipts
@@ -397,7 +441,9 @@ demo proof on a question the code was tuned against is gameable by a template;
 the held-out eval is not. This is the metric that keeps implementation honest.
 
 The initial versioned baseline is `1.0.0` (2026-08-29). It preserves the
-previously frozen shapes without a runtime or data migration.
+previously frozen shapes without a runtime or data migration. `2.0.0`
+(2026-09-23) replaces `SourceConnector.classify` with `classificationSignals`;
+see the change log above.
 
 ## Change log
 
