@@ -330,7 +330,7 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ lane: 'local', approved: false });
     await expect(runTierCommand(['classifier', 'approve'], { env: withPolicy })).rejects.toThrow('--why');
     const approved = await runTierCommand(['classifier', 'approve', '--why', 'Owner chose the local model for the sniffer.'], { env: withPolicy });
-    expect(approved).toMatchObject({ recorded: { approved_by: 'jamie', status: 'complete', kind: 'classifier_model_decision' } });
+    expect(approved).toMatchObject({ recorded: { approved_by: 'owner', status: 'complete', kind: 'classifier_model_decision' } });
     expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true });
   });
 });

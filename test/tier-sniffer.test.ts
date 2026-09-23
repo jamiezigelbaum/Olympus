@@ -456,7 +456,7 @@ describe('bounds and the owner-approval gate', () => {
         what: 'Owner approved the fixture sniffer.',
         model_id: LOCAL_LANE.modelId,
         prompt_version: SNIFFER_PROMPT_VERSION,
-        approved_by: 'jamie',
+        approved_by: 'owner',
         status: 'complete',
       });
       const ran = await service.runOnce();
@@ -473,8 +473,8 @@ describe('bounds and the owner-approval gate', () => {
 
   test('a revocation or a different prompt version is not an approval', () => {
     const base = { recorded_at: '2026-09-23T10:00:00.000Z', what: 'x', model_id: 'm', prompt_version: 'v1', status: 'complete' as const };
-    const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'jamie' as const };
-    const revoked = { ...base, recorded_at: '2026-09-23T11:00:00.000Z', kind: 'classifier_model_revoked' as const, approved_by: 'jamie' as const };
+    const approved = { ...base, kind: 'classifier_model_decision' as const, approved_by: 'owner' as const };
+    const revoked = { ...base, recorded_at: '2026-09-23T11:00:00.000Z', kind: 'classifier_model_revoked' as const, approved_by: 'owner' as const };
     expect(isClassifierApproved([approved], { modelId: 'm', promptVersion: 'v1' })).toBe(true);
     expect(isClassifierApproved([approved], { modelId: 'm', promptVersion: 'v2' })).toBe(false);
     expect(isClassifierApproved([revoked, approved], { modelId: 'm', promptVersion: 'v1' })).toBe(false);

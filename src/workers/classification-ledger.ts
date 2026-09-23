@@ -10,8 +10,8 @@
  * 1. NO ROTATION. A decision record that drops its oldest entries deletes
  *    exactly the history a review needs. Classifier decisions happen a few
  *    times a year.
- * 2. NEVER INFER AN APPROVAL. `approved_by` has no default and uses the same
- *    closed vocabulary: only the owner's value means approved, in advance.
+ * 2. NEVER INFER AN APPROVAL. `approved_by` has no default and a closed
+ *    vocabulary: only `owner` means approved, in advance.
  * 3. A corrupt line is skipped and COUNTED, never silently dropped.
  *
  * And one rule of its own: the sniffer does not dispatch until the ledger
@@ -22,13 +22,17 @@
 import { homedir } from 'node:os';
 import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { EmbeddingLedgerApprovedBy } from './embedding-ledger.ts';
 
 export const CLASSIFICATION_LEDGER_PATH_ENV = 'OLYMPUS_CLASSIFICATION_LEDGER_PATH';
 
-/** The same closed approval vocabulary as the embedding ledger. */
-export type ClassificationLedgerApprovedBy = EmbeddingLedgerApprovedBy;
-export const CLASSIFICATION_LEDGER_OWNER_APPROVAL: ClassificationLedgerApprovedBy = 'jamie';
+/**
+ * The embedding ledger's closed approval vocabulary, with its one approving
+ * value spelled `owner`: this module ships in the public CLI, which names no
+ * installation's owner. `owner` is the ONLY value that means approved, in
+ * advance; the other two mean nobody approved.
+ */
+export type ClassificationLedgerApprovedBy = 'owner' | 'system-automatic' | 'unattributed-historical';
+export const CLASSIFICATION_LEDGER_OWNER_APPROVAL: ClassificationLedgerApprovedBy = 'owner';
 
 export type ClassificationLedgerKind =
   /** A classifier model and prompt version were chosen (or asked for). */
@@ -147,7 +151,7 @@ export function isClassificationLedgerEntry(value: unknown): value is Classifica
   if (typeof record.recorded_at !== 'string' || record.recorded_at.trim() === '') return false;
   if (typeof record.what !== 'string' || record.what.trim() === '') return false;
   if (!['classifier_model_decision', 'classifier_model_revoked', 'note'].includes(record.kind as string)) return false;
-  if (!['jamie', 'system-automatic', 'unattributed-historical'].includes(record.approved_by as string)) return false;
+  if (!['owner', 'system-automatic', 'unattributed-historical'].includes(record.approved_by as string)) return false;
   if (!['pending', 'complete', 'n/a'].includes(record.status as string)) return false;
   for (const key of ['model_id', 'prompt_version', 'lane', 'why', 'entry_id'] as const) {
     if (record[key] !== undefined && typeof record[key] !== 'string') return false;
