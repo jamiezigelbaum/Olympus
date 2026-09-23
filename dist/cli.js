@@ -13544,8 +13544,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? DEFAULT_SEMANTIC_RELEVANCE_BAR;
-  const contentPreference = connectorStoreContentPreference(new Set(vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId)));
+  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId)));
   const fused = fuseRankedCandidateLanes({
     lanes: [
       { name: "keyword", items: keywordRows },
@@ -15440,7 +15440,7 @@ function errorMessage2(error) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 12, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -15459,6 +15459,9 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_types();
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
+  CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
+    ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR]
+  ]);
   CONTAINER_MIME_TYPES = Object.freeze([
     "inode/directory",
     "application/x-directory",
@@ -19211,6 +19214,12 @@ function createAnalyst(model, createOptions = {}) {
     }
   };
 }
+function analystPromptBytes(pack, options) {
+  const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
+  return promptEncoder.encode(`${ANALYST_SYSTEM}
+
+${buildAnalystPrompt(pack, localOnly)}`).length;
+}
 function evidencePackRequiresLocalOnly(pack) {
   return pack.candidates.some((candidate) => candidate.trustDomain === "secure_local" || isSecureTrustTier(candidate.trustTier) || (candidate.facts ?? []).some((fact) => fact.sensitivity.trustDomain === "secure_local" || isSecureTrustTier(fact.sensitivity.trustTier)));
 }
@@ -19401,7 +19410,7 @@ function formatCoverage(pack) {
   if (pack.coverage.skippedCorpora.length > 0) {
     parts.push(`skipped: ${pack.coverage.skippedCorpora.map((s) => `${s.corpusId} (${s.reason})`).join(", ")}`);
   }
-  const matches = (pack.coverage.matchCounts ?? []).filter((count) => count.matchedItems > 0);
+  const matches = (pack.coverage.matchCounts ?? []).filter((count) => count.matchedItems > 0 || count.atLeast);
   if (matches.length > 0) {
     parts.push(`matches: ${matches.map(formatMatchCount).join(", ")}`);
   }
@@ -19411,6 +19420,9 @@ function formatCoverage(pack) {
   return parts.join("; ");
 }
 function formatMatchCount(count) {
+  if (count.matchedItems === 0 && count.atLeast) {
+    return `${count.corpusId} (${count.family}) matches found (count unknown), ${count.inEvidence} in evidence`;
+  }
   const total = `${count.matchedItems}${count.atLeast ? "+" : ""}`;
   const readable = count.contentMatchedItems < count.matchedItems ? `, ${count.contentMatchedItems}${count.atLeast ? "+" : ""} with readable content` : "";
   return `${count.corpusId} (${count.family}) ${total} items${readable}, ${count.inEvidence} in evidence`;
@@ -19714,7 +19726,7 @@ function coerceCitation(value) {
 function stripCodeFences(text) {
   return text.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, ANALYST_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, ANALYST_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -19765,6 +19777,7 @@ var init_analyst = __esm(() => {
   ].join(`
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
+  promptEncoder = new TextEncoder;
   STOP_WORDS = new Set([
     "a",
     "about",
@@ -20137,10 +20150,11 @@ function echoesEvidence(detail, evidence) {
   }
   return false;
 }
-var DEFAULT_COMMAND = "openclaw", OPENCLAW_DEFAULT_MODEL_LABEL = "openclaw-default", DEFAULT_THINKING = "high", DEFAULT_TIMEOUT_MS = 120000, MAX_PROMPT_BYTES = 1e5, OpenClawInferError, MAX_DETAIL_CHARS = 160, PROMPT_ECHO_WINDOW = 10;
+var DEFAULT_COMMAND = "openclaw", OPENCLAW_DEFAULT_MODEL_LABEL = "openclaw-default", DEFAULT_THINKING = "high", DEFAULT_TIMEOUT_MS = 120000, MAX_PROMPT_BYTES = 1e5, OPENCLAW_INFER_MAX_PROMPT_BYTES, OpenClawInferError, MAX_DETAIL_CHARS = 160, PROMPT_ECHO_WINDOW = 10;
 var init_analyst_openclaw_infer = __esm(() => {
   init_operation_error();
   init_openclaw_executable();
+  OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
   OpenClawInferError = class OpenClawInferError extends OperationError {
     safeReason;
     constructor(message, suggestion) {
@@ -22208,14 +22222,15 @@ function createAnalystSourceIndexAnswerHandler(options) {
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       let pack = detail.pack;
-      const localEvidenceBytes = options.localAnalystEvidenceByteBudget ?? DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES;
+      const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       const legFitting = (analysisDetail) => {
         const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
         return {
-          localLeg: (analyst) => localBudgetedAnalyst(analyst, localEvidenceBytes, candidateCorpus)
+          localLeg: (analyst) => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus)
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -22230,18 +22245,18 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
       const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
       const analyze = (analysisDetail, analysisLocalOnly) => {
-        const { localLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
-          ...options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {},
+          ...options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {},
           ...veniceAnalyst ? { venice: veniceAnalyst } : {},
           trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLocalLegBudget(options.sovereigntyAnalystRoute, localLeg) } : {},
+          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) } : {},
           secureAnalystPoolState,
           ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
           ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
@@ -22426,25 +22441,46 @@ function secureLocalExclusionCoverageNotes(detail) {
   }
   return notes;
 }
-function withLocalLegBudget(route, localLeg) {
+function withLegPromptBudgets(route, localLeg, cloudLeg) {
   return (input) => {
     const resolved = route(input);
-    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step);
+    const fit = (steps) => steps.map((step) => step.backend === "local" ? { ...step, analyst: localLeg(step.analyst) } : step.backend === "cloud" ? { ...step, analyst: cloudLeg(step.analyst) } : step);
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function localBudgetedAnalyst(analyst, evidenceBytes, candidateCorpus) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus), analyzeOptions)
+    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions), analyzeOptions)
   };
 }
-function fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus) {
-  const total = pack.candidates.reduce((sum, candidate) => sum + candidate.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
-  if (total <= evidenceBytes)
+function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
+  if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const keepCount = Math.max(1, Math.min(pack.candidates.length, Math.floor(evidenceBytes / MIN_FITTED_BYTES_PER_CANDIDATE)));
+  const order = roundRobinCandidates(pack.candidates, candidateCorpus);
+  let fallback;
+  for (let keep = order.length;keep >= 1; keep -= 1) {
+    const kept = new Set(order.slice(0, keep));
+    const base = pack.candidates.filter((candidate) => kept.has(candidate));
+    const overhead = analystPromptBytes(restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus), analyzeOptions);
+    if (overhead >= maxPromptBytes)
+      continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0;attempt < 6; attempt += 1) {
+      if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+        break;
+      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
+      const bytes = analystPromptBytes(fitted, analyzeOptions);
+      if (bytes <= maxPromptBytes)
+        return fitted;
+      fallback = fitted;
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;
-  for (const candidate of pack.candidates) {
+  for (const candidate of candidates) {
     const corpusId = candidateCorpus.get(candidate) ?? "";
     const bucket = byCorpus.get(corpusId);
     if (bucket)
@@ -22452,28 +22488,21 @@ function fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus) {
     else
       byCorpus.set(corpusId, [candidate]);
   }
-  const kept = new Set;
-  for (let round = 0;kept.size < keepCount; round += 1) {
-    let seated = false;
+  const order = [];
+  for (let round = 0;order.length < candidates.length; round += 1) {
     for (const bucket of byCorpus.values()) {
       const candidate = bucket[round];
-      if (!candidate)
-        continue;
-      kept.add(candidate);
-      seated = true;
-      if (kept.size >= keepCount)
-        break;
+      if (candidate)
+        order.push(candidate);
     }
-    if (!seated)
-      break;
   }
-  const share = Math.floor(evidenceBytes / kept.size);
-  const candidates = pack.candidates.filter((candidate) => kept.has(candidate)).map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, share) }));
+  return order;
+}
+function restatePack(pack, candidates, candidateCorpus) {
+  const originals = pack.candidates.filter((original) => candidates.some((candidate) => candidate.provenance === original.provenance));
   const inEvidence = new Map;
-  for (const candidate of pack.candidates) {
-    if (!kept.has(candidate))
-      continue;
-    const corpusId = candidateCorpus.get(candidate) ?? "";
+  for (const original of originals) {
+    const corpusId = candidateCorpus.get(original) ?? "";
     inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
   }
   return {
@@ -23392,7 +23421,7 @@ function provenanceCorpusId(provenance) {
 function sourceItemsEqual(left, right) {
   return left.family === right.family && left.provider === right.provider && left.accountScope === right.accountScope && left.providerItemId === right.providerItemId && left.providerThreadId === right.providerThreadId && left.providerConversationId === right.providerConversationId && left.providerFileId === right.providerFileId && left.providerEventId === right.providerEventId && left.localItemId === right.localItemId && left.sourceVersion === right.sourceVersion;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES = 9000, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS;
 var init_analyst_answer = __esm(() => {
   init_analyst();
   init_analyst_openclaw_infer();
@@ -23404,6 +23433,7 @@ var init_analyst_answer = __esm(() => {
   init_types();
   init_operation_error();
   init_answer_latency_trace();
+  CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
   TrustedAnalystTimeoutError = class TrustedAnalystTimeoutError extends Error {
     timeoutMs;
     elapsedMs;
@@ -80427,7 +80457,7 @@ async function main() {
     }) : undefined;
   };
   const sourceIndexAnswerMaxResults = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS");
-  const sourceIndexLocalAnalystEvidenceBytes = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES, "OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES");
+  const sourceIndexLocalAnalystPromptBytes = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, "OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES");
   const sourceIndexAnswerMaxCharsPerCandidate = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE, "OLYMPUS_SOURCE_INDEX_ANSWER_MAX_CHARS_PER_CANDIDATE");
   const sourceIndexTrustedAnalystTimeoutMs = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS, "OLYMPUS_SOURCE_INDEX_TRUSTED_ANALYST_TIMEOUT_MS");
   const sourceAnswerLocalAnalystTimeoutMs = parseOptionalPositiveInteger(process.env.OLYMPUS_SOURCE_ANSWER_ANALYST_TIMEOUT_MS, "OLYMPUS_SOURCE_ANSWER_ANALYST_TIMEOUT_MS");
@@ -80502,7 +80532,7 @@ async function main() {
         requestedProvider
       }),
       ...sourceIndexAnswerMaxResults !== undefined ? { defaultMaxResults: sourceIndexAnswerMaxResults } : {},
-      ...sourceIndexLocalAnalystEvidenceBytes !== undefined ? { localAnalystEvidenceByteBudget: sourceIndexLocalAnalystEvidenceBytes } : {},
+      ...sourceIndexLocalAnalystPromptBytes !== undefined ? { localAnalystPromptByteBudget: sourceIndexLocalAnalystPromptBytes } : {},
       ...sourceIndexAnswerMaxCharsPerCandidate !== undefined ? { maxCharsPerCandidate: sourceIndexAnswerMaxCharsPerCandidate } : {},
       ...effectiveTrustedAnalystTimeoutMs !== undefined ? { trustedAnalystTimeoutMs: effectiveTrustedAnalystTimeoutMs } : {},
       ...sourceAnswerLocalAnalystTimeoutMs !== undefined ? { localAnalystTimeoutMs: sourceAnswerLocalAnalystTimeoutMs } : {},

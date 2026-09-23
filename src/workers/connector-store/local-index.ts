@@ -142,6 +142,19 @@ const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projec
 // questions peak at 0.61 best-cosine; true positives and paraphrases start
 // at 0.66) and may be re-pinned as the corpus grows.
 export const DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
+// Cosine bars at which a vector hit earns content preference in fusion, per
+// embedding model. Cosine scales differ by model, so a bar is only meaningful
+// for the model it was calibrated on: 0.62 was calibrated on
+// gemini-embedding-2 (see DEFAULT_SEMANTIC_RELEVANCE_BAR). A model without an
+// entry gets no vector content preference, so ranking fails soft to lexical
+// content first and RRF rank; an adapter's explicit semanticRelevanceBar still
+// applies. TODO: calibrate Venice text-embedding-qwen3-8b and the local qwen3
+// (2560-dim) embedder on real corpora (off-domain peak vs true-positive floor,
+// as was done for Gemini on 2026-07-25) and add them here.
+const CALIBRATED_CONTENT_PREFERENCE_BARS: ReadonlyMap<string, number> = new Map([
+  ['gemini-embedding-2', DEFAULT_SEMANTIC_RELEVANCE_BAR],
+]);
+
 // Media types that name a container rather than a document, for every source
 // that stores its folders as items: the IANA/freedesktop directory type
 // (Dropbox and local files), its legacy alias, and Google Drive's folder type.
@@ -7550,10 +7563,12 @@ async function hybridConnectorStoreSearch(
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
-  const contentBar = semanticRelevanceBar ?? DEFAULT_SEMANTIC_RELEVANCE_BAR;
-  const contentPreference = connectorStoreContentPreference(new Set(vectorRows
-    .filter((row) => row.bestCosine >= contentBar)
-    .map((row) => row.sourceItem.localItemId)));
+  const contentBar = semanticRelevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
+  const contentPreference = connectorStoreContentPreference(new Set(contentBar === undefined
+    ? []
+    : vectorRows
+      .filter((row) => row.bestCosine >= contentBar)
+      .map((row) => row.sourceItem.localItemId)));
 
   const fused = fuseRankedCandidateLanes({
     lanes: [

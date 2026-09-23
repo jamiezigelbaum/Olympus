@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { createAnalyst, redactPackForEscalation } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, redactPackForEscalation } from '../src/core/analyst.ts';
 import type { EvidenceCandidate, EvidencePack } from '../src/core/contracts.ts';
 import { buildEvidencePack, utf8ByteLength } from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
@@ -26,7 +26,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_FILES_CORPUS_ID } from '../src/workers/dropbox-files/index.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { createAnalystSourceIndexAnswerHandler, fitPackToEvidenceBytes } from '../src/workers/source-index/analyst-answer.ts';
+import { createAnalystSourceIndexAnswerHandler, fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,
@@ -117,22 +117,30 @@ describe('connector-store ranking: content over titles', () => {
   test('hybrid search ranks content first and never returns the folder', async () => {
     await withStores(async ({ store, provider }) => {
       for (const query of ['integral theory', 'ken wilber']) {
-        const ids = hitIds(await search(store, query, { retrievalMode: 'hybrid', maxResults: 5, provider }));
+        const ids = hitIds(await search(store, query, { retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62 }));
         expect({ query, top: ids.slice(0, 2).sort() }).toEqual({ query, top: ['pdf-a', 'pdf-b'] });
         expect(ids).not.toContain('dir-integral');
       }
     });
   });
 
-  test('a vector hit on real content beats a keyword hit on a bare file name at the same rank', async () => {
+  test('a vetted vector hit on real content beats a keyword hit on a bare file name at the same rank', async () => {
     await withStores(async ({ store, provider }) => {
       // Neither PDF says "spiral"; the only keyword hit is a title-only row.
       // The vector lane places PDF A first, which ties that title in RRF.
-      const response = await search(store, 'spiral dynamics', { retrievalMode: 'hybrid', maxResults: 3, provider });
-      const ids = hitIds(response);
-      expect(ids[0]).toBe('pdf-a');
+      // With a relevance bar for this model, PDF A (cosine 1.0) is vetted.
+      const vetted = hitIds(await search(store, 'spiral dynamics', {
+        retrievalMode: 'hybrid', maxResults: 3, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(vetted[0]).toBe('pdf-a');
       // The title-only row stays findable below the content.
-      expect(ids).toContain('title-spiral');
+      expect(vetted).toContain('title-spiral');
+
+      // An embedding model with no calibrated bar gets no vector content
+      // preference: ranking fails soft to lexical-first, and the title leads.
+      const uncalibrated = hitIds(await search(store, 'spiral dynamics', { retrievalMode: 'hybrid', maxResults: 3, provider }));
+      expect(uncalibrated[0]).toBe('title-spiral');
+      expect(uncalibrated).toContain('pdf-a');
     });
   });
 
@@ -383,7 +391,9 @@ describe('connector-store ranking: content over titles', () => {
       const hybrid = await workerSearch(embedded, { query: 'spiral dynamics' });
       expect(hybrid.status).toBe(200);
       expect(laneTypes(hybrid.body)).toContain('hybrid');
-      expect(hybrid.body.hits[0].sourceItem.providerItemId).toBe('pdf-a');
+      // The semantic lane ran: PDF A shares no word with the query.
+      expect(hybrid.body.hits.map((hit: { sourceItem: { providerItemId: string } }) => hit.sourceItem.providerItemId))
+        .toContain('pdf-a');
 
       // An explicit keyword pin is still honored.
       const pinned = await workerSearch(embedded, { query: 'spiral dynamics', retrieval_mode: 'keyword' });
@@ -519,12 +529,18 @@ function embeddingProvider(): SourceEmbeddingProvider {
 async function search(
   store: SearchStore,
   query: string,
-  options: { retrievalMode: 'keyword' | 'hybrid'; maxResults: number; provider?: SourceEmbeddingProvider },
+  options: {
+    retrievalMode: 'keyword' | 'hybrid';
+    maxResults: number;
+    provider?: SourceEmbeddingProvider;
+    semanticRelevanceBar?: number;
+  },
 ) {
   const adapter = createConnectorStoreCorpusAdapter({
     store,
     retrievalMode: options.retrievalMode,
     ...(options.provider ? { embeddingProvider: options.provider } : {}),
+    ...(options.semanticRelevanceBar !== undefined ? { semanticRelevanceBar: options.semanticRelevanceBar } : {}),
   });
   return adapter({
     query,
@@ -609,11 +625,19 @@ describe('evidence byte budget', () => {
     }
   });
 
-  test('a local leg gets the pack fitted to its byte budget, every corpus still seated', () => {
+  test('a pack is fitted by TOTAL prompt bytes, every corpus still seated', () => {
     const candidate = (id: string, text: string): EvidenceCandidate => ({
-      provenance: { sourceItem: { family: 'file', provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: id } },
-      trustTier: 'S2',
-      trustDomain: 'internal',
+      provenance: {
+        sourceItem: { family: 'file', provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: id },
+        citation: {
+          title: `A fairly long document title for ${id} about integral theory and practice`,
+          uri: `/Users/someone/Dropbox/Reading/Integral Theory/${id}.pdf`,
+          authorLabel: 'Someone Example',
+          authoredAt: '2026-09-01T00:00:00Z',
+        },
+      },
+      trustTier: 'S4',
+      trustDomain: 'secure_local',
       chunks: [text],
     });
     const mail = Array.from({ length: 20 }, (_, index) => candidate(`mail-${index}`, 'm'.repeat(1_666)));
@@ -636,14 +660,17 @@ describe('evidence byte budget', () => {
       ...mail.map((c) => [c, 'mail'] as const),
       ...files.map((c) => [c, 'files'] as const),
     ]);
-    const fitted = fitPackToEvidenceBytes(pack, 9_000, corpusOf);
-    const bytes = fitted.candidates.reduce((sum, c) => sum + c.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
-    expect(bytes).toBeLessThanOrEqual(9_000);
-    expect(fitted.candidates).toHaveLength(15);
-    expect(fitted.candidates.filter((c) => c.provenance.sourceItem.providerItemId.startsWith('file-'))).toHaveLength(4);
-    expect(fitted.coverage.matchCounts?.map((c) => c.inEvidence)).toEqual([11, 4]);
+    const options = { localOnly: true };
+    const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+    // The whole prompt (system rules, labels, local provenance, passages) fits.
+    expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(13_500);
+    expect(fitted.candidates.length).toBeGreaterThan(1);
+    expect(fitted.candidates.some((c) => c.provenance.sourceItem.providerItemId.startsWith('file-'))).toBe(true);
+    expect(fitted.candidates.some((c) => c.provenance.sourceItem.providerItemId.startsWith('mail-'))).toBe(true);
+    const inEvidence = fitted.coverage.matchCounts!.reduce((sum, count) => sum + count.inEvidence, 0);
+    expect(inEvidence).toBe(fitted.candidates.length);
     // A pack that already fits is untouched.
-    expect(fitPackToEvidenceBytes(pack, 100_000, corpusOf)).toBe(pack);
+    expect(fitPackToPromptBytes(pack, 1_000_000, corpusOf, options)).toBe(pack);
   });
 });
 
@@ -676,7 +703,7 @@ describe('local analyst leg budget', () => {
         },
       },
     });
-    for (const [declared, expectedCandidates] of [[undefined, 15], [60_000, 24]] as const) {
+    for (const declared of [undefined, 60_000] as const) {
       const received: EvidencePack[] = [];
       const handler = createAnalystSourceIndexAnswerHandler({
         analyst: {
@@ -686,12 +713,63 @@ describe('local analyst leg budget', () => {
           },
         },
         lanes,
-        ...(declared !== undefined ? { localAnalystEvidenceByteBudget: declared } : {}),
+        ...(declared !== undefined ? { localAnalystPromptByteBudget: declared } : {}),
       });
       await handler.answer({ question: 'What about integral theory?' });
-      const bytes = received[0]!.candidates.reduce((sum, c) => sum + c.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0), 0);
-      expect({ declared, candidates: received[0]!.candidates.length }).toEqual({ declared, candidates: expectedCandidates });
-      expect(bytes).toBeLessThanOrEqual(declared ?? 9_000);
+      const promptBytes = analystPromptBytes(received[0]!, { localOnly: false });
+      // Default: at most the pre-budget local footprint (13,667 bytes measured).
+      expect({ declared, fits: promptBytes <= (declared ?? 13_500) }).toEqual({ declared, fits: true });
+      if (declared !== undefined) expect(received[0]!.candidates).toHaveLength(24);
+      else expect(received[0]!.candidates.length).toBeLessThan(24);
     }
+  });
+
+  test('a cloud leg trims candidates to fit the OpenClaw prompt ceiling instead of failing', async () => {
+    const cjk = '整合理論は四つの象限で経験を捉える。';
+    const ids = Array.from({ length: 48 }, (_, index) => `cjk-${index}`);
+    const received: EvidencePack[] = [];
+    const handler = createAnalystSourceIndexAnswerHandler({
+      analyst: { async analyze() { throw new Error('local must not run'); } },
+      cloudAnalyst: {
+        async analyze(pack) {
+          received.push(pack);
+          return { answer: 'ok', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'ok' }], unanswered: [] };
+        },
+      },
+      lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry([
+          defineConnectorCorpus({ corpusId: NOTES_CORPUS_ID, family: 'file', trustDomain: 'internal' }),
+        ]),
+        adapters: {
+          [NOTES_CORPUS_ID]: () => ({
+            hits: ids.map((id) => ({
+              sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` },
+              provenance: {
+                sourceItem: { family: 'file' as const, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, localItemId: `${ACCOUNT}:${id}` },
+                citation: { title: `${cjk.repeat(6)} ${id}`, uri: `/資料/${cjk.repeat(3)}/${id}.pdf`, authorLabel: cjk },
+              },
+              score: 1,
+              rawExposed: false as const,
+            })),
+            latencyMs: 0,
+            rawExposed: false as const,
+          }),
+        },
+        contentProviders: {
+          [NOTES_CORPUS_ID]: {
+            async fetchLocalContent(request: { maxChars?: number }) {
+              return {
+                sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+                chunks: [cjk.repeat(200).slice(0, request.maxChars ?? 3_000)],
+              };
+            },
+          },
+        },
+      }),
+    });
+    await handler.answer({ question: '整合理論について', max_results: 48 });
+    expect(received).toHaveLength(1);
+    expect(analystPromptBytes(received[0]!, { localOnly: false })).toBeLessThanOrEqual(90_000);
+    expect(received[0]!.candidates.length).toBeGreaterThan(1);
   });
 });

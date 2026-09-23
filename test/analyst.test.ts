@@ -126,6 +126,7 @@ describe('Analyst capability', () => {
           { corpusId: 'secure_local.dropbox.files', family: 'file', matchedItems: 32, contentMatchedItems: 2, atLeast: false, inEvidence: 1 },
           { corpusId: 'internal.gmail.messages', family: 'email', matchedItems: 50, contentMatchedItems: 50, atLeast: true, inEvidence: 0 },
           { corpusId: 'internal.fake.empty', family: 'note', matchedItems: 0, contentMatchedItems: 0, atLeast: false, inEvidence: 0 },
+          { corpusId: 'internal.fake.filtered', family: 'note', matchedItems: 0, contentMatchedItems: 0, atLeast: true, inEvidence: 0 },
         ],
       }),
       { localOnly: false },
@@ -135,6 +136,8 @@ describe('Analyst capability', () => {
       + 'internal.gmail.messages (email) 50+ items, 0 in evidence',
     );
     expect(calls[0]!.prompt).not.toContain('internal.fake.empty (note)');
+    // A saturated probe that kept nothing after filtering still found matches.
+    expect(calls[0]!.prompt).toContain('internal.fake.filtered (note) matches found (count unknown), 0 in evidence');
     expect(calls[0]!.system).toContain('Never present the number of evidence candidates as the total.');
   });
 

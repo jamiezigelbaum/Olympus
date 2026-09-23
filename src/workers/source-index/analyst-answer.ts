@@ -28,8 +28,8 @@
 //   audits — never raw chunks, packets, or pack internals.
 
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
-import { noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
-import { OPENCLAW_DEFAULT_MODEL_LABEL } from '../../core/analyst-openclaw-infer.ts';
+import { analystPromptBytes, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
+import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
   clipChunksToUtf8Bytes,
@@ -125,8 +125,8 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   maxCharsPerCandidate?: number;
   // Total passage UTF-8 bytes across the evidence pack; see DEFAULT_EVIDENCE_BYTE_BUDGET.
   evidenceByteBudget?: number;
-  // Passage bytes a LOCAL analyst leg receives; see DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES.
-  localAnalystEvidenceByteBudget?: number;
+  // Total prompt bytes a LOCAL analyst leg receives; see DEFAULT_LOCAL_ANALYST_PROMPT_BYTES.
+  localAnalystPromptByteBudget?: number;
   // Per-lane retrieval deadline for the fan-out. Its own quantity, like the two
   // analyst bounds below: it governs how long ONE corpus may take to answer,
   // not how long the whole answer may take. Absent, the router uses its
@@ -209,12 +209,14 @@ export interface SourceAnswerSelfHealResult {
 // passage budget: 24 items get ~1,666 bytes each (their best two or three
 // passages), 3 items keep the 3,000 ceiling. Bytes, because the tightest lane
 // ceiling is bytes: the OpenClaw infer lane refuses prompts over 100,000 bytes
-// (it rides argv). Worst case for that lane is 48 candidates of CJK titles and
-// passages: 40k passage bytes plus about 30k of labels and 5k of system rules,
-// so about 75k, with 25k of margin for JSON escaping. Venice Private contexts
-// are far larger. A local analyst gets its own, smaller budget
-// (DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES). A caller's max_results still asks
-// for fewer, up to MAX_EVIDENCE_CANDIDATES.
+// (it rides argv). Passages are only part of a prompt: titles, locators,
+// labels, and provenance ride on top, and 48 CJK candidates with long titles
+// measured 97,239 bytes. So every cloud leg is fitted by TOTAL prompt bytes to
+// CLOUD_ANALYST_PROMPT_BYTES before dispatch (trimming candidates instead of
+// failing), and a local leg to its own, smaller total
+// (DEFAULT_LOCAL_ANALYST_PROMPT_BYTES). Venice Private contexts are far
+// larger. A caller's max_results still asks for fewer, up to
+// MAX_EVIDENCE_CANDIDATES.
 const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
 const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
@@ -222,10 +224,14 @@ const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // Delphi) can run a small context the request cannot raise (Ollama's default
 // num_ctx, for one) and truncates the prompt HEAD, which is where the system
 // rules sit. Nothing in the sovereignty config declares a local context, so a
-// local leg gets the pre-budget footprint that ran safely: 9,000 passage bytes
-// (the old 3 x 3,000). A host that serves a larger context declares it with
-// OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_EVIDENCE_BYTES.
-const DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES = 9_000;
+// local leg is fitted by TOTAL prompt bytes (system rules, every candidate's
+// labels and local provenance, and passages) to at most the pre-budget
+// footprint that ran safely: 3 candidates x 3,000 chars measured 13,667 bytes.
+// A host that serves a larger context declares it with
+// OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES.
+const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
+// The OpenClaw infer ceiling less a margin for the CLI's own framing.
+const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
 const TEMPORAL_INTENT_MIN_RESULTS = 8;
 const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
@@ -415,7 +421,7 @@ export function createAnalystSourceIndexAnswerHandler(
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       let pack = detail.pack;
-      const localEvidenceBytes = options.localAnalystEvidenceByteBudget ?? DEFAULT_LOCAL_ANALYST_EVIDENCE_BYTES;
+      const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
@@ -425,7 +431,8 @@ export function createAnalystSourceIndexAnswerHandler(
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
         return {
-          localLeg: (analyst: Analyst): Analyst => localBudgetedAnalyst(analyst, localEvidenceBytes, candidateCorpus),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, localPromptBytes, candidateCorpus),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(analyst, CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
         };
       };
       assertEvidencePackModelEligible(pack);
@@ -457,13 +464,13 @@ export function createAnalystSourceIndexAnswerHandler(
       // was included by default or explicitly: slow-but-working private answers
       // are the product posture, so no default-path cap cuts them short.
       const analyze = (analysisDetail: EvidencePackBuildDetail, analysisLocalOnly: boolean) => {
-        const { localLeg } = legFitting(analysisDetail);
+        const { localLeg, cloudLeg } = legFitting(analysisDetail);
         return routeAnalysis({
           pack: analysisDetail.pack,
           localOnly: analysisLocalOnly,
           requestedProvider: requestedAnalystProvider,
           local: localLeg(options.analyst),
-          ...(options.cloudAnalyst ? { cloud: options.cloudAnalyst } : {}),
+          ...(options.cloudAnalyst ? { cloud: cloudLeg(options.cloudAnalyst) } : {}),
           ...(veniceAnalyst ? { venice: veniceAnalyst } : {}),
           // Trusted/encrypted-cloud bound only. request.timeout_ms is the OpenClaw
           // tool watchdog budget (the skill passes ~600s) — a DIFFERENT quantity;
@@ -473,7 +480,7 @@ export function createAnalystSourceIndexAnswerHandler(
           localAnalystTimeoutMs,
           cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
           ...(options.sovereigntyAnalystRoute
-            ? { sovereigntyAnalystRoute: withLocalLegBudget(options.sovereigntyAnalystRoute, localLeg) }
+            ? { sovereigntyAnalystRoute: withLegPromptBudgets(options.sovereigntyAnalystRoute, localLeg, cloudLeg) }
             : {}),
           secureAnalystPoolState,
           ...(options.secureAnalystPool?.sloMs !== undefined
@@ -757,80 +764,124 @@ function secureLocalExclusionCoverageNotes(detail: EvidencePackBuildDetail): str
   return notes;
 }
 
-// Every local leg sees the pack fitted to the local budget; other legs see it
-// whole. Fitting keeps each contributing corpus represented (round-robin over
-// corpora in pack order), gives the kept candidates equal byte shares, and
-// restates matchCounts.inEvidence for what the local model actually receives.
-function withLocalLegBudget(
+// Local and ordinary-cloud legs see the pack fitted to their prompt byte
+// budgets; Venice legs see it whole. Fitting keeps each contributing corpus
+// represented (round-robin over corpora in pack order), gives the kept
+// candidates equal passage shares, and restates matchCounts.inEvidence for
+// what the model actually receives.
+function withLegPromptBudgets(
   route: NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']>,
   localLeg: (analyst: Analyst) => Analyst,
+  cloudLeg: (analyst: Analyst) => Analyst,
 ): NonNullable<AnalystSourceIndexAnswerHandlerOptions['sovereigntyAnalystRoute']> {
   return (input) => {
     const resolved = route(input);
     const fit = (steps: SovereigntyAnalystRouteStep[]) => steps.map((step) => (
-      step.backend === 'local' ? { ...step, analyst: localLeg(step.analyst) } : step
+      step.backend === 'local'
+        ? { ...step, analyst: localLeg(step.analyst) }
+        : step.backend === 'cloud'
+          ? { ...step, analyst: cloudLeg(step.analyst) }
+          : step
     ));
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
 
-function localBudgetedAnalyst(
+function promptBudgetedAnalyst(
   analyst: Analyst,
-  evidenceBytes: number,
+  promptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
 ): Analyst {
   return {
     analyze: (pack, analyzeOptions) => analyst.analyze(
-      fitPackToEvidenceBytes(pack, evidenceBytes, candidateCorpus),
+      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions),
       analyzeOptions,
     ),
   };
 }
 
-// Floor for one candidate's share when fitting a pack to a small lane.
+// Floor for one candidate's passage share when fitting a pack to a lane.
 const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
 
-export function fitPackToEvidenceBytes(
+/**
+ * Fit a pack so the analyst's whole prompt (system rules, every candidate's
+ * labels and provenance, passages, coverage) is at most maxPromptBytes of
+ * UTF-8. Keeps as many candidates as can each carry a usable passage share,
+ * seated round-robin across corpora, then clips passages; the measurement is
+ * the real prompt, so labels and escaping are counted, not estimated.
+ */
+export function fitPackToPromptBytes(
   pack: EvidencePack,
-  evidenceBytes: number,
+  maxPromptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+  analyzeOptions: AnalystOptions,
 ): EvidencePack {
-  const total = pack.candidates.reduce(
-    (sum, candidate) => sum + candidate.chunks.reduce((inner, chunk) => inner + utf8ByteLength(chunk), 0),
-    0,
-  );
-  if (total <= evidenceBytes) return pack;
-  const keepCount = Math.max(1, Math.min(
-    pack.candidates.length,
-    Math.floor(evidenceBytes / MIN_FITTED_BYTES_PER_CANDIDATE),
-  ));
+  if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
+  const order = roundRobinCandidates(pack.candidates, candidateCorpus);
+  let fallback: EvidencePack | undefined;
+  for (let keep = order.length; keep >= 1; keep -= 1) {
+    const kept = new Set(order.slice(0, keep));
+    const base = pack.candidates.filter((candidate) => kept.has(candidate));
+    const overhead = analystPromptBytes(
+      restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus),
+      analyzeOptions,
+    );
+    if (overhead >= maxPromptBytes) continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
+      const fitted = restatePack(
+        pack,
+        base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })),
+        candidateCorpus,
+      );
+      const bytes = analystPromptBytes(fitted, analyzeOptions);
+      if (bytes <= maxPromptBytes) return fitted;
+      fallback = fitted;
+      // Escaping made the passages cost more than their raw bytes; shrink by
+      // the observed ratio and measure again.
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  // Nothing fits even one candidate's labels: send the smallest pack rather
+  // than none, and let the transport's own ceiling report it.
+  return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+
+function roundRobinCandidates(
+  candidates: readonly EvidenceCandidate[],
+  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+): EvidenceCandidate[] {
   const byCorpus = new Map<string, EvidenceCandidate[]>();
-  for (const candidate of pack.candidates) {
+  for (const candidate of candidates) {
     const corpusId = candidateCorpus.get(candidate) ?? '';
     const bucket = byCorpus.get(corpusId);
     if (bucket) bucket.push(candidate);
     else byCorpus.set(corpusId, [candidate]);
   }
-  const kept = new Set<EvidenceCandidate>();
-  for (let round = 0; kept.size < keepCount; round += 1) {
-    let seated = false;
+  const order: EvidenceCandidate[] = [];
+  for (let round = 0; order.length < candidates.length; round += 1) {
     for (const bucket of byCorpus.values()) {
       const candidate = bucket[round];
-      if (!candidate) continue;
-      kept.add(candidate);
-      seated = true;
-      if (kept.size >= keepCount) break;
+      if (candidate) order.push(candidate);
     }
-    if (!seated) break;
   }
-  const share = Math.floor(evidenceBytes / kept.size);
-  const candidates = pack.candidates
-    .filter((candidate) => kept.has(candidate))
-    .map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, share) }));
+  return order;
+}
+
+// Candidates keep pack order; a fitted candidate is a copy, so its corpus is
+// looked up through the original it was copied from, by position.
+function restatePack(
+  pack: EvidencePack,
+  candidates: EvidenceCandidate[],
+  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+): EvidencePack {
+  const originals = pack.candidates.filter((original) => candidates.some((candidate) => (
+    candidate.provenance === original.provenance
+  )));
   const inEvidence = new Map<string, number>();
-  for (const candidate of pack.candidates) {
-    if (!kept.has(candidate)) continue;
-    const corpusId = candidateCorpus.get(candidate) ?? '';
+  for (const original of originals) {
+    const corpusId = candidateCorpus.get(original) ?? '';
     inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
   }
   return {

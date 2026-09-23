@@ -254,6 +254,19 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
   };
 }
 
+const promptEncoder = new TextEncoder();
+
+/**
+ * UTF-8 bytes of the main analyst call exactly as a single-prompt transport
+ * sends it (system rules, a blank line, then the evidence prompt), for the
+ * same localOnly decision analyze() makes. Lanes with a byte ceiling fit the
+ * pack against this, so every per-candidate field counts, not only passages.
+ */
+export function analystPromptBytes(pack: EvidencePack, options: AnalystOptions): number {
+  const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
+  return promptEncoder.encode(`${ANALYST_SYSTEM}\n\n${buildAnalystPrompt(pack, localOnly)}`).length;
+}
+
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {
   return pack.candidates.some((candidate) => (
     candidate.trustDomain === 'secure_local'
@@ -499,7 +512,7 @@ function formatCoverage(pack: EvidencePack): string {
   if (pack.coverage.skippedCorpora.length > 0) {
     parts.push(`skipped: ${pack.coverage.skippedCorpora.map((s) => `${s.corpusId} (${s.reason})`).join(', ')}`);
   }
-  const matches = (pack.coverage.matchCounts ?? []).filter((count) => count.matchedItems > 0);
+  const matches = (pack.coverage.matchCounts ?? []).filter((count) => count.matchedItems > 0 || count.atLeast);
   if (matches.length > 0) {
     parts.push(`matches: ${matches.map(formatMatchCount).join(', ')}`);
   }
@@ -510,6 +523,11 @@ function formatCoverage(pack: EvidencePack): string {
 }
 
 function formatMatchCount(count: EvidenceCoverageMatchCount): string {
+  // A probe that filled its ceiling and kept nothing after filtering still
+  // found matches; it just cannot say how many.
+  if (count.matchedItems === 0 && count.atLeast) {
+    return `${count.corpusId} (${count.family}) matches found (count unknown), ${count.inEvidence} in evidence`;
+  }
   const total = `${count.matchedItems}${count.atLeast ? '+' : ''}`;
   const readable = count.contentMatchedItems < count.matchedItems
     ? `, ${count.contentMatchedItems}${count.atLeast ? '+' : ''} with readable content`

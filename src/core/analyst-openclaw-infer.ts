@@ -51,6 +51,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 // opaque "could not be spawned" reason. Refusing above a conservative ceiling
 // keeps the router's local fallback deterministic and the audit reason legible.
 const MAX_PROMPT_BYTES = 100_000;
+export const OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
 // Resolve the openclaw binary even under a minimal service PATH (launchd
 // defaults omit /opt/homebrew/bin and /usr/local/bin; per-user npm installs
