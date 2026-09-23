@@ -10604,6 +10604,12 @@ function tierRowVisible(copies, corpusId, layer) {
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
   return copyServingLayer(here, layer) !== undefined;
 }
+function namesOnlyKept(db, itemPks) {
+  if (itemPks.length === 0)
+    return {};
+  const n = db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))").get(JSON.stringify(itemPks)).n;
+  return n > 0 ? { namesOnlyKeptChunks: n } : {};
+}
 function migrationFingerprint(contentHash, chunkHashes) {
   return createHash5("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
@@ -12592,6 +12598,24 @@ var init_local_index = __esm(() => {
         return;
       const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
       return migrationFingerprint(row.content_hash, hashes);
+    }
+    stripCopyContent(identity) {
+      return this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+          AND tombstoned = 0
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (!row)
+          return 0;
+        const count = this.db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk = ?").get(row.item_pk).n;
+        if (count === 0)
+          return 0;
+        this.db.query("DELETE FROM chunk_embeddings WHERE item_pk = ?").run(row.item_pk);
+        this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+        this.refreshFtsForItem(row.item_pk);
+        return count;
+      })();
     }
     recordTierDecision(connector, item, stored, tierClassification, run) {
       if (run.ledgerFailed)
@@ -15827,7 +15851,8 @@ var init_local_index = __esm(() => {
         supersededChunks: tier.hidden.length > 0 ? this.db.query(`
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `).get(JSON.stringify(tier.hidden)).n : 0,
-        tierMoveInProgress: tier.moving
+        tierMoveInProgress: tier.moving,
+        ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id NOT IN ('connector_store_embedding_write_authority', 'tiered_store_set_binding')
@@ -16046,7 +16071,6 @@ var init_local_index = __esm(() => {
   ];
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
-
 // src/workers/connector-store/tiered-store-set.ts
 var init_tiered_store_set = __esm(() => {
   init_types();
@@ -18544,6 +18568,48 @@ var init_telegram_messages = __esm(() => {
   init_store_sync2();
 });
 
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS2;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
 // src/workers/source-index/status.ts
 var init_status = __esm(() => {
   init_corpus();
@@ -18555,6 +18621,7 @@ var init_status = __esm(() => {
   init_dropbox_files();
   init_telegram_messages();
   init_operation_error();
+  init_secret_locations();
 });
 
 // src/workers/dashboard/scheduler-markers.ts
@@ -20911,46 +20978,8 @@ init_tier_set3();
 // src/workers/connector-store/tier-visibility.ts
 init_tier_ledger();
 
-// src/workers/classification/secret-locations.ts
-init_sqlite_migrations();
-init_engine();
-var STOP_WORDS2 = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "did",
-  "do",
-  "does",
-  "find",
-  "for",
-  "have",
-  "i",
-  "in",
-  "is",
-  "it",
-  "kept",
-  "keep",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "put",
-  "saved",
-  "show",
-  "stored",
-  "the",
-  "there",
-  "to",
-  "what",
-  "where",
-  "which",
-  "who",
-  "with"
-]);
-
 // src/workers/email-source/server.ts
+init_secret_locations();
 init_credential_broker();
 init_types();
 init_secret_store();
@@ -22091,9 +22120,17 @@ class TierSnifferStore {
   dbPath;
   db;
   now;
+  readOnly;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database3(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
       mkdirSync9(dirname13(this.dbPath), { recursive: true, mode: 448 });
@@ -22117,9 +22154,9 @@ class TierSnifferStore {
   }
   close() {
     try {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
     } finally {
-      if (this.dbPath !== ":memory:")
+      if (this.dbPath !== ":memory:" && !this.readOnly)
         restrictFiles(this.dbPath);
     }
   }
@@ -23076,8 +23113,8 @@ function finish(report) {
 }
 
 // src/workers/classification/sniffer-service.ts
-init_tier_ledger();
 import { existsSync as existsSync10 } from "node:fs";
+init_tier_ledger();
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 60000;
 
 class TierSnifferService {
@@ -23121,11 +23158,18 @@ class TierSnifferService {
     let checkingItems = 0;
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
+      const path = tierSnifferPathForLedger(ledgerPath);
+      if (path === ":memory:" || !existsSync10(path))
+        continue;
+      let store;
       try {
-        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        store = new TierSnifferStore({ dbPath: path, readOnly: true });
+        const counts = store.counts();
         checkingItems += counts.items;
         remainingQuestions += counts.questions;
-      } catch {}
+      } catch {} finally {
+        store?.close();
+      }
     }
     return {
       checkingItems,
@@ -23238,6 +23282,18 @@ class TierSnifferService {
     return { state: "ran", report };
   }
 }
+
+// src/workers/classification/tier-migration.ts
+init_operation_error();
+
+// src/workers/connector-store/tier-move.ts
+init_engine();
+init_tier_ledger();
+init_tier_placement();
+// src/workers/classification/tier-migration.ts
+init_engine();
+init_tier_classifier();
+init_tier_ledger();
 
 // src/workers/email-source/server.ts
 function requireSourceEmbeddingDimension(options) {

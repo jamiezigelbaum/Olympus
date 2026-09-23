@@ -16,7 +16,14 @@
 
 import { loadConfig } from '../../core/config.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { loadSensitivityMap, sensitivityMapRevision } from '../../core/sensitivity-map.ts';
+import { createHash } from 'node:crypto';
+import { readOwnerSensitivityMap, sensitivityMapRevision } from '../../core/sensitivity-map.ts';
+import { isClassifierApproved, readClassificationLedger, resolveClassificationLedgerPath } from '../classification-ledger.ts';
+import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId } from './sniffer.ts';
+import { SnifferLaneRefusedError, resolveSnifferLane, type SnifferLane } from './sniffer-lane.ts';
+import { TierSnifferStore } from './sniffer-store.ts';
+import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { loadOwnerTierRules } from './tier-rules.ts';
 import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
@@ -74,7 +81,7 @@ export async function runTierMigrateCommand(
       const withSniffer = flags.boolean('with-sniffer');
       const top = flags.number('top');
       flags.assertDone('plan');
-      const inputs = context.inputs ?? installedInputs(env, { withSniffer });
+      const inputs = context.inputs ?? await installedInputs(env, { withSniffer });
       return withLanes(context, env, 'read', inputs, async (opened) => {
         const result = await planTierMigration({
           lanes: opened.lanes,
@@ -105,7 +112,7 @@ export async function runTierMigrateCommand(
       const planId = flags.required('plan');
       const why = flags.string('why');
       flags.assertDone('approve');
-      const inputs = context.inputs ?? installedInputs(env, { withSniffer: planUsedSniffer(paths, planId) });
+      const inputs = context.inputs ?? await installedInputs(env, { withSniffer: planUsedSniffer(paths, planId) });
       return withLanes(context, env, 'read', inputs, async (opened) => {
         const plan = await approveTierMigration({
           planId,
@@ -130,7 +137,7 @@ export async function runTierMigrateCommand(
       const selector = flags.string('batch');
       const maxItems = flags.number('max-items');
       flags.assertDone('run');
-      const inputs = context.inputs ?? installedInputs(env, { withSniffer: planUsedSniffer(paths, planId) });
+      const inputs = context.inputs ?? await installedInputs(env, { withSniffer: planUsedSniffer(paths, planId) });
       return withLanes(context, env, 'write', inputs, async (opened) => {
         const result = await runTierMigration({
           planId,
@@ -150,7 +157,7 @@ export async function runTierMigrateCommand(
     case 'rollback': {
       const batchId = flags.required('batch');
       flags.assertDone('rollback');
-      const inputs = context.inputs ?? installedInputs(env, { withSniffer: false });
+      const inputs = context.inputs ?? await installedInputs(env, { withSniffer: false });
       return withLanes(context, env, 'write', inputs, async (opened) => ({
         kind: 'olympus_tier_migration_rollback',
         ...snake(await rollbackTierMigrationBatch({
@@ -177,7 +184,7 @@ export async function runTierMigrateCommand(
           'Run olympus tier migrate purge (without --approve) and pass its digest.',
         );
       }
-      const inputs = context.inputs ?? installedInputs(env, { withSniffer: false });
+      const inputs = context.inputs ?? await installedInputs(env, { withSniffer: false });
       return withLanes(context, env, approve ? 'write' : 'read', inputs, async (opened) => ({
         kind: 'olympus_tier_migration_purge',
         ...snake(await purgeTierMigration({
@@ -199,7 +206,7 @@ export async function runTierMigrateCommand(
       const latest = state.plans[state.plans.length - 1];
       let freshness: Record<string, unknown> | undefined;
       if (latest && (latest.state === 'planned' || latest.state === 'approved' || latest.state === 'stopped')) {
-        const inputs = context.inputs ?? installedInputs(env, { withSniffer: latest.withSniffer });
+        const inputs = context.inputs ?? await installedInputs(env, { withSniffer: latest.withSniffer });
         freshness = await withLanes(context, env, 'read', inputs, async (opened) => {
           const result = tierMigrationPlanFreshness(latest, opened.lanes, inputs);
           return { fresh: result.fresh, inputs_changed: result.inputsChanged, changed_items: result.changedItems };
@@ -239,28 +246,84 @@ async function withLanes<T>(
     return await run(opened);
   } finally {
     opened.close();
+    (inputs as { close?(): void }).close?.();
   }
 }
 
 /**
- * The owner's installed classification inputs: the sensitivity map (loaded
- * strictly: an invalid map refuses rather than planning without it). Owner
- * tier rules and the privacy-safe sniffer arrive with the P2 tooling
- * (tier-rules.json, the approved sniffer); until they are installed here a
- * plan runs on the map and per-item overrides, and `--with-sniffer` refuses.
+ * The owner's installed classification inputs, through the same loaders the
+ * worker uses (P2): the sensitivity map and `tier-rules.json`. Fail closed: a
+ * map or rules file that is present but unusable (invalid, torn, or writable
+ * by anyone but its owner) refuses the command rather than planning without
+ * the owner's Private rules. `--with-sniffer` uses the privacy-safe sniffer
+ * only when its exact lane, profile, model and prompt are owner-approved in
+ * the classification ledger (`olympus tier classifier approve`); the sniffer
+ * answers from its verdict cache and queues the rest for the worker's
+ * approved pass, so a later re-plan picks the answers up.
  */
-function installedInputs(env: Record<string, string | undefined>, options: { withSniffer: boolean }): TierMigrationInputs {
-  if (options.withSniffer) {
+async function installedInputs(
+  env: Record<string, string | undefined>,
+  options: { withSniffer: boolean },
+): Promise<TierMigrationInputs & { close?(): void }> {
+  const mapRead = readOwnerSensitivityMap(env);
+  if (mapRead.status === 'invalid') {
     throw new OperationError(
-      'invalid_request',
-      'The privacy-safe sniffer is not installed in this build, so --with-sniffer cannot run.',
-      'Plan without --with-sniffer: items whose names look private stay Private (pending) and are left where they are.',
+      'config_error',
+      `The sensitivity map is unusable (${mapRead.reason}); the migration refuses to plan without it.`,
+      'Fix the map (olympus sensitivity validate), then run the command again.',
     );
   }
-  const sensitivityMap = loadSensitivityMap({ env, allowMissing: true });
-  return {
+  const sensitivityMap = mapRead.status === 'ok' ? mapRead.map : undefined;
+  // Throws on an invalid file: the owner's rules are never silently dropped.
+  const rules = loadOwnerTierRules({ env, allowMissing: true });
+  const rulesDigest = createHash('sha256').update(JSON.stringify(rules)).digest('hex').slice(0, 16);
+  const revision = `map:${sensitivityMapRevision(sensitivityMap)};rules:${rules.length > 0 ? rulesDigest : 'none'}`;
+  const base = {
     ...(sensitivityMap ? { sensitivityMap } : {}),
-    revision: `map:${sensitivityMapRevision(sensitivityMap)};rules:none`,
+    ...(rules.length > 0 ? { rules } : {}),
+    revision,
+  };
+  if (!options.withSniffer) return base;
+  let lane: SnifferLane;
+  try {
+    lane = resolveSnifferLane(loadSovereigntyEngine({ env }));
+  } catch (error) {
+    if (error instanceof SnifferLaneRefusedError) {
+      throw new OperationError('invalid_request', `No privacy-safe sniffer lane is available (${error.reason}); --with-sniffer cannot run.`);
+    }
+    throw error;
+  }
+  const ledger = await readClassificationLedger(resolveClassificationLedgerPath(env));
+  const approved = isClassifierApproved(ledger.entries, {
+    lane: lane.kind,
+    profileId: lane.profileId,
+    modelId: lane.modelId,
+    promptVersion: SNIFFER_PROMPT_VERSION,
+  });
+  if (!approved) {
+    throw new OperationError(
+      'invalid_request',
+      `The sniffer (${lane.kind} ${lane.modelId}, prompt ${SNIFFER_PROMPT_VERSION}) is not owner-approved; --with-sniffer refuses.`,
+      'Approve it with olympus tier classifier approve --why <reason>, or plan without --with-sniffer.',
+    );
+  }
+  const stores = new Map<string, TierSnifferStore>();
+  return {
+    ...base,
+    snifferId: snifferId(lane),
+    snifferForLedger: (ledgerPath) => {
+      const path = tierSnifferPathForLedger(ledgerPath);
+      let store = stores.get(path);
+      if (!store) {
+        store = new TierSnifferStore({ dbPath: path });
+        stores.set(path, store);
+      }
+      return new CachedTierSniffer(store, lane);
+    },
+    close: () => {
+      for (const store of stores.values()) store.close();
+      stores.clear();
+    },
   };
 }
 

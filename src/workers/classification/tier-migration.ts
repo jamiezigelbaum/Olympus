@@ -114,6 +114,13 @@ export interface TierMigrationInputs {
   rules?: readonly OwnerTierRule[];
   /** Only the owner-approved privacy-safe sniffer, and only when the owner asks for it. */
   sniffer?: TierSniffer;
+  /**
+   * The approved sniffer for one lane's ledger (its verdict cache and question
+   * queue sit beside that ledger). Takes precedence over `sniffer`.
+   */
+  snifferForLedger?: (ledgerPath: string) => TierSniffer;
+  /** Content-free id of the sniffer in use (part of the inputs revision). */
+  snifferId?: string;
   revision: string;
 }
 
@@ -582,7 +589,7 @@ export function tierMigrationInputsRevision(lanes: readonly TierMigrationLane[],
   return sha256([
     TIER_CLASSIFIER_VERSION,
     inputs.revision,
-    inputs.sniffer ? `sniffer:${inputs.sniffer.id}` : 'sniffer:none',
+    inputs.snifferId ? `sniffer:${inputs.snifferId}` : inputs.sniffer ? `sniffer:${inputs.sniffer.id}` : 'sniffer:none',
     overrides,
   ].join('\u0000')).slice(0, 32);
 }
@@ -654,6 +661,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
     const ledger = set.ledger;
     const seen = new Set<string>();
     const stores = set.openStores();
+    const laneSniffer = options.inputs.snifferForLedger?.(ledger.dbPath) ?? options.inputs.sniffer;
     for (const store of stores) {
       let after: number | undefined;
       for (;;) {
@@ -710,16 +718,18 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
             continue;
           }
           const override = ledger.getOverride(item.identity);
+          const sniffer = laneSniffer;
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item, store.trustDomain, lane.storedPlacementIsPrior === true),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
+              subject: item.identity,
             },
             {
               ...(options.inputs.sensitivityMap ? { sensitivityMap: options.inputs.sensitivityMap } : {}),
               ...(options.inputs.rules ? { rules: options.inputs.rules } : {}),
-              ...(options.inputs.sniffer ? { sniffer: options.inputs.sniffer } : {}),
+              ...(sniffer ? { sniffer } : {}),
               ...(override ? { override } : {}),
             },
           );
@@ -791,7 +801,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
       })),
       reportPath,
       noteEntryId,
-      withSniffer: options.inputs.sniffer !== undefined,
+      withSniffer: options.inputs.sniffer !== undefined || options.inputs.snifferForLedger !== undefined,
       batches: [],
     };
     const others = state.plans.filter((plan) => plan.planId !== planId);

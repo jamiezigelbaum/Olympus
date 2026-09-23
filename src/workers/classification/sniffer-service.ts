@@ -22,6 +22,8 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync } from 'node:fs';
+import { TierSnifferStore } from './sniffer-store.ts';
+import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { TierLedger, tierLedgerPathForStore } from './tier-ledger.ts';
 
@@ -123,12 +125,20 @@ export class TierSnifferService {
     let checkingItems = 0;
     let remainingQuestions = 0;
     for (const ledgerPath of this.ledgerPaths()) {
+      // Read-only, and only where a sniffer queue exists: a status read never
+      // creates or migrates a sniffer file beside a ledger that has none.
+      const path = tierSnifferPathForLedger(ledgerPath);
+      if (path === ':memory:' || !existsSync(path)) continue;
+      let store: TierSnifferStore | undefined;
       try {
-        const counts = this.options.installed.snifferStoreForLedger(ledgerPath).counts();
+        store = new TierSnifferStore({ dbPath: path, readOnly: true });
+        const counts = store.counts();
         checkingItems += counts.items;
         remainingQuestions += counts.questions;
       } catch {
         // An unreadable queue contributes nothing; its items stay pending.
+      } finally {
+        store?.close();
       }
     }
     return {

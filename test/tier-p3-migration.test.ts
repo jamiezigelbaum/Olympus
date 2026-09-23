@@ -19,7 +19,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../src/core/source-index/types.ts';
@@ -1021,6 +1021,40 @@ describe('tier migration review fixes', () => {
       target: { metadataTier: 'private', contentTier: 'private' },
     })).rejects.toThrow(TierMoveRefusedError);
     expect(servedFrom(context, LIBRARY_CORPORA, context.library, 'launch').content).toEqual([LIBRARY_CORPORA.public_safe]);
+  });
+});
+
+describe('tier migration reads the owner inputs through the P2 loaders, fail closed', () => {
+  test('an invalid map or rules file refuses to plan; valid rules reach the plan; an unapproved sniffer refuses', async () => {
+    const context = await rehearsal();
+    const mapPath = join(context.dir, 'sensitivity-map.json');
+    const rulesPath = join(context.dir, 'tier-rules.json');
+    const cli = (env: Record<string, string | undefined>) => ({
+      env: { HOME: context.dir, XDG_DATA_HOME: context.dir, OLYMPUS_SENSITIVITY_MAP_PATH: mapPath, OLYMPUS_TIER_RULES_PATH: rulesPath, ...env },
+      laneSpecs: context.specs,
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+      itemDelayMs: 0,
+    });
+    writeFileSync(mapPath, '{ "schemaVersion": 2, ');
+    chmodSync(mapPath, 0o600);
+    await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/sensitivity map is unusable/u);
+    rmSync(mapPath);
+    writeFileSync(rulesPath, '{ not json');
+    chmodSync(rulesPath, 0o600);
+    await expect(runTierMigrateCommand(['plan'], cli({}))).rejects.toThrow(/Tier rules/u);
+    // A folder rule the owner wrote makes the garden file Private: it stays put.
+    writeFileSync(rulesPath, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'files-private', match: { pathPrefix: '/Files' }, tier: 'secure', strength: 'force' }],
+    }));
+    chmodSync(rulesPath, 0o600);
+    const planned = await runTierMigrateCommand(['plan'], cli({}));
+    expect(planned['state']).toBe('planned');
+    const moves = (planned['totals'] as { moves: Array<{ source: string; toContent: string }> }).moves;
+    expect(moves.some((move) => move.source === 'rehearsal.files' && move.toContent === 'Personal')).toBe(false);
+    expect(existsSync(context.paths.statePath)).toBe(true);
+    await expect(runTierMigrateCommand(['plan', '--with-sniffer'], cli({}))).rejects.toThrow(/sniffer/u);
   });
 });
 
