@@ -2253,8 +2253,8 @@ function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardView
     mode: configured ? 'shared_pilot' : 'advanced_byo_required',
     verification: 'unverified',
     warning: configured
-      ? 'The shared Google pilot client is published but unverified. Google may show an unverified-app warning during this 3–5-user pilot.'
-      : 'The shared Google pilot client is not provisioned in this install. Use the advanced bring-your-own Google app flow.',
+      ? 'Google may show an “unverified app” warning when you connect: Olympus’s Google app has not finished Google’s verification yet.'
+      : 'Olympus’s shared Google app is not set up in this install. Use the advanced bring-your-own Google app flow.',
     advanced_byo_supported: true,
   };
 }
@@ -3423,7 +3423,7 @@ function pendingForDefinition(
   return matches[0];
 }
 
-function isGoogleOAuthSource(source: DashboardOAuthSource | 'google'): boolean {
+export function isGoogleOAuthSource(source: DashboardOAuthSource | 'google'): boolean {
   return source === 'google' || source === 'gmail' || source === 'google-drive';
 }
 

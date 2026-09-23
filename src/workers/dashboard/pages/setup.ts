@@ -22,13 +22,21 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
-import { dashboardAttentionLine, dashboardIsConnectedSource, dashboardSetupMeta, dashboardStatus } from '../vocabulary.ts';
+import {
+  dashboardAttentionLine,
+  dashboardIsConnectedSource,
+  dashboardScopePending,
+  dashboardSetupMeta,
+  dashboardStatus,
+  dashboardSubLine,
+} from '../vocabulary.ts';
 import {
   attentionRow,
   dashboardNeedsSetupSheet,
   dashboardOAuthConnectSheet,
   connectorSheet,
   dashboardControlGate,
+  dashboardGoogleProviderNote,
   escapeHtml,
   pageShell,
   safeExternalHref,
@@ -67,7 +75,7 @@ const CONNECTOR_PROMPT = [
 
 
 
-type SetupGroupId = 'needs_you' | 'working' | 'connecting' | 'fresh' | 'not_connected';
+type SetupGroupId = 'needs_you' | 'working' | 'waiting' | 'connecting' | 'fresh' | 'not_connected';
 
 interface SetupGroupDefinition {
   id: SetupGroupId;
@@ -84,6 +92,7 @@ interface SetupGroupDefinition {
 const SETUP_GROUPS: readonly SetupGroupDefinition[] = [
   { id: 'needs_you', heading: 'Needs you', attention: true },
   { id: 'working', heading: 'Working', attention: false },
+  { id: 'waiting', heading: 'Waiting', attention: false },
   { id: 'connecting', heading: 'Connecting', attention: false },
   { id: 'fresh', heading: 'Fresh', attention: false },
   { id: 'not_connected', heading: 'Available to connect', attention: false },
@@ -95,10 +104,9 @@ export function renderDashboardSetupPage(
 ): string {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
-  const pilotNote = renderGooglePilotNote(view);
   const sections = SETUP_GROUPS
     .map((group) => {
-      const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath);
+      const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
       return group.id === 'not_connected' && view.model_setup && !view.model_setup.ready && rendered
         ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
     })
@@ -115,9 +123,6 @@ export function renderDashboardSetupPage(
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
-    // Above every Google row, because Google raises its unverified-app screen
-    // only after the reader has already pressed Connect.
-    ...(pilotNote ? [pilotNote] : []),
     ...sections,
     connectorRow(),
     connectorSheet({
@@ -164,24 +169,6 @@ function renderSetupSummary(view: SourceDashboardViewModel): string {
     + `</div>`;
 }
 
-/**
- * The v0.4 shared-OAuth decision: the packaged pilot client is published but
- * unverified, and this page — the one carrying the Connect button — is where
- * that is named, so the reader meets the fact before Google's own interstitial
- * rather than after it.
- *
- * Only the shared client raises the warning. An install running the advanced
- * BYO path consents to the reader's own Google app and has nothing to be told,
- * so it gets no note: the reviewed design's shared-client-is-the-normal-journey
- * ruling leaves the default page unscolded.
- */
-function renderGooglePilotNote(view: SourceDashboardViewModel): string {
-  const pilot = view.google_pilot;
-  if (pilot?.mode !== 'shared_pilot') return '';
-  return `<div class="pilotnote"><b>Shared Google pilot client:</b> ${escapeHtml(pilot.warning)} `
-    + `Gmail and Drive request their read scopes separately.</div>`;
-}
-
 function groupSources(
   sources: readonly DashboardSourceCard[],
   degraded: readonly WorkerCredentialDegradation[] | undefined,
@@ -189,6 +176,7 @@ function groupSources(
   const grouped: Record<SetupGroupId, DashboardSourceCard[]> = {
     needs_you: [],
     working: [],
+    waiting: [],
     connecting: [],
     fresh: [],
     not_connected: [],
@@ -212,11 +200,16 @@ function setupGroupOf(
     const status = dashboardStatus({ source, ...(degraded ? { degradedCredentials: degraded } : {}) });
     if (status === 'Needs you' || status === 'Failing') return 'needs_you';
   }
+  // Home's Waiting group, by the same predicate: a source that has read nothing
+  // yet — before its first sync, or before its folders are chosen — is not
+  // Working and never Fresh.
+  if (dashboardScopePending(source)) return 'waiting';
   switch (source.connection.state) {
     case 'reauth_required':
       return 'needs_you';
-    case 'syncing':
     case 'waiting_for_first_sync':
+      return 'waiting';
+    case 'syncing':
       return 'working';
     case 'awaiting_consent':
       return 'connecting';
@@ -234,11 +227,14 @@ function renderGroup(
   sources: readonly DashboardSourceCard[],
   degraded: readonly WorkerCredentialDegradation[] | undefined,
   basePath: string | undefined,
+  view: SourceDashboardViewModel,
 ): string {
   if (sources.length === 0) return '';
   const rows = sources
     .map((source) => (
-      group.id === 'not_connected' ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)))
+      group.id === 'not_connected'
+        ? renderSetupRow(source, view, basePath)
+        : renderStateRow(group, source, degraded, basePath, view)))
     .join('\n');
   return `${sectionHeading(group.heading, sources.length, group.attention)}\n${rows}`;
 }
@@ -258,6 +254,7 @@ function renderStateRow(
   source: DashboardSourceCard,
   degraded: readonly WorkerCredentialDegradation[] | undefined,
   basePath: string | undefined,
+  view: SourceDashboardViewModel,
 ): string {
   const why = stateLine(group.id, source, degraded);
   const href = detailHref(source, basePath);
@@ -268,7 +265,7 @@ function renderStateRow(
   // so it gets the same sheet, not a bare row. This is exactly where home's
   // "Set up" degradation link sends the reader.
   if (group.id === 'needs_you' && action.kind === 'needs_setup') {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const disconnect = custodyAction(source);
     const row = attentionRow({
       label: source.label,
@@ -290,6 +287,7 @@ function renderStateRow(
   if ((group.id === 'needs_you' || group.id === 'connecting') && action.kind === 'oauth') {
     const connect = dashboardOAuthConnectSheet(source, action, {
       ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...providerNote(view, action),
     });
     if (connect) {
       const secondary = group.id === 'connecting' ? cancelAction(action) : custodyAction(source);
@@ -306,7 +304,7 @@ function renderStateRow(
   }
   const control = group.id === 'needs_you'
     ? connectAction(source, true)
-    : group.id === 'working' || group.id === 'fresh'
+    : group.id === 'working' || group.id === 'waiting' || group.id === 'fresh'
       ? custodyAction(source)
       : undefined;
   const disconnect = group.id === 'needs_you' ? custodyAction(source) : undefined;
@@ -320,7 +318,7 @@ function renderStateRow(
   });
 }
 
-function renderSetupRow(source: DashboardSourceCard, basePath?: string): string {
+function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, basePath?: string): string {
   const action = source.connection.action;
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
@@ -344,7 +342,7 @@ function renderSetupRow(source: DashboardSourceCard, basePath?: string): string 
   // button — "Set up", the verb for a flow with a step before the consent
   // screen — opens a sheet carrying the copyable agent prompt and that form.
   if (action.kind === 'needs_setup') {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const link = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
@@ -362,6 +360,7 @@ function renderSetupRow(source: DashboardSourceCard, basePath?: string): string 
   if (action.kind === 'oauth') {
     const connect = dashboardOAuthConnectSheet(source, action, {
       ...(source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}),
+      ...providerNote(view, action),
     });
     if (connect) {
       const row = setupRow({
@@ -384,6 +383,15 @@ function renderSetupRow(source: DashboardSourceCard, basePath?: string): string 
     action: connectAction(source, false) ?? { label: actionStateLabel(source), kind: 'none' },
     ...(link === undefined ? {} : { blurbLink: link }),
   });
+}
+
+/** The Google verification note for a Google sheet, spread-ready; empty otherwise. */
+function providerNote(
+  view: SourceDashboardViewModel,
+  action: Extract<DashboardSourceAction, { kind: 'oauth' | 'needs_setup' }>,
+): { providerNote?: string } {
+  const note = dashboardGoogleProviderNote(view, action);
+  return note === undefined ? {} : { providerNote: note };
 }
 
 /**
@@ -422,6 +430,10 @@ function stateLine(
   degraded: readonly WorkerCredentialDegradation[] | undefined,
 ): string {
   if (group === 'working') return workingLine(source);
+  if (group === 'waiting') {
+    const line = dashboardSubLine(source, degraded ? { degradedCredentials: degraded } : {});
+    if (line !== '') return line;
+  }
   if (group === 'connecting') return connectingLine(source);
   if (group === 'needs_you') {
     // The vocabulary's reason line, so a degraded credential or stalled answer
@@ -433,7 +445,6 @@ function stateLine(
 }
 
 function workingLine(source: DashboardSourceCard): string {
-  if (source.connection.state === 'waiting_for_first_sync') return source.connection.label;
   const firstIngest = source.freshness.hours === undefined;
   const parts = [firstIngest ? 'first ingest' : 'syncing'];
   if (source.coverage.indexed_items > 0) parts.push(`${formatCount(source.coverage.indexed_items)} indexed so far`);

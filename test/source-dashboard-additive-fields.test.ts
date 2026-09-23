@@ -319,7 +319,7 @@ describe('dashboard view model additive facts', () => {
     expect(view.google_pilot).toEqual({
       mode: 'advanced_byo_required',
       verification: 'unverified',
-      warning: 'The shared Google pilot client is not provisioned in this install. Use the advanced bring-your-own Google app flow.',
+      warning: 'Olympus’s shared Google app is not set up in this install. Use the advanced bring-your-own Google app flow.',
       advanced_byo_supported: true,
     });
     expect(view.policy).toEqual({

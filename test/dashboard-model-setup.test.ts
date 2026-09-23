@@ -35,6 +35,59 @@ test('Models precede Sources and only new source connections are gated', () => {
   expect(ready).toContain('Models are ready.');
 });
 
+test('ready models collapse to source-style rows; a model without its key keeps the full card', () => {
+  const view = buildDashboardPreviewView('fresh');
+  view.model_setup = modelView(true);
+  const ready = renderDashboardSetupPage(view);
+  for (const [id, label] of [['gemini', 'Gemini'], ['venice', 'Venice']] as const) {
+    const row = segment(ready, `<div class="attncard plain modelrow" data-model-card="${id}"`, `id="model-key-${id}"`);
+    expect(row).toContain(`<span class="name">${label}</span>`);
+    expect(row).toContain('Ready · key connected');
+    expect(row).not.toContain('modelcard"');
+    // Replace key is quiet and still opens the same key form, now in a sheet
+    // that also carries the "Get a key" link.
+    expect(row).toContain(`class="btn quiet" data-sheet-toggle="#model-key-${id}"`);
+    const sheet = segment(ready, `id="model-key-${id}"`, '</div>');
+    expect(sheet).toContain(`data-model-provider="${id}"`);
+    expect(sheet).toContain('name="api_key"');
+    expect(sheet).toContain(`Get a ${label} API key`);
+  }
+  expect(ready).not.toContain('<section class="modelcard"');
+  expect(ready).not.toContain('Add the keys required by your privacy choice');
+  expect(ready).toContain('Models are ready. You can connect sources below.');
+  // The optional local-model help and the re-check stay reachable on one quiet line.
+  const extras = segment(ready, 'class="modelextras"', '</section>');
+  expect(extras).toContain('data-sheet-toggle="#local-model-setup-sheet"');
+  expect(extras).toContain('Connect existing local models');
+  expect(extras).toContain('data-model-check');
+  expect(extras).toContain('Check readiness');
+  expect(ready).toContain('id="local-model-setup-sheet"');
+
+  view.model_setup = {
+    ready: false,
+    checked_at: '2026-09-14T12:00:00.000Z',
+    cards: [
+      { id: 'gemini', label: 'Gemini', required: true, state: 'ready', detail: 'Public and Personal embeddings.' },
+      { id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Private model processing.' },
+    ],
+  };
+  const partial = renderDashboardSetupPage(view);
+  expect(partial).toContain('class="attncard plain modelrow" data-model-card="gemini"');
+  const venice = segment(partial, '<section class="modelcard" data-model-card="venice"', '</section>');
+  expect(venice).toContain('Not configured');
+  expect(venice).toContain('class="keyfield" type="password" name="api_key"');
+  expect(venice).toContain('Get a Venice API key');
+  expect(partial).toContain('Add the keys required by your privacy choice');
+  expect(partial).toContain('Optional: your agent can help connect models you already run');
+  expect(partial).not.toContain('class="modelextras"');
+});
+
+function segment(html: string, from: string, to: string): string {
+  const start = html.indexOf(from);
+  expect(start).toBeGreaterThan(-1);
+  return html.slice(start, html.indexOf(to, start + from.length) + to.length);
+}
+
 test('model controls reject extra input and accept Gemini through the existing key boundary', () => {
   expect(parseDashboardControlParams({ action: 'connect_api_key', source: 'gemini', api_key: 'fixture' }))
     .toEqual({ action: 'connect_api_key', source: 'gemini', api_key: 'fixture' });

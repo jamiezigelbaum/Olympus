@@ -10,8 +10,15 @@ export { DASHBOARD_LANE_CSS, DASHBOARD_PROGRESS_CSS, DASHBOARD_POLICY_CSS };
  */
 import { createHash } from 'node:crypto';
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
-import { DASHBOARD_SAVED_SECRET_FIELD_VALUE } from '../source-dashboard.ts';
-import type { DashboardCallbackRegistration, DashboardConnectField, DashboardConnectFieldName, DashboardSourceAction, DashboardSourceCard } from '../source-dashboard.ts';
+import { DASHBOARD_SAVED_SECRET_FIELD_VALUE, isGoogleOAuthSource } from '../source-dashboard.ts';
+import type {
+  DashboardCallbackRegistration,
+  DashboardConnectField,
+  DashboardConnectFieldName,
+  DashboardSourceAction,
+  DashboardSourceCard,
+  SourceDashboardViewModel,
+} from '../source-dashboard.ts';
 import type { EmbeddingRuntimeFacts } from './embedding-runtime.ts';
 import { dashboardSourceProgress, type DashboardPhaseId } from './phases.ts';
 import { DASHBOARD_STATUS_COLORS, DASHBOARD_THEME_CSS, DASHBOARD_THEME_TOKENS } from './theme.ts';
@@ -902,6 +909,12 @@ export interface DashboardConnectSheetInput {
   placeholders?: Partial<Record<DashboardConnectFieldName, string>>;
   /** A bounded sentence above everything, e.g. what the provider refused. */
   notice?: string;
+  /**
+   * What the provider's own consent screen may say about the app asking, e.g.
+   * Google's unverified-app warning. Shown only inside the sheet, so it meets
+   * the reader who is about to connect and nobody else.
+   */
+  providerNote?: string;
   /** Renders the Cancel control for a source whose attempt is still pending. */
   cancellable?: boolean;
   /** The submit button's word; defaults to Connect. */
@@ -941,9 +954,12 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `${value === undefined ? '' : ` value="${escapeHtml(value)}"`}`
       + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join('');
-  const notice = input.notice === undefined || input.notice.trim() === ''
+  const notice = (input.notice === undefined || input.notice.trim() === ''
     ? ''
-    : `<p class="why">${escapeHtml(input.notice)}</p>`;
+    : `<p class="why">${escapeHtml(input.notice)}</p>`)
+    + (input.providerNote === undefined || input.providerNote.trim() === ''
+      ? ''
+      : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   // The redirect URI sits above the key fields and is selectable text with its
   // own copy button (.promptbox is already `user-select: all`), because every
@@ -1062,6 +1078,7 @@ function callbackRegistrationSteps(
 export function dashboardNeedsSetupSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'needs_setup' }>,
+  options: { providerNote?: string } = {},
 ): { sheetId: string; sheet: string } {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   const sheet = connectSetupSheet({
@@ -1071,6 +1088,7 @@ export function dashboardNeedsSetupSheet(
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });
   return { sheetId, sheet };
@@ -1092,7 +1110,7 @@ export function dashboardNeedsSetupSheet(
 export function dashboardOAuthConnectSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'oauth' }>,
-  options: { notice?: string } = {},
+  options: { notice?: string; providerNote?: string } = {},
 ): { sheetId: string; sheet: string } | undefined {
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
@@ -1143,9 +1161,27 @@ export function dashboardOAuthConnectSheet(
     ...(action.known_client_id ? { values: { client_id: action.known_client_id } } : {}),
     ...(action.pending_attempt ? { cancellable: true } : {}),
     ...(notice === undefined ? {} : { notice }),
+    ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });
   return { sheetId, sheet };
+}
+
+/**
+ * Google's unverified-app warning, for the Google connect sheets only.
+ *
+ * It used to be a banner over the whole Setup source list, read by everyone
+ * whether or not they meant to connect Google (owner, 2026-09-23). Now it sits
+ * inside the Gmail and Drive sheets, and only while this install connects
+ * through Olympus's shared, still-unverified Google app: a bring-your-own app
+ * consents to the owner's own client and has nothing to be told.
+ */
+export function dashboardGoogleProviderNote(
+  view: Pick<SourceDashboardViewModel, 'google_pilot'>,
+  action: Extract<DashboardSourceAction, { kind: 'oauth' | 'needs_setup' }>,
+): string | undefined {
+  if (view.google_pilot?.mode !== 'shared_pilot' || !isGoogleOAuthSource(action.source)) return undefined;
+  return `${view.google_pilot.warning} Gmail and Drive ask for their read access separately.`;
 }
 
 function redirectUriInput(

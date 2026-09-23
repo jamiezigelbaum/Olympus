@@ -36812,7 +36812,12 @@ function dashboardStatusResolution(input) {
   if (readinessStatus === "Needs you" || queueStatus === "Needs you") {
     return { status: "Needs you", mappedUnknown: false };
   }
+  if (dashboardScopePending(source))
+    return { status: "Waiting", mappedUnknown: false };
   return { status: connectionStatus, mappedUnknown: false };
+}
+function dashboardScopePending(source) {
+  return source.scope_selection?.connected === true && source.scope_selection.status === "scope_pending";
 }
 function firstUnknownEnumValue(source) {
   if (DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state] === undefined)
@@ -37033,6 +37038,8 @@ function workingLine(source) {
   return parts.join(" · ");
 }
 function waitingLine(source) {
+  if (dashboardScopePending(source))
+    return "waiting for folder selection";
   if (source.connection.state === "waiting_for_first_sync")
     return "waiting for the first sync";
   const queued = source.queue_health.waiting + source.queue_health.active;
@@ -38266,7 +38273,7 @@ function googlePilotStatus(configured) {
   return {
     mode: configured ? "shared_pilot" : "advanced_byo_required",
     verification: "unverified",
-    warning: configured ? "The shared Google pilot client is published but unverified. Google may show an unverified-app warning during this 3–5-user pilot." : "The shared Google pilot client is not provisioned in this install. Use the advanced bring-your-own Google app flow.",
+    warning: configured ? "Google may show an “unverified app” warning when you connect: Olympus’s Google app has not finished Google’s verification yet." : "Olympus’s shared Google app is not set up in this install. Use the advanced bring-your-own Google app flow.",
     advanced_byo_supported: true
   };
 }
@@ -64808,8 +64815,6 @@ var DASHBOARD_LANE_CSS = `.bgrow { position: relative; display: block; backgroun
 .setupsummary .sumcard { min-width: 0; border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; background: var(--panel); }
 .setupsummary b { display: block; color: var(--t4); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
 .setupsummary span { display: block; color: var(--t2); font-size: 13px; line-height: 1.3; }
-.pilotnote { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; color: var(--t3); font-size: 12px; padding: 10px 12px; margin-bottom: 18px; }
-.pilotnote b { color: var(--warn); }
 @media (max-width: 700px) { .setupsummary { grid-template-columns: 1fr; } }`, BACKGROUND_CSS = `.lane { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 12px 14px; margin-bottom: 7px; }
 .lane .lanehd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lane .lnm { font-weight: 600; font-size: 13.5px; color: var(--t2); }
@@ -66697,6 +66702,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .sheet.on { display: block; }
 .sheet h4 { margin: 0 0 6px; font-size: 13.5px; }
 .sheet p { color: var(--t3); font-size: 12.5px; margin: 0 0 10px; max-width: 66ch; }
+.sheet .providernote { border-left: 2px solid var(--warn-line); padding-left: 10px; }
 .promptbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; color: var(--t2); white-space: pre-wrap; user-select: all; margin-bottom: 10px; word-break: break-all; }
 /* The popup-blocked authorization link. Empty on every render that did not
    need it, so it must take no space until the script fills it in. */
@@ -67005,7 +67011,7 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""}` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join("");
-  const notice = input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`;
+  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml(input.notice)}</p>`) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn quiet" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
@@ -67030,7 +67036,7 @@ function callbackRegistrationSteps(id, registration) {
   const consoleStep = consoleUrl === undefined ? escapeHtml(registration.console.label) : `${escapeHtml(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml(new URL(consoleUrl).host)} →</a>`;
   return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml(registration.finish)}</li>` + `</ol>`;
 }
-function dashboardNeedsSetupSheet(source, action) {
+function dashboardNeedsSetupSheet(source, action, options = {}) {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const sheet = connectSetupSheet({
     id: sheetId,
@@ -67039,6 +67045,7 @@ function dashboardNeedsSetupSheet(source, action) {
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
   return { sheetId, sheet };
@@ -67072,9 +67079,15 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     ...action.known_client_id ? { values: { client_id: action.known_client_id } } : {},
     ...action.pending_attempt ? { cancellable: true } : {},
     ...notice === undefined ? {} : { notice },
+    ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
   return { sheetId, sheet };
+}
+function dashboardGoogleProviderNote(view, action) {
+  if (view.google_pilot?.mode !== "shared_pilot" || !isGoogleOAuthSource2(action.source))
+    return;
+  return `${view.google_pilot.warning} Gmail and Drive ask for their read access separately.`;
 }
 function redirectUriInput(action) {
   const registration = action.callback_registration === undefined ? {} : { registration: action.callback_registration };
@@ -68248,7 +68261,7 @@ var init_background = __esm(() => {
 function renderDashboardHomePage(view, options) {
   const groups = dashboardConnectedStatusGroups(view, options);
   const background = renderBackgroundSection(view, options);
-  const blocks = groups.map((group, index) => renderSection(group, options, background === "" && index === groups.length - 1));
+  const blocks = groups.map((group, index) => renderSection(group, view, options, background === "" && index === groups.length - 1));
   blocks.push(background);
   blocks.push(renderSetupLink(options));
   const nav = renderDashboardNav("home", {
@@ -68298,12 +68311,12 @@ function backgroundHref(basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${BACKGROUND_QUERY_PARAM2}`;
 }
-function renderSection(group, options, last) {
-  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, options) : renderCardSection(group, options, last);
+function renderSection(group, view, options, last) {
+  return ATTENTION_STATUSES.includes(group.status) ? renderAttentionSection(group, view, options) : renderCardSection(group, options, last);
 }
-function renderAttentionSection(group, options) {
+function renderAttentionSection(group, view, options) {
   const rows = group.sources.map((source) => {
-    const resolved = attentionAction(source, options);
+    const resolved = attentionAction(source, view, options);
     const row = attentionRow({
       label: source.label,
       why: dashboardAttentionLine(source, options),
@@ -68355,14 +68368,15 @@ function detailHref2(source, basePath) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}${DETAIL_QUERY_PARAM2}=${encodeURIComponent(source.source_id)}`;
 }
-function attentionAction(source, options) {
+function attentionAction(source, view, options) {
   const action = source.connection.action;
   const reconnecting = source.coverage.indexed_items > 0;
   if (action.kind === "needs_setup") {
     if (!dashboardControlsAvailable(options)) {
       return { action: lockedAction(reconnecting ? "Reauthenticate" : action.label, options?.basePath) };
     }
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const note = dashboardGoogleProviderNote(view, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, note === undefined ? {} : { providerNote: note });
     return {
       action: { label: reconnecting ? "Reauthenticate" : action.label, kind: "none", sheet: sheetId, primary: true },
       sheet
@@ -68375,8 +68389,10 @@ function attentionAction(source, options) {
     return { action: lockedAction(label, options?.basePath) };
   }
   if (action.kind === "oauth") {
+    const note = dashboardGoogleProviderNote(view, action);
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...note === undefined ? {} : { providerNote: note }
     });
     if (connect) {
       return {
@@ -69345,25 +69361,46 @@ function renderModelSetup(view) {
   if (!view)
     return "";
   const cards = view.cards.map((card) => {
+    if (card.state === "ready")
+      return readyModelRow(card);
     const state = { not_configured: "Not configured", applying: "Applying…", needs_attention: "Needs attention", ready: "Ready" }[card.state];
     let action = "";
     if (card.id === "local") {
-      action = '<button type="button" class="btn" data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>';
+      action = `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`;
     } else {
-      const form = `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
-      action = card.state === "ready" ? `<details><summary>Replace key</summary>${form}</details>` : card.state === "applying" ? "<p>Key saved. Olympus is applying the configuration or waiting for another required key.</p>" : form;
-      const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
-      action += `<p><a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></p>`;
+      action = card.state === "applying" ? "<p>Key saved. Olympus is applying the configuration or waiting for another required key.</p>" : modelKeyForm(card);
+      action += modelKeyLink(card);
     }
     return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${state}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>`;
   }).join("");
-  return '<section aria-label="Models"><div class="sect">Models</div>' + "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>" + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + (view.cards.some((card) => card.id === "local") ? "" : '<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>') + '<form method="post" action="/dashboard/models/check" data-model-check><button class="btn" type="submit">Check readiness</button><span data-action-message role="status"></span></form>' + (view.ready ? '<p role="status">Models are ready. You can connect sources below.</p>' : '<p role="status">Finish the required model setup above to unlock new source connections.</p>') + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+  const localCard = view.cards.some((card) => card.id === "local");
+  const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn quiet" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" : (localCard ? "" : `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`;
+  return '<section aria-label="Models"><div class="sect">Models</div>' + (view.ready ? '<p class="quiet" role="status">Models are ready. You can connect sources below.</p>' : "<p>Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>") + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + (view.ready ? "" : '<p role="status">Finish the required model setup above to unlock new source connections.</p>') + "</section>" + connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" });
+}
+function readyModelRow(card) {
+  const label = escapeHtml(card.label);
+  const state = card.id === "local" ? "Ready" : "Ready · key connected";
+  const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
+  if (card.id === "local")
+    return `${head}<button type="button" class="btn quiet" ${LOCAL_MODELS_TOGGLE}</div>`;
+  const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  return `${head}<button type="button" class="btn quiet" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button></div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyForm(card)}${modelKeyLink(card)}</div>`;
+}
+function modelKeyForm(card) {
+  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+}
+function modelKeyLink(card) {
+  const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
+  return `<p><a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></p>`;
 }
 var MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 24px}.modelcard{border:1px solid var(--border,#333);border-radius:12px;padding:18px}
 .modelcard header{display:flex;justify-content:space-between;gap:16px}.modelcard form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
 .modelcard input[type=password]{flex:1;min-width:160px}.modelcard p{margin:8px 0}.source-model-gate{border:0;padding:0;margin:0;min-width:0}.source-model-gate[disabled]{opacity:.5}
-`, LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to Models in Setup and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.";
+.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+.modelcards .sheet input[type=password]{flex:1;min-width:160px}
+.modelextras{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:-12px 0 24px}.modelextras form{display:inline-flex;align-items:center;gap:8px}
+`, LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to Models in Setup and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
 var init_model_setup2 = __esm(() => {
   init_components();
 });
@@ -69372,9 +69409,8 @@ var init_model_setup2 = __esm(() => {
 function renderDashboardSetupPage(view, options) {
   const degraded = options?.degradedCredentials ?? view.degraded_credentials;
   const grouped = groupSources(view.sources, degraded);
-  const pilotNote = renderGooglePilotNote(view);
   const sections = SETUP_GROUPS.map((group) => {
-    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath);
+    const rendered = renderGroup(group, grouped[group.id], degraded, options?.basePath, view);
     return group.id === "not_connected" && view.model_setup && !view.model_setup.ready && rendered ? `<fieldset class="source-model-gate" disabled aria-label="Sources: finish model setup first">${rendered}</fieldset>` : rendered;
   }).filter((section) => section.length > 0);
   const body = [
@@ -69385,7 +69421,6 @@ function renderDashboardSetupPage(view, options) {
     renderSetupSummary(view),
     renderModelSetup(view.model_setup),
     '<div class="sect">Sources</div>',
-    ...pilotNote ? [pilotNote] : [],
     ...sections,
     connectorRow(),
     connectorSheet({
@@ -69418,16 +69453,11 @@ function renderSetupSummary(view) {
   const line = `${ready} answer-ready · ${connected} connected`;
   return `<div class="setupsummary" aria-label="Setup summary">` + `<div class="sumcard"><b>Security preset</b><span>Configured</span></div>` + `<div class="sumcard"><b>Sources</b><span>${escapeHtml(line)}</span></div>` + `</div>`;
 }
-function renderGooglePilotNote(view) {
-  const pilot = view.google_pilot;
-  if (pilot?.mode !== "shared_pilot")
-    return "";
-  return `<div class="pilotnote"><b>Shared Google pilot client:</b> ${escapeHtml(pilot.warning)} ` + `Gmail and Drive request their read scopes separately.</div>`;
-}
 function groupSources(sources, degraded) {
   const grouped = {
     needs_you: [],
     working: [],
+    waiting: [],
     connecting: [],
     fresh: [],
     not_connected: []
@@ -69442,11 +69472,14 @@ function setupGroupOf(source, degraded) {
     if (status === "Needs you" || status === "Failing")
       return "needs_you";
   }
+  if (dashboardScopePending(source))
+    return "waiting";
   switch (source.connection.state) {
     case "reauth_required":
       return "needs_you";
-    case "syncing":
     case "waiting_for_first_sync":
+      return "waiting";
+    case "syncing":
       return "working";
     case "awaiting_consent":
       return "connecting";
@@ -69458,10 +69491,10 @@ function setupGroupOf(source, degraded) {
       return "not_connected";
   }
 }
-function renderGroup(group, sources, degraded, basePath) {
+function renderGroup(group, sources, degraded, basePath, view) {
   if (sources.length === 0)
     return "";
-  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, basePath) : renderStateRow(group, source, degraded, basePath)).join(`
+  const rows = sources.map((source) => group.id === "not_connected" ? renderSetupRow(source, view, basePath) : renderStateRow(group, source, degraded, basePath, view)).join(`
 `);
   return `${sectionHeading2(group.heading, sources.length, group.attention)}
 ${rows}`;
@@ -69470,12 +69503,12 @@ function sectionHeading2(heading, count, attention) {
   const marker = attention ? "▲ " : "";
   return `<div class="sect${attention ? " attn" : ""}">${marker}${heading} — ${count}</div>`;
 }
-function renderStateRow(group, source, degraded, basePath) {
+function renderStateRow(group, source, degraded, basePath, view) {
   const why = stateLine(group.id, source, degraded);
   const href = detailHref2(source, basePath);
   const action = source.connection.action;
   if (group.id === "needs_you" && action.kind === "needs_setup") {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const disconnect2 = custodyAction(source);
     const row = attentionRow({
       label: source.label,
@@ -69490,7 +69523,8 @@ ${sheet}`;
   }
   if ((group.id === "needs_you" || group.id === "connecting") && action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...providerNote(view, action)
     });
     if (connect) {
       const secondary = group.id === "connecting" ? cancelAction(action) : custodyAction(source);
@@ -69506,7 +69540,7 @@ ${sheet}`;
 ${connect.sheet}`;
     }
   }
-  const control = group.id === "needs_you" ? connectAction(source, true) : group.id === "working" || group.id === "fresh" ? custodyAction(source) : undefined;
+  const control = group.id === "needs_you" ? connectAction(source, true) : group.id === "working" || group.id === "waiting" || group.id === "fresh" ? custodyAction(source) : undefined;
   const disconnect = group.id === "needs_you" ? custodyAction(source) : undefined;
   return attentionRow({
     label: source.label,
@@ -69517,7 +69551,7 @@ ${connect.sheet}`;
     ...disconnect ? { secondaryAction: disconnect } : {}
   });
 }
-function renderSetupRow(source, basePath) {
+function renderSetupRow(source, view, basePath) {
   const action = source.connection.action;
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -69538,7 +69572,7 @@ function renderSetupRow(source, basePath) {
 ${sheet}`;
   }
   if (action.kind === "needs_setup") {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action);
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view, action));
     const link2 = keyLocationLink(action.instructions);
     const row = setupRow({
       label: source.label,
@@ -69552,7 +69586,8 @@ ${sheet}`;
   }
   if (action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, {
-      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {}
+      ...source.connection.provider_refusal ? { notice: source.connection.provider_refusal.reason } : {},
+      ...providerNote(view, action)
     });
     if (connect) {
       const row = setupRow({
@@ -69574,6 +69609,10 @@ ${connect.sheet}`;
     ...link === undefined ? {} : { blurbLink: link }
   });
 }
+function providerNote(view, action) {
+  const note = dashboardGoogleProviderNote(view, action);
+  return note === undefined ? {} : { providerNote: note };
+}
 function keyLocationLink(instructions) {
   const url = safeExternalHref(instructions.provider_console_url);
   if (url === undefined)
@@ -69589,6 +69628,11 @@ function actionStateLabel(source) {
 function stateLine(group, source, degraded) {
   if (group === "working")
     return workingLine2(source);
+  if (group === "waiting") {
+    const line = dashboardSubLine(source, degraded ? { degradedCredentials: degraded } : {});
+    if (line !== "")
+      return line;
+  }
   if (group === "connecting")
     return connectingLine(source);
   if (group === "needs_you") {
@@ -69599,8 +69643,6 @@ function stateLine(group, source, degraded) {
   return source.connection.label;
 }
 function workingLine2(source) {
-  if (source.connection.state === "waiting_for_first_sync")
-    return source.connection.label;
   const firstIngest = source.freshness.hours === undefined;
   const parts = [firstIngest ? "first ingest" : "syncing"];
   if (source.coverage.indexed_items > 0)
@@ -69702,6 +69744,7 @@ var init_setup = __esm(() => {
   SETUP_GROUPS = [
     { id: "needs_you", heading: "Needs you", attention: true },
     { id: "working", heading: "Working", attention: false },
+    { id: "waiting", heading: "Waiting", attention: false },
     { id: "connecting", heading: "Connecting", attention: false },
     { id: "fresh", heading: "Fresh", attention: false },
     { id: "not_connected", heading: "Available to connect", attention: false }

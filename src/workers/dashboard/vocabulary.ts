@@ -202,7 +202,23 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   if (readinessStatus === 'Needs you' || queueStatus === 'Needs you') {
     return { status: 'Needs you', mappedUnknown: false };
   }
+  // A folder source that is connected but has no approved scope has read
+  // nothing and will read nothing until the owner chooses folders. Its
+  // connection state is `connected`, which alone reads Fresh — a green dot and
+  // "synced just now" over an empty corpus (first-install test, 2026-09-23).
+  // It is waiting, exactly as a source before its first sync is; the Choose
+  // folders banner carries the ask.
+  if (dashboardScopePending(source)) return { status: 'Waiting', mappedUnknown: false };
   return { status: connectionStatus, mappedUnknown: false };
+}
+
+/**
+ * True when a connected source that requires an explicit folder scope has not
+ * had one approved yet. Generic over every source that declares
+ * `scope_selection`, never a named provider.
+ */
+export function dashboardScopePending(source: DashboardSourceCard): boolean {
+  return source.scope_selection?.connected === true && source.scope_selection.status === 'scope_pending';
 }
 
 /** The first value on the card that no mapping table knows about. */
@@ -763,6 +779,7 @@ function workingLine(source: DashboardSourceCard): string {
 }
 
 function waitingLine(source: DashboardSourceCard): string {
+  if (dashboardScopePending(source)) return 'waiting for folder selection';
   if (source.connection.state === 'waiting_for_first_sync') return 'waiting for the first sync';
   const queued = source.queue_health.waiting + source.queue_health.active;
   if (queued > 0) return `${dashboardCount(queued)} in queue`;
