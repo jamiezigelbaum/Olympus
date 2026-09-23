@@ -915,6 +915,14 @@ export class TierLedger {
     return removed;
   }
 
+  /**
+   * Whether any routed item has a copy (in any state) in this store. False
+   * means every row in the store is legacy, so readers can skip the filter.
+   */
+  corpusHasCopies(corpusId: string): boolean {
+    return this.db.query('SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1').get(corpusId) !== null;
+  }
+
   /** Items with a copy in this store in the given state, for status counts. */
   corpusCopyIdentities(
     corpusId: string,
