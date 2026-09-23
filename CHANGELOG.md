@@ -1,15 +1,22 @@
 # Changelog
 
-## 0.4.0-beta.3 - candidate
+## 0.4.0-beta.3 - 2026-09-23
 
 - Restore beta 1 setup, native dashboard, messaging pairing and folder-scope
   controls alongside the newer native services and X reconnect fixes.
 - Preserve beta 1 schema-12 stores and existing content during upgrade.
+- Wait for the worker to report ready before a managed upgrade completes.
 - Bind file sync cursors to the current approval and enforce content scope
   before embedding dispatch, including revocation between batches.
 - Require exclusive native messaging capture ownership and retain sessions
   when Unpair cannot confirm that native capture stopped.
-- This candidate is prepared for the final test; it is not yet published.
+- A refresh token the provider has definitively refused (X "token was
+  invalid", `invalid_grant`) now marks the source for reconnection and stops
+  retrying, instead of retrying every minute behind a misleading "latched"
+  status. Temporary provider errors still retry.
+- The connect form shows a saved client secret as a filled, masked field and
+  explains that a provider error page usually means the callback URL is not
+  registered exactly.
 
 ## 0.4.0-beta.2 - 2026-09-21
 
