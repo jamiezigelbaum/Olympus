@@ -2036,6 +2036,19 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Use a tiered store set's ledger: the ONE authority for every leg's
+   * decisions and visibility. A default ledger this store opened for itself is
+   * closed. A read-only store reads visibility from it but still records
+   * nothing.
+   */
+  useTierLedger(ledger: TierLedger): void {
+    if (this.tierLedgerHandle === ledger) return;
+    if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+    this.tierLedgerHandle = ledger;
+    this.tierLedgerOwned = false;
+  }
+
+  /**
    * The ledger whose copy rows decide what this store may serve. Never creates
    * a ledger file as a side effect of a read: a store whose ledger does not
    * exist yet cannot hold a routed copy, so everything in it is legacy and

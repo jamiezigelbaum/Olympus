@@ -22,11 +22,17 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import {
-  syncAndEmbedFromConnector,
   type ConnectorStoreEmbedSummary,
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
+import {
+  createLaneTieredStoreSet,
+  type TieredStoreRoutingCounts,
+  type TieredStoreSet,
+  type TieredStoreSetRun,
+} from '../connector-store/tiered-store-set.ts';
+import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   isApprovedSecureSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
@@ -35,6 +41,7 @@ import { accountFromGoogleHandle, loadGoogleSensitivityMap } from './classificat
 import {
   DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES,
   GOOGLE_DRIVE_PROVIDER,
+  GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
   GoogleDriveSourceConnector,
   googleDriveConnectorStoreClassification,
   isGoogleDriveConnectorCursor,
@@ -111,6 +118,15 @@ export interface GoogleDriveConnectorStoreReceipt {
     traversal_complete: number;
     /** Always 0 for Drive: deletion semantics are unproven until a later leg. */
     absence_authoritative: number;
+    /** Present once the lane's Public store exists and ran. */
+    public_items_indexed?: number;
+    public_chunks_indexed?: number;
+    public_chunks_embedded?: number;
+    /** Present when this run routed new items by their recorded tiers. */
+    tier_routed_items?: number;
+    tier_pending_items?: number;
+    tier_secret_items?: number;
+    tier_moves_queued?: number;
   };
   api_usage: {
     utc_day: string;
@@ -181,6 +197,14 @@ export interface GoogleDriveConnectorStoreSyncOptions extends GoogleDriveSourceC
   internalEmbeddingProvider?: SourceEmbeddingProvider;
   secureEmbeddingProvider?: SourceEmbeddingProvider;
   config?: GoogleDriveLiveSyncConfig;
+  /**
+   * The lane's per-tier stores (tiered-store-set.ts). Omitted: a set over the
+   * internal and secure stores, with the Public store below when given.
+   */
+  tierSet?: TieredStoreSet;
+  publicStore?: { open: () => LocalConnectorStore; exists: () => boolean };
+  secretLocations?: SecretLocationsIndex;
+  onTierLegOpened?: (store: LocalConnectorStore) => void;
 }
 
 export function createGoogleDriveConnectorStoreSyncHandler(
@@ -218,16 +242,32 @@ export function createGoogleDriveConnectorStoreSyncHandler(
     provenance: sourceInvocationProvenance(overrides.provenance),
   });
 
+  const sensitivityMap = options.sensitivityMap ?? loadGoogleSensitivityMap(env);
+  const tierSet = options.tierSet ?? createLaneTieredStoreSet({
+    setId: connectorId,
+    internalStore: options.internalStore,
+    secureStore: options.secureStore,
+    ...(options.publicStore
+      ? { publicLeg: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } }
+      : {}),
+    ...(options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {}),
+    ...(options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {}),
+    ...(sensitivityMap ? { tierClassification: { sensitivityMap } } : {}),
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+    ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
+  });
+
   const runBothStores = async (input: {
     connector: GoogleDriveSourceConnector;
     maxItems?: number;
     cursor?: string;
     reconcile?: boolean;
   }): Promise<DriveStoreRun> => {
-    // One provider traversal, shared with the second store. The two stores
-    // differ only in the trust domain the spine accepts, so the second listing
-    // pass was pure duplicate provider cost.
-    const traversal = sharedTraversal(input.connector, connectorId);
+    // One provider traversal feeds every tier store: the set records it on
+    // its first pass and replays it to the other legs, routes each NEW item
+    // by its recorded tiers, and leaves every existing item on the lane's own
+    // placement. Its resume point commits only after every leg did.
+    const traversal = scopedTraversal(input.connector, connectorId);
     const sync = {
       fetchContent: true,
       classification,
@@ -256,23 +296,14 @@ export function createGoogleDriveConnectorStoreSyncHandler(
         }
         : {}),
     };
-    const internal = await runStore({
-      store: options.internalStore,
-      connector: traversal,
-      sync,
-      ...(options.internalEmbeddingProvider
-        ? { embeddingProvider: options.internalEmbeddingProvider }
-        : {}),
-    });
-    const secure = await runStore({
-      store: options.secureStore,
-      connector: traversal,
-      sync,
-      ...(options.secureEmbeddingProvider
-        ? { embeddingProvider: options.secureEmbeddingProvider }
-        : {}),
-    });
-    return { internal, secure, traversal: input.connector.traversalStatus() };
+    const run = await tierSet.sync(traversal, sync, { commitCursor: input.reconcile !== true });
+    return {
+      internal: legOf(run, 'internal'),
+      secure: legOf(run, 'secure_local'),
+      ...(run.byDomain.public_safe ? { public: legOf(run, 'public_safe') } : {}),
+      routing: run.routing,
+      traversal: input.connector.traversalStatus(),
+    };
   };
 
   return {
@@ -317,9 +348,13 @@ export function createGoogleDriveConnectorStoreSyncHandler(
       const envelope = request.checkpoint?.trim() || undefined;
       const envelopeCursor = googleDriveCheckpointCursor(envelope, connectorId, options.scope !== undefined);
       const envelopeUsable = isGoogleDriveConnectorCursor(envelopeCursor);
+      // The fallback is the tier set's committed resume point, written only
+      // after every leg of a run committed; a store written before P1b falls
+      // back to its own completed run as before.
       const candidate = envelopeUsable
         ? envelopeCursor
-        : options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
+        : tierSet.committedCursor(connectorId)?.cursor
+          ?? options.internalStore.lastCompletedSyncRun(connectorId)?.cursor;
       let resume = isGoogleDriveConnectorCursor(candidate) ? candidate : undefined;
       if ((envelope !== undefined && !envelopeUsable) || (candidate !== undefined && resume === undefined)) {
         warnings.push(GOOGLE_DRIVE_RESUME_REJECTED_WARNING);
@@ -423,71 +458,30 @@ interface DriveStoreRunLeg {
 interface DriveStoreRun {
   internal: DriveStoreRunLeg;
   secure: DriveStoreRunLeg;
+  /** Present once the lane's Public store exists and ran. */
+  public?: DriveStoreRunLeg;
+  routing: TieredStoreRoutingCounts;
   traversal: ReturnType<GoogleDriveSourceConnector['traversalStatus']>;
 }
 
-async function runStore(input: {
-  store: LocalConnectorStore;
-  connector: SourceConnector;
-  sync: Parameters<LocalConnectorStore['syncFromConnector']>[1];
-  embeddingProvider?: SourceEmbeddingProvider;
-}): Promise<DriveStoreRunLeg> {
-  if (!input.embeddingProvider) {
-    // Honest degradation rather than a silent one: the store still fills, and
-    // the receipt's chunks_embedded of 0 says the lane cannot become servable
-    // until an embedding provider is configured.
-    return { sync: await input.store.syncFromConnector(input.connector, input.sync), embed: undefined };
-  }
-  const run = await syncAndEmbedFromConnector({
-    store: input.store,
-    connector: input.connector,
-    embeddingProvider: input.embeddingProvider,
-    ...(input.sync ? { sync: input.sync } : {}),
-  });
-  return { sync: run.sync, embed: run.embed };
+function legOf(run: TieredStoreSetRun, domain: 'public_safe' | 'internal' | 'secure_local'): DriveStoreRunLeg {
+  const leg = run.byDomain[domain];
+  if (!leg) throw new Error(`The Google Drive ${domain} store did not run.`);
+  return { sync: leg.sync, embed: leg.embed };
 }
 
-/**
- * Records the provider traversal on first use and shares it afterwards. The
- * recording is faithful even when the store stops early on its own maxItems
- * bound, because the second store applies the same bound to the same pages.
- */
-function sharedTraversal(
+/** The connector under this lane's (scope-bound) cursor id. */
+function scopedTraversal(
   connector: GoogleDriveSourceConnector,
   connectorId: string,
 ): SourceConnector {
-  const pages: SourceConnectorListPage[] = [];
-  let recorded = false;
-  let failed = false;
   return {
     id: connectorId,
     family: connector.family,
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
     classificationSignals: (item: RawItem) => connector.classificationSignals(item),
-    listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
-      if (recorded) {
-        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-          for (const page of pages) yield page;
-        })();
-      }
-      return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-        try {
-          for await (const page of connector.listItems(options)) {
-            pages.push(page);
-            yield page;
-          }
-        } catch (error) {
-          failed = true;
-          throw error;
-        } finally {
-          // Reached on normal completion and on the store breaking out early.
-          // A thrown traversal is never shareable: its recording is partial
-          // and the caller is aborting the whole run anyway.
-          if (!failed) recorded = true;
-        }
-      })();
-    },
+    listItems: (options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> => connector.listItems(options),
   };
 }
 
@@ -555,12 +549,15 @@ function taskOutcome(input: {
   const internalExcludedUnevaluable = input.run.internal.sync.exclusions.items_excluded_unevaluable;
   const secureExcluded = input.run.secure.sync.itemsExcluded;
   const secureExcludedUnevaluable = input.run.secure.sync.exclusions.items_excluded_unevaluable;
+  const publicLeg = input.run.public;
   const changed = internalIndexed > 0
     || secureIndexed > 0
     || internalTombstoned > 0
     || secureTombstoned > 0
     || internalEmbedded > 0
-    || secureEmbedded > 0;
+    || secureEmbedded > 0
+    || (publicLeg?.sync.itemsIndexed ?? 0) > 0
+    || (publicLeg?.embed?.chunksEmbedded ?? 0) > 0;
   const warnings = [...new Set(input.warnings)];
   if ((internalExcluded > 0 || secureExcluded > 0)
     && !warnings.includes(GOOGLE_DRIVE_INGEST_EXCLUSION_WARNING)) {
@@ -599,6 +596,7 @@ function taskOutcome(input: {
       // full traversal — including one the content budget stopped halfway.
       traversal_complete: Number(input.run.internal.sync.traversalComplete),
       absence_authoritative: 0,
+      ...tieredReceiptCounts(input.run),
     },
     api_usage: {
       utc_day: input.usage?.utcDay ?? '',
@@ -627,6 +625,32 @@ export function googleDriveReceiptDigest(
   receipt: Omit<GoogleDriveConnectorStoreReceipt, 'receipt_sha256'>,
 ): string {
   return createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
+}
+
+/**
+ * Counts the lane gained with per-tier stores. Present only when there is
+ * something to say, so a receipt from a run that routed nothing is exactly
+ * the pre-P1b receipt.
+ */
+function tieredReceiptCounts(run: DriveStoreRun): Partial<GoogleDriveConnectorStoreReceipt['counts']> {
+  const routing = run.routing;
+  return {
+    ...(run.public
+      ? {
+          public_items_indexed: run.public.sync.itemsIndexed,
+          public_chunks_indexed: run.public.sync.chunksIndexed,
+          public_chunks_embedded: run.public.embed?.chunksEmbedded ?? 0,
+        }
+      : {}),
+    ...(routing.itemsRouted + routing.itemsSecrets + routing.movesQueued + routing.routedDeletions > 0
+      ? {
+          tier_routed_items: routing.itemsRouted,
+          tier_pending_items: routing.itemsPendingHeld,
+          tier_secret_items: routing.itemsSecrets,
+          tier_moves_queued: routing.movesQueued,
+        }
+      : {}),
+  };
 }
 
 function isRejectedCursorError(error: unknown): boolean {

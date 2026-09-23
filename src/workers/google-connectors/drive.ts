@@ -38,6 +38,8 @@ import {
 
 export const GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = 'internal.drive.docs';
 export const GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = 'secure_local.drive.docs';
+/** The lane's Public store (P1b per-tier stores), created when its first item is routed there. */
+export const GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = 'public_safe.drive.docs';
 export const GOOGLE_DRIVE_PROVIDER = 'google_drive';
 export const DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200;
 export const DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50;
@@ -1018,6 +1020,14 @@ export function defaultGoogleDriveSecureConnectorStoreDbPath(env: Record<string,
   }
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
   return join(dataHome, 'openclaw', 'olympus', 'google-drive-secure-connector-store.sqlite');
+}
+
+export function defaultGoogleDrivePublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
+  if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
+    return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
+  }
+  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  return join(dataHome, 'openclaw', 'olympus', 'google-drive-public-connector-store.sqlite');
 }
 
 class RestGoogleDriveApiClient implements GoogleDriveApiClient {

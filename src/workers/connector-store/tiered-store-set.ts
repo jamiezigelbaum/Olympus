@@ -48,6 +48,7 @@ import {
   type TierCopy,
   type TierCopyLayers,
   type TierCopyPlan,
+  TierLedger as TierLedgerClass,
   type TierLedger,
   type TierPlacementPlan,
 } from '../classification/tier-ledger.ts';
@@ -182,6 +183,7 @@ export class TieredStoreSet {
       if (spec.store && (spec.store.trustDomain !== spec.trustDomain || spec.store.corpusId !== spec.corpusId)) {
         throw new Error('A tiered store leg\'s store must match its declared trust domain and corpus.');
       }
+      spec.store?.useTierLedger(this.ledger);
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     // Private and pending items must always have somewhere to go.
@@ -199,6 +201,7 @@ export class TieredStoreSet {
       store.close();
       throw new Error('A lazily opened tiered store does not match its declared leg.');
     }
+    store.useTierLedger(this.ledger);
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -261,7 +264,11 @@ export class TieredStoreSet {
    * run routed an item to it. The set's resume point is committed only after
    * every leg committed.
    */
-  async sync(connector: SourceConnector, sync: ConnectorStoreSyncOptions = {}): Promise<TieredStoreSetRun> {
+  async sync(
+    connector: SourceConnector,
+    sync: ConnectorStoreSyncOptions = {},
+    options: { commitCursor?: boolean } = {},
+  ): Promise<TieredStoreSetRun> {
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -279,7 +286,9 @@ export class TieredStoreSet {
     }
     run.finalize();
     const cursor = legRuns[0]?.sync.cursor;
-    this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
+    // A pass that is not a resume point (a reconcile from the start of the
+    // listing) must not overwrite the incremental lane's committed position.
+    if (options.commitCursor !== false) this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
     return tieredRun(legRuns, run.counts, cursor);
   }
 
@@ -353,6 +362,68 @@ export class TieredStoreSet {
     const result = await syncAndEmbedFromConnector({ store, connector, embeddingProvider: provider, sync });
     return { trustDomain: domain, corpusId: store.corpusId, sync: result.sync, embed: result.embed };
   }
+}
+
+export interface LaneTieredStoreSetOptions {
+  setId: string;
+  internalStore: LocalConnectorStore;
+  secureStore: LocalConnectorStore;
+  /** The lane's Public store, opened (and created) only when an item is routed there. */
+  publicLeg?: { corpusId: string; open: () => LocalConnectorStore; exists: () => boolean };
+  /** Personal and Public share one canonical cloud identity; Private has its own. */
+  internalEmbeddingProvider?: SourceEmbeddingProvider;
+  secureEmbeddingProvider?: SourceEmbeddingProvider;
+  splitLayers?: boolean;
+  tierClassification?: ConnectorStoreTierClassification;
+  secretLocations?: SecretLocationsIndex;
+  /** Default: the secure store's own co-located ledger (tieredStoreSetLedgerPath). */
+  ledger?: TierLedger;
+  onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
+}
+
+/**
+ * A lane's set from the two stores it has always had (both legacy legs) plus
+ * a lazily created Public leg. The set ledger defaults to the secure store's
+ * co-located ledger, so the one visibility authority sits exactly where the
+ * data lifecycle already finds it.
+ */
+export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): TieredStoreSet {
+  const ledger = options.ledger
+    ?? options.secureStore.tierLedger()
+    ?? new TierLedgerClass({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+  return new TieredStoreSet({
+    setId: options.setId,
+    ledger,
+    ...(options.splitLayers === false ? { splitLayers: false } : {}),
+    ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
+    ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
+    legs: [
+      ...(options.publicLeg
+        ? [{
+            trustDomain: 'public_safe' as const,
+            corpusId: options.publicLeg.corpusId,
+            open: options.publicLeg.open,
+            exists: options.publicLeg.exists,
+            ...(options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}),
+          }]
+        : []),
+      {
+        trustDomain: 'internal' as const,
+        corpusId: options.internalStore.corpusId,
+        store: options.internalStore,
+        legacy: true,
+        ...(options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}),
+      },
+      {
+        trustDomain: 'secure_local' as const,
+        corpusId: options.secureStore.corpusId,
+        store: options.secureStore,
+        legacy: true,
+        ...(options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}),
+      },
+    ],
+  });
 }
 
 /** The router one run hands every leg. Plans are made once per item per run. */
