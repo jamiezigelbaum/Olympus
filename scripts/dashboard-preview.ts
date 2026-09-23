@@ -245,6 +245,29 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'missing' }).getStatus();
     return view;
   }
+  if (state === 'first-install') {
+    // The owner's first-install test (2026-09-23): model keys in, Dropbox
+    // connected with its folders not yet chosen, Readwise before its first
+    // sync. Both should read Waiting; the models should read as compact rows.
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: emptyStatus(),
+      schedulerStatus: scheduler([]),
+      sovereigntyEngine: engine,
+      connectedHandleRegistry: registry([
+        handle('dropbox.personal', 'dropbox', ['dropbox.files.sync'], ['files.content.read']),
+        handle('readwise.personal', 'readwise', ['readwise.library.sync'], []),
+      ]),
+      apiKeyAvailability: { readwise: true },
+      oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, dropbox: 'preview-dropbox-app-key' },
+      oauthClientSecretAvailability: { google: true },
+      googlePilotClientConfigured: true,
+      oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+      fileSourceScopeStatus: { 'dropbox.files': 'scope_pending' },
+      now: NOW,
+    });
+    view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
+    return view;
+  }
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -493,7 +516,7 @@ if (import.meta.main) {
       || /(?:^|;\s*)olympus_preview_controls=1/.test(request.headers.get('cookie') ?? '');
     const state = url.pathname.replace(/^\//, '') || 'partial';
     const states = [
-      'models', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+      'models', 'first-install', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
       'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
       'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
     ];
@@ -541,7 +564,7 @@ if (import.meta.main) {
   },
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}`);
-  console.log('  states: /fresh /partial /full /dropbox-initial /dropbox-update');
+  console.log('  states: /models /first-install /fresh /partial /full /dropbox-initial /dropbox-update');
   console.log('  connect walkthroughs (add ?setup): /connect-google /connect-google-loopback /connect-dropbox /connect-x /connect-dropbox-refused');
   console.log('  publisher-app one-click cards (add ?setup): /connect-dropbox-publisher /connect-google-publisher');
 }

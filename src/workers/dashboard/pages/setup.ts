@@ -22,7 +22,14 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
-import { dashboardAttentionLine, dashboardIsConnectedSource, dashboardSetupMeta, dashboardStatus } from '../vocabulary.ts';
+import {
+  dashboardAttentionLine,
+  dashboardIsConnectedSource,
+  dashboardScopePending,
+  dashboardSetupMeta,
+  dashboardStatus,
+  dashboardSubLine,
+} from '../vocabulary.ts';
 import {
   attentionRow,
   dashboardNeedsSetupSheet,
@@ -67,7 +74,7 @@ const CONNECTOR_PROMPT = [
 
 
 
-type SetupGroupId = 'needs_you' | 'working' | 'connecting' | 'fresh' | 'not_connected';
+type SetupGroupId = 'needs_you' | 'working' | 'waiting' | 'connecting' | 'fresh' | 'not_connected';
 
 interface SetupGroupDefinition {
   id: SetupGroupId;
@@ -84,6 +91,7 @@ interface SetupGroupDefinition {
 const SETUP_GROUPS: readonly SetupGroupDefinition[] = [
   { id: 'needs_you', heading: 'Needs you', attention: true },
   { id: 'working', heading: 'Working', attention: false },
+  { id: 'waiting', heading: 'Waiting', attention: false },
   { id: 'connecting', heading: 'Connecting', attention: false },
   { id: 'fresh', heading: 'Fresh', attention: false },
   { id: 'not_connected', heading: 'Available to connect', attention: false },
@@ -189,6 +197,7 @@ function groupSources(
   const grouped: Record<SetupGroupId, DashboardSourceCard[]> = {
     needs_you: [],
     working: [],
+    waiting: [],
     connecting: [],
     fresh: [],
     not_connected: [],
@@ -212,11 +221,16 @@ function setupGroupOf(
     const status = dashboardStatus({ source, ...(degraded ? { degradedCredentials: degraded } : {}) });
     if (status === 'Needs you' || status === 'Failing') return 'needs_you';
   }
+  // Home's Waiting group, by the same predicate: a source that has read nothing
+  // yet — before its first sync, or before its folders are chosen — is not
+  // Working and never Fresh.
+  if (dashboardScopePending(source)) return 'waiting';
   switch (source.connection.state) {
     case 'reauth_required':
       return 'needs_you';
-    case 'syncing':
     case 'waiting_for_first_sync':
+      return 'waiting';
+    case 'syncing':
       return 'working';
     case 'awaiting_consent':
       return 'connecting';
@@ -306,7 +320,7 @@ function renderStateRow(
   }
   const control = group.id === 'needs_you'
     ? connectAction(source, true)
-    : group.id === 'working' || group.id === 'fresh'
+    : group.id === 'working' || group.id === 'waiting' || group.id === 'fresh'
       ? custodyAction(source)
       : undefined;
   const disconnect = group.id === 'needs_you' ? custodyAction(source) : undefined;
@@ -422,6 +436,10 @@ function stateLine(
   degraded: readonly WorkerCredentialDegradation[] | undefined,
 ): string {
   if (group === 'working') return workingLine(source);
+  if (group === 'waiting') {
+    const line = dashboardSubLine(source, degraded ? { degradedCredentials: degraded } : {});
+    if (line !== '') return line;
+  }
   if (group === 'connecting') return connectingLine(source);
   if (group === 'needs_you') {
     // The vocabulary's reason line, so a degraded credential or stalled answer
@@ -433,7 +451,6 @@ function stateLine(
 }
 
 function workingLine(source: DashboardSourceCard): string {
-  if (source.connection.state === 'waiting_for_first_sync') return source.connection.label;
   const firstIngest = source.freshness.hours === undefined;
   const parts = [firstIngest ? 'first ingest' : 'syncing'];
   if (source.coverage.indexed_items > 0) parts.push(`${formatCount(source.coverage.indexed_items)} indexed so far`);
