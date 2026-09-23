@@ -48,7 +48,7 @@ import type {
   LocalConnectorStore,
 } from '../connector-store/local-index.ts';
 import { moveTieredItem, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
-import { TIER_KEY_TRUST_DOMAIN, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   EMBEDDING_LEDGER_OWNER_APPROVAL,
   appendEmbeddingLedgerEntry,
@@ -71,8 +71,6 @@ import {
   tierLedgerIdentityKey,
   type TierCopy,
   type TierCopyPlan,
-  type TierLedger,
-  type TierLedgerIdentity,
   type TierLedgerRecord,
   type TierMigrationProposal,
   type TierMigrationProposalInput,
@@ -1846,10 +1844,3 @@ export function tierMigrationStatusSummary(statePath: string): TierMigrationStat
     purged: plan.purge !== undefined,
   };
 }
-
-/** Display name of a tier key (TRUST_MODEL.md). */
-export function tierMigrationTierName(tier: TierKey): string {
-  return TIER_DISPLAY[tier];
-}
-
-export { TIER_KEY_TRUST_DOMAIN };
