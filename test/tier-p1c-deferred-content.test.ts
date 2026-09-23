@@ -352,6 +352,29 @@ describe('P1c: content that lands after listing', () => {
     expect(local.inputs.some((input) => input.includes('balance'))).toBe(false);
   });
 
+  test('the content row carries the names row\'s approved-scope stamp, so the scope filter judges both alike', async () => {
+    const GENERATION = 'a'.repeat(64);
+    const REVISION = '12345678-1234-4123-8123-123456789abc';
+    const dir = workspace();
+    const lane = openLane(dir);
+    cleanups.unshift(() => lane.close());
+    await lane.set.sync(fixtureConnector(() => listing(NEW)), {
+      fetchContent: false,
+      placement: SECURE_PLACEMENT,
+      sourceScopeObservation: () => ({ accountGeneration: GENERATION, scopeRevision: REVISION, folderKeys: [] }),
+    });
+    await lane.sink.accept(request('new-scan', NEW[1]!.body));
+    expect(lane.stores.internal!.activeLocalItemRow(localId('new-scan'))?.sourceScope)
+      .toMatchObject({ accountGeneration: GENERATION, scopeRevision: REVISION });
+    expect(lane.stores.secure_local!.activeLocalItemRow(localId('new-scan'))?.sourceScope)
+      .toMatchObject({ accountGeneration: GENERATION, scopeRevision: REVISION });
+    const filtered = lane.stores.secure_local!.searchItems('diagnosis', 5, undefined, {
+      sourceScopeGeneration: GENERATION,
+      sourceScopeRevision: REVISION,
+    });
+    expect(filtered.map((row) => row.sourceItem.providerItemId)).toEqual(['new-scan']);
+  });
+
   test('a provider deletion tombstones the names copy and the content copy', async () => {
     const dir = workspace();
     const lane = openLane(dir);

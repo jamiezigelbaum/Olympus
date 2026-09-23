@@ -197,11 +197,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           embedHold: placement.embedHold,
         });
       }
+      const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
         await contentStore.syncFromConnector(
           singleItemConnector(contentStore, { ...plan.item, content: { kind: 'metadata_only' } }),
           {
             fetchContent: false,
+            // The content row carries the names row's approved-scope stamp, so
+            // the scope read filter judges both copies the same way.
+            ...(anchorScope ? { sourceScopeObservation: () => anchorScope } : {}),
             tierRouting: {
               route: () => ({
                 kind: 'store',
