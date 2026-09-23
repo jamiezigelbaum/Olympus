@@ -11945,40 +11945,81 @@ function closeSqliteStore(db, options = {}) {
 }
 
 // src/core/sender-rules.ts
+function stripComments(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0)
+      out += char;
+  }
+  return out;
+}
 function senderAddress2(from) {
   if (!from)
     return;
-  const bracketed = [...from.matchAll(/<([^<>]*)>/g)].at(-1)?.[1];
-  const candidate = (bracketed ?? from).trim();
+  const cleaned = stripComments(from);
+  const bracketed = [...cleaned.matchAll(/<([^<>]*)>/g)].at(-1)?.[1];
+  const candidate = (bracketed ?? cleaned).trim();
   const match = ADDRESS.exec(candidate);
   if (!match)
     return;
   return { address: `${match[1].toLowerCase()}@${match[2].toLowerCase()}`, domain: match[2].toLowerCase() };
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  return [...from.matchAll(ANY_ADDRESS)].map((match) => ({
+    address: `${match[1].toLowerCase()}@${match[2].toLowerCase()}`,
+    domain: match[2].toLowerCase()
+  }));
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
 }
 function senderMatchesRule(from, rule) {
   const normalized = rule.trim().toLowerCase();
   if (!normalized.includes("@"))
     return false;
   const sender = senderAddress2(from);
-  if (!sender)
-    return false;
-  if (normalized.startsWith("@")) {
-    const domain = normalized.slice(1);
-    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
-  }
-  return sender.address === normalized;
+  return sender !== undefined && addressMatches(sender, normalized);
 }
 function ownerSenderRuleMatches(from, value, raises) {
   const normalized = value.trim().toLowerCase();
   if (!normalized)
     return false;
-  if (normalized.includes("@"))
-    return senderMatchesRule(from, normalized);
-  return raises && (from ?? "").toLowerCase().includes(normalized);
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").toLowerCase().includes(normalized);
+  const sender = senderAddress2(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
 }
-var ADDRESS;
+var ADDRESS, ANY_ADDRESS;
 var init_sender_rules = __esm(() => {
-  ADDRESS = /^([^\s<>"(),;:@]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
+  ADDRESS = /^((?:"(?:[^"\\]|\\.)*")|(?:[^\s<>"(),;:@]+))@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i;
+  ANY_ADDRESS = /((?:"(?:[^"\\]|\\.)*")|(?:[^\s<>"(),;:@]+))@([a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi;
 });
 
 // src/workers/classification/tier-classifier.ts
