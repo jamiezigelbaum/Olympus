@@ -688,13 +688,14 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  * - `elsewhere`: another store holds it (or nothing does: Secrets). This store
  *   writes nothing, and a copy it already holds (superseded) is kept as-is.
  * - `delete`: the provider deleted a routed item this store holds a copy of
- *   (current, staged or superseded): tombstone it.
+ *   (current, staged or superseded), or the item became Secrets: tombstone it.
+ *   Chunks, FTS rows and vectors go, as for every tombstone.
  */
 export type ConnectorStoreTierRoute =
   | { kind: 'legacy' }
   | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content' }
-  | { kind: 'elsewhere'; reason: 'routed_to_other_tier' | 'secrets' | 'move_queued' }
-  | { kind: 'delete' };
+  | { kind: 'elsewhere'; reason: 'routed_to_other_tier' | 'secrets' | 'move_queued' | 'content_unread' }
+  | { kind: 'delete'; reason: 'provider_deleted' | 'secrets' };
 
 export interface ConnectorStoreTierRouteInput {
   store: LocalConnectorStore;
@@ -5135,9 +5136,15 @@ export class LocalConnectorStore {
             continue;
           }
           if (route.kind === 'delete') {
-            if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, undefined, true)) {
+            const secrets = route.reason === 'secrets';
+            if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? 'S5' : undefined, true)) {
               itemsTombstoned += 1;
-              deletedEventItemsTombstoned += 1;
+              if (secrets) {
+                secretsTierItemsTombstoned += 1;
+                gaps.push(secretsTierExcludedGap(itemForStorage));
+              } else {
+                deletedEventItemsTombstoned += 1;
+              }
             }
             continue;
           }
