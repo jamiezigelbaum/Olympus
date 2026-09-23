@@ -73,6 +73,9 @@ import {
   type FileExtractionRunner,
 } from '../file-extraction/runner.ts';
 import { createConnectorStoreExtractionSink } from '../file-extraction/store-sink.ts';
+import { createTieredStoreExtractionSink } from '../file-extraction/tiered-store-sink.ts';
+import { tieredExtractionView, type TieredExtractionView } from '../connector-store/tiered-extraction.ts';
+import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type {
   ExtractionItemRef,
   ExtractorRegistryConfig,
@@ -136,9 +139,17 @@ export interface FileExtractionRuntimeOptions {
    */
   sourceFactories?: ReadonlyMap<
     string,
-    (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore })
+    (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore; view?: TieredExtractionView })
       => FileExtractionSource | Promise<FileExtractionSource>
   >;
+  /**
+   * Corpora whose lane keeps per-tier stores with text that arrives after
+   * listing (TieredStoreSetOptions.contentArrivesLater), keyed by the lane's
+   * own corpus. Such a corpus reads candidates, locators and egress tiers
+   * across the set, and its sink lands each routed item's text in the store
+   * its content tier decides. Its existing items take the plain path.
+   */
+  tierSets?: ReadonlyMap<string, TieredStoreSet>;
   /**
    * The broker a family factory issues its download credential from. Injected
    * by tests; the runtime builds one over its own `env`.
@@ -218,12 +229,17 @@ export function createFileExtractionRuntime(
       warn(fileExtractionCorpusDropped(config, 'no_source_factory'));
       continue;
     }
+    const tierSet = options.tierSets?.get(config.corpusId);
+    if (tierSet && tierSet.legSpec(store.trustDomain)?.store !== store) {
+      throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
+    }
+    const view = tierSet ? tieredExtractionView(tierSet) : undefined;
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config, store });
-        const source = await buildSource({ config, store });
+        const source = await buildSource({ config, store, ...(view ? { view } : {}) });
         if (!options.scopeGuard) return source;
         const guard = options.scopeGuard;
         return {
@@ -250,20 +266,28 @@ export function createFileExtractionRuntime(
             : {}),
         } satisfies FileExtractionSource;
       },
-      sink: createConnectorStoreExtractionSink({
-        store,
-        classify: (item: RawItem) => buildSourceSensitivity({
-          // The item's OWN stored tier, read live. A constant here would either
-          // downgrade an item on every enrichment pass or make the store refuse
-          // one it already holds.
-          trustTier: storedTrustTier(store, item) ?? 'S4',
-          trustDomain: store.trustDomain,
-        }),
-        syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
-        ownerConnectorId: config.ownerConnectorId ?? `${config.provider}-connector`,
-        ownershipKind: 'observed',
-        claims: jobs,
-      }),
+      sink: tierSet
+        ? createTieredStoreExtractionSink({
+            set: tierSet,
+            syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
+            ownerConnectorId: config.ownerConnectorId ?? `${config.provider}-connector`,
+            ownershipKind: 'observed',
+            claims: jobs,
+          })
+        : createConnectorStoreExtractionSink({
+            store,
+            classify: (item: RawItem) => buildSourceSensitivity({
+              // The item's OWN stored tier, read live. A constant here would
+              // either downgrade an item on every enrichment pass or make the
+              // store refuse one it already holds.
+              trustTier: storedTrustTier(store, item) ?? 'S4',
+              trustDomain: store.trustDomain,
+            }),
+            syncConnectorId: FILE_EXTRACTION_SYNC_CONNECTOR_ID,
+            ownerConnectorId: config.ownerConnectorId ?? `${config.provider}-connector`,
+            ownershipKind: 'observed',
+            claims: jobs,
+          }),
       ...(config.maxTrustTierForRemote
         ? {
             egressPolicy: {
@@ -273,7 +297,11 @@ export function createFileExtractionRuntime(
           }
         : {}),
       trustTiers: {
-        itemTrustTier: (ref) => store.localContent(ref.localItemId, 1)?.trustTier,
+        // Across a tier set, a routed item is never below Private on its way
+        // to an extractor: its content tier is not known until its text is.
+        itemTrustTier: (ref) => view
+          ? view.itemTrustTier(ref.localItemId)
+          : store.localContent(ref.localItemId, 1)?.trustTier,
       },
       ...(options.scopeGuard
         ? {
@@ -464,19 +492,21 @@ function defaultSourceFactories(
   const broker = (): CredentialBroker => (sharedBroker ??= createEnvCredentialBroker({ env }));
   let driveRequestBudget: GoogleDailyRequestBudget | undefined;
   const factories = new Map<string, (
-    input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore },
+    input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore; view?: TieredExtractionView },
   ) => FileExtractionSource | Promise<FileExtractionSource>>([
-    ['dropbox', async (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore }) => {
+    ['dropbox', async (input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore; view?: TieredExtractionView }) => {
       const token = await issueDropboxExtractionToken(broker(), extractionCredentialHandle(input.config));
       return new DropboxExtractionSource({
         id: `${input.config.corpusId}:extraction`,
         corpusId: input.config.corpusId,
         provider: input.config.provider,
+        // Across the lane's tier stores when it has them: its own store's
+        // candidates first, exactly as before, then new files' names copies.
         candidates: connectorStoreExtractionCandidateReader(
-          input.store,
+          input.view ?? input.store,
           input.config.resolveCandidateFilters?.(),
         ),
-        locators: input.store,
+        locators: input.view ?? input.store,
         scopes: (input.config.resolveScopes?.() ?? input.config.scopes)
           .map((approvedScopeKey) => ({ approvedScopeKey })),
         token,
@@ -537,7 +567,7 @@ function defaultSourceFactories(
  * wiring, rather than in either of the two modules it joins.
  */
 export function connectorStoreExtractionCandidateReader(
-  store: LocalConnectorStore,
+  store: Pick<LocalConnectorStore, 'extractionCandidates'>,
   filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters,
 ): ExtractionCandidateReader {
   return {

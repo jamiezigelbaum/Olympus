@@ -1026,6 +1026,16 @@ export function createCanonicalDropboxSchedulerSource(input: {
   store?: LocalConnectorStore;
   fileExtraction?: FileExtractionRunner;
   embeddingProvider?: SourceEmbeddingProvider;
+  /**
+   * The lane's other tier stores (per-item routing): each is embedded with its
+   * own trust domain's identity once it exists. The secure store keeps
+   * `embeddingProvider` above.
+   */
+  tierEmbeddings?: ReadonlyArray<{
+    corpusId: string;
+    store: () => LocalConnectorStore | undefined;
+    provider: SourceEmbeddingProvider;
+  }>;
 }): SourceSchedulerSource | undefined {
   if (!input.providerSync || !input.store) return undefined;
   if (input.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(input.embeddingProvider)) {
@@ -1121,6 +1131,28 @@ export function createCanonicalDropboxSchedulerSource(input: {
       writer: true,
       run: async () => {
         const result = await input.store!.embedChunks({ provider: input.embeddingProvider! });
+        return progressFromCounts({
+          chunks_seen: result.chunksSeen,
+          chunks_embedded: result.chunksEmbedded,
+          chunks_skipped: result.chunksSkipped,
+        });
+      },
+    });
+  }
+
+  for (const tier of input.tierEmbeddings ?? []) {
+    tasks.push({
+      id: `dropbox.files_embeddings.${schedulerScopeHash(tier.corpusId)}`,
+      kind: 'embed',
+      writer: true,
+      run: async () => {
+        // A tier store exists only once a file was routed to it.
+        const store = tier.store();
+        if (!store) return progressFromCounts({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0 });
+        if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(tier.provider)) {
+          throw new Error('A secure_local tier store requires a local/private or approved Venice embedding provider.');
+        }
+        const result = await store.embedChunks({ provider: tier.provider });
         return progressFromCounts({
           chunks_seen: result.chunksSeen,
           chunks_embedded: result.chunksEmbedded,

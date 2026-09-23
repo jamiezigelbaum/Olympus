@@ -31,7 +31,7 @@ import {
   type SqliteMigrationResult,
 } from './core/sqlite-migrations.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
-import { defaultDropboxConnectorStoreDbPath } from './workers/dropbox-files/index.ts';
+import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -45,8 +45,13 @@ import {
   defaultProtectedTelegramConnectorStoreDbPath,
 } from './workers/telegram-messages/index.ts';
 import { defaultReadwiseConnectorStoreDbPath } from './workers/readwise/index.ts';
+import { defaultReadwiseSecureConnectorStoreDbPath } from './workers/readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './workers/x-bookmarks/index.ts';
-import { defaultWhatsAppConnectorStoreDbPath } from './workers/whatsapp/index.ts';
+import { defaultXBookmarksSecureConnectorStoreDbPath } from './workers/x-bookmarks/tier-set.ts';
+import {
+  defaultWhatsAppConnectorStoreDbPath,
+  defaultWhatsAppInternalConnectorStoreDbPath,
+} from './workers/whatsapp/index.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
 import {
   olympusDataRoots,
@@ -226,7 +231,9 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH',
         'dropbox-files-index.sqlite',
       ),
-      connectorStorePaths: (context) => [defaultDropboxConnectorStoreDbPath(envForContext(context))],
+      // Every tier store of the lane (P1c); the set ledger and the
+      // secret-locations index sit beside the secure (first) one.
+      connectorStorePaths: (context) => dropboxTierConnectorStoreDbPaths(envForContext(context)),
       policyPaths: (context) => [defaultDropboxIngestionPolicyPathForHome(context?.homeDir)],
     },
     {
@@ -271,7 +278,12 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         'OLYMPUS_SOURCE_INDEX_READWISE_INDEX_DB_PATH',
         'readwise-index.sqlite',
       ),
-      connectorStorePaths: (context) => [defaultReadwiseConnectorStoreDbPath(envForContext(context))],
+      // The lane's Private store (P1c) carries the set ledger and the
+      // secret-locations index beside it, created or not.
+      connectorStorePaths: (context) => [
+        defaultReadwiseConnectorStoreDbPath(envForContext(context)),
+        defaultReadwiseSecureConnectorStoreDbPath(envForContext(context)),
+      ],
     },
     {
       // The legacy X bookmarks index was retired and deleted (2026-07-28), so
@@ -281,7 +293,10 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       sourceId: 'x.bookmarks',
       label: 'X bookmarks connector store',
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [defaultXBookmarksConnectorStoreDbPath(envForContext(context))],
+      connectorStorePaths: (context) => [
+        defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
+        defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context)),
+      ],
     },
     {
       // Connector-store only, like X: the WhatsApp corpus never had a legacy
@@ -295,7 +310,10 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       sourceAliases: ['whatsapp.messages'],
       label: 'WhatsApp messages connector store',
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [defaultWhatsAppConnectorStoreDbPath(envForContext(context))],
+      connectorStorePaths: (context) => [
+        defaultWhatsAppConnectorStoreDbPath(envForContext(context)),
+        defaultWhatsAppInternalConnectorStoreDbPath(envForContext(context)),
+      ],
       rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context)),
     },
     // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START

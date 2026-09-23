@@ -119,8 +119,20 @@ export {
 } from './qualification.ts';
 
 export {
+  createDropboxTierLane,
+  type DropboxTierLane,
+} from './tier-set.ts';
+
+export {
   DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+  DROPBOX_INTERNAL_FILES_CORPUS_ID,
+  DROPBOX_PUBLIC_FILES_CORPUS_ID,
+  DROPBOX_TIER_CORPUS_IDS,
+  createDropboxTierConnectorStore,
+  defaultDropboxInternalConnectorStoreDbPath,
+  defaultDropboxPublicConnectorStoreDbPath,
+  dropboxTierConnectorStoreDbPaths,
   DROPBOX_INGESTION_EXCLUSION_SOURCE,
   DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
   createDropboxConnectorStore,
