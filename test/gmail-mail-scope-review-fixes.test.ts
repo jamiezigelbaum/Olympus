@@ -490,6 +490,9 @@ describe('delta review at a201e996: bounded parsing and multi-author From', () =
       'a@'.repeat(50_000),
       `${'x.'.repeat(50_000)}@`,
       `${'"'.repeat(20_000)}${'('.repeat(20_000)}${'<'.repeat(20_000)}@${'a.'.repeat(20_000)}`,
+      // Delta review at bf39471c: long `.-` runs that do not end the string.
+      `a@b${'.-'.repeat(2_040)}x`,
+      `a@b${'-'.repeat(4_000)}.x`,
     ];
     const rules = Array.from({ length: 10 }, (_, index) => `@domain${index}.example`);
     for (const header of hostile) {
@@ -543,7 +546,12 @@ describe('delta review at a201e996: bounded parsing and multi-author From', () =
       payload: { mimeType: 'text/plain', headers: [{ name: 'Subject', value: 's' }, { name: 'From', value: huge }], body: { data: Buffer.from('b').toString('base64url') } },
     };
     const page = await collect(new GoogleGmailSourceConnector({ apiClient: fakeClient([mail]), account: 'personal', env: {} }).listItems({ limit: 5 }));
-    expect(String(page.items[0]!.metadata.from).length).toBe(MAX_FROM_HEADER_CHARS);
+    const stored = String(page.items[0]!.metadata.from);
+    expect(stored.length).toBe(MAX_FROM_HEADER_CHARS + 1);
+    expect(stored.endsWith('…')).toBe(true);
+    // Truncated means unparseable: a skip rule never matches it.
+    expect(senderAddress(stored)).toBeUndefined();
+    expect(senderMatchesRule(stored, '@y.example')).toBe(false);
   });
 });
 

@@ -33,7 +33,12 @@ type Address = { address: string; domain: string };
 
 /** A dotted domain with non-empty labels, lower-cased; undefined otherwise. */
 function validDomain(raw: string): string | undefined {
-  const domain = raw.toLowerCase().replace(/[.-]+$/, '');
+  // A backwards loop, not a `[.-]+$` pattern: on attacker-controlled text an
+  // end-anchored run pattern retries from every position of a long `.-` run
+  // that does not end the string, which is quadratic.
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === '.' || raw[end - 1] === '-')) end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
   const labels = domain.split('.');
   if (labels.length < 2 || labels.some((label) => !label || label.startsWith('-') || label.endsWith('-'))) return undefined;
   return domain;

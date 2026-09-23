@@ -967,9 +967,11 @@ function rawItemFromGmailMessage(
 ): RawItem {
   const headers = headersFromPart(message.payload);
   const subject = headers.get('subject') ?? '(no subject)';
-  // Sender-controlled and uncapped from Gmail: stored at most 4 KB, the same
-  // bound every sender-rule parse applies.
-  const from = (headers.get('from') ?? '').slice(0, MAX_FROM_HEADER_CHARS);
+  // Sender-controlled and uncapped from Gmail. A longer header is stored as
+  // its first 4 KB plus a truncation mark, one character over the bound every
+  // sender-rule parse applies, so a truncated From is always unparseable.
+  const rawFrom = headers.get('from') ?? '';
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
   const date = parsedDate(headers.get('date')) ?? internalDateIso(message.internalDate);
   // Mail older than the approved window: subject, sender, date and labels
   // only. No body and no snippet (the snippet is body text), so the item stays
