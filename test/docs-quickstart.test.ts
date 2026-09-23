@@ -97,7 +97,7 @@ describe('first-run docs', () => {
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
     for (const [doc, steps] of [
       [install, ['## Step 4 — Verify the worker', '## Step 5 — Validate', '## Step 6 — Finish installation: dashboard handoff', '## Step 7 — Verify the chosen source']],
-      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Open your dashboard and optionally connect sources', '## 6. Verify a cited answer']],
+      [quickstart, ['## 3. Check the worker', '## 4. Validate', '## 5. Open your dashboard and connect sources', '## 6. Verify a cited answer']],
     ] as const) {
       const positions = steps.map((step) => doc.indexOf(step));
       expect(positions.every((position) => position > 0)).toBe(true);
@@ -156,7 +156,7 @@ describe('first-run docs', () => {
   test('first-run dashboard guidance follows the canonical worker and gateway checks', () => {
     const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
     const quickstart = readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8');
-    const dashboardStep = quickstart.indexOf('## 5. Open your dashboard and optionally connect sources');
+    const dashboardStep = quickstart.indexOf('## 5. Open your dashboard and connect sources');
 
     expect(readme).toContain('[docs/QUICKSTART.md](docs/QUICKSTART.md)');
     expect(dashboardStep).toBeGreaterThan(0);

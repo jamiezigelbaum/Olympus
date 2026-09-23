@@ -14,9 +14,9 @@ use a remembered summary of this guide as the user-facing copy.
 
 ## Normal setup sequence
 
-Choose the privacy posture with the operator, ask for the privacy classifier
-approval, activate the base worker, run the required gateway restart, and open
-the dashboard's Setup page. Its **Models** section comes first: Gemini
+Choose the privacy posture with the operator, run setup (which registers and
+starts the base worker), ask for the privacy classifier approval, verify the
+worker, run the required gateway restart, and open the dashboard's Setup page. Its **Models** section comes first: Gemini
 and Venice keys are entered there, and existing local models have an
 agent-assisted configuration starting point plus **Check readiness**. Missing
 model keys are expected at this stage; do not block the dashboard handoff or
@@ -637,8 +637,10 @@ categories raise matching items. Public and Personal categories are lowering
 guidance that any raise still beats, and content can never be lowered by
 them. Personal is already the default, so do not write a Personal category.
 Write a Public category only for material the operator names as published
-(a blog folder, a public-writing label), and match it by path or label, not
-by a broad keyword. Lower on a sender only for authenticated or low-stakes
+(a blog folder, say), and match it with `pathPatterns` (a folder path or
+folder key). Keywords never lower a tier: a lowering category matches only
+on a path pattern or a sender, so a keyword in a Public or Personal category
+has no effect. Lower on a sender only for authenticated or low-stakes
 senders: a From address can be spoofed, so a forged sender must never be able
 to pull real mail down a tier. An older schemaVersion 1 map still loads and
 stays raise-only.
@@ -800,8 +802,11 @@ expected and never blocks the handoff. The operator pastes each key into its
 fallback below only when the operator explicitly asks for a setup without the
 browser dashboard.
 
-For the normal browser flow, continue through base-worker and Gateway
-activation in Steps 4–5, then hand over the Setup link in Step 6. Do not require
+For the normal browser flow, skip the headless fallback below but first
+complete the [privacy classifier approval](#privacy-classifier-approval--its-own-consent-gate)
+at the end of this step; it applies in both flows. Then continue through
+base-worker and Gateway activation in Steps 4–5, and hand over the Setup link
+in Step 6. Do not require
 keys to be present before that link: the operator enters them in **Models**.
 Connect validates and stores the key privately. After all required keys are
 saved, the managed worker applies them automatically; wait for the Models
@@ -811,8 +816,9 @@ prompt, and use **Check readiness** after their configuration is applied.
 
 ### Headless credential fallback — only when explicitly chosen
 
-The remaining terminal/password-manager instructions in this step apply only
-when the operator chooses a headless workflow. They are not the normal browser
+The terminal/password-manager instructions in this subsection apply only
+when the operator chooses a headless workflow; the privacy classifier approval
+after it applies to everyone. They are not the normal browser
 installation path.
 
 **Code-block contract:** a code block in your message means exactly one
@@ -1016,8 +1022,9 @@ it said:
   credential among its problems, and the status JSON carries an
   `embedding_lane` of `{"state": "embedding_lane_disabled", "reason":
   "embedding_provider_unavailable"}`. All three name the SAME credential.
-  Connect the key, run `olympus worker restart`, re-run doctor — the three
-  go green together.
+  In the browser flow it is finished in the **Models** card and the worker
+  applies it; in the headless fallback, connect the key and run `olympus
+  worker restart`. Re-run doctor — the three go green together.
 - **No source connected yet (expected).** A healthy worker passes base-install
   health with zero sources. Mailbox configuration is not worker readiness;
   the repaired Doctor no longer marks `email_worker` red just because the
@@ -1046,7 +1053,8 @@ lanes only for `local-first`/`local-only` postures, in plain words
 ### Privacy classifier approval — its own consent gate
 
 This applies in both the browser and the headless flow, after the posture and
-model choices above. Olympus decides most tiers with rules on this machine. For
+model choices above; a browser-flow agent arrives here straight from the
+opening of Step 3. Olympus decides most tiers with rules on this machine. For
 an item whose names look possibly private, it asks a privacy-safe model, the
 privacy classifier, whether the item is Personal or Private before it is
 embedded. The classifier does nothing until the operator approves the exact
@@ -1056,22 +1064,30 @@ lane, model and prompt version. Read what it would use (you run this):
 olympus tier classifier status
 ```
 
-It reports `lane` (`local` or `venice`), `profile`, `modelId` and `approved`.
-On `no-sensitive` it reports `refused: no_private_lane`: there is nothing to
-approve, so skip this gate and do not mention the classifier. Otherwise
-explain it in these terms, naming the actual lane, and ask:
+It reports `lane` (`local` or `venice`), `profile`, `modelId` and `approved`,
+or `lane: null` with a `refused` reason. On `no-sensitive` the reason is
+`no_private_lane`: there is nothing to approve, so skip this gate and do not
+mention the classifier. Any other refusal (`standard_cloud`,
+`unsupported_provider`, `outside_private_policy`) means the policy names a
+classifier model Olympus will not use for possibly-private material. Report
+it to the operator in plain words ("the policy names a model the privacy
+classifier may not use, so it stays off"), do not ask for approval, and do
+not edit the policy to make it pass; flagged items stay held as Private. When
+a lane is reported, explain it in these terms, naming the actual lane, and
+ask:
 
 > One more privacy choice. Olympus sorts most of your items with rules on this
 > machine. When an item's name looks like it might be private — a word from
 > your sensitivity map, or a sensitive-sounding file or folder name — it asks
 > a private model to decide Personal or Private before indexing it for
-> search. It sends one item at a time: its title, folder path and labels, and
-> sometimes the first 1,200 characters of its text. Anything that looks like a
-> password or key is never sent. The model is <your local model, on this
-> machine | Venice's private model, off this machine, under Venice's privacy
-> policy>, never an ordinary cloud model. If you'd rather not, those items
-> stay Private: searchable by keyword, but not indexed for meaning until you
-> approve. Shall I turn it on?
+> search. It sends one item at a time: its title, folder path and folder
+> names, labels and sender, and, when the content itself looks sensitive, a
+> short excerpt: up to the first 1,200 characters of its text. Anything that
+> looks like a password or key is never sent. The model is <your local model,
+> on this machine | Venice's private model, off this machine, under Venice's
+> privacy policy>, never an ordinary cloud model. If you'd rather not, those
+> items stay Private until you approve, and meanwhile they are found only by
+> keyword search. Shall I turn it on?
 
 `local-first` normally uses the local model. If status shows `venice` there,
 a classification profile is declared, and the operator must hear that names
@@ -1161,7 +1177,9 @@ with the remedy `Read the worker log at <errorLogPath> and <logPath>, then
 run olympus worker status and follow its recovery action.` (on macOS both
 paths are under `~/Library/Logs/Olympus`). Read the log before changing
 anything — the reason a worker exits at boot is one line away, and a
-missing Gemini key is a common one.
+missing Gemini key is a common one. In the browser flow a missing key is not
+yours to supply: the operator pastes it into its **Models** card in Step 6;
+only the headless fallback uses the Step 3 connect command.
 
 Only if `start` still leaves it `inactive` or `failed` do you reach for
 `olympus worker install`. It is idempotent, it writes nothing over an

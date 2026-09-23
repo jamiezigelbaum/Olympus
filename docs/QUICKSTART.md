@@ -1,6 +1,7 @@
 # Olympus Quickstart
 
-Install Olympus, then optionally connect a source and verify a cited answer.
+Install Olympus, connect the sources you want it to answer from, and verify a
+cited answer.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
@@ -158,8 +159,9 @@ saved categories read-only. Write the map as `"schemaVersion": 2`. Olympus
 judges each item's names (Personal unless raised) and its content (raised to
 Private or Secrets on evidence), and the map feeds both. Private and Secrets
 categories raise matching items. Public and Personal categories are lowering
-guidance that any raise still beats, and they never lower content; Personal
-is the default, so a Personal category is rarely useful. A schemaVersion 1 map
+guidance that any raise still beats, and they never lower content. They
+match only on a path pattern or a sender, never a keyword; Personal is the
+default, so a Personal category is rarely useful. A schemaVersion 1 map
 still loads and stays raise-only guidance. The stored keys keep their legacy
 names — `secure` is Private, and the legacy `private` key means Personal — so
 sensitive Private data is written with `"targetTierName": "secure"`, never
@@ -215,17 +217,21 @@ server before relying on Private source answers.
 Then decide on the private classifier. For items whose names look possibly
 private, Olympus asks a private model — your local model, or Venice Private on
 `private-cloud-only` — whether they are Personal or Private, one item at a
-time: title, folder path and labels, and sometimes the first 1,200 characters
-of text, never anything that looks like a secret. It never uses an ordinary
-cloud model, and it does nothing until you approve the exact model:
+time. It sends the title, folder path and folder names, labels and sender,
+and, when the content itself looks sensitive, a short excerpt of up to the
+first 1,200 characters of text; never anything that looks like a secret. It
+never uses an ordinary cloud model, and it does nothing until you approve the
+exact model:
 
 ```bash
 olympus tier classifier status
 olympus tier classifier approve --why "<your reason>"
 ```
 
-Without approval those items stay Private: searchable by keyword, not
-embedded. `no-sensitive` has no classifier lane and nothing to approve.
+Without approval those items stay Private and are found only by keyword
+search meanwhile. `no-sensitive` has no classifier lane and nothing to
+approve; if `status` reports any other refusal, the policy names a model the
+classifier may not use, and it stays off.
 
 On `no-sensitive`, setup and doctor still list the Private corpora as configured
 and empty, with `secure_local` routed `"mode": "disabled"`. That is the honest
@@ -406,10 +412,11 @@ If the line is not there because the log rotated since the last restart,
 the other two checks stand on their own — do not restart again just to
 produce it.
 
-## 5. Open your dashboard and optionally connect sources
+## 5. Open your dashboard and connect sources
 
 Installation ends with a working, clickable Olympus dashboard link from your
-agent. Connecting a source is optional; providing that link is not. The agent
+agent. Sources are what make Olympus useful, and you choose which ones in the
+dashboard, so that link is required. The agent
 must resolve the address for your browser and verify dashboard access, rather
 than giving you a host-only localhost URL or another terminal command.
 

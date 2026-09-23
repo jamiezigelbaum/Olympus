@@ -105,9 +105,10 @@ fork:
 | **Do not add secure data to Olympus** (`no-sensitive`) | frontier cloud | **not ingested** — reported as an honest gap |
 
 “Private cloud only” describes **Private-data handling**: Venice answers
-Private questions and an approved Venice Private embedding model indexes
-Private content. Gemini still supplies embeddings for Public and Personal
-content, and Private content never goes to Gemini. Public and Personal
+Private questions, and Private search is keyword-only by default. Venice
+Private embeddings for Private content are available but switched on only
+with the owner's explicit, advance approval. Gemini still supplies embeddings
+for Public and Personal content, and Private content never goes to Gemini. Public and Personal
 questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
@@ -170,8 +171,8 @@ OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
 ```
 
 Continue the quickstart to describe your data, choose a privacy posture,
-connect model credentials, and verify base activation before optional source
-setup and the first cited answer. The CLI lives inside the
+connect model credentials, and verify base activation before choosing your
+sources in the dashboard and checking the first cited answer. The CLI lives inside the
 managed plugin; use the resolved executable rather than assuming it is on PATH.
 
 This candidate artifact includes native Control UI support. On OpenClaw
@@ -183,7 +184,7 @@ and requires its own Gateway's Control UI over HTTPS or localhost. Olympus uses
 your signed-in OpenClaw permissions; its worker token stays on the server.
 The standalone `olympus dashboard` command remains available for older hosts,
 when custom plugin UI is off, and for direct access when needed. See the
-[dashboard guide](docs/QUICKSTART.md#5-open-your-dashboard-and-optionally-connect-sources).
+[dashboard guide](docs/QUICKSTART.md#5-open-your-dashboard-and-connect-sources).
 
 For Gemini embeddings, Venice accounts/API credit, or local models, use the
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).

@@ -117,8 +117,22 @@ describe('pilot installation entry points', () => {
       document.indexOf('### Privacy classifier approval — its own consent gate'),
       document.indexOf('## Step 4 — Verify the worker'),
     );
-    expect(document.indexOf('### Privacy classifier approval')).toBeGreaterThan(document.indexOf('### Headless credential fallback'));
+    // The browser flow skips the headless fallback, so its own instruction must
+    // send the agent to the gate before Steps 4-5, and the fallback must not
+    // claim the gate as headless-only.
+    const browserFlow = document.slice(
+      document.indexOf('For the normal browser flow,'),
+      document.indexOf('### Headless credential fallback'),
+    );
+    expect(browserFlow).toContain('(#privacy-classifier-approval--its-own-consent-gate)');
+    expect(browserFlow.indexOf('privacy classifier approval')).toBeLessThan(browserFlow.indexOf('Steps 4–5'));
+    expect(document).toContain('the privacy classifier approval\nafter it applies to everyone');
+    expect(document.indexOf('### Privacy classifier approval')).toBeLessThan(document.indexOf('## Step 4 — Verify the worker'));
     expect(gate).toContain('olympus tier classifier status');
+    for (const refusal of ['standard_cloud', 'unsupported_provider', 'outside_private_policy', 'no_private_lane']) {
+      expect(gate).toContain(refusal);
+    }
+    expect(gate.replace(/>\s*/g, '').replace(/\s+/g, ' ')).toContain('labels and sender');
     expect(gate).toContain('olympus tier classifier approve --why');
     expect(gate).toContain('never an ordinary cloud model');
     expect(gate).toContain('A no is a complete answer; record nothing.');
