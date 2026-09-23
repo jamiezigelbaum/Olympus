@@ -289,6 +289,14 @@ export interface ContentTierInput {
   metadataTier: TierKey;
   metadataForced: boolean;
   metadataFlagged: boolean;
+  /**
+   * The item's names, when the caller has them: they travel with the text so
+   * a detector's origin hint and a title's vocabulary still count, exactly
+   * as they do when the text arrives with the listing.
+   */
+  title?: string;
+  path?: string;
+  sender?: string;
 }
 
 export interface ContentTierDecision {
@@ -318,7 +326,11 @@ export function classifyContentTier(
   const content = contentPass({
     signals: {},
     text,
-    matchInput: {},
+    matchInput: mapMatchInput({
+      ...(input.title?.trim() ? { title: input.title } : {}),
+      ...(input.path?.trim() ? { path: input.path } : {}),
+      ...(input.sender?.trim() ? { sender: input.sender } : {}),
+    }),
     metadata: {
       tier: input.metadataTier,
       decidedBy: 'default',
