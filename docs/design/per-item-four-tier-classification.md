@@ -106,7 +106,16 @@ It never calls a model. The model seam, `DelphiItemTierScorer`, only chooses bet
 
 ## 2. Target model
 
-**Invariant.** Every item from every source gets exactly one current tier at ingestion: Public, Personal, Private or Secrets. The decision is made per item and stored with content-free reasons. An item is searchable in **exactly one** tier at any moment.
+**Invariant.** Every item from every source gets two current tiers at ingestion, decided per item and stored with content-free reasons:
+
+- a **metadata tier** for its title, file or folder name, subject, sender and labels, **Personal by default**; and
+- a **content tier** for its text, which is always at least the metadata tier and is raised to Private or Secrets on evidence.
+
+Owner example (2026-09-23): a file named "biopsy results" has Personal metadata, since the fact of a biopsy is not private. Its content ("the results show cancer") is Private. Asked about health, Castor can learn "you had a biopsy" from Personal metadata, and anything about the condition comes only through Argus as a derived answer.
+
+Each layer is searchable in **exactly one** tier at any moment. Metadata rows and content chunks may therefore live in different tier stores. This extends today's metadata-only rows, which already exist separately from content chunks.
+
+**Per-install choice.** Setup asks whether names and titles should be Personal (the default) or Private. The Private option costs little at ingest, because private embedding of short titles is cheap (§4.4). It does mean any answer that relies on names goes through Argus. Owner rules and the sensitivity map can still raise specific folders, senders or labels to Private metadata.
 
 ### 2.1 Unit of judgment
 
@@ -117,7 +126,7 @@ It never calls a model. The model seam, `DelphiItemTierScorer`, only chooses bet
 
 The owner's rule (2026-09-23): **the default tier is Personal.** Things are raised to Private or Secrets on evidence. A quick private "sniffer" pass looks at anything whose names or metadata suggest it might be private, **before** full ingestion and embedding. Two passes:
 
-**Pass 1: metadata** (names, folder path, sender, labels, chat; runs for every item, including metadata-only ones)
+**Pass 1: metadata tier** (names, folder path, sender, labels, chat; runs for every item, including metadata-only ones)
 
 ```
   [1] per-item owner override (sticky) .............................. final
@@ -133,7 +142,7 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
   [8] default ........................................................ → Personal
 ```
 
-**Pass 2: content** (only for items approved for full ingestion, before chunks are embedded)
+**Pass 2: content tier** (only for items approved for full ingestion, before chunks are embedded; starts from the metadata tier and can only raise)
 
 ```
   [9]  secret detector on the full extracted text ................... → Secrets
@@ -178,6 +187,17 @@ A classifier model change is an owner-approved, ledgered event.
 
 - **Rules** live in `~/.olympus/tier-rules.json`: `{source, match: pathPrefix|folderKey|label|sender|chat, tier, strength}`. They are keyed by provider identifiers, so they survive re-syncs and rebuilds.
 - **Per-item overrides** live in the tier ledger, keyed by provider item identity, so a moved file keeps its override. They are set with `olympus tier set <locator> <tier>`, and later through a review page.
+
+### 2.5 Email scope picker (owner decision 2026-09-23)
+
+Email gets a connect-time scope picker, the equivalent of the Dropbox folder picker. Today a Gmail connect ingests the whole history with no picker. It pulls 200 messages per pass under a 5,000-request daily budget, and the only filter is a hidden `OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting. The picker offers:
+
+- **Time window:** full content for the **last 2 years by default**. Older mail is indexed by metadata only, and can be upgraded later per label or sender.
+- **Gmail categories and labels:** include or skip each. Promotions and Social are skipped by default.
+- **Sender rules:** "always Private" and "skip" lists, seeded with suggestions from the highest-volume senders.
+- **An estimate** of message count, time and embedding cost before anything runs.
+
+Its choices become owner tier rules (§2.4) and the connector's query, so the same rule engine covers email, Telegram and WhatsApp. Owners don't need to clean their mailboxes first.
 
 ---
 
@@ -283,6 +303,8 @@ These are formulas. M0 (§4.6) measures the real counts before anything is appro
 - Venice Qwen3-8B costs $0.0125 per million tokens.
 - Gemini Embedding 2: read the live price at approval time. The examples assume $0.15 per million, which is **unverified**.
 
+**Metadata cost:** titles and names are short (about 10–30 tokens each). Classifying names by rule is effectively instant. Sniffing a flagged name costs one batched call per about 100 names. Embedding every name privately, if an install chooses Private metadata, runs about 100k names × 20 tokens ≈ 2M tokens ≈ $0.03 on Venice, in minutes. Metadata is never the slow or expensive part; full content is.
+
 **First install:** classification runs before embedding, so each chunk is embedded once, in the right model. For example, 300k chunks with 70% Personal or Public comes to about $32 (Gemini) plus about $1 (Venice), plus classifier tokens on undecided items only.
 
 **Reclassifying an existing install:** nothing is fetched from the provider again. The metadata pass is CPU-only (minutes). The sniffer runs only on flagged items. Only **moving** chunks are embedded, in the destination tier's model; items whose tier doesn't change cost nothing. The dry run (M0) reports the exact counts, tokens, cost and time before anything is approved.
@@ -372,7 +394,8 @@ This tooling ships in the plugin for every existing install. Running it on any l
 
 Decided by the owner:
 
-- **Default tier is Personal.** Metadata-only items are Personal unless something raises them.
+- **Metadata tier defaults to Personal; content tier is judged separately and can be Private.** Names and titles are Personal unless something raises them. Setup offers "Private names" as an option for people who want it.
+- **Email scope picker** with a 2-year full-content default; older mail is indexed by metadata only.
 - **Sniffer:** a quick private/local model pass on anything whose names or metadata look possibly private, before full ingestion and embedding.
 - **Keep cloud vectors** when an item moves up to Private: hidden, not deleted.
 - **One query searches all tiers**, with Argus handling Private evidence.
