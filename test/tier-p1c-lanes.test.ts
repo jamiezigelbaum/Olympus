@@ -33,6 +33,35 @@ import {
 import { createWhatsAppTierLane, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, createXBookmarksTierLane } from '../src/workers/x-bookmarks/tier-set.ts';
 import { cloudProvider, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
+import { parseSensitivityMap, USER_FACING_TIER_MAPPING, type SensitivityMap } from '../src/core/sensitivity-map.ts';
+import {
+  LocalXBookmarksApiUsageStore,
+  createXBookmarksConnectorStore,
+  createXBookmarksContentRecoveryHandler,
+  createXBookmarksSourceConnector,
+} from '../src/workers/x-bookmarks/index.ts';
+import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
+
+/** The owner's map: a Private folder and a Private keyword. */
+function ownerMap(): SensitivityMap {
+  const category = (id: string, match: { keywords?: string[]; pathPatterns?: string[] }) => ({
+    id,
+    label: id,
+    targetTierName: 'secure',
+    targetTrustTier: USER_FACING_TIER_MAPPING.secure.targetTrustTier,
+    targetTrustDomain: USER_FACING_TIER_MAPPING.secure.targetTrustDomain,
+    examples: ['example'],
+    match: { keywords: match.keywords ?? [], senderPatterns: [], pathPatterns: match.pathPatterns ?? [] },
+  });
+  return parseSensitivityMap({
+    schemaVersion: 2,
+    userFacingTiers: USER_FACING_TIER_MAPPING,
+    categories: [
+      category('therapy', { pathPatterns: ['/therapy/'] }),
+      category('deal', { keywords: ['acme merger'] }),
+    ],
+  });
+}
 
 const roots: string[] = [];
 const closers: Array<() => void> = [];
@@ -218,6 +247,151 @@ describe('P1c Dropbox lane', () => {
     expect(again.receipt.counts.tier_moves_queued ?? 0).toBe(0);
     expect(ids(secure, 'diagnosis')).toEqual(['id:scan']);
     expect(ids(internal, 'quadrants')).toEqual(['id:integral']);
+  });
+});
+
+describe('P1c: the owner\'s sensitivity map judges every new item', () => {
+  test('Dropbox: a map Private folder or keyword keeps a new file Private and away from the cloud embedder', async () => {
+    const root = workspace();
+    const env = {
+      OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
+      OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+      OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
+    };
+    const entries = [
+      { tag: 'file' as const, id: 'id:session', name: 'session-notes.pdf', pathDisplay: '/Therapy/session-notes.pdf', rev: 'r1' },
+      { tag: 'file' as const, id: 'id:memo', name: 'memo.pdf', pathDisplay: '/Work/memo.pdf', rev: 'r1' },
+      { tag: 'file' as const, id: 'id:book', name: 'book-chapter.pdf', pathDisplay: '/Library/book-chapter.pdf', rev: 'r1' },
+    ];
+    const metadataClient: DropboxMetadataClient = {
+      supportsNativeRecursive: true,
+      async listFolder(): Promise<DropboxMetadataPage> {
+        return { entries: [...entries], cursor: 'cursor-1', hasMore: false };
+      },
+      async listFolderContinue(): Promise<DropboxMetadataPage> {
+        return { entries: [...entries], cursor: 'cursor-2', hasMore: false };
+      },
+    };
+    const broker = new StaticCredentialBroker([{
+      handle: 'dropbox.personal',
+      provider: 'dropbox',
+      allowedCapabilities: ['dropbox.files.sync'],
+      token: 'test-token',
+      trustDomain: 'secure_local',
+    }]);
+    const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: 'secure_local.dropbox.files', family: 'file', trustDomain: 'secure_local' });
+    closers.push(() => secure.close());
+    const lane = createDropboxTierLane({
+      secureStore: secure,
+      env,
+      policy: defaultDropboxIngestionPolicy(),
+      tierClassification: { sensitivityMap: ownerMap() },
+    });
+    closers.push(() => {
+      lane.internal.current()?.close();
+      lane.public.current()?.close();
+    });
+    await createDropboxProviderStoreSyncHandler({ store: secure, account: 'personal', broker, metadataClient, tierSet: lane.set })
+      .pull({ approved_scope_key: 'dropbox.personal:/' });
+    // A map-Private folder: the names never reach the Personal store.
+    expect(ids(lane.internal.current(), 'session')).toEqual([]);
+    expect(ids(secure, 'session')).toEqual(['id:session']);
+
+    // The sink takes the set's own classification (the runtime passes none).
+    const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
+    const land = (id: string, text: string) => sink.accept({
+      ref: {
+        corpusId: 'secure_local.dropbox.files',
+        provider: 'dropbox',
+        accountScope: 'personal',
+        approvedScopeKey: 'dropbox.personal:/',
+        providerItemId: id,
+        localItemId: `personal:${id}`,
+        sourceVersion: 'r1',
+      },
+      text,
+      extractorKind: 'local_text',
+      extractorVersion: 'test',
+      fetchedAt: '2026-09-23T00:00:00.000Z',
+    });
+    expect((await land('id:session', 'We talked about sleep and the week ahead.')).accepted).toBe(true);
+    expect((await land('id:memo', 'Draft terms for the acme merger, board review Friday.')).accepted).toBe(true);
+    expect((await land('id:book', 'Chapter three covers the history of cartography.')).accepted).toBe(true);
+    expect(ids(secure, 'sleep')).toEqual(['id:session']);
+    expect(ids(secure, 'board')).toEqual(['id:memo']);
+    expect(ids(lane.internal.current(), 'board')).toEqual([]);
+    expect(ids(lane.internal.current(), 'cartography')).toEqual(['id:book']);
+
+    const cloud = cloudProvider();
+    await lane.internal.current()!.embedChunks({ provider: cloud });
+    expect(cloud.inputs.some((input) => input.includes('cartography'))).toBe(true);
+    expect(cloud.inputs.some((input) => input.includes('acme') || input.includes('sleep'))).toBe(false);
+  });
+
+  test('Readwise: a map Private keyword raises a new item to the Private store, embedded only privately', async () => {
+    const root = workspace();
+    const store = new LocalConnectorStore({ dbPath: join(root, 'readwise.sqlite'), corpusId: 'internal.readwise.library', family: 'readwise', trustDomain: 'internal' });
+    closers.push(() => store.close());
+    const cloud = cloudProvider();
+    const local = localProvider();
+    const lane = createReadwiseTierLane({
+      store,
+      env: { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') },
+      embeddingProvider: cloud,
+      secureEmbeddingProvider: local,
+      tierClassification: { sensitivityMap: ownerMap() },
+    });
+    closers.push(() => lane.newStores.secure_local?.current()?.close());
+    const specs: Spec[] = [
+      { id: 'hl-deal', title: 'Note', text: 'Thoughts on the acme merger timeline.' },
+      { id: 'hl-book', title: 'Book', text: 'Maps change how cities imagine themselves.' },
+    ];
+    await lane.set.sync(laneConnector('readwise', 'readwise', () => specs), { fetchContent: true, placement: READWISE_STORE_PLACEMENT });
+    expect(ids(lane.newStores.secure_local!.current(), 'timeline')).toEqual(['hl-deal']);
+    expect(ids(store, 'timeline')).toEqual([]);
+    expect(cloud.inputs.some((input) => input.includes('acme'))).toBe(false);
+    expect(local.inputs.some((input) => input.includes('acme'))).toBe(true);
+    expect(ids(store, 'cities')).toEqual(['hl-book']);
+  });
+});
+
+describe('P1c X content recovery', () => {
+  test('never writes text into a routed bookmark\'s store copy', async () => {
+    const root = workspace();
+    const store = createXBookmarksConnectorStore(join(root, 'x.sqlite'));
+    closers.push(() => store.close());
+    const usage = new LocalXBookmarksApiUsageStore(join(root, 'x-usage.sqlite'));
+    closers.push(() => usage.close());
+    const lane = createXBookmarksTierLane({
+      store,
+      env: { OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'x-secure.sqlite') },
+    });
+    closers.push(() => lane.newStores.secure_local?.current()?.close());
+    // Private text: the names copy stays in the internal store with no text.
+    await lane.set.sync(createXBookmarksSourceConnector({
+      account: 'personal',
+      posts: [{ id: '2076846914813788163', text: 'The lab results confirm the diagnosis; treatment starts Monday.' }],
+      fetchedAt: '2026-07-30T10:00:00.000Z',
+    }), { fetchContent: true, placement: X_BOOKMARKS_STORE_PLACEMENT });
+    expect(lane.ledger.copies({ provider: 'x', accountScope: 'personal', providerItemId: '2076846914813788163' })
+      .map((copy) => [copy.corpusId, copy.layers])).toEqual([
+      ['internal.x.bookmarks', 'metadata'],
+      ['secure_local.x.bookmarks', 'content'],
+    ]);
+    const recovery = (withLedger: boolean) => createXBookmarksContentRecoveryHandler({
+      store,
+      usageStore: usage,
+      account: 'personal',
+      userId: 'provider-user-1',
+      ...(withLedger ? { tierLedger: lane.ledger } : {}),
+      sourceClient: { async fetchPostsByIds() { throw new Error('no provider call expected'); } },
+    });
+    // Without the ledger the repair would take the names copy as recoverable.
+    expect((await recovery(false).recover({ limit: 10 })).status).toBe('planned');
+    const guarded = await recovery(true).recover({ execute: true, limit: 10 });
+    expect(guarded.status).toBe('nothing_to_recover');
+    expect(guarded.counts.candidates_tier_routed).toBe(1);
+    expect(ids(store, 'diagnosis')).toEqual([]);
   });
 });
 
