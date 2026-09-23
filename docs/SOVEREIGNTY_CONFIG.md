@@ -394,11 +394,21 @@ model is chosen from this policy, never from an ordinary cloud lane:
 | private-cloud-only | Venice Private (`venice-private`) |
 | no-sensitive | none: flagged items stay pending, held Private |
 
-A `standard_cloud` classification profile is refused with a typed error
-before anything is sent. The sniffer also waits for the owner to approve the
-exact model and prompt version in the append-only classification ledger
-(`olympus tier classifier approve --why ...`); a model or prompt change stops
-it until the owner approves again. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
+The sniffer uses only what the secure_local route already approves for
+Private data: a disabled route (no-sensitive) refuses outright, and a declared
+classification profile is accepted only for a provider kind the secure pool
+itself has, with the pool's model gate (no E2EE-gated ids). A `standard_cloud`
+profile is refused with a typed error before anything is sent. The sniffer
+also waits for the owner to approve the exact lane, profile, model and prompt
+version in the append-only classification ledger
+(`olympus tier classifier approve --why ...`). The prompt version is derived
+from the prompt text, so any change to the prompt, the model, the profile or
+the lane stops it until the owner approves again; flagged items wait, pending
+and held Private, meanwhile. An answer that needs the private pool aborts the
+sniffer's in-flight call, and a local lane asks at most 20 names per call.
+Names with a sender, chat text and excerpts are asked one item per call, and
+material shaped like an instruction to the model is Private without being
+sent. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
 `OLYMPUS_TIER_SNIFFER_INTERVAL_MS`, `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS`,
 `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`.
 
