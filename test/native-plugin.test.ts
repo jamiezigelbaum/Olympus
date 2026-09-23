@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import plugin, {
   handleSourceWatchDeliveryGatewayRequest,
   sendOpenClawSourceWatchDelivery,
@@ -358,6 +362,76 @@ describe('native OpenClaw plugin adapter', () => {
       match: 'exact',
       handler: expect.any(Function),
     })]);
+  });
+
+  test('tool calls and watch delivery use the worker.env token current at each request', async () => {
+    // First install, 2026-09-23: the Gateway registered the plugin before setup
+    // minted the worker token, captured none, and every tool call then got 401
+    // from the worker setup started until a manual Gateway restart.
+    const home = mkdtempSync(join(tmpdir(), 'olympus-plugin-token-reload-'));
+    const envPath = join(home, '.config', 'olympus', 'worker.env');
+    mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
+    const writeToken = (token: string) => writeFileSync(envPath, `OLYMPUS_WORKER_AUTH_TOKEN=${token}\n`, { mode: 0o600 });
+    const savedHome = process.env.HOME;
+    const savedToken = process.env.OLYMPUS_WORKER_AUTH_TOKEN;
+    process.env.HOME = home;
+    delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
+    const authorizations: Array<string | null> = [];
+    globalThis.fetch = (async (_url, init) => {
+      authorizations.push(new Headers(init?.headers).get('Authorization'));
+      return new Response('{}', { status: 401 });
+    }) as typeof fetch;
+    const tools = new Map<string, NativeTool>();
+    const routes: Array<{ handler: (request: unknown, response: unknown) => Promise<void> }> = [];
+    try {
+      plugin.register({
+        config: {},
+        pluginConfig: { email: { enabled: true, baseUrl: 'http://source-worker.test/v1' } },
+        registerTool(tool: NativeTool) {
+          const materialized = materializeTool(tool);
+          tools.set(materialized.name, materialized);
+        },
+        registerHttpRoute(route) {
+          routes.push(route as unknown as (typeof routes)[number]);
+        },
+      });
+      const ask = () => tools.get('source_answer')!.execute('token-reload', { question: 'q' });
+      const deliver = async (authorization: string) => {
+        const request = Object.assign(Readable.from([Buffer.from('{}')]), { method: 'GET', headers: { authorization } });
+        const response = { statusCode: 0, setHeader() {}, end(body: string) { this.body = body; }, body: '' };
+        await routes[0]!.handler(request, response);
+        return JSON.parse(response.body).error_kind as string;
+      };
+
+      await ask();
+      expect(await deliver('Bearer first-token')).toBe('watch_delivery_auth_unconfigured');
+      writeToken('first-token');
+      await ask();
+      expect(await deliver('Bearer first-token')).toBe('method_not_allowed');
+      writeToken('rotated-token');
+      await ask();
+      expect(await deliver('Bearer first-token')).toBe('unauthorized');
+      expect(await deliver('Bearer rotated-token')).toBe('method_not_allowed');
+      expect(authorizations).toEqual([null, 'Bearer first-token', 'Bearer rotated-token']);
+
+      // An explicit plugin credential still outranks worker.env.
+      const pinned = new Map<string, NativeTool>();
+      plugin.register({
+        pluginConfig: { email: { enabled: true, baseUrl: 'http://source-worker.test/v1' }, worker: { authToken: 'config-token' } },
+        registerTool(tool: NativeTool) {
+          const materialized = materializeTool(tool);
+          pinned.set(materialized.name, materialized);
+        },
+      });
+      await pinned.get('source_answer')!.execute('token-pinned', { question: 'q' });
+      expect(authorizations.at(-1)).toBe('Bearer config-token');
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedToken === undefined) delete process.env.OLYMPUS_WORKER_AUTH_TOKEN;
+      else process.env.OLYMPUS_WORKER_AUTH_TOKEN = savedToken;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('uses a built JavaScript runtime entrypoint for OpenClaw installation', () => {

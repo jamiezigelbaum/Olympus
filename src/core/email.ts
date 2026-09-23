@@ -9,7 +9,7 @@ import {
   type SourceWatchAuthenticatedRoute,
   type SourceWatchMode,
 } from './source-watch.ts';
-import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { withWorkerAuthHeader, workerAuthTokenProvider } from './worker-auth.ts';
 
 export type EmailFetch = (url: string, init: RequestInit) => Promise<Response>;
 export interface EmailTransportRequestOptions {
@@ -615,7 +615,7 @@ export function createEmailTransport(config: OlympusConfig): EmailTransport {
       },
     };
   }
-  return new DirectHttpEmailTransport(fetch, workerAuthTokenFromConfig(config), config.email.requestTimeoutSeconds * 1000);
+  return new DirectHttpEmailTransport(fetch, workerAuthTokenProvider(config), config.email.requestTimeoutSeconds * 1000);
 }
 
 // Ceiling for the private-lane fetch timer inside the OpenClaw Gateway. On
@@ -638,10 +638,12 @@ export function effectiveEmailRequestTimeoutMs(configuredMs: number, requestedMs
 
 export class DirectHttpEmailTransport implements EmailTransport {
   private fetchImpl: EmailFetch;
-  private authToken: string | undefined;
+  private authToken: string | (() => string | undefined) | undefined;
   private timeoutMs: number;
 
-  constructor(fetchImpl: EmailFetch = fetch, authToken?: string, timeoutMs = 0) {
+  // A function token is resolved per request, so a worker.env token minted or
+  // changed after this transport was built still authenticates.
+  constructor(fetchImpl: EmailFetch = fetch, authToken?: string | (() => string | undefined), timeoutMs = 0) {
     this.fetchImpl = fetchImpl;
     this.authToken = authToken;
     this.timeoutMs = timeoutMs;
@@ -651,7 +653,8 @@ export class DirectHttpEmailTransport implements EmailTransport {
     const timeoutMs = effectiveEmailRequestTimeoutMs(this.timeoutMs, options?.timeoutMs);
     let response: Response;
     try {
-      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, this.authToken), timeoutMs);
+      const authToken = typeof this.authToken === 'function' ? this.authToken() : this.authToken;
+      response = await fetchWithTimeout(this.fetchImpl, url, withWorkerAuthHeader(init, authToken), timeoutMs);
     } catch (error) {
       if (isAbortError(error)) {
         throw new OperationError(

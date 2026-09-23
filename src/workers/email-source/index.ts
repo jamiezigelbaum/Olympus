@@ -373,6 +373,11 @@ export interface EmailSourceWorkerOptions {
   sourceAnswerLatencyLog?: SourceAnswerLatencyLog;
   sourceIndexStatus?: SourceIndexStatusHandler;
   readwiseConnectorStoreSync?: ReadwiseConnectorStoreSyncHandler;
+  /**
+   * Resolves the current Readwise handler after registry changes. When present
+   * it is authoritative, as `currentXBookmarksRuntime` is for X.
+   */
+  currentReadwiseSync?: () => ReadwiseConnectorStoreSyncHandler | undefined;
   xBookmarksConnectorStoreSync?: XBookmarksConnectorStoreSyncHandler;
   xBookmarksContentRecovery?: XBookmarksContentRecoveryHandler;
   /**
@@ -647,7 +652,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceAnswer = options.sourceAnswer;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
-  const readwiseConnectorStoreSync = options.readwiseConnectorStoreSync;
+  const currentReadwiseSync = options.currentReadwiseSync
+    ?? (() => options.readwiseConnectorStoreSync);
   const xBookmarksConnectorStoreSync = options.xBookmarksConnectorStoreSync;
   const xBookmarksContentRecovery = options.xBookmarksContentRecovery;
   const currentXBookmarksRuntime = options.currentXBookmarksRuntime
@@ -2260,6 +2266,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (mode !== undefined && mode !== 'connector_store') {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'mode must be connector_store for Readwise sync.');
             }
+            const readwiseConnectorStoreSync = currentReadwiseSync();
             if (!readwiseConnectorStoreSync) {
               throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'Readwise connector-store sync is not configured.');
             }
@@ -2825,8 +2832,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     // would otherwise starve every fallback sitting behind it. This order is
     // the one `dashboardSourceSyncAvailable` already reports: a source is
     // syncable when either path exists, so neither may preempt the other.
-    if (request.source === 'readwise' && readwiseConnectorStoreSync) {
-      return readwiseConnectorStoreSync.sync();
+    const readwiseSync = request.source === 'readwise' ? currentReadwiseSync() : undefined;
+    if (readwiseSync) {
+      return readwiseSync.sync();
     }
 
     const xSync = request.source === 'x' ? currentXBookmarksRuntime()?.sync : undefined;
@@ -2972,7 +2980,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       return schedulerStatus?.sources.some((candidate) => candidate.source_id === 'google_drive.docs' || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true
         || dashboardSyncHookServes(source);
     }
-    if (source === 'readwise') return readwiseConnectorStoreSync !== undefined || dashboardSyncHookServes(source);
+    if (source === 'readwise') return currentReadwiseSync() !== undefined || dashboardSyncHookServes(source);
     if (source === 'x') return currentXBookmarksRuntime()?.sync !== undefined || dashboardSyncHookServes(source);
     if (source === 'dropbox') {
       const schedulerStatus = sourceScheduler?.status();

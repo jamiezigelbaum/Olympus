@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -9,6 +9,7 @@ import {
   dashboardQueryTokenFromWorkerAuthToken,
   unquoteEnvValue,
   workerAuthTokenFromConfig,
+  workerAuthTokenProvider,
 } from '../src/core/worker-auth.ts';
 import {
   createEmailSourceWorker,
@@ -509,6 +510,40 @@ describe('worker HTTP bind and auth', () => {
 
       chmodSync(envPath, 0o644);
       expect(workerAuthTokenFromConfig(config, { env: { HOME: home } })).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('the token provider follows worker.env rewrites, in place or by rename', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-worker-auth-provider-'));
+    const envPath = join(home, '.config', 'olympus', 'worker.env');
+    try {
+      mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
+      const config = defaultConfig();
+      const current = workerAuthTokenProvider(config, { env: { HOME: home } });
+      expect(current()).toBeUndefined();
+
+      writeFileSync(envPath, 'OLYMPUS_WORKER_AUTH_TOKEN=token-aaaa\n', { mode: 0o600 });
+      expect(current()).toBe('token-aaaa');
+      expect(current()).toBe('token-aaaa');
+      // Same length, rewritten in place.
+      writeFileSync(envPath, 'OLYMPUS_WORKER_AUTH_TOKEN=token-bbbb\n', { mode: 0o600 });
+      expect(current()).toBe('token-bbbb');
+      // Replaced by an atomic rename, as the managed writers do.
+      writeFileSync(`${envPath}.tmp`, 'OLYMPUS_WORKER_AUTH_TOKEN=token-cccc\n', { mode: 0o600 });
+      renameSync(`${envPath}.tmp`, envPath);
+      expect(current()).toBe('token-cccc');
+
+      // Precedence and the unresolved-SecretRef refusal are unchanged.
+      expect(workerAuthTokenProvider(config, {
+        env: { HOME: home, OLYMPUS_WORKER_AUTH_TOKEN: 'env-token' },
+      })()).toBe('env-token');
+      config.worker.authToken = 'config-token';
+      expect(workerAuthTokenProvider(config, { env: { HOME: home } })()).toBe('config-token');
+      delete config.worker.authToken;
+      config.worker.authTokenSecretRefUnresolved = true;
+      expect(workerAuthTokenProvider(config, { env: { HOME: home } })()).toBeUndefined();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

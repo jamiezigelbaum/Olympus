@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
+import { connectGeminiApiKey } from '../src/core/connect.ts';
 import { acquireLifecycleMutationLock } from '../src/core/lifecycle-lock.ts';
 import { runWorkerLifecycle } from '../src/core/lifecycle.ts';
 import {
@@ -351,6 +352,36 @@ describe('olympus setup wizard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test('re-running setup and connecting a model key keep the existing worker token', async () => {
+    // A running Gateway and worker already hold this token; minting a new one
+    // on a re-run would 401 every plugin call until both restarted.
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-token-preserved-'));
+    const paths = workerServicePaths('linux', dir);
+    const setup = (token: string, preset: 'no-sensitive' | 'private-cloud-only') => runIsolatedSetupWizard({
+      preset,
+      yes: true,
+      force: true,
+      sovereigntyPath: join(dir, 'sovereignty.json'),
+      platform: 'linux',
+      homeDir: dir,
+      workingDirectory: dir,
+      tokenGenerator: () => token,
+      dependencyCheck: healthyDependencyCheck,
+    });
+    const storedToken = () => workerAuthTokenFromConfig(defaultConfig(), { env: { HOME: dir } });
+    try {
+      await setup('first-token', 'no-sensitive');
+      expect(storedToken()).toBe('first-token');
+      await setup('second-token', 'private-cloud-only');
+      expect(storedToken()).toBe('first-token');
+      await connectGeminiApiKey({ apiKey: 'gemini-key', envPath: paths.envPath, validate: false });
+      expect(storedToken()).toBe('first-token');
+      expect(readFileSync(paths.envPath, 'utf8').match(/^OLYMPUS_WORKER_AUTH_TOKEN=/gm)).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test('setup keeps the managed files when the service manager refuses to start them', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-activation-refused-'));

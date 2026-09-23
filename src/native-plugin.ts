@@ -7,7 +7,7 @@ import { configFromPluginConfig } from './core/config.ts';
 import { createDelphiTransport, DelphiClient } from './core/delphi.ts';
 import { createEmailTransport, EmailClient } from './core/email.ts';
 import { shouldExposeOperation } from './core/operation-exposure.ts';
-import { workerAuthTokenFromConfig } from './core/worker-auth.ts';
+import { workerAuthTokenProvider } from './core/worker-auth.ts';
 import {
   createNativeWorkerService,
   type NativeWorkerServiceDefinition,
@@ -404,7 +404,9 @@ export async function handleSourceWatchDeliveryGatewayRequest(input: {
 
 function registerSourceWatchDeliveryRoute(api: OpenClawPluginApi, config: OperationContext['config']): void {
   if (!api.registerHttpRoute || !api.config) return;
-  const authToken = workerAuthTokenFromConfig(config);
+  // Resolved per request: the worker delivering here presents the token it
+  // booted with, which setup can mint after this route was registered.
+  const currentAuthToken = workerAuthTokenProvider(config);
   api.registerHttpRoute({
     path: SOURCE_WATCH_DELIVERY_ROUTE,
     auth: 'plugin',
@@ -419,6 +421,7 @@ function registerSourceWatchDeliveryRoute(api: OpenClawPluginApi, config: Operat
         response.end(JSON.stringify({ status: 'failed', error_kind: 'invalid_request_body' }));
         return;
       }
+      const authToken = currentAuthToken();
       const result = await handleSourceWatchDeliveryGatewayRequest({
         method: request.method ?? '',
         authorization: typeof request.headers.authorization === 'string'
